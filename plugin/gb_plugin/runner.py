@@ -28,7 +28,11 @@ class RunnerError(RuntimeError):
 class RouteOptions:
     keep_locked: bool = True
     runs: int = os.cpu_count() or 1
-    via_cost: float = 1.5
+    via_cost: float = 3.0
+    # generations that select by the clearance check after the geometry step (0 = fastest)
+    geometry_generations: int = 3
+    # folder for one image per generation and an animated evolution.gif (None = no images)
+    frames_dir: Optional[str] = None
 
 
 def load_settings(path: Path = SETTINGS_FILE) -> dict:
@@ -87,7 +91,25 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
     if opts.keep_locked:
         cmd.append("--keep-locked")
     cmd += ["--runs", str(int(opts.runs)), "--via-cost", repr(float(opts.via_cost))]
+    if opts.geometry_generations > 0:
+        cmd += ["--geometry-generations", str(int(opts.geometry_generations))]
+    if opts.frames_dir:
+        cmd += ["--frames", str(opts.frames_dir)]
     return cmd
+
+
+def tool_env(env: Mapping[str, str] = os.environ, extra_dirs=EXTRA_DIRS) -> dict:
+    """The environment for the router: PATH extended by the usual install directories, so
+    that it finds rsvg-convert and magick for the animation when KiCad was started from the
+    Finder."""
+    out = dict(env)
+    parts = [p for p in out.get("PATH", os.defpath).split(os.pathsep) if p]
+    for d in extra_dirs:
+        d = os.path.expanduser(d)
+        if d not in parts:
+            parts.append(d)
+    out["PATH"] = os.pathsep.join(parts)
+    return out
 
 
 @dataclass
@@ -104,6 +126,10 @@ class RouteResult:
     def unrouted(self) -> List[str]:
         return re.findall(r"^\s*unrouted: (.*)$", self.stdout, re.M)
 
+    def animation(self) -> Optional[str]:
+        m = re.search(r"^frames: \d+ images, animation (.*)$", self.stdout, re.M)
+        return m.group(1).strip() if m else None
+
     def violations(self) -> Optional[int]:
         m = re.search(r"^clearance check: (\d+) violations", self.stdout, re.M)
         return int(m.group(1)) if m else None
@@ -115,7 +141,7 @@ def run_route(cmd: List[str], output: Path, cwd: Optional[Path] = None,
     the router runs (to update a progress dialog); returning False kills the router."""
     try:
         proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, errors="replace")
+                                text=True, errors="replace", env=tool_env())
     except OSError as e:
         raise RunnerError(f"cannot start {cmd[0]}: {e}") from e
     out: dict = {}

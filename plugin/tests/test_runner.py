@@ -68,7 +68,7 @@ class FindBinaryTest(unittest.TestCase):
 
 class CommandTest(unittest.TestCase):
     def test_build_command(self):
-        opts = runner.RouteOptions(keep_locked=True, runs=8, via_cost=2)
+        opts = runner.RouteOptions(keep_locked=True, runs=8, via_cost=2, geometry_generations=0)
         self.assertEqual(
             runner.build_command("gb", Path("/a/b.kicad_pcb"), Path("/t/o.kicad_pcb"), opts),
             ["gb", "route", "/a/b.kicad_pcb", "-o", "/t/o.kicad_pcb", "--keep-locked",
@@ -76,17 +76,31 @@ class CommandTest(unittest.TestCase):
         opts.keep_locked = False
         self.assertNotIn("--keep-locked", runner.build_command("gb", Path("b"), Path("o"), opts))
 
+    def test_quality_and_animation(self):
+        opts = runner.RouteOptions(geometry_generations=3, frames_dir="/p/anim")
+        cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
+        self.assertEqual(cmd[-4:], ["--geometry-generations", "3", "--frames", "/p/anim"])
+
+    def test_tool_env_adds_install_dirs(self):
+        env = runner.tool_env({"PATH": "/usr/bin"}, extra_dirs=("/opt/x/bin", "/usr/bin"))
+        self.assertEqual(env["PATH"], os.pathsep.join(["/usr/bin", "/opt/x/bin"]))
+
     def test_defaults(self):
         o = runner.RouteOptions()
         self.assertTrue(o.keep_locked)
         self.assertEqual(o.runs, os.cpu_count() or 1)
-        self.assertEqual(o.via_cost, 1.5)
+        self.assertEqual(o.via_cost, 3.0)
+        self.assertEqual(o.geometry_generations, 3)
+        self.assertIsNone(o.frames_dir)
 
     def test_parse_output(self):
         r = runner.RouteResult([], 0, STDOUT, "")
         self.assertEqual(r.best_line(), "best: seed 0 9/10 routed, 4 vias, 120 mm, 0.50 s")
         self.assertEqual(r.unrouted(), ["GND from U1.3"])
         self.assertEqual(r.violations(), 2)
+        self.assertIsNone(r.animation())
+        r = runner.RouteResult([], 0, STDOUT + "frames: 5 images, animation /p/a/evolution.gif\n", "")
+        self.assertEqual(r.animation(), "/p/a/evolution.gif")
         self.assertIsNone(runner.RouteResult([], 0, "", "").best_line())
 
 
@@ -106,6 +120,9 @@ print({STDOUT!r})""")
         r = runner.run_route([str(exe), "route", "b", "-o", str(self.out)], self.out, self.dir)
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.violations(), 2)
+        self.assertIsNone(r.animation())
+        r = runner.RouteResult([], 0, STDOUT + "frames: 5 images, animation /p/a/evolution.gif\n", "")
+        self.assertEqual(r.animation(), "/p/a/evolution.gif")
 
     def test_failure_shows_output(self):
         exe = make_exe(self.dir / "bad", """import sys

@@ -8,6 +8,7 @@ board with the routed ones in one commit (one undo step).
 
 from __future__ import annotations
 
+import dataclasses
 import shutil
 import sys
 import tempfile
@@ -38,7 +39,7 @@ class ConsoleUi:
     bar since 10.0.1)."""
 
     def ask_options(self, defaults: runner.RouteOptions) -> Optional[runner.RouteOptions]:
-        return defaults
+        return dataclasses.replace(defaults, frames_dir=None)
 
     def run_with_progress(self, fn):
         return fn(None)
@@ -55,6 +56,8 @@ class WxUi:
         self.app = wx.App(False)
 
     def ask_options(self, defaults: runner.RouteOptions) -> Optional[runner.RouteOptions]:
+        """``defaults.frames_dir`` is where the animation would go; the check box decides
+        whether it is made."""
         dlg = wx.Dialog(None, title=TITLE)
         keep = wx.CheckBox(dlg, label="Keep locked tracks and vias")
         keep.SetValue(defaults.keep_locked)
@@ -62,17 +65,23 @@ class WxUi:
         cost = wx.SpinCtrlDouble(dlg, min=0.0, max=1000.0, initial=float(defaults.via_cost),
                                  inc=0.1)
         cost.SetDigits(2)
+        quality = wx.SpinCtrl(dlg, min=0, max=20, initial=int(defaults.geometry_generations))
+        frames = wx.CheckBox(dlg, label="Save an animation of the generations")
+        frames.SetToolTip(f"One image per generation and evolution.gif in {defaults.frames_dir}")
         note = wx.StaticText(dlg, label=(
             "All unlocked tracks and vias are replaced by the routed ones.\n"
             "Without \"keep locked\", locked ones are replaced as well."))
-        grid = wx.FlexGridSizer(2, 2, 8, 12)
+        grid = wx.FlexGridSizer(3, 2, 8, 12)
         grid.Add(wx.StaticText(dlg, label="Parallel runs:"), 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(runs, 0, wx.EXPAND)
         grid.Add(wx.StaticText(dlg, label="Via cost (mm of track):"), 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(cost, 0, wx.EXPAND)
+        grid.Add(wx.StaticText(dlg, label="Geometry generations:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.Add(quality, 0, wx.EXPAND)
         box = wx.BoxSizer(wx.VERTICAL)
         box.Add(keep, 0, wx.ALL, 12)
         box.Add(grid, 0, wx.LEFT | wx.RIGHT | wx.EXPAND, 12)
+        box.Add(frames, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
         box.Add(note, 0, wx.ALL, 12)
         box.Add(dlg.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL), 0, wx.ALL | wx.EXPAND, 12)
         dlg.SetSizerAndFit(box)
@@ -80,7 +89,9 @@ class WxUi:
         try:
             if dlg.ShowModal() != wx.ID_OK:
                 return None
-            return runner.RouteOptions(keep.GetValue(), runs.GetValue(), cost.GetValue())
+            return runner.RouteOptions(keep.GetValue(), runs.GetValue(), cost.GetValue(),
+                                       quality.GetValue(),
+                                       defaults.frames_dir if frames.GetValue() else None)
         finally:
             dlg.Destroy()
 
@@ -162,6 +173,9 @@ def report(plan: bf.ImportPlan, applied, res: runner.RouteResult) -> str:
         lines += [f"  {u}" for u in unrouted[:10]]
         if len(unrouted) > 10:
             lines.append("  ...")
+    gif = res.animation()
+    if gif:
+        lines.append(f"Animation of the generations: {gif}")
     if applied.unknown_nets:
         lines.append(f"Nets not found on the board: {', '.join(sorted(applied.unknown_nets))}")
     lines += [f"Warning: {w}" for w in plan.warnings[:5]]
@@ -187,7 +201,16 @@ def main() -> int:
                  "editor?")
         return 1
 
-    opts = ui.ask_options(runner.RouteOptions())
+    # the animation goes next to the project (the router itself works in a temp folder)
+    frames_default = None
+    try:
+        proj = board.document.project
+        if proj.path:
+            frames_default = str(Path(proj.path) / "gummiband-evolution")
+    except Exception:
+        pass
+    opts = ui.ask_options(runner.RouteOptions(
+        frames_dir=frames_default or str(Path(tempfile.gettempdir()) / "gummiband-evolution")))
     if opts is None:
         return 0
 

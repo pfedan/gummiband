@@ -51,7 +51,12 @@ for:
   connects to; all unlocked tracks and vias are replaced. Off: every track and via is replaced
   (same as `gummiband route` without `--keep-locked`).
 - **Parallel runs** (default: CPU count): portfolio size, `--runs`.
-- **Via cost** (default 1.5): in mm of track, `--via-cost`.
+- **Via cost** (default 3.0): in mm of track, `--via-cost`.
+- **Geometry generations** (default 3): generations that are judged by the clearance check of
+  the finished geometry, `--geometry-generations` (0 is fastest, more is cleaner).
+- **Save an animation of the generations** (off by default): one image per generation and an
+  animated `evolution.gif` in `gummiband-evolution/` next to the project, `--frames`. Needs
+  `rsvg-convert` and ImageMagick (`brew install librsvg imagemagick`).
 
 While the router runs, a progress dialog shows the elapsed time; *Cancel* stops the router and
 leaves the board alone. At the end a message box reports what was removed and created, the
