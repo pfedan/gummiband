@@ -49,7 +49,7 @@ impl Default for RouterConfig {
             sites_per_tri: 3,
             margin: 0.01,
             via_in_pad: false,
-            escape_cost: env("GB_ESCAPE", 0.6),
+            escape_cost: env("GB_ESCAPE", 0.0),
         }
     }
 }

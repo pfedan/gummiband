@@ -90,7 +90,20 @@ pub fn simplify(pts: &[Point], tol: f64) -> Vec<Point> {
 
 pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConfig) {
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
-    let mut tracks: Vec<Vec<Point>> = geo.tracks.iter().map(|t| resample(&t.pts, cfg.spacing)).collect();
+    // coarse points while the bands move a lot, fine points for the final clearance work
+    let coarse = std::env::var("GB_COARSE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or((cfg.spacing * 2.0).max(0.1));
+    let mut tracks: Vec<Vec<Point>> = geo.tracks.iter().map(|t| resample(&t.pts, coarse)).collect();
+    // how far any push can reach: largest clearance plus the widest track
+    let max_clr = board
+        .classes
+        .iter()
+        .map(|c| c.clearance)
+        .fold(board.rules.min_clearance, f64::max)
+        .max(board.pair_clearance.values().copied().fold(0.0, f64::max));
+    let max_w = geo.tracks.iter().map(|t| t.width).fold(0.0, f64::max);
     let bounds = board.bbox().grow(5.0);
     // vias as static obstacles: (centre, radius, net, clearance)
     let mut vias: Vec<(Point, f64, u32, f64)> = geo
@@ -117,7 +130,16 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         if it % 10 == 9 {
             tracks = tracks
                 .par_iter()
-                .map(|p| resample(&simplify(p, 0.0005), cfg.spacing))
+                .map(|p| {
+                    resample(
+                        &simplify(p, 0.0005),
+                        if it * 4 >= cfg.iterations * 3 {
+                            cfg.spacing
+                        } else {
+                            coarse
+                        },
+                    )
+                })
                 .collect();
         }
         let mut pieces = Vec::new();
@@ -197,7 +219,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         push = push + dir * ((need - d) * 0.5);
                     }
                 }
-                for pi in idx.query_point(vc, vr + 1.5) {
+                for pi in idx.query_point(vc, vr + max_clr + max_w / 2.0 + 0.1) {
                     let pc = &pieces[pi as usize];
                     let o = &geo.tracks[pc.track as usize];
                     if o.net == vn {
@@ -243,7 +265,10 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     let mid = (pts[i - 1] + pts[i + 1]) * 0.5;
                     let mut mv = (mid - p) * tension;
                     let mut push = pt(0.0, 0.0);
-                    let reach = w / 2.0 + 2.0;
+                    let reach = std::env::var("GB_REACH")
+                        .ok()
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(w / 2.0 + max_clr + max_w / 2.0 + 0.6);
                     // static obstacles
                     for oi in sub.shared.obs_index.query_point(p, reach) {
                         let o = &board.obstacles[oi as usize];
@@ -271,11 +296,12 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         }
                     }
                     // board edge
+                    let inside_board = board.inside(p);
                     for o in &board.outline {
                         let (d, q) = nearest_on_poly(o, p);
                         let need = edge_clr + w / 2.0 + cfg.margin;
-                        if d < need {
-                            let inside_board = board.inside(p);
+                        // a point outside the board always goes back in
+                        if d < need || !inside_board {
                             let dir = if inside_board { (p - q).norm() } else { (q - p).norm() };
                             let d = if inside_board { d } else { -d };
                             push = push + dir * (need - d);
@@ -471,14 +497,35 @@ fn taut(
         let mut out = vec![pts[0]];
         let mut i = 0;
         while i < n - 1 {
-            let mut j = i + 1;
-            let mut k = i + 2;
-            while k < n && k <= i + 80 {
+            // farthest visible point: exponential search, then bisection (visibility along a
+            // band is close to monotone, so this needs a handful of checks instead of a scan)
+            let mut good = i + 1;
+            let mut step = 2;
+            let mut bad = n;
+            while good + step < n {
+                let k = good + step;
                 if clear(pts[i], pts[k], &pieces, &idx) {
-                    j = k;
+                    good = k;
+                    step *= 2;
+                } else {
+                    bad = k;
+                    break;
                 }
-                k += 1;
             }
+            if bad == n && good + 1 < n && clear(pts[i], pts[n - 1], &pieces, &idx) {
+                good = n - 1;
+            } else {
+                let mut hi = bad.min(n);
+                while hi - good > 1 {
+                    let mid = (good + hi) / 2;
+                    if clear(pts[i], pts[mid], &pieces, &idx) {
+                        good = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+            }
+            let j = good;
             out.push(pts[j]);
             i = j;
         }
