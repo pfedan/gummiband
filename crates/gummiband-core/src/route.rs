@@ -32,6 +32,9 @@ pub struct RouterConfig {
     pub margin: f64,
     /// Allow vias inside SMD pads for plane fan-outs (otherwise only as a last resort).
     pub via_in_pad: bool,
+    /// Extra cost (mm) for passing right next to a pad of another net that still waits for its
+    /// route: keeps the escape of dense pin rows free.
+    pub escape_cost: f64,
 }
 
 impl Default for RouterConfig {
@@ -46,6 +49,7 @@ impl Default for RouterConfig {
             sites_per_tri: 3,
             margin: 0.01,
             via_in_pad: false,
+            escape_cost: env("GB_ESCAPE", 0.6),
         }
     }
 }
@@ -140,6 +144,8 @@ pub struct Router<'a> {
     pub conn_vias: Vec<Vec<u32>>,
     /// Pins whose pads overlap (same net) share a group: they are connected already.
     pub pin_group: Vec<u32>,
+    /// Per pin: number of unrouted connections that start or end there.
+    pending: Vec<u32>,
     /// Debugging: positions expanded by the last search of a traced connection.
     pub trace: std::sync::Arc<std::sync::Mutex<Option<Vec<(Point, u8)>>>>,
 }
@@ -248,6 +254,7 @@ impl<'a> Router<'a> {
             conn_vias: Vec::new(),
             trace: Default::default(),
             pin_group: Self::pin_groups(board, sub),
+            pending: vec![0; board.pins.len()],
         }
     }
 
@@ -431,6 +438,30 @@ impl<'a> Router<'a> {
             }
         }
         (zones, neck_w)
+    }
+
+    /// Escape penalty for crossing edge e: an end vertex on a pad of another net that still
+    /// has unrouted connections.
+    fn escape_penalty(&self, li: usize, e: u32, net: NetId) -> f64 {
+        if self.cfg.escape_cost <= 0.0 {
+            return 0.0;
+        }
+        let m = self.m(li);
+        for end in 0..2 {
+            for d in m.demands(e, end) {
+                if d.obs == OUTSIDE {
+                    continue;
+                }
+                let o = &self.board.obstacles[d.obs as usize];
+                if let Some(p) = o.pin
+                    && o.net != Some(net)
+                    && self.pending[p] > 0
+                {
+                    return self.cfg.escape_cost;
+                }
+            }
+        }
+        0.0
     }
 
     /// Width of a track of `full` width with neck zones at edge e.
@@ -1361,6 +1392,7 @@ impl<'a> Router<'a> {
             let len = pu.dist(pv);
             let dir = (pv - pu) * (1.0 / len);
             let n = self.cross[lu][e as usize].len();
+            let escape = self.escape_penalty(lu, e, net);
             for j in 0..=n {
                 if free {
                     if let Some((cp, cs)) = chord_from
@@ -1389,7 +1421,7 @@ impl<'a> Router<'a> {
                         slot: j as u16,
                     },
                     q,
-                    node.g + node.pos.dist(q),
+                    node.g + node.pos.dist(q) + escape,
                     idx,
                 );
             }
@@ -1987,10 +2019,28 @@ impl<'a> Router<'a> {
     }
 
     /// Route all planned connections. Returns the number routed.
+    fn conn_pins(&self, ci: usize) -> Vec<usize> {
+        let c = &self.conns[ci];
+        let mut p = vec![c.from];
+        if let Goal::Pins(t) = &c.goal {
+            p.extend(t.iter().copied());
+        }
+        p
+    }
+
     pub fn run(&mut self) -> usize {
         let mut failed = Vec::new();
         for ci in 0..self.conns.len() {
-            if !self.route_one(ci) {
+            for p in self.conn_pins(ci) {
+                self.pending[p] += 1;
+            }
+        }
+        for ci in 0..self.conns.len() {
+            let ok = self.route_one(ci);
+            for p in self.conn_pins(ci) {
+                self.pending[p] -= 1;
+            }
+            if !ok {
                 failed.push(ci);
             }
         }
