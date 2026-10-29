@@ -42,7 +42,20 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   (search over small placement offsets, evaluated by the router).
 - Differential pairs with impedance and length matching.
 - Rule engine: more custom rule conditions (positions, footprints, layers).
-- More than two signal layers.
+- More than two signal layers (pulled forward with the synthetic 4 layer benchmarks).
+- Alternative placements as portfolio variants (smaller, square, round outlines with the
+  connectors and the ESP32 module fixed), see `crates/gummiband-place`.
+- Synthetic benchmark suite of increasing difficulty (`bench/gen_boards.py`).
+
+## M3b: Interface for AI agents
+
+- Machine readable everything: `gummiband route --report out.json` (stats, unrouted
+  connections, violations with nets and positions, portfolio) is the first step.
+- Next: an MCP server (`gummiband mcp`) with tools to load a board, list nets and classes,
+  lock or prioritize nets, set per net options, route (all or selected nets), get DRC results
+  and quality metrics as JSON, and render PNG images of regions for visual inspection.
+- Stable JSON schemas, deterministic results for the same seed, incremental calls on an open
+  session so an agent can iterate quickly.
 
 ## M4: Search and performance
 

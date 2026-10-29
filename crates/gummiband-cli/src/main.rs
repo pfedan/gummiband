@@ -46,12 +46,19 @@ enum Cmd {
         /// Generations of the evolutionary order search after the portfolio.
         #[arg(long, default_value_t = 3)]
         generations: usize,
+        /// Generations that select by clearance violations after the geometry step (slower).
+        #[arg(long, default_value_t = 0)]
+        geometry_generations: usize,
         /// Write a debug SVG.
         #[arg(long)]
         svg: Option<PathBuf>,
         /// Draw the triangulation into the SVG.
         #[arg(long)]
         svg_tris: bool,
+        /// Write a machine readable JSON report (stats, unrouted connections, violations,
+        /// portfolio) for scripts and AI agents.
+        #[arg(long)]
+        report: Option<PathBuf>,
     },
     /// Remove tracks, vias and outer copper zones (benchmark preparation).
     Strip {
@@ -152,8 +159,10 @@ fn main() -> Result<()> {
             via_pitch,
             via_cost,
             generations,
+            geometry_generations,
             svg,
             svg_tris,
+            report,
         } => {
             let keep = if keep_locked {
                 KeepCopper::Locked
@@ -183,6 +192,7 @@ fn main() -> Result<()> {
                 &gummiband_core::SearchConfig {
                     population: runs,
                     generations,
+                    geometry_generations,
                 },
             );
             let dt = t0.elapsed();
@@ -194,8 +204,15 @@ fn main() -> Result<()> {
             );
             for r in &res.portfolio {
                 println!(
-                    "  gen {:2} seed {:2} fanout_first {:5}: {}/{} routed, {} vias, {:.0} mm",
-                    r.generation, r.seed, r.fanout_first, r.routed, r.conns, r.vias, r.length
+                    "  gen {:2} seed {:2} fanout_first {:5}: {}/{} routed, {} vias, {:.0} mm{}",
+                    r.generation,
+                    r.seed,
+                    r.fanout_first,
+                    r.routed,
+                    r.conns,
+                    r.vias,
+                    r.length,
+                    r.violations.map(|v| format!(", {v} violations")).unwrap_or_default()
                 );
             }
             let s = &res.stats;
@@ -304,6 +321,39 @@ fn main() -> Result<()> {
             let ranges = write::strip_ranges(&kb, &opts);
             std::fs::write(&output, write::patch(&kb, &ranges, &items))?;
             println!("wrote {} items to {}", items.len(), output.display());
+            if let Some(path) = report {
+                let st = &res.stats;
+                let json = serde_json::json!({
+                    "board": board.display().to_string(),
+                    "output": output.display().to_string(),
+                    "seconds": dt.as_secs_f64(),
+                    "connections": st.conns,
+                    "routed": st.routed,
+                    "unrouted": st.unrouted,
+                    "vias": st.vias,
+                    "length_mm": st.length,
+                    "items_written": items.len(),
+                    "violations": viol.iter().map(|v| serde_json::json!({
+                        "what": v.what,
+                        "x": v.at.x,
+                        "y": v.at.y,
+                        "actual_mm": v.actual,
+                        "required_mm": v.required,
+                        "nets": [b.nets[v.nets.0 as usize].name.clone(), v.nets.1.map(|n| b.nets[n as usize].name.clone())],
+                    })).collect::<Vec<_>>(),
+                    "portfolio": res.portfolio.iter().map(|r| serde_json::json!({
+                        "generation": r.generation,
+                        "seed": r.seed,
+                        "fanout_first": r.fanout_first,
+                        "routed": r.routed,
+                        "connections": r.conns,
+                        "vias": r.vias,
+                        "length_mm": r.length,
+                        "violations": r.violations,
+                    })).collect::<Vec<_>>(),
+                });
+                std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
+            }
         }
         Cmd::Strip {
             board,

@@ -1223,7 +1223,7 @@ impl<'a> Router<'a> {
                             .board
                             .planes
                             .iter()
-                            .any(|pl| pl.net == net && pn.layers.has(pl.layer))
+                            .any(|pl| pl.net == net && pn.layers.has(pl.layer) && pl.outline.contains(pn.pos))
                 }
             }
         };
@@ -1910,9 +1910,9 @@ impl<'a> Router<'a> {
             let reaches_plane = |p: usize| {
                 n.pins.iter().any(|&q| {
                     self.pin_group[q] == self.pin_group[p]
-                        && b.planes
-                            .iter()
-                            .any(|pl| pl.net == net && b.pins[q].layers.has(pl.layer))
+                        && b.planes.iter().any(|pl| {
+                            pl.net == net && b.pins[q].layers.has(pl.layer) && pl.outline.contains(b.pins[q].pos)
+                        })
                 })
             };
             if has_plane {

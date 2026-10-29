@@ -29,6 +29,8 @@ pub struct RunStats {
     pub vias: usize,
     pub length: f64,
     pub unrouted: Vec<String>,
+    /// Clearance violations after the geometry step (None if not relaxed).
+    pub violations: Option<usize>,
 }
 
 impl RunStats {
@@ -50,6 +52,8 @@ pub struct SearchConfig {
     pub population: usize,
     /// Generations of the evolutionary search after the initial portfolio (0 = portfolio only).
     pub generations: usize,
+    /// Generations that also run the geometry step and select by clearance violations.
+    pub geometry_generations: usize,
 }
 
 /// Routing order genome: a key per connection, identified by (net, from pin). Lower routes first.
@@ -61,6 +65,8 @@ struct Candidate {
     /// Final connection order and the unrouted connections, for the next genome.
     order: Vec<(NetId, usize)>,
     failed: Vec<(NetId, usize)>,
+    /// Nets with clearance violations after the geometry step.
+    bad_nets: Vec<NetId>,
 }
 
 fn evaluate(
@@ -100,6 +106,7 @@ fn evaluate(
         vias: geo.vias.len(),
         length,
         unrouted,
+        violations: None,
     };
     Candidate {
         stats,
@@ -109,6 +116,7 @@ fn evaluate(
             .iter()
             .map(|&ci| (r.conns[ci].net, r.conns[ci].from))
             .collect(),
+        bad_nets: Vec::new(),
     }
 }
 
@@ -217,7 +225,10 @@ pub fn route_board(
         .collect();
     let mut portfolio: Vec<RunStats> = first.iter().map(|c| c.stats.clone()).collect();
     // the best few candidates go through the geometry step at the end
-    let keep = 4;
+    let keep = std::env::var("GB_FINALISTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
     let mut finalists: Vec<Candidate> = Vec::new();
     let offer = |finalists: &mut Vec<Candidate>, c: Candidate| {
         finalists.push(c);
@@ -269,26 +280,63 @@ pub fn route_board(
             },
         );
     }
-    // relax the finalists of the best completion and keep the cleanest geometry
+    // relax the finalists of the best completion and keep the cleanest geometry; then, if
+    // asked, run generations that select by the clearance violations after the geometry step
+    let geo_eval = |mut c: Candidate| -> Candidate {
+        relax::relax(board, &sub, &mut c.geo, &relax::RelaxConfig::default());
+        let v = check::check(board, &c.geo);
+        let mut nets: Vec<NetId> = v.iter().flat_map(|x| [Some(x.nets.0), x.nets.1]).flatten().collect();
+        nets.sort_unstable();
+        nets.dedup();
+        c.stats.violations = Some(v.len());
+        c.bad_nets = nets;
+        c
+    };
+    let full_cost = |c: &Candidate| c.stats.cost() + c.stats.violations.unwrap_or(0) as f64 * 1000.0;
     let top = finalists[0].stats.routed;
-    let mut judged: Vec<(usize, Candidate)> = finalists
+    let judged: Vec<Candidate> = finalists
         .into_iter()
         .filter(|c| c.stats.routed == top)
         .collect::<Vec<_>>()
         .into_par_iter()
-        .map(|mut c| {
-            relax::relax(board, &sub, &mut c.geo, &relax::RelaxConfig::default());
-            (check::check(board, &c.geo).len(), c)
-        })
+        .map(geo_eval)
         .collect();
-    judged.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.stats.cost().total_cmp(&b.1.stats.cost())));
-    for (v, c) in &judged {
-        eprintln!(
-            "finalist gen {} {}/{} routed, {} vias, {:.0} mm: {v} violations",
-            c.stats.generation, c.stats.routed, c.stats.conns, c.stats.vias, c.stats.length
-        );
+    for c in &judged {
+        portfolio.push(c.stats.clone());
     }
-    let (_, best) = judged.swap_remove(0);
+    let mut best = judged
+        .into_iter()
+        .min_by(|a, b| full_cost(a).total_cmp(&full_cost(b)))
+        .unwrap();
+    for generation in 1..=search.geometry_generations {
+        if best.stats.violations == Some(0) && best.failed.is_empty() {
+            break;
+        }
+        let genomes: Vec<Genome> = (0..pop).map(|_| mutate_geo(&best, &mut rng)).collect();
+        let cfg = RouterConfig {
+            seed: 0,
+            fanout_first: best.stats.fanout_first,
+            ..base.clone()
+        };
+        let next: Vec<Candidate> = genomes
+            .par_iter()
+            .map(|g| {
+                geo_eval(evaluate(
+                    board,
+                    &sub,
+                    cfg.clone(),
+                    Some(g),
+                    search.generations + generation,
+                ))
+            })
+            .collect();
+        for c in next {
+            portfolio.push(c.stats.clone());
+            if full_cost(&c) < full_cost(&best) {
+                best = c;
+            }
+        }
+    }
     (
         sub,
         RouteResult {
@@ -297,4 +345,19 @@ pub fn route_board(
             portfolio,
         },
     )
+}
+
+/// A mutant that moves the connections of nets with clearance violations (and failed ones)
+/// earlier, so that they get their room before their neighbours.
+fn mutate_geo(best: &Candidate, rng: &mut Rng) -> Genome {
+    let n = best.order.len().max(1) as f64;
+    let mut g = mutate(best, rng);
+    for k in &best.order {
+        if best.bad_nets.contains(&k.0) && rng.unit() < 0.6 {
+            if let Some(v) = g.get_mut(k) {
+                *v -= n * (0.05 + 0.5 * rng.unit());
+            }
+        }
+    }
+    g
 }

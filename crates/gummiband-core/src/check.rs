@@ -10,6 +10,8 @@ use crate::realize::Geometry;
 #[derive(Debug, Clone)]
 pub struct Violation {
     pub what: String,
+    /// Nets involved (the routed item first).
+    pub nets: (NetId, Option<NetId>),
     pub at: crate::geom::Point,
     pub actual: f64,
     pub required: f64,
@@ -118,6 +120,7 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
             if edge < board.rules.edge_clearance - 1e-4 {
                 out.push(Violation {
                     what: "edge".into(),
+                    nets: (net, None),
                     at,
                     actual: edge,
                     required: board.rules.edge_clearance,
@@ -156,6 +159,7 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
                             board.nets[net as usize].name,
                             o.net.map(|n| board.nets[n as usize].name.clone())
                         ),
+                        nets: (net, o.net),
                         at,
                         actual: d,
                         required: need,
@@ -214,6 +218,7 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
                             board.nets[net as usize].name,
                             board.nets[qnet as usize].name
                         ),
+                        nets: (net, Some(qnet)),
                         at,
                         actual: d,
                         required: need,
