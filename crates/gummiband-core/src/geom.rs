@@ -254,6 +254,18 @@ pub enum Shape {
 }
 
 impl Shape {
+    pub fn translated(&self, d: Point) -> Shape {
+        match self {
+            Shape::Circle { c, r } => Shape::Circle { c: *c + d, r: *r },
+            Shape::Capsule { a, b, r } => Shape::Capsule {
+                a: *a + d,
+                b: *b + d,
+                r: *r,
+            },
+            Shape::Polygon(p) => Shape::Polygon(Polygon::new(p.pts.iter().map(|q| *q + d).collect())),
+        }
+    }
+
     pub fn bbox(&self) -> Rect {
         match self {
             Shape::Circle { c, r } => {

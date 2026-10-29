@@ -28,6 +28,11 @@ pub struct ReadOptions {
     /// Force these copper layers to be planes (not routed). Layers of KiCad type "power" are
     /// planes by default.
     pub plane_layers: Vec<String>,
+    /// Let the router shift footprints a little: all except locked ones, connectors, modules,
+    /// mounting holes and the references in `fixed`.
+    pub move_parts: bool,
+    /// References that never move.
+    pub fixed: Vec<String>,
 }
 
 impl Default for ReadOptions {
@@ -36,6 +41,8 @@ impl Default for ReadOptions {
             keep: KeepCopper::Locked,
             zones_as_obstacles: false,
             plane_layers: Vec::new(),
+            move_parts: false,
+            fixed: Vec::new(),
         }
     }
 }
@@ -79,6 +86,7 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
         patterns: Vec::new(),
         copper: Vec::new(),
         edges: Vec::new(),
+        movable: Vec::new(),
     };
 
     r.read_layers(&root, opts);
@@ -98,6 +106,12 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
         }
     }
     r.finish_outline();
+    if opts.move_parts {
+        r.b.movable = std::mem::take(&mut r.movable)
+            .into_iter()
+            .filter(|f| !opts.fixed.contains(f) && r.b.courtyards.contains_key(f))
+            .collect();
+    }
 
     Ok(KicadBoard {
         text,
@@ -118,6 +132,8 @@ struct Reader {
     copper: Vec<String>,
     /// Loose Edge.Cuts segments, chained into polygons at the end.
     edges: Vec<(Point, Point)>,
+    /// Footprints that may move under `move_parts` (unlocked, no connector, module or hole).
+    movable: Vec<String>,
 }
 
 fn xy(n: &Node) -> Option<Point> {
@@ -390,6 +406,27 @@ impl Reader {
             })
             .unwrap_or("?")
             .to_string();
+        let first_obstacle = self.b.obstacles.len();
+        // parts with an outside interface or a mechanical role stay where they are
+        let lib = fp.args().first().and_then(|x| x.as_str()).unwrap_or("");
+        let fixed_kind = [
+            "Connector",
+            "Module",
+            "MountingHole",
+            "Button_Switch",
+            "Jumper",
+            "TestPoint",
+        ]
+        .iter()
+        .any(|k| lib.contains(k))
+            || ["J", "P", "CN", "USB", "H", "MH", "SW", "TP"].iter().any(|p| {
+                reference
+                    .strip_prefix(p)
+                    .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+            });
+        if !fp.flag("locked") && !fixed_kind {
+            self.movable.push(reference.clone());
+        }
         for pad in fp.children("pad") {
             self.read_pad(pad, pos, rot, &reference);
         }
@@ -426,8 +463,15 @@ impl Reader {
                     keep: KeepCopper::None,
                     zones_as_obstacles: false,
                     plane_layers: vec![],
+                    move_parts: false,
+                    fixed: vec![],
                 },
             );
+        }
+        if self.b.obstacles.len() > first_obstacle {
+            self.b
+                .footprint_obstacles
+                .insert(reference, (first_obstacle..self.b.obstacles.len()).collect());
         }
     }
 

@@ -219,3 +219,51 @@ impl UuidGen {
         )
     }
 }
+
+/// Shift footprints (by reference) in a board file: only the footprint's own `(at x y [r])`
+/// changes, pads and graphics are relative to it.
+pub fn move_footprints(text: &str, offsets: &std::collections::HashMap<String, Point>) -> anyhow::Result<String> {
+    let root = crate::sexpr::parse(text).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+    let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    for fp in root
+        .args()
+        .iter()
+        .filter(|n| matches!(n.head(), Some("footprint") | Some("module")))
+    {
+        let reference = fp
+            .children("property")
+            .find(|p| p.args().first().and_then(|x| x.as_str()) == Some("Reference"))
+            .and_then(|p| p.args().get(1)?.as_str())
+            .or_else(|| {
+                fp.children("fp_text")
+                    .find(|t| t.args().first().and_then(|x| x.as_str()) == Some("reference"))
+                    .and_then(|t| t.args().get(1)?.as_str())
+            });
+        let (Some(reference), Some(at)) = (reference, fp.child("at")) else {
+            continue;
+        };
+        let Some(d) = offsets.get(reference) else {
+            continue;
+        };
+        let v = at.args().iter().filter_map(|x| x.as_f64()).collect::<Vec<_>>();
+        if v.len() < 2 {
+            continue;
+        }
+        let mut new = format!("(at {} {}", f(v[0] + d.x), f(v[1] + d.y));
+        for r in &v[2..] {
+            new.push_str(&format!(" {}", f(*r)));
+        }
+        new.push(')');
+        edits.push((at.span(), new));
+    }
+    edits.sort_by_key(|e| e.0.start);
+    let mut out = String::with_capacity(text.len());
+    let mut pos = 0;
+    for (r, new) in edits {
+        out.push_str(&text[pos..r.start]);
+        out.push_str(&new);
+        pos = r.end;
+    }
+    out.push_str(&text[pos..]);
+    Ok(out)
+}

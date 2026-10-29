@@ -168,9 +168,38 @@ pub struct Board {
     pub courtyards: std::collections::HashMap<String, Rect>,
     /// Track to track clearances of custom rules, above the net class clearance (a < b).
     pub pair_clearance: std::collections::HashMap<(NetId, NetId), f64>,
+    /// Obstacles (pads, holes, copper graphics) by footprint reference.
+    #[serde(default)]
+    pub footprint_obstacles: std::collections::HashMap<String, Vec<usize>>,
+    /// Footprints the router may shift a little (empty: placement is fixed).
+    #[serde(default)]
+    pub movable: Vec<String>,
 }
 
 impl Board {
+    /// The board with footprints shifted by the given offsets (pads, holes, graphics, pins and
+    /// courtyards move together).
+    pub fn with_offsets(&self, offsets: &std::collections::HashMap<String, Point>) -> Board {
+        let mut b = self.clone();
+        for (fp, &d) in offsets {
+            if let Some(obs) = self.footprint_obstacles.get(fp) {
+                for &i in obs {
+                    b.obstacles[i].shape = b.obstacles[i].shape.translated(d);
+                }
+            }
+            for p in b.pins.iter_mut().filter(|p| &p.footprint == fp) {
+                p.pos = p.pos + d;
+            }
+            if let Some(r) = b.courtyards.get_mut(fp) {
+                *r = Rect {
+                    min: r.min + d,
+                    max: r.max + d,
+                };
+            }
+        }
+        b
+    }
+
     pub fn layer_id(&self, name: &str) -> Option<LayerId> {
         self.layers.iter().position(|l| l.name == name).map(|i| i as LayerId)
     }

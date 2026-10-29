@@ -70,6 +70,13 @@ enum Cmd {
         /// portfolio) for scripts and AI agents.
         #[arg(long)]
         report: Option<PathBuf>,
+        /// Let the geometry generations shift parts next to clearance problems (locked
+        /// footprints, connectors, modules and mounting holes stay).
+        #[arg(long)]
+        move_parts: bool,
+        /// References that never move under --move-parts, comma separated.
+        #[arg(long, value_delimiter = ',')]
+        fixed: Vec<String>,
     },
     /// Remove tracks, vias and outer copper zones (benchmark preparation).
     Strip {
@@ -179,6 +186,8 @@ fn main() -> Result<()> {
             svg_tris,
             report,
             frames,
+            move_parts,
+            fixed,
         } => {
             let keep = if keep_locked {
                 KeepCopper::Locked
@@ -190,10 +199,34 @@ fn main() -> Result<()> {
                 &ReadOptions {
                     keep,
                     plane_layers: cli.plane_layers.clone(),
+                    move_parts,
+                    fixed,
                     ..Default::default()
                 },
             )?;
-            let b = &kb.board;
+            // debugging: GB_SHIFT="R8:0.3,0;C4:0,-0.2" routes the board with these parts shifted
+            let shifted_in;
+            let b = match std::env::var("GB_SHIFT") {
+                Ok(spec) => {
+                    let off: std::collections::HashMap<String, gummiband_core::geom::Point> = spec
+                        .split(';')
+                        .filter_map(|e| {
+                            let (r, d) = e.split_once(':')?;
+                            let (x, y) = d.split_once(',')?;
+                            Some((
+                                r.to_string(),
+                                gummiband_core::geom::pt(x.parse().ok()?, y.parse().ok()?),
+                            ))
+                        })
+                        .collect();
+                    shifted_in = kb.board.with_offsets(&off);
+                    &shifted_in
+                }
+                Err(_) => &kb.board,
+            };
+            if move_parts {
+                println!("movable parts: {}", b.movable.len());
+            }
             let runs = if runs == 0 { rayon::current_num_threads() } else { runs };
             let t0 = std::time::Instant::now();
             let (sub, res) = gummiband_core::route_board(
@@ -214,6 +247,19 @@ fn main() -> Result<()> {
                 },
             );
             let dt = t0.elapsed();
+            // the geometry belongs to the board with the shifted parts
+            let shifted;
+            let b = if res.offsets.is_empty() {
+                b
+            } else {
+                let mut moved: Vec<_> = res.offsets.iter().collect();
+                moved.sort_by(|a, b| a.0.cmp(b.0));
+                for (f, d) in moved {
+                    println!("moved {f} by {:.2}, {:.2} mm", d.x, d.y);
+                }
+                shifted = b.with_offsets(&res.offsets);
+                &shifted
+            };
             println!(
                 "substrate: {} vertices, {} triangles, {} via sites",
                 sub.m.iter().map(|m| m.verts.len()).sum::<usize>(),
@@ -389,7 +435,13 @@ fn main() -> Result<()> {
                 zone_layers: vec![],
             };
             let ranges = write::strip_ranges(&kb, &opts);
-            std::fs::write(&output, write::patch(&kb, &ranges, &items))?;
+            let text = write::patch(&kb, &ranges, &items);
+            let text = if res.offsets.is_empty() {
+                text
+            } else {
+                write::move_footprints(&text, &res.offsets)?
+            };
+            std::fs::write(&output, text)?;
             println!("wrote {} items to {}", items.len(), output.display());
             if let Some(path) = report {
                 let st = &res.stats;

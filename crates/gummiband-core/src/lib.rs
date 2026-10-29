@@ -80,6 +80,9 @@ pub struct RouteResult {
     pub portfolio: Vec<RunStats>,
     /// The best candidate after every generation (label, geometry, relaxed), if requested.
     pub frames: Vec<(String, Geometry, bool)>,
+    /// Footprints the router shifted (reference, offset in mm); the geometry belongs to the
+    /// shifted board, see [`Board::with_offsets`].
+    pub offsets: HashMap<String, geom::Point>,
 }
 
 #[derive(Debug, Clone)]
@@ -250,10 +253,68 @@ fn mutate(best: &Candidate, rng: &mut Rng) -> Genome {
     g
 }
 
-/// Route a board: build the substrate once, run a portfolio of router configurations in
-/// parallel, then improve the best routing order in generations of mutants (completion first,
-/// then vias, then length). The winner is relaxed into its final geometry.
+/// Route a board (see [`route_fixed`]). With movable parts and clearance problems left, parts
+/// next to the problems are shifted and the whole search runs again on the shifted board, for
+/// a few placement rounds; the best result over all rounds wins.
 pub fn route_board(
+    board: &Board,
+    sub_cfg: &SubstrateConfig,
+    base: &RouterConfig,
+    search: &SearchConfig,
+) -> (Substrate, RouteResult) {
+    let score = |b: &Board, r: &RouteResult| -> (usize, f64, Vec<geom::Point>) {
+        let v = check::check(b, &r.geometry);
+        let shorts = v.iter().filter(|x| x.actual <= 0.0).count();
+        let cost = r.stats.cost() + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0;
+        (r.stats.routed, cost, v.iter().map(|x| x.at).collect())
+    };
+    let (sub, res) = route_fixed(board, sub_cfg, base, search);
+    if board.movable.is_empty() || search.geometry_generations == 0 {
+        return (sub, res);
+    }
+    let rounds = std::env::var("GB_PLACE_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+    let mut best_score = score(board, &res);
+    let mut best = (sub, res);
+    let mut offsets: HashMap<String, geom::Point> = HashMap::new();
+    let mut hot = best_score.2.clone();
+    let mut rng = Rng(0x91ace);
+    for round in 1..=rounds {
+        if hot.is_empty() && best.1.stats.unrouted.is_empty() {
+            break;
+        }
+        let cur = board.with_offsets(&offsets);
+        let Some(next) = shift_parts(board, &cur, &offsets, &hot, &mut rng) else {
+            break;
+        };
+        let moved = board.with_offsets(&next);
+        let (sub, mut res) = route_fixed(&moved, sub_cfg, base, search);
+        res.offsets = next.clone();
+        let sc = score(&moved, &res);
+        eprintln!(
+            "placement round {round}: {} parts shifted, {}/{} routed, cost {:.0} (best {:.0})",
+            next.len(),
+            res.stats.routed,
+            res.stats.conns,
+            sc.1,
+            best_score.1
+        );
+        hot = sc.2.clone();
+        offsets = next;
+        if sc.0 > best_score.0 || (sc.0 == best_score.0 && sc.1 < best_score.1) {
+            best_score = sc;
+            best = (sub, res);
+        }
+    }
+    best
+}
+
+/// One full search on a fixed placement: build the substrate once, run a portfolio of router
+/// configurations in parallel, then improve the best routing order in generations of mutants
+/// (completion first, then vias, then length). The winner is relaxed into its final geometry.
+pub fn route_fixed(
     board: &Board,
     sub_cfg: &SubstrateConfig,
     base: &RouterConfig,
@@ -357,6 +418,7 @@ pub fn route_board(
                 stats: best.stats,
                 portfolio,
                 frames,
+                offsets: HashMap::new(),
             },
         );
     }
@@ -383,7 +445,10 @@ pub fn route_board(
     // successive halving: the topology cost predicts the finished geometry only weakly, so
     // many finalists get a short relaxation first and only the best quarter the full one
     let top = finalists[0].stats.routed;
-    let full_n = std::env::var("GB_FULL").ok().and_then(|v| v.parse().ok()).unwrap_or(6usize);
+    let full_n = std::env::var("GB_FULL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6usize);
     let pool: Vec<Candidate> = finalists.into_iter().filter(|c| c.stats.routed == top).collect();
     let pool = if pool.len() > full_n {
         let screen = relax::RelaxConfig {
@@ -493,8 +558,83 @@ pub fn route_board(
             stats: best.stats,
             portfolio,
             frames,
+            offsets: HashMap::new(),
         },
     )
+}
+
+/// New footprint offsets: movable parts with pads next to clearance problems step away from
+/// them (boldly, 0.15 to 0.5 mm per step), as long as the courtyards stay inside the board and
+/// apart from each other. `cur` is the board with the current `offsets` applied.
+fn shift_parts(
+    board: &Board,
+    cur: &Board,
+    offsets: &HashMap<String, geom::Point>,
+    hot: &[geom::Point],
+    rng: &mut Rng,
+) -> Option<HashMap<String, geom::Point>> {
+    let mut offsets = offsets.clone();
+    let mut courtyards = cur.courtyards.clone();
+    let mut changed = false;
+    let mut spots: Vec<geom::Point> = Vec::new();
+    for &h in hot {
+        if spots.iter().all(|s| s.dist(h) > 1.0) {
+            spots.push(h);
+        }
+    }
+    for h in spots {
+        let near: Vec<&String> = board
+            .movable
+            .iter()
+            .filter(|f| cur.pins.iter().any(|p| &p.footprint == *f && p.pos.dist(h) < 1.5))
+            .collect();
+        if near.is_empty() {
+            continue;
+        }
+        let fp = near[(rng.next() % near.len() as u64) as usize];
+        let Some(r) = courtyards.get(fp).copied() else {
+            continue;
+        };
+        let centre = (r.min + r.max) * 0.5;
+        let away = centre - h;
+        if away.len() < 1e-6 {
+            continue;
+        }
+        let step = away.norm() * (0.15 + 0.35 * rng.unit());
+        for scale in [1.0, 0.5] {
+            let d = step * scale;
+            let moved = geom::Rect {
+                min: r.min + d,
+                max: r.max + d,
+            };
+            let inside = [
+                moved.min,
+                moved.max,
+                geom::pt(moved.min.x, moved.max.y),
+                geom::pt(moved.max.x, moved.min.y),
+            ]
+            .iter()
+            .all(|&q| board.inside(q));
+            // parts that already overlap may keep overlapping as much as before
+            let free = courtyards
+                .iter()
+                .all(|(other, o)| other == fp || overlap(o, &moved) <= overlap(o, &r) + 1e-9);
+            if inside && free {
+                let e = offsets.entry(fp.clone()).or_insert(geom::pt(0.0, 0.0));
+                *e = *e + d;
+                courtyards.insert(fp.clone(), moved);
+                changed = true;
+                break;
+            }
+        }
+    }
+    changed.then_some(offsets)
+}
+
+fn overlap(a: &geom::Rect, b: &geom::Rect) -> f64 {
+    let w = a.max.x.min(b.max.x) - a.min.x.max(b.min.x);
+    let h = a.max.y.min(b.max.y) - a.min.y.max(b.min.y);
+    if w > 0.0 && h > 0.0 { w * h } else { 0.0 }
 }
 
 /// A mutant that moves the connections of nets with clearance violations (and failed ones)
