@@ -438,7 +438,9 @@ impl<'a> Router<'a> {
         let m = self.m(li);
         let [u, v] = m.edges[e as usize];
         let (a, b) = (m.verts[u as usize], m.verts[v as usize]);
-        if necks.iter().any(|&(c, r)| point_seg_dist(c, a, b) < r) {
+        // narrow only where the whole edge lies in a zone: the realized track narrows only
+        // inside the zones, so the topology must not count on more room than that
+        if necks.iter().any(|&(c, r)| c.dist(a) < r && c.dist(b) < r) {
             neck_w
         } else {
             full

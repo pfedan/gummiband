@@ -39,9 +39,13 @@ impl Track {
         }
     }
 
-    /// Width of the piece a-b (the wider end wins).
+    /// Width of the piece a-b: narrow only if both ends lie in the same neck zone.
     pub fn piece_width(&self, a: Point, b: Point) -> f64 {
-        self.width_at(a).max(self.width_at(b))
+        if self.necks.iter().any(|&(c, r)| c.dist(a) < r && c.dist(b) < r) {
+            self.neck_w
+        } else {
+            self.width
+        }
     }
 }
 

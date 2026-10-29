@@ -11,7 +11,7 @@ print("unconnected", len(d["unconnected_items"]), dict(c))
 rows = []
 for v in d["violations"]:
     m = re.search(r"clearance ([0-9.]+) mm; actual ([0-9.]+)", v["description"])
-    if not m:
+    if not m or v["type"].startswith("silk"):
         continue
     deficit = float(m.group(1)) - float(m.group(2))
     rows.append((deficit, v["type"], [(i["description"][:60], round(i["pos"]["x"], 3), round(i["pos"]["y"], 3)) for i in v["items"]]))
