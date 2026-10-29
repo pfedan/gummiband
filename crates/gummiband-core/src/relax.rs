@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 use crate::board::{Board, ObstacleKind};
 use crate::geom::{Point, Rect, point_seg_dist, pt};
-use crate::index::GridIndex;
+use crate::index::{GridIndex, PointGrid};
 use crate::realize::{Elem, Geometry, Track};
 use crate::topo::Substrate;
 
@@ -90,6 +90,7 @@ pub fn simplify(pts: &[Point], tol: f64) -> Vec<Point> {
 
 pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConfig) {
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
+    let t_start = std::time::Instant::now();
     // coarse points while the bands move a lot, fine points for the final clearance work
     let coarse = std::env::var("GB_COARSE")
         .ok()
@@ -102,9 +103,28 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         .iter()
         .map(|c| c.clearance)
         .fold(board.rules.min_clearance, f64::max)
-        .max(board.pair_clearance.values().copied().fold(0.0, f64::max));
+        .max(board.pair_clearance.values().copied().fold(0.0, f64::max))
+        .max(board.obstacles.iter().map(|o| o.clearance).fold(0.0, f64::max))
+        .max(board.rules.hole_clearance);
     let max_w = geo.tracks.iter().map(|t| t.width).fold(0.0, f64::max);
+    let obs_boxes: Vec<Rect> = sub.shared.obs_polys.iter().map(|p| p.bbox()).collect();
     let bounds = board.bbox().grow(5.0);
+    // every point query below looks at one cell only: the cell lists hold all obstacles within
+    // the largest reach of any point in it, and the edge mask marks cells near the board edge
+    let reach_max = max_w + max_clr + cfg.margin + 0.01;
+    let cells = CellLists::new(bounds, 0.5, &obs_boxes, reach_max);
+    let near_edge: Vec<bool> = (0..cells.len())
+        .map(|c| {
+            let (r, half) = cells.cell_rect(c);
+            let mid = (r.min + r.max) * 0.5;
+            let d = board
+                .outline
+                .iter()
+                .map(|o| nearest_on_poly(o, mid).0)
+                .fold(f64::INFINITY, f64::min);
+            d < board.rules.edge_clearance + max_w / 2.0 + cfg.margin + half + 0.01 || !board.inside(mid)
+        })
+        .collect();
     // vias as static obstacles: (centre, radius, net, clearance)
     let mut vias: Vec<(Point, f64, u32, f64)> = geo
         .vias
@@ -124,9 +144,14 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         .map(|(p, t)| (attach(p[0], t.net, &vias), attach(*p.last().unwrap(), t.net, &vias)))
         .collect();
 
+    // while annealing only a few spots still move: cells near the points and vias that moved
+    // in the previous round are the only ones worth visiting (None: visit everything)
+    let mut dirty: Option<Vec<bool>> = None;
+    let annealing = |it: usize| it * 4 >= cfg.iterations * 3;
     for it in 0..cfg.iterations {
         // anneal: the last quarter only resolves clearances
-        let tension = if it * 4 >= cfg.iterations * 3 { 0.0 } else { cfg.tension };
+        let tension = if annealing(it) { 0.0 } else { cfg.tension };
+        let before = annealing(it).then(|| (tracks.clone(), vias.iter().map(|v| v.0).collect::<Vec<_>>()));
         if it % 10 == 9 {
             tracks = tracks
                 .par_iter()
@@ -152,13 +177,10 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 });
             }
         }
-        let mut idx = GridIndex::new(bounds, 0.5);
-        for (i, pc) in pieces.iter().enumerate() {
-            let mut r = Rect::empty();
-            r.add(pc.a);
-            r.add(pc.b);
-            idx.insert(i as u32, &r);
-        }
+        // pieces by their midpoints; queries grow by the longest half piece
+        let mids: Vec<Point> = pieces.iter().map(|pc| (pc.a + pc.b) * 0.5).collect();
+        let half = pieces.iter().map(|pc| pc.a.dist(pc.b)).fold(0.0, f64::max) / 2.0;
+        let idx = PointGrid::new(bounds, 0.25, &mids);
         let mut via_idx = GridIndex::new(bounds, 1.0);
         for (i, v) in vias.iter().enumerate() {
             let mut r = Rect::empty();
@@ -219,11 +241,11 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         push = push + dir * ((need - d) * 0.5);
                     }
                 }
-                for pi in idx.query_point(vc, vr + max_clr + max_w / 2.0 + 0.1) {
+                idx.for_each_near(vc, vr + max_clr + max_w / 2.0 + 0.1 + half, |pi| {
                     let pc = &pieces[pi as usize];
                     let o = &geo.tracks[pc.track as usize];
                     if o.net == vn {
-                        continue;
+                        return;
                     }
                     let need = vr + o.piece_width(pc.a, pc.b) / 2.0 + vclr.max(clr(o.net)) + cfg.margin;
                     let ab = pc.b - pc.a;
@@ -239,7 +261,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         let dir = if d > 1e-9 { (vc - q).norm() } else { ab.perp().norm() };
                         push = push + dir * ((need - d) * 0.5);
                     }
-                }
+                });
                 let l = push.len();
                 let mv = if l > cfg.max_step {
                     push * (cfg.max_step / l)
@@ -258,105 +280,118 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 let (c, net, layer) = (clr(t.net), t.net, t.layer);
                 let mut out = pts.clone();
                 let n = pts.len();
-                for i in 1..n.saturating_sub(1) {
-                    let p = pts[i];
-                    let w = t.width_at(p);
-                    // tension
-                    let mid = (pts[i - 1] + pts[i + 1]) * 0.5;
-                    let mut mv = (mid - p) * tension;
-                    let mut push = pt(0.0, 0.0);
-                    let reach = std::env::var("GB_REACH")
-                        .ok()
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .unwrap_or(w / 2.0 + max_clr + max_w / 2.0 + 0.6);
-                    // static obstacles
-                    for oi in sub.shared.obs_index.query_point(p, reach) {
-                        let o = &board.obstacles[oi as usize];
-                        if !o.layers.has(layer) || (o.net == Some(net) && o.kind != ObstacleKind::Hole) {
-                            continue;
+                // points in parallel too: a few long tracks would otherwise keep one core busy
+                let inner: Vec<Point> = (1..n.saturating_sub(1))
+                    .into_par_iter()
+                    .with_min_len(32)
+                    .map(|i| {
+                        let p = pts[i];
+                        if dirty.as_ref().is_some_and(|d| !d[cells.cell_of(p)]) {
+                            return p;
                         }
-                        let need = match o.kind {
-                            ObstacleKind::Keepout { tracks, .. } => {
-                                if !tracks {
-                                    continue;
-                                }
-                                crate::board::KEEPOUT_GAP
+                        let w = t.width_at(p);
+                        // tension
+                        let mid = (pts[i - 1] + pts[i + 1]) * 0.5;
+                        let mut mv = (mid - p) * tension;
+                        let mut push = pt(0.0, 0.0);
+                        let reach = w / 2.0 + max_clr + max_w / 2.0 + cfg.margin + 0.01;
+                        // static obstacles
+                        let cell = cells.cell_of(p);
+                        for &oi in cells.get(cell) {
+                            let o = &board.obstacles[oi as usize];
+                            if !o.layers.has(layer) || (o.net == Some(net) && o.kind != ObstacleKind::Hole) {
+                                continue;
                             }
-                            ObstacleKind::Hole => board.rules.hole_clearance,
-                            _ => o.clearance.max(c),
-                        } + w / 2.0
-                            + cfg.margin;
-                        let poly = &sub.shared.obs_polys[oi as usize];
-                        let inside = poly.contains(p);
-                        let (d, q) = nearest_on_poly(poly, p);
-                        let d = if inside { -d } else { d };
-                        if d < need {
-                            let dir = if inside { (q - p).norm() } else { (p - q).norm() };
-                            push = push + dir * (need - d);
+                            let need = match o.kind {
+                                ObstacleKind::Keepout { tracks, .. } => {
+                                    if !tracks {
+                                        continue;
+                                    }
+                                    crate::board::KEEPOUT_GAP
+                                }
+                                ObstacleKind::Hole => board.rules.hole_clearance,
+                                _ => o.clearance.max(c),
+                            } + w / 2.0
+                                + cfg.margin;
+                            // cheap reject on the bounding box before the polygon distance
+                            if bbox_dist(&obs_boxes[oi as usize], p) >= need {
+                                continue;
+                            }
+                            let poly = &sub.shared.obs_polys[oi as usize];
+                            let inside = poly.contains(p);
+                            let (d, q) = nearest_on_poly(poly, p);
+                            let d = if inside { -d } else { d };
+                            if d < need {
+                                let dir = if inside { (q - p).norm() } else { (p - q).norm() };
+                                push = push + dir * (need - d);
+                            }
                         }
-                    }
-                    // board edge
-                    let inside_board = board.inside(p);
-                    for o in &board.outline {
-                        let (d, q) = nearest_on_poly(o, p);
-                        let need = edge_clr + w / 2.0 + cfg.margin;
-                        // a point outside the board always goes back in
-                        if d < need || !inside_board {
-                            let dir = if inside_board { (p - q).norm() } else { (q - p).norm() };
-                            let d = if inside_board { d } else { -d };
-                            push = push + dir * (need - d);
+                        // board edge (only near it)
+                        let inside_board = !near_edge[cell] || board.inside(p);
+                        for o in board.outline.iter().filter(|_| near_edge[cell]) {
+                            let (d, q) = nearest_on_poly(o, p);
+                            let need = edge_clr + w / 2.0 + cfg.margin;
+                            // a point outside the board always goes back in
+                            if d < need || !inside_board {
+                                let dir = if inside_board { (p - q).norm() } else { (q - p).norm() };
+                                let d = if inside_board { d } else { -d };
+                                push = push + dir * (need - d);
+                            }
                         }
-                    }
-                    // vias of other nets
-                    for vi in via_idx.query_point(p, reach) {
-                        let (vc, vr, vn, vclr) = vias[vi as usize];
-                        if vn == net {
-                            continue;
+                        // vias of other nets
+                        for vi in via_idx.query_point(p, reach) {
+                            let (vc, vr, vn, vclr) = vias[vi as usize];
+                            if vn == net {
+                                continue;
+                            }
+                            let need = vr + vclr.max(c) + w / 2.0 + cfg.margin;
+                            let d = p.dist(vc);
+                            if d < need {
+                                push = push + (p - vc).norm() * ((need - d) * 0.5);
+                            }
                         }
-                        let need = vr + vclr.max(c) + w / 2.0 + cfg.margin;
-                        let d = p.dist(vc);
-                        if d < need {
-                            push = push + (p - vc).norm() * ((need - d) * 0.5);
+                        // other tracks (they push back from their side, so take half)
+                        idx.for_each_near(p, reach + half, |pi| {
+                            let pc = &pieces[pi as usize];
+                            let o = &geo.tracks[pc.track as usize];
+                            if pc.track as usize == ti || o.net == net || o.layer != layer {
+                                return;
+                            }
+                            let need = w / 2.0
+                                + o.piece_width(pc.a, pc.b) / 2.0
+                                + board.track_clearance(net, o.net)
+                                + cfg.margin;
+                            let ab = pc.b - pc.a;
+                            let l2 = ab.len2();
+                            let tt = if l2 > 0.0 {
+                                ((p - pc.a).dot(ab) / l2).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            let q = pc.a + ab * tt;
+                            let d = p.dist(q);
+                            if d < need {
+                                let dir = if d > 1e-9 { (p - q).norm() } else { ab.perp().norm() };
+                                push = push + dir * ((need - d) * 0.5);
+                            }
+                        });
+                        // constraints win over tension: drop the tension part that points into the push
+                        if push.len2() > 0.0 {
+                            let pn = push.norm();
+                            let into = mv.dot(pn);
+                            if into < 0.0 {
+                                mv = mv - pn * into;
+                            }
+                            mv = mv + push;
                         }
-                    }
-                    // other tracks (they push back from their side, so take half)
-                    for pi in idx.query_point(p, reach) {
-                        let pc = &pieces[pi as usize];
-                        let o = &geo.tracks[pc.track as usize];
-                        if pc.track as usize == ti || o.net == net || o.layer != layer {
-                            continue;
+                        let l = mv.len();
+                        if l > cfg.max_step {
+                            mv = mv * (cfg.max_step / l);
                         }
-                        let need =
-                            w / 2.0 + o.piece_width(pc.a, pc.b) / 2.0 + board.track_clearance(net, o.net) + cfg.margin;
-                        let ab = pc.b - pc.a;
-                        let l2 = ab.len2();
-                        let tt = if l2 > 0.0 {
-                            ((p - pc.a).dot(ab) / l2).clamp(0.0, 1.0)
-                        } else {
-                            0.0
-                        };
-                        let q = pc.a + ab * tt;
-                        let d = p.dist(q);
-                        if d < need {
-                            let dir = if d > 1e-9 { (p - q).norm() } else { ab.perp().norm() };
-                            push = push + dir * ((need - d) * 0.5);
-                        }
-                    }
-                    // constraints win over tension: drop the tension part that points into the push
-                    if push.len2() > 0.0 {
-                        let pn = push.norm();
-                        let into = mv.dot(pn);
-                        if into < 0.0 {
-                            mv = mv - pn * into;
-                        }
-                        mv = mv + push;
-                    }
-                    let l = mv.len();
-                    if l > cfg.max_step {
-                        mv = mv * (cfg.max_step / l);
-                    }
-                    out[i] = p + mv;
-                }
+                        p + mv
+                    })
+                    .collect();
+                out[1..1 + inner.len()].copy_from_slice(&inner);
                 out
             })
             .collect();
@@ -372,11 +407,51 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 pts[n - 1] = vias[*b].0;
             }
         }
+        dirty = before.map(|(old_tracks, old_vias)| {
+            let mut d = vec![false; cells.len()];
+            let k = ((reach_max + cfg.max_step) / cells.cell).ceil() as isize + 1;
+            let mut mark = |p: Point| {
+                let c = cells.cell_of(p) as isize;
+                let (cx, cy) = (c % cells.nx as isize, c / cells.nx as isize);
+                for y in (cy - k).max(0)..=(cy + k).min(cells.ny as isize - 1) {
+                    for x in (cx - k).max(0)..=(cx + k).min(cells.nx as isize - 1) {
+                        d[(y * cells.nx as isize + x) as usize] = true;
+                    }
+                }
+            };
+            for (a, b) in old_tracks.iter().zip(&tracks) {
+                if a.len() != b.len() {
+                    a.iter().chain(b).for_each(|p| mark(*p));
+                } else {
+                    for (p, q) in a.iter().zip(b) {
+                        if p.dist(*q) > 1e-9 {
+                            mark(*p);
+                            mark(*q);
+                        }
+                    }
+                }
+            }
+            for (p, v) in old_vias.iter().zip(&vias) {
+                if p.dist(v.0) > 1e-9 {
+                    mark(*p);
+                    mark(v.0);
+                }
+            }
+            d
+        });
     }
     for (v, (p, ..)) in geo.vias.iter_mut().zip(&vias) {
         v.at = *p;
     }
+    let t_taut = std::time::Instant::now();
     let tracks = taut(board, sub, geo, tracks, cfg);
+    if std::env::var("GB_TIMING").is_ok() {
+        eprintln!(
+            "relax rounds {:.2} s, taut {:.2} s",
+            t_taut.duration_since(t_start).as_secs_f64(),
+            t_taut.elapsed().as_secs_f64()
+        );
+    }
     for (t, (pts, elems)) in geo.tracks.iter_mut().zip(tracks) {
         *t = Track {
             elems,
@@ -585,6 +660,13 @@ fn taut(
     result
 }
 
+/// Distance from p to a rectangle (0 inside).
+fn bbox_dist(r: &Rect, p: Point) -> f64 {
+    let dx = (r.min.x - p.x).max(0.0).max(p.x - r.max.x);
+    let dy = (r.min.y - p.y).max(0.0).max(p.y - r.max.y);
+    dx.hypot(dy)
+}
+
 /// Distance from p to the polygon boundary and the nearest boundary point.
 fn nearest_on_poly(poly: &crate::geom::Polygon, p: Point) -> (f64, Point) {
     let mut best = (f64::INFINITY, p);
@@ -597,14 +679,79 @@ fn nearest_on_poly(poly: &crate::geom::Polygon, p: Point) -> (f64, Point) {
             0.0
         };
         let q = a + ab * t;
-        let d = p.dist(q);
-        if d < best.0 {
-            best = (d, q);
+        let d2 = (p - q).len2();
+        if d2 < best.0 {
+            best = (d2, q);
         }
     }
-    best
+    (best.0.sqrt(), best.1)
 }
 
 fn env_usize(k: &str, d: usize) -> usize {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+}
+
+/// Uniform grid where each cell lists the boxes within `reach` of it, so a point query is a
+/// single slice lookup without deduplication.
+struct CellLists {
+    origin: Point,
+    cell: f64,
+    nx: usize,
+    ny: usize,
+    start: Vec<u32>,
+    ids: Vec<u32>,
+}
+
+impl CellLists {
+    fn new(bounds: Rect, cell: f64, boxes: &[Rect], reach: f64) -> CellLists {
+        let nx = ((bounds.width() / cell).ceil() as usize).max(1);
+        let ny = ((bounds.height() / cell).ceil() as usize).max(1);
+        let mut lists: Vec<Vec<u32>> = vec![Vec::new(); nx * ny];
+        let f = |v: f64, o: f64, n: usize| (((v - o) / cell).floor().max(0.0) as usize).min(n - 1);
+        for (i, b) in boxes.iter().enumerate() {
+            let g = b.grow(reach);
+            for y in f(g.min.y, bounds.min.y, ny)..=f(g.max.y, bounds.min.y, ny) {
+                for x in f(g.min.x, bounds.min.x, nx)..=f(g.max.x, bounds.min.x, nx) {
+                    lists[y * nx + x].push(i as u32);
+                }
+            }
+        }
+        let mut start = vec![0u32];
+        let mut ids = Vec::new();
+        for l in lists {
+            ids.extend(l);
+            start.push(ids.len() as u32);
+        }
+        CellLists {
+            origin: bounds.min,
+            cell,
+            nx,
+            ny,
+            start,
+            ids,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.nx * self.ny
+    }
+
+    fn cell_of(&self, p: Point) -> usize {
+        let f = |v: f64, o: f64, n: usize| (((v - o) / self.cell).floor().max(0.0) as usize).min(n - 1);
+        f(p.y, self.origin.y, self.ny) * self.nx + f(p.x, self.origin.x, self.nx)
+    }
+
+    /// The cell's rectangle and half its diagonal.
+    fn cell_rect(&self, c: usize) -> (Rect, f64) {
+        let (x, y) = ((c % self.nx) as f64, (c / self.nx) as f64);
+        let min = pt(self.origin.x + x * self.cell, self.origin.y + y * self.cell);
+        let mut r = Rect::empty();
+        r.add(min);
+        r.add(pt(min.x + self.cell, min.y + self.cell));
+        (r, self.cell * std::f64::consts::FRAC_1_SQRT_2)
+    }
+
+    fn get(&self, c: usize) -> &[u32] {
+        &self.ids[self.start[c] as usize..self.start[c + 1] as usize]
+    }
 }
