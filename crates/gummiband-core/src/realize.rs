@@ -39,9 +39,15 @@ impl Track {
         }
     }
 
-    /// Width of the piece a-b: narrow only if both ends lie in the same neck zone.
+    /// Width of the piece a-b: narrow if it touches a neck zone. The topology counts an edge
+    /// as narrow only if the whole edge lies in a zone, so every piece that crosses such an edge
+    /// touches the zone and is narrow as well.
     pub fn piece_width(&self, a: Point, b: Point) -> f64 {
-        if self.necks.iter().any(|&(c, r)| c.dist(a) < r && c.dist(b) < r) {
+        if self
+            .necks
+            .iter()
+            .any(|&(c, r)| crate::geom::point_seg_dist(c, a, b) < r)
+        {
             self.neck_w
         } else {
             self.width
