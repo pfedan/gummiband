@@ -512,7 +512,7 @@ impl Router<'_> {
                         .map(|_| p[0])
                 });
                 let Some(at) = hit else { continue };
-let common: Vec<String> = sa
+                let common: Vec<String> = sa
                     .crossings
                     .iter()
                     .enumerate()

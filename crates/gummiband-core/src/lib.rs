@@ -22,6 +22,7 @@ use topo::{Substrate, SubstrateConfig};
 pub struct RunStats {
     pub seed: u64,
     pub fanout_first: bool,
+    pub via_cost: f64,
     /// Generation of the evolutionary search (0 = initial portfolio).
     pub generation: usize,
     pub conns: usize,
@@ -100,6 +101,7 @@ fn evaluate(
     let stats = RunStats {
         seed: cfg.seed,
         fanout_first: cfg.fanout_first,
+        via_cost: cfg.via_cost,
         generation,
         conns: r.conns.len(),
         routed,
@@ -216,6 +218,8 @@ pub fn route_board(
         .map(|i| RouterConfig {
             seed: i as u64,
             fanout_first: i % 2 == 0,
+            // the via cost is part of the search: spread it around the configured value
+            via_cost: base.via_cost * [1.0, 1.0, 0.6, 1.6, 0.8, 1.3][(i / 2) % 6],
             ..base.clone()
         })
         .collect();
@@ -252,6 +256,7 @@ pub fn route_board(
         let cfg = RouterConfig {
             seed: 0,
             fanout_first: best.stats.fanout_first,
+            via_cost: best.stats.via_cost,
             ..base.clone()
         };
         let next: Vec<Candidate> = genomes
@@ -316,6 +321,7 @@ pub fn route_board(
         let cfg = RouterConfig {
             seed: 0,
             fanout_first: best.stats.fanout_first,
+            via_cost: best.stats.via_cost,
             ..base.clone()
         };
         let next: Vec<Candidate> = genomes

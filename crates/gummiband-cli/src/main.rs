@@ -43,8 +43,8 @@ enum Cmd {
         /// Via site grid pitch in mm.
         #[arg(long, default_value_t = 0.5)]
         via_pitch: f64,
-        /// Via cost in mm of track.
-        #[arg(long, default_value_t = 1.5)]
+        /// Via cost in mm of track (the search varies it around this value).
+        #[arg(long, default_value_t = 3.0)]
         via_cost: f64,
         /// Generations of the evolutionary order search after the portfolio.
         #[arg(long, default_value_t = 3)]
@@ -210,10 +210,11 @@ fn main() -> Result<()> {
             );
             for r in &res.portfolio {
                 println!(
-                    "  gen {:2} seed {:2} fanout_first {:5}: {}/{} routed, {} vias, {:.0} mm{}",
+                    "  gen {:2} seed {:2} fanout_first {:5} via cost {:.1}: {}/{} routed, {} vias, {:.0} mm{}",
                     r.generation,
                     r.seed,
                     r.fanout_first,
+                    r.via_cost,
                     r.routed,
                     r.conns,
                     r.vias,

@@ -38,7 +38,7 @@ impl Default for RouterConfig {
     fn default() -> Self {
         let env = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         RouterConfig {
-            via_cost: 1.5,
+            via_cost: 3.0,
             fanout_first: true,
             max_expansions: env("GB_MAXEXP", 400_000.0) as usize,
             seed: 0,
