@@ -50,6 +50,12 @@ pub struct NetClass {
     pub via_drill: f64,
     /// Lower value = routed first (KiCad net class priority convention).
     pub priority: i32,
+    /// Minimum track width from custom rules (necking below the class width is limited by it).
+    #[serde(default)]
+    pub min_width: Option<f64>,
+    /// Footprints (references) inside whose courtyard the minimum width does not apply.
+    #[serde(default)]
+    pub neck_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -100,6 +106,8 @@ pub struct Obstacle {
 pub struct Pin {
     /// "R8.1"
     pub name: String,
+    /// Footprint reference, "R8".
+    pub footprint: String,
     pub net: NetId,
     pub pos: Point,
     pub layers: LayerSet,
@@ -153,6 +161,10 @@ pub struct Board {
     pub nets: Vec<Net>,
     pub classes: Vec<NetClass>,
     pub rules: Rules,
+    /// Courtyard bounding boxes by footprint reference.
+    pub courtyards: std::collections::HashMap<String, Rect>,
+    /// Track to track clearances of custom rules, above the net class clearance (a < b).
+    pub pair_clearance: std::collections::HashMap<(NetId, NetId), f64>,
 }
 
 impl Board {
@@ -188,6 +200,13 @@ impl Board {
         let ca = a.map_or(0.0, |n| self.class_of(n).clearance);
         let cb = b.map_or(0.0, |n| self.class_of(n).clearance);
         ca.max(cb).max(self.rules.min_clearance)
+    }
+
+    /// Clearance between tracks of two nets, custom rules included.
+    pub fn track_clearance(&self, a: NetId, b: NetId) -> f64 {
+        let base = self.clearance(Some(a), Some(b));
+        let key = (a.min(b), a.max(b));
+        self.pair_clearance.get(&key).map_or(base, |&c| c.max(base))
     }
 
     pub fn bbox(&self) -> Rect {

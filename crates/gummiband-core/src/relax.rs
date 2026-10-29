@@ -189,7 +189,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     if o.net == vn {
                         continue;
                     }
-                    let need = vr + o.width / 2.0 + vclr.max(clr(o.net)) + cfg.margin;
+                    let need = vr + o.piece_width(pc.a, pc.b) / 2.0 + vclr.max(clr(o.net)) + cfg.margin;
                     let ab = pc.b - pc.a;
                     let l2 = ab.len2();
                     let tt = if l2 > 0.0 {
@@ -219,11 +219,12 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             .enumerate()
             .map(|(ti, pts)| {
                 let t = &geo.tracks[ti];
-                let (w, c, net, layer) = (t.width, clr(t.net), t.net, t.layer);
+                let (c, net, layer) = (clr(t.net), t.net, t.layer);
                 let mut out = pts.clone();
                 let n = pts.len();
                 for i in 1..n.saturating_sub(1) {
                     let p = pts[i];
+                    let w = t.width_at(p);
                     // tension
                     let mid = (pts[i - 1] + pts[i + 1]) * 0.5;
                     let mut mv = (mid - p) * tension;
@@ -285,7 +286,8 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         if pc.track as usize == ti || o.net == net || o.layer != layer {
                             continue;
                         }
-                        let need = w / 2.0 + o.width / 2.0 + c.max(clr(o.net)) + cfg.margin;
+                        let need =
+                            w / 2.0 + o.piece_width(pc.a, pc.b) / 2.0 + board.track_clearance(net, o.net) + cfg.margin;
                         let ab = pc.b - pc.a;
                         let l2 = ab.len2();
                         let tt = if l2 > 0.0 {
@@ -342,6 +344,8 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             width: t.width,
             layer: t.layer,
             net: t.net,
+            necks: std::mem::take(&mut t.necks),
+            neck_w: t.neck_w,
         };
     }
 }

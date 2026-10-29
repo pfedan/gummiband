@@ -25,6 +25,24 @@ pub struct Track {
     pub width: f64,
     pub layer: LayerId,
     pub net: NetId,
+    /// Zones (centre, radius) where the track narrows to `neck_w`.
+    pub necks: Vec<(Point, f64)>,
+    pub neck_w: f64,
+}
+
+impl Track {
+    pub fn width_at(&self, p: Point) -> f64 {
+        if self.necks.iter().any(|&(c, r)| c.dist(p) < r) {
+            self.neck_w
+        } else {
+            self.width
+        }
+    }
+
+    /// Width of the piece a-b (the wider end wins).
+    pub fn piece_width(&self, a: Point, b: Point) -> f64 {
+        self.width_at(a).max(self.width_at(b))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -227,8 +245,11 @@ impl Router<'_> {
                     width: s.width,
                     layer: self.sub.layers[s.li as usize],
                     net: s.net,
+                    necks: s.necks.clone(),
+                    neck_w: s.neck_w,
                 }
             })
+            .filter(|t| t.pts.len() >= 2)
             .collect();
         let mut vias: Vec<Via> = self
             .vias

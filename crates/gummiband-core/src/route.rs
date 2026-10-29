@@ -85,8 +85,13 @@ pub struct Seg {
     pub start: End,
     pub end: End,
     pub crossings: Vec<Crossing>,
+    /// Track width at each crossing (narrower inside the neck zones).
+    pub widths: Vec<f64>,
     /// Free triangles with a chord of this segment.
     pub chord_tris: Vec<u32>,
+    /// Zones around the connection's pins where the track may neck down, and the neck width.
+    pub necks: Vec<(Point, f64)>,
+    pub neck_w: f64,
 }
 
 /// Position on a triangle boundary: local edge or local vertex.
@@ -339,9 +344,67 @@ impl<'a> Router<'a> {
         }
     }
 
+    /// Neck zones and width of connection ci: around its pins a wide track may narrow down.
+    /// With a minimum width rule for the class, only inside exempt courtyards.
+    pub fn necks(&self, ci: usize) -> (Vec<(Point, f64)>, f64) {
+        let c = &self.conns[ci];
+        let cls = self.board.class_of(c.net);
+        let neck_w = self.board.rules.min_track_width.max(0.25).min(cls.track_width);
+        if neck_w >= cls.track_width - 1e-9 {
+            return (Vec::new(), cls.track_width);
+        }
+        let mut pins = vec![c.from];
+        if let Goal::Pins(p) = &c.goal {
+            pins.extend(p.iter().copied());
+        }
+        let mut zones = Vec::new();
+        for &p in &pins {
+            let pin = &self.board.pins[p];
+            if cls.min_width.is_some() {
+                if !cls.neck_refs.contains(&pin.footprint) {
+                    continue;
+                }
+                let Some(r) = self.board.courtyards.get(&pin.footprint) else {
+                    continue;
+                };
+                let inside = (pin.pos.x - r.min.x)
+                    .min(r.max.x - pin.pos.x)
+                    .min(pin.pos.y - r.min.y)
+                    .min(r.max.y - pin.pos.y);
+                if inside > 0.0 {
+                    zones.push((pin.pos, inside));
+                }
+            } else {
+                zones.push((pin.pos, pin.size.0.max(pin.size.1) / 2.0 + 0.8));
+            }
+        }
+        (zones, neck_w)
+    }
+
+    /// Width of a track of `full` width with neck zones at edge e.
+    fn width_at_edge(&self, li: usize, e: u32, full: f64, necks: &[(Point, f64)], neck_w: f64) -> f64 {
+        if necks.is_empty() {
+            return full;
+        }
+        let m = self.m(li);
+        let [u, v] = m.edges[e as usize];
+        let (a, b) = (m.verts[u as usize], m.verts[v as usize]);
+        if necks.iter().any(|&(c, r)| point_seg_dist(c, a, b) < r) {
+            neck_w
+        } else {
+            full
+        }
+    }
+
     /// Item of segment `seg` crossing edge e, with its sides relative to the two apexes.
     fn item_on(&self, li: usize, e: u32, seg: u32) -> Item {
         let mut it = self.item_of(seg);
+        {
+            let s = self.segs[seg as usize].as_ref().unwrap();
+            if let Some(k) = s.crossings.iter().position(|c| c.e == e) {
+                it.w = s.widths.get(k).copied().unwrap_or(s.width);
+            }
+        }
         for (k, &t) in self.m(li).edge_tris[e as usize].iter().enumerate() {
             if t != NONE {
                 it.sides[k] = self.chord_side(li, e, t, seg);
@@ -464,16 +527,20 @@ impl<'a> Router<'a> {
         b
     }
 
-    fn gap(a: &Item, b: &Item) -> f64 {
+    fn gap(board: &Board, a: &Item, b: &Item) -> f64 {
         if a.net == b.net {
-            0.0
-        } else {
-            a.w / 2.0 + a.c.max(b.c) + b.w / 2.0
+            return 0.0;
         }
+        let mut c = a.c.max(b.c);
+        if a.net != NetId::MAX && b.net != NetId::MAX && !board.pair_clearance.is_empty() {
+            c = c.max(board.track_clearance(a.net, b.net));
+        }
+        a.w / 2.0 + c + b.w / 2.0
     }
 
     /// Pack items along a segment of length `len` with end needs; centre line intervals.
     fn pack_with(
+        board: &Board,
         items: &[Item],
         len: f64,
         need_u: impl Fn(&Item) -> f64,
@@ -486,14 +553,14 @@ impl<'a> Router<'a> {
         for i in 0..n {
             let mut x = need_u(&items[i]).max(bounds.get(i).map_or(f64::NEG_INFINITY, |b| b.0));
             if i > 0 {
-                x = x.max(lo[i - 1] + Self::gap(&items[i - 1], &items[i]));
+                x = x.max(lo[i - 1] + Self::gap(board, &items[i - 1], &items[i]));
             }
             lo[i] = x;
         }
         for i in (0..n).rev() {
             let mut y = (len - need_v(&items[i])).min(bounds.get(i).map_or(f64::INFINITY, |b| b.1));
             if i + 1 < n {
-                y = y.min(hi[i + 1] - Self::gap(&items[i], &items[i + 1]));
+                y = y.min(hi[i + 1] - Self::gap(board, &items[i], &items[i + 1]));
             }
             hi[i] = y;
         }
@@ -556,6 +623,7 @@ impl<'a> Router<'a> {
         };
         let bounds = self.apex_bounds(li, e, items, extra_apex);
         Self::pack_with(
+            self.board,
             items,
             len,
             |it| self.end_need(li, e, 0, it).max(extra_end(u, it)) + margin,
@@ -795,6 +863,7 @@ impl<'a> Router<'a> {
                     let len = p.dist(m.verts[vi as usize]);
                     let margin = self.cfg.margin;
                     let ok = Self::pack_with(
+                        self.board,
                         &items,
                         len,
                         |it| self.vertex_need(li, vi, it) + margin,
@@ -978,11 +1047,19 @@ impl<'a> Router<'a> {
                 match exit {
                     Some(ix) => {
                         seg.crossings[ix].from = cur;
+                        let w = seg.widths.get(ix).copied().unwrap_or(seg.width);
                         for (j, c) in new_cross.into_iter().enumerate() {
                             seg.crossings.insert(ix + j, c);
+                            seg.widths.insert(ix + j, w);
                         }
                     }
-                    None => seg.crossings.extend(new_cross),
+                    None => {
+                        let w = seg.widths.last().copied().unwrap_or(seg.width);
+                        for c in new_cross {
+                            seg.crossings.push(c);
+                            seg.widths.push(w);
+                        }
+                    }
                 }
                 seg.chord_tris.retain(|&q| q != t);
                 for (xt, c) in new_chords {
@@ -1057,6 +1134,7 @@ impl<'a> Router<'a> {
             c: cls.clearance.max(self.board.rules.min_clearance),
             sides: [2, 2],
         };
+        let (necks, neck_w) = self.necks(ci);
         let src = &self.board.pins[conn.from];
         let target_pts: Vec<Point> = match &conn.goal {
             Goal::Pins(p) => p.iter().map(|&p| self.board.pins[p].pos).collect(),
@@ -1192,6 +1270,7 @@ impl<'a> Router<'a> {
                 }
             }
             let mut item = item;
+            item.w = self.width_at_edge(lu, e, item.w, &necks, neck_w);
             if free && let Some((cp, cs)) = chord_from {
                 // the chord in t fixes the side of t's apex on the exit edge ...
                 let side_idx = m.edge_tris[e as usize].iter().position(|&x| x == t).unwrap();
@@ -1201,6 +1280,7 @@ impl<'a> Router<'a> {
                     let e_in = m.tri_edges[t as usize][ke as usize];
                     let mut it_in = item;
                     it_in.sides = [2, 2];
+                    it_in.w = self.width_at_edge(lu, e_in, cls.track_width, &necks, neck_w);
                     let si = m.edge_tris[e_in as usize].iter().position(|&x| x == t).unwrap();
                     it_in.sides[si] = self.side_of_pos(lu, t, e_in, CPos::Edge(k));
                     if self.slot_interval(lu, e_in, js, it_in).is_none() {
@@ -1540,6 +1620,7 @@ impl<'a> Router<'a> {
         let (width, clearance) = (cls.track_width, cls.clearance.max(self.board.rules.min_clearance));
         let mut seg_ids = Vec::new();
         let mut via_ids = Vec::new();
+        let (necks, neck_w) = self.necks(ci);
 
         // Split the chain into runs of triangle nodes on one layer.
         let mut i = 0;
@@ -1581,7 +1662,10 @@ impl<'a> Router<'a> {
                 start,
                 end,
                 crossings: Vec::new(),
+                widths: Vec::new(),
                 chord_tris: Vec::new(),
+                necks: necks.clone(),
+                neck_w,
             };
             seg_ids.push(self.insert_seg(seg, &run));
             start = end;
@@ -1654,6 +1738,8 @@ impl<'a> Router<'a> {
             crossings.push((e, from, slot));
         }
         for (e, from, slot) in crossings {
+            let w = self.width_at_edge(li, e, s.width, &s.necks, s.neck_w);
+            s.widths.push(w);
             let list = &mut self.cross[li][e as usize];
             let j = (slot as usize).min(list.len());
             list.insert(j, id);

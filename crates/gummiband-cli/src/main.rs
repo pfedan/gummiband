@@ -139,6 +139,7 @@ fn main() -> Result<()> {
                 );
             }
             println!("rules: {:?}", b.rules);
+            println!("custom track clearances: {} net pairs", b.pair_clearance.len());
         }
         Cmd::Route {
             board,
@@ -263,17 +264,17 @@ fn main() -> Result<()> {
                 for e in &t.elems {
                     items.push(match *e {
                         Elem::Line(a, b) => write::Item::Track {
+                            width: t.piece_width(a, b),
                             a,
                             b,
-                            width: t.width,
                             layer: t.layer,
                             net: t.net,
                         },
                         Elem::Arc(a, mid, b) => write::Item::Arc {
+                            width: t.piece_width(a, b),
                             a,
                             mid,
                             b,
-                            width: t.width,
                             layer: t.layer,
                             net: t.net,
                         },

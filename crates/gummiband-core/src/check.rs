@@ -38,7 +38,7 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
             pieces.push(Piece::Seg {
                 a: w[0],
                 b: w[1],
-                r: t.width / 2.0,
+                r: t.piece_width(w[0], w[1]) / 2.0,
                 layer: t.layer,
                 net: t.net,
             });
@@ -197,7 +197,11 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
                 if qnet == net || !both_layers {
                     continue;
                 }
-                let need = clr(net).max(clr(qnet));
+                let need = if matches!((p, q), (Piece::Seg { .. }, Piece::Seg { .. })) {
+                    board.track_clearance(net, qnet)
+                } else {
+                    clr(net).max(clr(qnet))
+                };
                 if d < need - 1e-4 {
                     out.push(Violation {
                         what: format!(

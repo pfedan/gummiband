@@ -57,7 +57,13 @@ pub fn read_board(path: &Path, opts: &ReadOptions) -> Result<KicadBoard> {
     let pro_json = std::fs::read_to_string(&pro)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-    parse_board(text, pro_json.as_ref(), opts)
+    let mut kb = parse_board(text, pro_json.as_ref(), opts)?;
+    if let Ok(dru) = std::fs::read_to_string(path.with_extension("kicad_dru")) {
+        let rules = crate::dru::parse_rules(&dru);
+        kb.board.pair_clearance = crate::dru::pair_clearances(&kb.board, &rules);
+        crate::dru::apply_width_rules(&mut kb.board, &dru);
+    }
+    Ok(kb)
 }
 
 pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOptions) -> Result<KicadBoard> {
@@ -228,6 +234,8 @@ impl Reader {
                 via_diameter: f("via_diameter", 0.6),
                 via_drill: f("via_drill", 0.3),
                 priority: prio.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                min_width: None,
+                neck_refs: Vec::new(),
             });
         }
         if !self.b.classes.iter().any(|c| c.name == "Default") {
@@ -240,6 +248,8 @@ impl Reader {
                     via_diameter: 0.6,
                     via_drill: 0.3,
                     priority: i32::MAX,
+                    min_width: None,
+                    neck_refs: Vec::new(),
                 },
             );
         }
@@ -382,6 +392,25 @@ impl Reader {
             .to_string();
         for pad in fp.children("pad") {
             self.read_pad(pad, pos, rot, &reference);
+        }
+        let mut court = Rect::empty();
+        for g in fp.args() {
+            if let Some(h) = g.head()
+                && matches!(h, "fp_line" | "fp_arc" | "fp_rect" | "fp_circle" | "fp_poly")
+                && matches!(g.child_str("layer"), Some("F.CrtYd") | Some("B.CrtYd"))
+            {
+                let mut ps: Vec<Point> = ["start", "end", "mid", "center"]
+                    .iter()
+                    .filter_map(|k| child_xy(g, k))
+                    .collect();
+                ps.extend(pts(g));
+                for q in ps {
+                    court.add(pos + kicad_rot(q, rot));
+                }
+            }
+        }
+        if court.width() > 0.0 {
+            self.b.courtyards.insert(reference.clone(), court);
         }
         for g in fp.args() {
             if let Some(h) = g.head()
@@ -550,6 +579,7 @@ impl Reader {
             }
             self.b.pins.push(Pin {
                 name: format!("{reference}.{number}"),
+                footprint: reference.to_string(),
                 net,
                 pos: center,
                 layers,

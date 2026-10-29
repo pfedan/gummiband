@@ -1,0 +1,30 @@
+{
+    "$schema": "https://go.kicad.org/api/schemas/v1",
+    "identifier": "gummiband.kicad-plugin",
+    "name": "Gummiband",
+    "description": "Topological rubber band autorouter: routes the open board with the gummiband CLI and imports the tracks and vias as one undo step.",
+    "runtime": {
+        "type": "python",
+        "min_version": "3.9"
+    },
+    "actions": [
+        {
+            "identifier": "route",
+            "name": "Route with Gummiband",
+            "description": "Route the open board with Gummiband and replace its tracks and vias",
+            "show-button": true,
+            "scopes": [
+                "pcb"
+            ],
+            "entrypoint": "gummiband_action.py",
+            "icons-light": [
+                "icons/gummiband-light-24.png",
+                "icons/gummiband-light-48.png"
+            ],
+            "icons-dark": [
+                "icons/gummiband-dark-24.png",
+                "icons/gummiband-dark-48.png"
+            ]
+        }
+    ]
+}

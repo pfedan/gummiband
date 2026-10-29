@@ -76,7 +76,7 @@ pub fn orient(a: Point, b: Point, c: Point) -> f64 {
     (b - a).cross(c - a)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Rect {
     pub min: Point,
     pub max: Point,

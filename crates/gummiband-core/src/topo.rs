@@ -671,6 +671,8 @@ pub(crate) mod tests {
             via_diameter: 0.6,
             via_drill: 0.3,
             priority: 0,
+            min_width: None,
+            neck_refs: Vec::new(),
         }];
         b.nets = vec![Net {
             name: "A".into(),
@@ -692,6 +694,7 @@ pub(crate) mod tests {
             });
             b.pins.push(Pin {
                 name: format!("P{i}"),
+                footprint: format!("P{i}"),
                 net: 0,
                 pos: pt(x, 5.),
                 layers: LayerSet::single(0),
