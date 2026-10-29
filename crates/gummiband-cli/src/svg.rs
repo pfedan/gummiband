@@ -108,6 +108,17 @@ pub fn render(board: &Board, sub: Option<&Substrate>, geo: &Geometry, viol: &[Vi
             v.drill / 2.0
         );
     }
+    if let Ok(t) = std::fs::read_to_string("/tmp/gb-why.txt")
+        && std::env::var("GB_WHY").is_ok()
+    {
+        for l in t.lines() {
+            let v: Vec<f64> = l.split(' ').filter_map(|x| x.parse().ok()).collect();
+            if v.len() == 3 {
+                let c = if v[2] == 0.0 { "#0ff" } else { "#f0f" };
+                let _ = writeln!(s, r#"<circle cx="{}" cy="{}" r="0.04" fill="{c}"/>"#, v[0], v[1]);
+            }
+        }
+    }
     for v in viol {
         let _ = writeln!(
             s,

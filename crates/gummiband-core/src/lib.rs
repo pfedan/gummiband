@@ -55,6 +55,26 @@ pub fn route_board(
             let mut r = Router::new(board, &sub, cfg.clone());
             r.plan();
             let routed = r.run();
+            if let Ok(pin) = std::env::var("GB_WHY") {
+                // trace the search of the first unrouted connection from this pin
+                if let Some(ci) = r
+                    .unrouted()
+                    .into_iter()
+                    .find(|&ci| board.pins[r.conns[ci].from].name == pin)
+                {
+                    *r.trace.lock().unwrap() = Some(Vec::new());
+                    r.route_one(ci);
+                    let t = r.trace.lock().unwrap().take().unwrap_or_default();
+                    eprintln!("why {pin}: {} expansions", t.len());
+                    let _ = std::fs::write(
+                        "/tmp/gb-why.txt",
+                        t.iter()
+                            .map(|(p, l)| format!("{} {} {}", p.x, p.y, l))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
+            }
             let geo = r.geometry();
             if std::env::var("GB_VALIDATE").is_ok() {
                 let v = r.validate();

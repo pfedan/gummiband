@@ -37,7 +37,7 @@ impl Default for SubstrateConfig {
     fn default() -> Self {
         SubstrateConfig {
             via_pitch: 0.4,
-            steiner_pitch: 1.5,
+            steiner_pitch: 2.5,
         }
     }
 }

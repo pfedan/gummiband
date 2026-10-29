@@ -34,12 +34,13 @@ pub struct RouterConfig {
 
 impl Default for RouterConfig {
     fn default() -> Self {
+        let env = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         RouterConfig {
             via_cost: 1.5,
             fanout_first: true,
-            max_expansions: 400_000,
+            max_expansions: env("GB_MAXEXP", 400_000.0) as usize,
             seed: 0,
-            ripup_passes: 3,
+            ripup_passes: env("GB_RIPUP", 3.0) as usize,
             sites_per_tri: 3,
             margin: 0.01,
         }
@@ -134,6 +135,10 @@ pub struct Router<'a> {
     /// Segment ids per connection (empty = unrouted).
     pub conn_segs: Vec<Vec<u32>>,
     pub conn_vias: Vec<Vec<u32>>,
+    /// Pins whose pads overlap (same net) share a group: they are connected already.
+    pub pin_group: Vec<u32>,
+    /// Debugging: positions expanded by the last search of a traced connection.
+    pub trace: std::sync::Arc<std::sync::Mutex<Option<Vec<(Point, u8)>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -238,7 +243,47 @@ impl<'a> Router<'a> {
             conns: Vec::new(),
             conn_segs: Vec::new(),
             conn_vias: Vec::new(),
+            trace: Default::default(),
+            pin_group: Self::pin_groups(board, sub),
         }
+    }
+
+    fn pin_groups(board: &Board, sub: &Substrate) -> Vec<u32> {
+        let n = board.pins.len();
+        let mut parent: Vec<u32> = (0..n as u32).collect();
+        fn find(p: &mut [u32], x: u32) -> u32 {
+            let mut r = x;
+            while p[r as usize] != r {
+                r = p[r as usize];
+            }
+            let mut y = x;
+            while p[y as usize] != r {
+                let next = p[y as usize];
+                p[y as usize] = r;
+                y = next;
+            }
+            r
+        }
+        for (pi, pin) in board.pins.iter().enumerate() {
+            for &o in &pin.obstacles {
+                let poly = &sub.shared.obs_polys[o];
+                for q in sub.shared.obs_index.query(&poly.bbox()) {
+                    let other = &board.obstacles[q as usize];
+                    let Some(pj) = other.pin else { continue };
+                    if pj == pi || board.pins[pj].net != pin.net || !other.layers.intersects(board.obstacles[o].layers)
+                    {
+                        continue;
+                    }
+                    if poly.dist_to_poly(&sub.shared.obs_polys[q as usize]) <= 0.0 {
+                        let (a, b) = (find(&mut parent, pi as u32), find(&mut parent, pj as u32));
+                        if a != b {
+                            parent[a as usize] = b;
+                        }
+                    }
+                }
+            }
+        }
+        (0..n as u32).map(|x| find(&mut parent, x)).collect()
     }
 
     fn m(&self, li: usize) -> &Mesh {
@@ -294,6 +339,10 @@ impl<'a> Router<'a> {
     }
 
     fn via_need(via: &ViaInfo, it: &Item) -> f64 {
+        if via.net == NetId::MAX {
+            // phantom point: tracks on both sides together keep one clearance
+            return it.c / 2.0 + it.w / 2.0;
+        }
         if via.net == it.net {
             0.0
         } else {
@@ -1149,11 +1198,11 @@ impl<'a> Router<'a> {
         };
         let is_target = |pin: usize| -> bool {
             match &conn.goal {
-                Goal::Pins(p) => p.contains(&pin),
+                Goal::Pins(p) => p.iter().any(|&q| self.pin_group[q] == self.pin_group[pin]),
                 Goal::Plane => {
                     let pn = &self.board.pins[pin];
                     // a nearby through hole pin of the net reaches the plane as well
-                    pin != conn.from
+                    self.pin_group[pin] != self.pin_group[conn.from]
                         && pn.net == net
                         && pn.pos.dist(src.pos) < 3.0
                         && self
@@ -1192,7 +1241,12 @@ impl<'a> Router<'a> {
             if !src.layers.has(m.layer) {
                 continue;
             }
-            for &o in &src.obstacles {
+            let group = self.pin_group[conn.from];
+            let starts: Vec<usize> = (0..self.board.pins.len())
+                .filter(|&q| self.pin_group[q] == group && self.board.pins[q].layers.has(m.layer))
+                .flat_map(|q| self.board.pins[q].obstacles.iter().copied())
+                .collect();
+            for &o in &starts {
                 for &t in m.obs_tris.get(&(o as u32)).map(|v| v.as_slice()).unwrap_or(&[]) {
                     push(
                         &mut best,
@@ -1336,6 +1390,13 @@ impl<'a> Router<'a> {
             expansions += 1;
             if expansions > self.cfg.max_expansions {
                 return None;
+            }
+            if let Some(t) = self.trace.lock().unwrap().as_mut() {
+                let li = match node.kind {
+                    NK::Tri { li, .. } | NK::Vert { li, .. } | NK::Site { li, .. } => li,
+                    _ => 0,
+                };
+                t.push((node.pos, li));
             }
             match node.kind {
                 NK::GoalPin { .. } | NK::GoalVia { .. } | NK::GoalSite { .. } => {
@@ -1783,11 +1844,25 @@ impl<'a> Router<'a> {
             let n = &b.nets[net as usize];
             let has_plane = b.planes.iter().any(|p| p.net == net);
             let prio = n.priority as i64;
+            // one representative per group of overlapping pads
+            let mut reps: Vec<usize> = Vec::new();
+            for &p in &n.pins {
+                if !reps.iter().any(|&r| self.pin_group[r] == self.pin_group[p]) {
+                    reps.push(p);
+                }
+            }
+            let reaches_plane = |p: usize| {
+                n.pins.iter().any(|&q| {
+                    self.pin_group[q] == self.pin_group[p]
+                        && b.planes
+                            .iter()
+                            .any(|pl| pl.net == net && b.pins[q].layers.has(pl.layer))
+                })
+            };
             if has_plane {
-                for &p in &n.pins {
-                    let pin = &b.pins[p];
-                    if b.planes.iter().any(|pl| pl.net == net && pin.layers.has(pl.layer)) {
-                        continue; // through hole pin reaches the plane itself
+                for &p in &reps {
+                    if reaches_plane(p) {
+                        continue; // a through hole pad of the group reaches the plane itself
                     }
                     let key = if self.cfg.fanout_first {
                         i64::MIN / 2 + prio
@@ -1807,7 +1882,10 @@ impl<'a> Router<'a> {
                 continue;
             }
             // Prim order: each new pin connects to the pins already in the tree
-            let pins = &n.pins;
+            let pins = &reps;
+            if pins.len() < 2 {
+                continue;
+            }
             let mut in_tree = vec![false; pins.len()];
             in_tree[0] = true;
             let mut dist: Vec<f64> = pins.iter().map(|&p| b.pins[p].pos.dist(b.pins[pins[0]].pos)).collect();
