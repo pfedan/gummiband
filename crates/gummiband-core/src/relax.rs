@@ -337,11 +337,10 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         v.at = *p;
     }
     let tracks = taut(board, sub, geo, tracks, cfg);
-    for (t, pts) in geo.tracks.iter_mut().zip(tracks) {
-        let s = simplify(&pts, 0.0005);
+    for (t, (pts, elems)) in geo.tracks.iter_mut().zip(tracks) {
         *t = Track {
-            elems: s.windows(2).map(|w| Elem::Line(w[0], w[1])).collect(),
-            pts: s,
+            elems,
+            pts,
             width: t.width,
             layer: t.layer,
             net: t.net,
@@ -361,9 +360,10 @@ fn taut(
     geo: &Geometry,
     mut tracks: Vec<Vec<Point>>,
     cfg: &RelaxConfig,
-) -> Vec<Vec<Point>> {
+) -> Vec<(Vec<Point>, Vec<Elem>)> {
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
     let bounds = board.bbox().grow(5.0);
+    let mut result: Vec<(Vec<Point>, Vec<Elem>)> = Vec::with_capacity(tracks.len());
     let mut idx = GridIndex::new(bounds, 0.5);
     // pieces: (a, b, track); a removed piece gets track = u32::MAX
     let mut pieces: Vec<(Point, Point, u32)> = Vec::new();
@@ -450,6 +450,8 @@ fn taut(
         let pts = &tracks[ti];
         let n = pts.len();
         if n <= 2 {
+            let p = simplify(pts, 0.0005);
+            result.push((p.clone(), p.windows(2).map(|w| Elem::Line(w[0], w[1])).collect()));
             continue;
         }
         let mut out = vec![pts[0]];
@@ -466,16 +468,60 @@ fn taut(
             out.push(pts[j]);
             i = j;
         }
-        if out.len() < n {
-            for &id in &owned[ti] {
-                pieces[id as usize].2 = u32::MAX;
+        let out = simplify(&out, 0.0005);
+        // round the corners with the largest arcs that keep all clearances
+        let mut elems: Vec<Elem> = Vec::new();
+        let mut flat: Vec<Point> = vec![out[0]];
+        let mut cur = out[0];
+        for i in 1..out.len() {
+            let b = out[i];
+            if i + 1 < out.len() {
+                let (a, c) = (out[i - 1], out[i + 1]);
+                let (u, v) = ((a - b).norm(), (c - b).norm());
+                let cos = u.dot(v).clamp(-1.0, 1.0);
+                let theta = cos.acos(); // interior angle
+                if theta < std::f64::consts::PI - 0.03 && theta > 0.05 {
+                    let half = theta / 2.0;
+                    let t_max = (a.dist(b) * 0.45).min(c.dist(b) * 0.45).min(b.dist(cur));
+                    let mut r = t_max * half.tan();
+                    let mut done = false;
+                    while r >= 0.1 && !done {
+                        let t = r / half.tan();
+                        let (p1, p2) = (b + u * t, b + v * t);
+                        let bis = (u + v).norm();
+                        let center = b + bis * (r / half.sin());
+                        let mid = center - bis * r;
+                        let arc = crate::geom::arc_polyline(p1, mid, p2, 0.002);
+                        if arc.windows(2).all(|w| clear(w[0], w[1], &pieces, &idx)) {
+                            if cur.dist(p1) > 1e-6 {
+                                elems.push(Elem::Line(cur, p1));
+                            }
+                            elems.push(Elem::Arc(p1, mid, p2));
+                            flat.extend_from_slice(&arc);
+                            cur = p2;
+                            done = true;
+                        }
+                        r *= 0.5;
+                    }
+                    if done {
+                        continue;
+                    }
+                }
             }
-            owned[ti].clear();
-            add(&mut idx, &mut pieces, &mut owned, ti, &out);
-            tracks[ti] = out;
+            elems.push(Elem::Line(cur, b));
+            flat.push(b);
+            cur = b;
         }
+        flat.dedup_by(|a, b| a.dist(*b) < 1e-9);
+        for &id in &owned[ti] {
+            pieces[id as usize].2 = u32::MAX;
+        }
+        owned[ti].clear();
+        add(&mut idx, &mut pieces, &mut owned, ti, &flat);
+        tracks[ti] = flat.clone();
+        result.push((flat, elems));
     }
-    tracks
+    result
 }
 
 /// Distance from p to the polygon boundary and the nearest boundary point.
