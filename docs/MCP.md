@@ -1,0 +1,219 @@
+# MCP server
+
+`gummiband-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that
+lets AI agents drive the router: load a board, look at nets and classes, set per net
+priorities or skip nets, route, run KiCad's DRC on the result and look at PNG renders of board
+regions. It is milestone M3b (see [MILESTONES.md](MILESTONES.md)).
+
+- Transport: stdio, one JSON-RPC 2.0 message per line; logs go to stderr.
+- Protocol: built on the official Rust SDK [`rmcp`](https://crates.io/crates/rmcp) 3.8. It
+  serves both eras of the protocol: the `initialize` handshake (legacy revisions 2024-11-05
+  up to 2025-11-25, e.g. 2025-06-18) and the stateless current revision 2026-07-28
+  (`server/discover`, protocol version in every request's `_meta`).
+- Every tool returns a short text summary, the result as JSON text (for clients that only show
+  `content`) and the same JSON as `structuredContent`, which follows the tool's
+  `outputSchema`. `render` also returns the PNG as image content. Failures (unknown board id,
+  missing file, unknown net, kicad-cli errors) come back as tool results with `isError: true`
+  and a message the agent can act on.
+- Session state: boards are kept in memory by id (`b1`, `b2`, ...) for the life of the server
+  process. Loading the same file again re-reads it and keeps its id and net options.
+
+## Build
+
+```bash
+cargo build --release -p gummiband-mcp
+# binary: target/release/gummiband-mcp
+```
+
+External tools: `kicad-cli` (KiCad 9/10) for `drc` and `render`, and `rsvg-convert` (librsvg,
+`brew install librsvg`) for `render`. They are searched in `GUMMIBAND_KICAD_CLI` /
+`GUMMIBAND_RSVG_CONVERT`, then `PATH`, then the usual places
+(`/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli`, `/opt/homebrew/bin`,
+`/usr/local/bin`, `/usr/bin`). MCP clients often start servers with a short `PATH`, so set the
+variables if the tools live elsewhere.
+
+Threads: routing runs on the rayon pool. `RAYON_NUM_THREADS` sets its size; without it the
+server uses 4 threads (the machine is usually shared). Only one `route` runs at a time; other
+tools keep answering while a route runs.
+
+## Register the server
+
+### Claude Code
+
+```bash
+claude mcp add gummiband -e RAYON_NUM_THREADS=8 -- /path/to/gummiband/target/release/gummiband-mcp
+# for all projects: claude mcp add --scope user gummiband -- /path/to/.../gummiband-mcp
+claude mcp list
+```
+
+Routing a real board takes from seconds to minutes. If Claude Code gives up on long tool
+calls, raise its tool timeout (environment variable `MCP_TOOL_TIMEOUT`, in milliseconds,
+when starting `claude`).
+
+### Claude Desktop
+
+`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+
+```json
+{
+  "mcpServers": {
+    "gummiband": {
+      "command": "/path/to/gummiband/target/release/gummiband-mcp",
+      "args": [],
+      "env": {
+        "RAYON_NUM_THREADS": "8",
+        "GUMMIBAND_KICAD_CLI": "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+        "GUMMIBAND_RSVG_CONVERT": "/opt/homebrew/bin/rsvg-convert"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop after editing the file.
+
+## Tools
+
+Coordinates are millimetres in KiCad board coordinates (y grows downwards), the same numbers
+KiCad shows in the status bar. Optional arguments may be left out.
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `load_board` | `path`, `keep_locked?` | board id, layers (plane flag), outline box and size, pins, nets, routable nets, connections, planes, net classes (priority, width, clearance, via), custom rule count, custom clearance net pairs, kept net options |
+| `list_nets` | `board`, `filter?`, `include_single?` | nets with class, pin count, plane flag, effective priority, skip flag |
+| `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
+| `route` | `board`, `runs?`, `generations?`, `geometry_generations?`, `keep_locked?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below) |
+| `drc` | `path`, `max_items?` | KiCad DRC summary |
+| `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?` | PNG (image content) and its path, region, pixels per mm |
+
+### load_board
+
+Reads the `.kicad_pcb` with its `.kicad_pro` (net classes) and `.kicad_dru` (custom rules) of
+the same base name. `keep_locked` (default false) keeps locked tracks and vias as fixed copper
+whose ends join their nets; by default everything is routed from scratch, like
+`gummiband route`. `connections` is counted like `gummiband info` (pins - 1 per net with 2 or
+more pins); `route` counts plane nets per fan-out, so its total is lower on boards with planes.
+
+```json
+{"name": "load_board", "arguments": {"path": "bench/work/lichtschnitzel/lichtschnitzel.kicad_pcb"}}
+```
+
+### list_nets
+
+`filter` is a case insensitive substring of the net or class name. Nets with fewer than two
+pins are left out unless `include_single` is true.
+
+```json
+{"name": "list_nets", "arguments": {"board": "b1", "filter": "gnd"}}
+```
+
+### set_net_options
+
+Stored in the session by net name and applied on every following `route` of the board:
+`priority` overrides the net class priority (lower routes first), `skip: true` leaves the net
+out of routing (its pads stay obstacles; its old tracks are not kept, since the output replaces
+all unlocked copper). `reset: true` drops the net's options before applying the others.
+
+```json
+{"name": "set_net_options", "arguments": {"board": "b1", "net": "/MCU/SDA", "priority": -10}}
+{"name": "set_net_options", "arguments": {"board": "b1", "net": "VBUS_IN", "skip": true}}
+```
+
+### route
+
+Runs `gummiband_core::route_board` on the loaded board with the net options applied and writes
+the routed board (existing unlocked tracks and vias replaced; with `keep_locked` the locked ones
+stay). Defaults match the CLI: `runs` = number of routing threads, `generations` 3,
+`geometry_generations` 0, `via_pitch` 0.5 mm, `via_cost` 1.5. `output` defaults to
+`<input>.routed.kicad_pcb` next to the input; the `.kicad_pro` and `.kicad_dru` are copied next
+to the output if missing, so `drc` and `load_board` work on it. `nets` routes only the listed
+nets for this call.
+
+Result fields: `board`, `input`, `output`, `seconds`, `threads`, `connections`, `routed`,
+`unrouted` (list of `net: pad -> pad`), `vias`, `length_mm`, `items_written`, `skipped_nets`,
+`violations_total`, `violations_by_kind`, `violations` (first `max_violations`, default 50:
+`what`, `x`, `y`, `actual_mm`, `required_mm`, `nets` [routed net, other net or null]),
+`portfolio` (per run: `generation`, `seed`, `fanout_first`, `routed`, `connections`, `vias`,
+`length_mm`, `violations`), `copied`.
+
+```json
+{"name": "route", "arguments": {"board": "b1", "runs": 2, "generations": 0}}
+```
+
+### drc
+
+Runs `kicad-cli pcb drc --refill-zones --format json --units mm` and summarizes it. The
+`.kicad_pro` with the board's base name must sit next to the board; if it is missing it is
+copied (with the `.kicad_dru`) from a project whose name is a prefix of the board's
+(`x.routed.kicad_pcb` takes `x.kicad_pro`) or from the only project in the folder. The full
+report is written next to the board as `<name>.drc.json`.
+
+Result: `counts` per violation type without silkscreen (`silk*`) and library (`lib_*`) checks,
+`violations` (their sum), `ignored`, `unconnected` and the first `max_items` (default 20)
+`unconnected_items`, `deficit_histogram` of the clearance type violations (< 2 um, < 10 um,
+< 30 um, < 100 um, more) and the `worst_clearance` violations with type, required, actual,
+deficit and the items with positions.
+
+```json
+{"name": "drc", "arguments": {"path": "/abs/path/lichtschnitzel.routed.kicad_pcb", "max_items": 5}}
+```
+
+### render
+
+Plots the layers with `kicad-cli pcb export svg` (page coordinates equal board coordinates),
+crops the SVG to `region` and rasterizes it with `rsvg-convert`. Default layers: the routing
+copper layers (no inner planes, which are solid pours) and `Edge.Cuts`; default region: the
+board outline plus 1 mm; `width_px` defaults to 1000 (at most 4000), the height follows the
+region. The PNG goes to the server's temp folder unless `output` is given.
+
+```json
+{"name": "render", "arguments": {"path": "/abs/path/lichtschnitzel.routed.kicad_pcb",
+  "region": {"x0": 140, "y0": 120, "x1": 160, "y1": 140}, "width_px": 800}}
+```
+
+## Try it without a client
+
+Each line on stdin is one message; wait for an answer before sending the next request
+(stdin closing ends the server).
+
+```bash
+RAYON_NUM_THREADS=4 target/release/gummiband-mcp <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"shell","version":"0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"load_board","arguments":{"path":"bench/work/lichtschnitzel/lichtschnitzel.kicad_pcb"}}}
+EOF
+```
+
+Shortened session on the Lichtschnitzel benchmark (4 threads):
+
+```text
+>> initialize {"protocolVersion":"2025-06-18",...}
+<< {"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"gummiband-mcp",...},"instructions":"..."}
+>> tools/call load_board {"path":".../lichtschnitzel.kicad_pcb"}
+<< Loaded lichtschnitzel.kicad_pcb as board b1: 100.0 x 60.0 mm, 4 copper layers (F.Cu, In1.Cu plane,
+   In2.Cu plane, B.Cu), 525 pins, 111 nets (92 to route, 414 connections), 11 net classes, 10 custom rules.
+>> tools/call list_nets {"board":"b1","filter":"gnd"}
+<< {"count":1,"nets":[{"class":"GND","name":"GND","pins":150,"plane":true,"priority":4,"skip":false}]}
+>> tools/call route {"board":"b1","runs":2,"generations":0,"output":".../lichtschnitzel.routed.kicad_pcb"}
+<< Routed 346/348 connections (2 unrouted), 338 vias, 2458 mm of track, 29 clearance violations
+   (Gummiband check), 44.7 s on 4 threads. Wrote 3306 items to .../lichtschnitzel.routed.kicad_pcb.
+>> tools/call drc {"path":".../lichtschnitzel.routed.kicad_pcb"}
+<< KiCad DRC: 2 unconnected, 23 violations {"clearance": 18, "copper_sliver": 1, "items_not_allowed": 1,
+   "shorting_items": 1, "tracks_crossing": 2} (428 silk/lib findings ignored).
+   Clearance deficits <2um/<10um/<30um/<100um/more: [4, 2, 10, 2, 0].
+>> tools/call render {"path":"...","region":{"x0":140,"y0":120,"x1":160,"y1":140},"width_px":800}
+<< Rendered ... (F.Cu,B.Cu,Edge.Cuts) region x 140.00..160.00, y 120.00..140.00 mm at 800x800 px (40.0 px/mm)
+   + image/png content
+```
+
+`cargo test -p gummiband-mcp` runs the same handshake, `tools/list`, `load_board`,
+`list_nets`, `set_net_options` and a small `route` on a two resistor board written by the test.
+
+## Open points
+
+- Incremental routing on top of existing copper (route selected nets and keep the rest) needs
+  `KeepCopper::All` plus per net stripping in the writer; today a route replaces all unlocked
+  copper, so skipped nets end up without tracks.
+- Progress notifications during long routes, and cancellation (the core has no cancel hook).
+- `route` returns Gummiband's own clearance check; KiCad's verdict needs a `drc` call.

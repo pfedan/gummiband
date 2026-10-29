@@ -154,10 +154,18 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
                 if d < need - 1e-4 {
                     out.push(Violation {
                         what: format!(
-                            "{:?} {}~{:?}",
-                            o.kind,
+                            "{} {}~{}",
+                            match o.kind {
+                                ObstacleKind::Pad => "pad",
+                                ObstacleKind::Track => "locked-track",
+                                ObstacleKind::Via => "locked-via",
+                                ObstacleKind::Keepout { .. } => "keepout",
+                                ObstacleKind::Zone => "zone",
+                                ObstacleKind::Graphic => "graphic",
+                                ObstacleKind::Hole => "hole",
+                            },
                             board.nets[net as usize].name,
-                            o.net.map(|n| board.nets[n as usize].name.clone())
+                            o.net.map_or("-".to_string(), |n| board.nets[n as usize].name.clone())
                         ),
                         nets: (net, o.net),
                         at,
