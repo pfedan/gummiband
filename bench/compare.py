@@ -2,6 +2,7 @@
 """Compare two gummiband binaries across the whole benchmark breadth, judged by the KiCad DRC.
 
 Usage: bench/compare.py OLD_BIN NEW_BIN [--boards a,b,...] [--args "route args"] [--out DIR]
+       (the same binary twice: one run per board, a status table)
 
 Boards: the synthetic suite (bench/boards), the prepared external boards (bench/work/ext:
 arty, corne, ulx3s) and the Lichtschnitzel benchmark (bench/work/lichtschnitzel). Every board is
@@ -80,6 +81,10 @@ def main():
         _, pre = drc(base)
         row = {"board": name}
         for tag, gb in (("old", a.old), ("new", a.new)):
+            if tag == "new" and a.new == a.old:
+                # one binary: a status table, the run is not repeated
+                row["new"] = row["old"]
+                continue
             d = os.path.join(a.out, tag, name)
             pcb = copy_project(src, d, name)
             t0 = time.time()
