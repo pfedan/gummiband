@@ -32,6 +32,8 @@ pub struct RunStats {
     pub unrouted: Vec<String>,
     /// Clearance violations after the geometry step (None if not relaxed).
     pub violations: Option<usize>,
+    /// Of those, the ones where copper of two nets touches or crosses (shorts).
+    pub shorts: Option<usize>,
 }
 
 impl RunStats {
@@ -146,6 +148,7 @@ fn evaluate(
         length,
         unrouted,
         violations: None,
+        shorts: None,
     };
     Candidate {
         stats,
@@ -365,11 +368,17 @@ pub fn route_board(
         nets.sort_unstable();
         nets.dedup();
         c.stats.violations = Some(v.len());
+        c.stats.shorts = Some(v.iter().filter(|x| x.actual <= 0.0).count());
         c.bad_nets = nets;
         c.hot = v.iter().map(|x| x.at).collect();
         c
     };
-    let full_cost = |c: &Candidate| c.stats.cost() + c.stats.violations.unwrap_or(0) as f64 * 1000.0;
+    // a short is much worse than a clearance a little too small: it weighs six violations
+    let full_cost = |c: &Candidate| {
+        c.stats.cost()
+            + c.stats.violations.unwrap_or(0) as f64 * 1000.0
+            + c.stats.shorts.unwrap_or(0) as f64 * 5000.0
+    };
     let top = finalists[0].stats.routed;
     let judged: Vec<Candidate> = finalists
         .into_iter()
@@ -428,7 +437,10 @@ pub fn route_board(
             .collect();
         for c in next {
             portfolio.push(c.stats.clone());
-            if full_cost(&c) < full_cost(&best) {
+            // completion first: a generation never trades a connection for cleaner geometry
+            let better = c.stats.routed > best.stats.routed
+                || (c.stats.routed == best.stats.routed && full_cost(&c) < full_cost(&best));
+            if better {
                 best = c;
             }
         }

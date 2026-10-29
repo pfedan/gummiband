@@ -225,7 +225,7 @@ fn main() -> Result<()> {
                     r.conns,
                     r.vias,
                     r.length,
-                    r.violations.map(|v| format!(", {v} violations")).unwrap_or_default()
+                    r.violations.map(|v| format!(", {v} violations ({} shorts)", r.shorts.unwrap_or(0))).unwrap_or_default()
                 );
             }
             let s = &res.stats;
@@ -413,6 +413,7 @@ fn main() -> Result<()> {
                         "vias": r.vias,
                         "length_mm": r.length,
                         "violations": r.violations,
+                        "shorts": r.shorts,
                     })).collect::<Vec<_>>(),
                 });
                 std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;

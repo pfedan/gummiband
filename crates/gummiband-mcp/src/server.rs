@@ -309,6 +309,8 @@ pub struct PortfolioOut {
     pub length_mm: f64,
     /// Clearance violations after the geometry step (null if this run was not realized).
     pub violations: Option<usize>,
+    /// Of those, copper of two nets touching or crossing (null if not realized).
+    pub shorts: Option<usize>,
 }
 
 /// The fields of `gummiband route --report`, plus a few for the session.
@@ -766,6 +768,7 @@ fn route_blocking(
                 vias: r.vias,
                 length_mm: r.length,
                 violations: r.violations,
+                shorts: r.shorts,
             })
             .collect(),
         copied: copied.iter().map(|p| p.display().to_string()).collect(),

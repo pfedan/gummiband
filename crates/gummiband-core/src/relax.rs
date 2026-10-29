@@ -143,6 +143,13 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         .zip(&geo.tracks)
         .map(|(p, t)| (attach(p[0], t.net, &vias), attach(*p.last().unwrap(), t.net, &vias)))
         .collect();
+    // per via the layers and widths of the tracks that end on it
+    let mut via_tracks: Vec<Vec<(_, f64)>> = vec![Vec::new(); vias.len()];
+    for (t, (a, b)) in geo.tracks.iter().zip(&ends) {
+        for v in [a, b].into_iter().flatten() {
+            via_tracks[*v].push((t.layer, t.width_at(vias[*v].0)));
+        }
+    }
 
     // while annealing only a few spots still move: cells near the points and vias that moved
     // in the previous round are the only ones worth visiting (None: visit everything)
@@ -202,16 +209,23 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         continue;
                     }
                     let need = match o.kind {
-                        ObstacleKind::Keepout { vias: no_vias, .. } => {
-                            if !no_vias {
+                        ObstacleKind::Keepout { vias: no_vias, tracks } => {
+                            // a via outside a track keepout still needs room for the ends of
+                            // its tracks on that layer (they end at the via centre)
+                            let ends = via_tracks[vi]
+                                .iter()
+                                .filter(|(l, _)| tracks && o.layers.has(*l))
+                                .map(|(_, w)| w / 2.0)
+                                .fold(f64::NEG_INFINITY, f64::max);
+                            let r = if no_vias { vr.max(ends) } else { ends };
+                            if r == f64::NEG_INFINITY {
                                 continue;
                             }
-                            crate::board::KEEPOUT_GAP
+                            crate::board::KEEPOUT_GAP + r
                         }
-                        ObstacleKind::Hole => board.rules.hole_clearance,
-                        _ => o.clearance.max(vclr),
-                    } + vr
-                        + cfg.margin;
+                        ObstacleKind::Hole => board.rules.hole_clearance + vr,
+                        _ => o.clearance.max(vclr) + vr,
+                    } + cfg.margin;
                     let poly = &sub.shared.obs_polys[oi as usize];
                     let inside = poly.contains(vc);
                     let (d, q) = nearest_on_poly(poly, vc);
