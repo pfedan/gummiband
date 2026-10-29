@@ -100,6 +100,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         .collect();
     let edge_clr = board.rules.edge_clearance;
     let routing = board.routing_layers();
+    let drills: Vec<f64> = geo.vias.iter().map(|v| v.drill).collect();
     // track ends that sit on a via of their net follow the via
     let attach = |p: Point, net: u32, vias: &[(Point, f64, u32, f64)]| {
         vias.iter().position(|v| v.2 == net && v.0.dist(p) < 1e-6)
@@ -177,13 +178,23 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     }
                 }
                 for (vj, &(c2, r2, n2, clr2)) in vias.iter().enumerate() {
-                    if vj == vi || n2 == vn {
+                    if vj == vi {
                         continue;
                     }
-                    let need = vr + r2 + vclr.max(clr2) + cfg.margin;
+                    let holes = drills[vi] / 2.0 + drills[vj] / 2.0 + board.rules.hole_to_hole + cfg.margin;
+                    let need = if n2 == vn {
+                        holes
+                    } else {
+                        (vr + r2 + vclr.max(clr2) + cfg.margin).max(holes)
+                    };
                     let d = vc.dist(c2);
-                    if d < need && d > 1e-9 {
-                        push = push + (vc - c2).norm() * ((need - d) * 0.5);
+                    if d < need {
+                        let dir = if d > 1e-9 {
+                            (vc - c2).norm()
+                        } else {
+                            pt(1.0, 0.0).rotate(vi as f64)
+                        };
+                        push = push + dir * ((need - d) * 0.5);
                     }
                 }
                 for pi in idx.query_point(vc, vr + 1.5) {
