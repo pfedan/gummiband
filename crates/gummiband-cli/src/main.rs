@@ -1,15 +1,17 @@
+mod svg;
+
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use gummiband_core::board::ObstacleKind;
+use gummiband_core::realize::Elem;
+use gummiband_core::route::RouterConfig;
+use gummiband_core::topo::SubstrateConfig;
 use gummiband_kicad::{KeepCopper, ReadOptions, read_board, write};
 
 #[derive(Parser)]
-#[command(
-    name = "gummiband",
-    about = "Topological rubber band autorouter for KiCad"
-)]
+#[command(name = "gummiband", about = "Topological rubber band autorouter for KiCad")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -23,6 +25,30 @@ enum Cmd {
         /// Keep all existing tracks and vias (default: locked ones only).
         #[arg(long)]
         keep_all: bool,
+    },
+    /// Route a board and write the result.
+    Route {
+        board: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Keep only locked tracks and vias as fixed copper (default: remove all).
+        #[arg(long)]
+        keep_locked: bool,
+        /// Portfolio size (parallel router runs with different orders).
+        #[arg(long, default_value_t = 0)]
+        runs: usize,
+        /// Via site grid pitch in mm.
+        #[arg(long, default_value_t = 0.5)]
+        via_pitch: f64,
+        /// Via cost in mm of track.
+        #[arg(long, default_value_t = 1.5)]
+        via_cost: f64,
+        /// Write a debug SVG.
+        #[arg(long)]
+        svg: Option<PathBuf>,
+        /// Draw the triangulation into the SVG.
+        #[arg(long)]
+        svg_tris: bool,
     },
     /// Remove tracks, vias and outer copper zones (benchmark preparation).
     Strip {
@@ -42,11 +68,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Info { board, keep_all } => {
-            let keep = if keep_all {
-                KeepCopper::All
-            } else {
-                KeepCopper::Locked
-            };
+            let keep = if keep_all { KeepCopper::All } else { KeepCopper::Locked };
             let kb = read_board(
                 &board,
                 &ReadOptions {
@@ -63,14 +85,9 @@ fn main() -> Result<()> {
                 bb.height()
             );
             for (i, l) in b.layers.iter().enumerate() {
-                println!(
-                    "layer {i}: {}{}",
-                    l.name,
-                    if l.is_plane { " (plane)" } else { "" }
-                );
+                println!("layer {i}: {}{}", l.name, if l.is_plane { " (plane)" } else { "" });
             }
-            let count =
-                |k: fn(&ObstacleKind) -> bool| b.obstacles.iter().filter(|o| k(&o.kind)).count();
+            let count = |k: fn(&ObstacleKind) -> bool| b.obstacles.iter().filter(|o| k(&o.kind)).count();
             println!(
                 "obstacles: {} (pads {}, tracks {}, vias {}, keepouts {}, holes {}, graphics {})",
                 b.obstacles.len(),
@@ -82,10 +99,7 @@ fn main() -> Result<()> {
                 count(|k| matches!(k, ObstacleKind::Graphic)),
             );
             let routable = b.routable_nets().count();
-            let conns: usize = b
-                .routable_nets()
-                .map(|n| b.nets[n as usize].pins.len() - 1)
-                .sum();
+            let conns: usize = b.routable_nets().map(|n| b.nets[n as usize].pins.len() - 1).sum();
             println!(
                 "pins: {}, nets: {} ({} with 2+ pins, {} connections)",
                 b.pins.len(),
@@ -121,14 +135,145 @@ fn main() -> Result<()> {
                     c.via_diameter,
                     c.via_drill,
                     nets.len(),
-                    if nets.len() <= 8 {
-                        nets.join(" ")
-                    } else {
-                        String::new()
-                    }
+                    if nets.len() <= 8 { nets.join(" ") } else { String::new() }
                 );
             }
             println!("rules: {:?}", b.rules);
+        }
+        Cmd::Route {
+            board,
+            output,
+            keep_locked,
+            runs,
+            via_pitch,
+            via_cost,
+            svg,
+            svg_tris,
+        } => {
+            let keep = if keep_locked {
+                KeepCopper::Locked
+            } else {
+                KeepCopper::None
+            };
+            let kb = read_board(
+                &board,
+                &ReadOptions {
+                    keep,
+                    ..Default::default()
+                },
+            )?;
+            let b = &kb.board;
+            let runs = if runs == 0 { rayon::current_num_threads() } else { runs };
+            let t0 = std::time::Instant::now();
+            let (sub, res) = gummiband_core::route_board(
+                b,
+                &SubstrateConfig { via_pitch },
+                &RouterConfig {
+                    via_cost,
+                    ..Default::default()
+                },
+                runs,
+            );
+            let dt = t0.elapsed();
+            println!(
+                "substrate: {} vertices, {} triangles, {} via sites",
+                sub.verts.len(),
+                sub.tris.len(),
+                sub.is_site.iter().filter(|&&x| x).count()
+            );
+            for r in &res.portfolio {
+                println!(
+                    "  run seed {:2} fanout_first {:5}: {}/{} routed, {} vias, {:.0} mm",
+                    r.seed, r.fanout_first, r.routed, r.conns, r.vias, r.length
+                );
+            }
+            let s = &res.stats;
+            println!(
+                "best: seed {} {}/{} routed, {} vias, {:.0} mm, {:.2} s",
+                s.seed,
+                s.routed,
+                s.conns,
+                s.vias,
+                s.length,
+                dt.as_secs_f64()
+            );
+            for u in s.unrouted.iter().take(40) {
+                println!("  unrouted: {u}");
+            }
+            let viol = gummiband_core::check::check(b, &res.geometry);
+            println!("clearance check: {} violations", viol.len());
+            let mut kinds = std::collections::BTreeMap::new();
+            for v in &viol {
+                *kinds
+                    .entry(v.what.split(' ').next().unwrap_or("").to_string())
+                    .or_insert(0) += 1;
+            }
+            println!("  {kinds:?}");
+            if std::env::var("GB_VIOL").is_ok() {
+                let mut hist = [0usize; 6];
+                for v in &viol {
+                    let r = (v.actual / v.required).clamp(0.0, 0.999);
+                    hist[(r * 6.0) as usize] += 1;
+                }
+                println!("  ratio histogram (0..1 in sixths): {hist:?}");
+                let mut def = [0usize; 5];
+                for v in &viol {
+                    let d = v.required - v.actual;
+                    def[[0.002, 0.01, 0.03, 0.1, f64::INFINITY]
+                        .iter()
+                        .position(|&x| d < x)
+                        .unwrap()] += 1;
+                }
+                println!("  deficit <2um <10um <30um <100um more: {def:?}");
+                let severe: Vec<_> = viol.iter().filter(|v| v.actual < v.required * 0.5).collect();
+                for v in severe.iter().step_by((severe.len() / 12).max(1)) {
+                    println!(
+                        "  {} at {:.3},{:.3}: {:.4} < {:.4}",
+                        v.what, v.at.x, v.at.y, v.actual, v.required
+                    );
+                }
+            }
+            if let Some(path) = svg {
+                std::fs::write(&path, svg::render(b, Some(&sub), &res.geometry, &viol, svg_tris))?;
+            }
+            let mut items = Vec::new();
+            for t in &res.geometry.tracks {
+                for e in &t.elems {
+                    items.push(match *e {
+                        Elem::Line(a, b) => write::Item::Track {
+                            a,
+                            b,
+                            width: t.width,
+                            layer: t.layer,
+                            net: t.net,
+                        },
+                        Elem::Arc(a, mid, b) => write::Item::Arc {
+                            a,
+                            mid,
+                            b,
+                            width: t.width,
+                            layer: t.layer,
+                            net: t.net,
+                        },
+                    });
+                }
+            }
+            for v in &res.geometry.vias {
+                items.push(write::Item::Via {
+                    at: v.at,
+                    diameter: v.diameter,
+                    drill: v.drill,
+                    net: v.net,
+                });
+            }
+            let opts = write::StripOptions {
+                unlocked: true,
+                locked: !keep_locked,
+                zone_layers: vec![],
+            };
+            let ranges = write::strip_ranges(&kb, &opts);
+            std::fs::write(&output, write::patch(&kb, &ranges, &items))?;
+            println!("wrote {} items to {}", items.len(), output.display());
         }
         Cmd::Strip {
             board,

@@ -52,8 +52,7 @@ pub struct KicadBoard {
 }
 
 pub fn read_board(path: &Path, opts: &ReadOptions) -> Result<KicadBoard> {
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let pro = path.with_extension("kicad_pro");
     let pro_json = std::fs::read_to_string(&pro)
         .ok()
@@ -61,11 +60,7 @@ pub fn read_board(path: &Path, opts: &ReadOptions) -> Result<KicadBoard> {
     parse_board(text, pro_json.as_ref(), opts)
 }
 
-pub fn parse_board(
-    text: String,
-    pro: Option<&serde_json::Value>,
-    opts: &ReadOptions,
-) -> Result<KicadBoard> {
+pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOptions) -> Result<KicadBoard> {
     let root = sexpr::parse(&text).map_err(|e| anyhow!("parse error: {e}"))?;
     if root.head() != Some("kicad_pcb") {
         return Err(anyhow!("not a kicad_pcb file"));
@@ -90,8 +85,9 @@ pub fn parse_board(
             Some("footprint") | Some("module") => r.read_footprint(n),
             Some("segment") | Some("arc") | Some("via") => r.read_copper(n, opts.keep),
             Some("zone") => r.read_zone(n, opts),
-            Some("gr_rect") | Some("gr_line") | Some("gr_arc") | Some("gr_circle")
-            | Some("gr_poly") => r.read_graphic(n, None),
+            Some("gr_rect") | Some("gr_line") | Some("gr_arc") | Some("gr_circle") | Some("gr_poly") => {
+                r.read_graphic(n, None)
+            }
             _ => {}
         }
     }
@@ -157,10 +153,8 @@ impl Reader {
         if let Some(layers) = root.child("layers") {
             for l in layers.args() {
                 let a = l.items();
-                let (Some(id), Some(name)) = (
-                    a.first().and_then(|x| x.as_f64()),
-                    a.get(1).and_then(|x| x.as_str()),
-                ) else {
+                let (Some(id), Some(name)) = (a.first().and_then(|x| x.as_f64()), a.get(1).and_then(|x| x.as_str()))
+                else {
                     continue;
                 };
                 if !name.ends_with(".Cu") {
@@ -186,10 +180,7 @@ impl Reader {
         cu.sort_by_key(|(_, n, _)| rank(n));
         for (_, name, plane) in cu {
             self.copper.push(name.clone());
-            self.b.layers.push(Layer {
-                name,
-                is_plane: plane,
-            });
+            self.b.layers.push(Layer { name, is_plane: plane });
         }
     }
 
@@ -228,15 +219,8 @@ impl Reader {
             .and_then(|c| c.as_array());
         for c in classes.into_iter().flatten() {
             let f = |k: &str, d: f64| c.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
-            let name = c
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Default")
-                .to_string();
-            let prio = c
-                .get("priority")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(i32::MAX as i64);
+            let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("Default").to_string();
+            let prio = c.get("priority").and_then(|v| v.as_i64()).unwrap_or(i32::MAX as i64);
             self.b.classes.push(NetClass {
                 name,
                 track_width: f("track_width", 0.2),
@@ -291,10 +275,7 @@ impl Reader {
         let mut table = HashMap::new();
         for n in root.children("net") {
             let a = n.args();
-            if let (Some(num), Some(name)) = (
-                a.first().and_then(|x| x.as_f64()),
-                a.get(1).and_then(|x| x.as_str()),
-            ) {
+            if let (Some(num), Some(name)) = (a.first().and_then(|x| x.as_f64()), a.get(1).and_then(|x| x.as_str())) {
                 self.numbered.insert(num as i64, name.to_string());
                 table.insert(name.to_string(), num as i64);
             }
@@ -376,9 +357,7 @@ impl Reader {
     }
 
     fn clearance_of(&self, net: Option<NetId>) -> f64 {
-        net.map_or(self.b.rules.min_clearance, |n| {
-            self.b.clearance(Some(n), None)
-        })
+        net.map_or(self.b.rules.min_clearance, |n| self.b.clearance(Some(n), None))
     }
 
     fn push_obstacle(&mut self, o: Obstacle) -> usize {
@@ -388,10 +367,7 @@ impl Reader {
 
     fn read_footprint(&mut self, fp: &Node) {
         let at = fp.child_f64s("at").unwrap_or_default();
-        let pos = pt(
-            at.first().copied().unwrap_or(0.0),
-            at.get(1).copied().unwrap_or(0.0),
-        );
+        let pos = pt(at.first().copied().unwrap_or(0.0), at.get(1).copied().unwrap_or(0.0));
         let rot = at.get(2).copied().unwrap_or(0.0);
         let reference = fp
             .children("property")
@@ -409,10 +385,7 @@ impl Reader {
         }
         for g in fp.args() {
             if let Some(h) = g.head()
-                && matches!(
-                    h,
-                    "fp_line" | "fp_arc" | "fp_rect" | "fp_circle" | "fp_poly"
-                )
+                && matches!(h, "fp_line" | "fp_arc" | "fp_rect" | "fp_circle" | "fp_poly")
             {
                 self.read_graphic(g, Some((pos, rot)));
             }
@@ -435,10 +408,7 @@ impl Reader {
         let kind = a.get(1).and_then(|x| x.as_str()).unwrap_or("smd");
         let shape = a.get(2).and_then(|x| x.as_str()).unwrap_or("rect");
         let at = pad.child_f64s("at").unwrap_or_default();
-        let local = pt(
-            at.first().copied().unwrap_or(0.0),
-            at.get(1).copied().unwrap_or(0.0),
-        );
+        let local = pt(at.first().copied().unwrap_or(0.0), at.get(1).copied().unwrap_or(0.0));
         let angle = at.get(2).copied().unwrap_or(fp_rot);
         let center = fp_pos + kicad_rot(local, fp_rot);
         let size = pad.child_f64s("size").unwrap_or_else(|| vec![0.0, 0.0]);
@@ -479,10 +449,7 @@ impl Reader {
         let rad = -angle.to_radians();
         let mut shapes: Vec<Shape> = Vec::new();
         match shape {
-            "circle" => shapes.push(Shape::Circle {
-                c: center,
-                r: w / 2.0,
-            }),
+            "circle" => shapes.push(Shape::Circle { c: center, r: w / 2.0 }),
             "oval" => {
                 let (len, r, dir) = if w >= h {
                     (w - h, h / 2.0, pt(1.0, 0.0))
@@ -512,14 +479,9 @@ impl Reader {
                     .map(|s| s == "circle")
                     .unwrap_or(false);
                 if anchor_circle {
-                    shapes.push(Shape::Circle {
-                        c: center,
-                        r: w / 2.0,
-                    });
+                    shapes.push(Shape::Circle { c: center, r: w / 2.0 });
                 } else {
-                    shapes.push(Shape::Polygon(roundrect_polygon(
-                        center, w, h, 0.0, rad, me,
-                    )));
+                    shapes.push(Shape::Polygon(roundrect_polygon(center, w, h, 0.0, rad, me)));
                 }
                 if let Some(prims) = pad.child("primitives") {
                     for p in prims.args() {
@@ -533,9 +495,7 @@ impl Reader {
                                 }
                             }
                             Some("gr_circle") => {
-                                if let (Some(c), Some(e)) =
-                                    (child_xy(p, "center"), child_xy(p, "end"))
-                                {
+                                if let (Some(c), Some(e)) = (child_xy(p, "center"), child_xy(p, "end")) {
                                     shapes.push(Shape::Circle {
                                         c: tf(c),
                                         r: c.dist(e) + width / 2.0,
@@ -543,20 +503,13 @@ impl Reader {
                                 }
                             }
                             Some("gr_rect") => {
-                                if let (Some(s), Some(e)) =
-                                    (child_xy(p, "start"), child_xy(p, "end"))
-                                {
-                                    let ps = vec![s, pt(e.x, s.y), e, pt(s.x, e.y)]
-                                        .into_iter()
-                                        .map(tf)
-                                        .collect();
+                                if let (Some(s), Some(e)) = (child_xy(p, "start"), child_xy(p, "end")) {
+                                    let ps = vec![s, pt(e.x, s.y), e, pt(s.x, e.y)].into_iter().map(tf).collect();
                                     shapes.push(Shape::Polygon(Polygon::new(ps)));
                                 }
                             }
                             Some("gr_line") => {
-                                if let (Some(s), Some(e)) =
-                                    (child_xy(p, "start"), child_xy(p, "end"))
-                                {
+                                if let (Some(s), Some(e)) = (child_xy(p, "start"), child_xy(p, "end")) {
                                     shapes.push(Shape::Capsule {
                                         a: tf(s),
                                         b: tf(e),
@@ -570,15 +523,10 @@ impl Reader {
                 }
             }
             // rect, trapezoid, chamfered_rect: the bounding rectangle
-            _ => shapes.push(Shape::Polygon(roundrect_polygon(
-                center, w, h, 0.0, rad, me,
-            ))),
+            _ => shapes.push(Shape::Polygon(roundrect_polygon(center, w, h, 0.0, rad, me))),
         }
 
-        let clearance = pad
-            .child_f64("clearance")
-            .unwrap_or(0.0)
-            .max(self.clearance_of(net));
+        let clearance = pad.child_f64("clearance").unwrap_or(0.0).max(self.clearance_of(net));
         let pin_idx = net.map(|_| self.b.pins.len());
         let mut obs = Vec::new();
         for s in shapes {
@@ -638,10 +586,7 @@ impl Reader {
                     self.b.all_layers()
                 };
                 self.push_obstacle(Obstacle {
-                    shape: Shape::Circle {
-                        c: at,
-                        r: size / 2.0,
-                    },
+                    shape: Shape::Circle { c: at, r: size / 2.0 },
                     layers,
                     net,
                     kind: ObstacleKind::Via,
@@ -764,9 +709,7 @@ impl Reader {
                 }
             }
             "arc" => {
-                if let (Some(s), Some(m), Some(e)) =
-                    (child_xy(g, "start"), child_xy(g, "mid"), child_xy(g, "end"))
-                {
+                if let (Some(s), Some(m), Some(e)) = (child_xy(g, "start"), child_xy(g, "mid"), child_xy(g, "end")) {
                     polyline = arc_polyline(map(s), map(m), map(e), me);
                 }
             }
@@ -843,10 +786,7 @@ impl Reader {
                     chain.pop();
                     break;
                 }
-                let Some(i) = segs
-                    .iter()
-                    .position(|(p, q)| p.dist(end) < tol || q.dist(end) < tol)
-                else {
+                let Some(i) = segs.iter().position(|(p, q)| p.dist(end) < tol || q.dist(end) < tol) else {
                     break;
                 };
                 let (p, q) = segs.swap_remove(i);

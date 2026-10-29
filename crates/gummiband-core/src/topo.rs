@@ -61,6 +61,8 @@ pub struct Substrate {
     pub layers: Vec<LayerId>,
     /// Per routing layer, per triangle: NONE (free), OUTSIDE or the covering obstacle.
     pub tri_status: Vec<Vec<u32>>,
+    /// Per routing layer: triangles covered by each obstacle.
+    pub obs_tris: Vec<HashMap<u32, Vec<u32>>>,
     /// Per routing layer: demands for edge end (2 * edge + end), flattened with offsets.
     demand_off: Vec<Vec<u32>>,
     demands: Vec<Vec<Demand>>,
@@ -82,11 +84,7 @@ impl Substrate {
         let me = board.rules.max_error;
         let layers: Vec<LayerId> = board.routing_layers().iter().collect();
         let routing = board.routing_layers();
-        let obs_polys: Vec<Polygon> = board
-            .obstacles
-            .par_iter()
-            .map(|o| o.shape.to_polygon(me))
-            .collect();
+        let obs_polys: Vec<Polygon> = board.obstacles.par_iter().map(|o| o.shape.to_polygon(me)).collect();
         let mut bounds = board.bbox();
         if bounds.width() <= 0.0 {
             for p in &obs_polys {
@@ -101,23 +99,20 @@ impl Substrate {
         }
 
         // --- vertices and constraints
-        let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
-            ConstrainedDelaunayTriangulation::new();
+        let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> = ConstrainedDelaunayTriangulation::new();
         let mut handle_of: HashMap<(i64, i64), FixedVertexHandle> = HashMap::new();
-        let mut insert = |cdt: &mut ConstrainedDelaunayTriangulation<Point2<f64>>,
-                          p: Point|
-         -> Option<FixedVertexHandle> {
-            let key = ((p.x * 1e5).round() as i64, (p.y * 1e5).round() as i64);
-            if let Some(&h) = handle_of.get(&key) {
-                return Some(h);
-            }
-            let h = cdt.insert(Point2::new(snap(p.x), snap(p.y))).ok()?;
-            handle_of.insert(key, h);
-            Some(h)
-        };
+        let mut insert =
+            |cdt: &mut ConstrainedDelaunayTriangulation<Point2<f64>>, p: Point| -> Option<FixedVertexHandle> {
+                let key = ((p.x * 1e5).round() as i64, (p.y * 1e5).round() as i64);
+                if let Some(&h) = handle_of.get(&key) {
+                    return Some(h);
+                }
+                let h = cdt.insert(Point2::new(snap(p.x), snap(p.y))).ok()?;
+                handle_of.insert(key, h);
+                Some(h)
+            };
         let mut constraints: Vec<(FixedVertexHandle, FixedVertexHandle)> = Vec::new();
-        let mut add_poly = |cdt: &mut ConstrainedDelaunayTriangulation<Point2<f64>>,
-                            poly: &Polygon| {
+        let mut add_poly = |cdt: &mut ConstrainedDelaunayTriangulation<Point2<f64>>, poly: &Polygon| {
             let hs: Vec<_> = poly.pts.iter().filter_map(|&p| insert(cdt, p)).collect();
             for i in 0..hs.len() {
                 let (a, b) = (hs[i], hs[(i + 1) % hs.len()]);
@@ -223,10 +218,7 @@ impl Substrate {
         }
 
         // --- extract
-        let verts: Vec<Point> = cdt
-            .vertices()
-            .map(|v| pt(v.position().x, v.position().y))
-            .collect();
+        let verts: Vec<Point> = cdt.vertices().map(|v| pt(v.position().x, v.position().y)).collect();
         let mut tris = Vec::new();
         for f in cdt.inner_faces() {
             let vs = f.vertices();
@@ -250,11 +242,7 @@ impl Substrate {
                     edge_tris.push([NONE, NONE]);
                     (edges.len() - 1) as u32
                 });
-                let slot = if edge_tris[e as usize][0] == NONE {
-                    0
-                } else {
-                    1
-                };
+                let slot = if edge_tris[e as usize][0] == NONE { 0 } else { 1 };
                 edge_tris[e as usize][slot] = ti as u32;
                 tri_edges[ti][k] = e;
             }
@@ -282,9 +270,7 @@ impl Substrate {
             .map(|&l| {
                 tris.par_iter()
                     .map(|t| {
-                        let c =
-                            (verts[t[0] as usize] + verts[t[1] as usize] + verts[t[2] as usize])
-                                * (1.0 / 3.0);
+                        let c = (verts[t[0] as usize] + verts[t[1] as usize] + verts[t[2] as usize]) * (1.0 / 3.0);
                         if !board.inside(c) {
                             return OUTSIDE;
                         }
@@ -321,6 +307,18 @@ impl Substrate {
             edge_tris,
             vert_tris,
             layers,
+            obs_tris: tri_status
+                .iter()
+                .map(|st| {
+                    let mut m: HashMap<u32, Vec<u32>> = HashMap::new();
+                    for (t, &o) in st.iter().enumerate() {
+                        if o != NONE && o != OUTSIDE {
+                            m.entry(o).or_default().push(t as u32);
+                        }
+                    }
+                    m
+                })
+                .collect(),
             tri_status,
             demand_off: Vec::new(),
             demands: Vec::new(),
@@ -358,11 +356,7 @@ impl Substrate {
                     .vert_tris
                     .iter()
                     .map(|ts| {
-                        let mut v: Vec<u32> = ts
-                            .iter()
-                            .map(|&t| st[t as usize])
-                            .filter(|&s| s != NONE)
-                            .collect();
+                        let mut v: Vec<u32> = ts.iter().map(|&t| st[t as usize]).filter(|&s| s != NONE).collect();
                         v.sort_unstable();
                         v.dedup();
                         v
@@ -376,10 +370,7 @@ impl Substrate {
                         off.push(out.len() as u32);
                         let start = out.len();
                         for &o in &vert_obs[u as usize] {
-                            out.push(Demand {
-                                obs: o,
-                                factor: 1.0,
-                            });
+                            out.push(Demand { obs: o, factor: 1.0 });
                         }
                         let pu = self.verts[u as usize];
                         let dir = (self.verts[v as usize] - pu).norm();
@@ -397,11 +388,7 @@ impl Substrate {
                                 })
                                 .unwrap();
                             let beyond = self.tri_nbrs[t as usize][k];
-                            let ob = if beyond == NONE {
-                                OUTSIDE
-                            } else {
-                                st[beyond as usize]
-                            };
+                            let ob = if beyond == NONE { OUTSIDE } else { st[beyond as usize] };
                             if ob == NONE {
                                 continue;
                             }
@@ -439,8 +426,7 @@ impl Substrate {
 
     pub fn tri_center(&self, t: u32) -> Point {
         let v = self.tris[t as usize];
-        (self.verts[v[0] as usize] + self.verts[v[1] as usize] + self.verts[v[2] as usize])
-            * (1.0 / 3.0)
+        (self.verts[v[0] as usize] + self.verts[v[1] as usize] + self.verts[v[2] as usize]) * (1.0 / 3.0)
     }
 
     pub fn edge_len(&self, e: u32) -> f64 {
@@ -479,7 +465,7 @@ impl Substrate {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::board::*;
     use crate::geom::*;
@@ -496,12 +482,7 @@ mod tests {
                 is_plane: false,
             },
         ];
-        b.outline = vec![Polygon::new(vec![
-            pt(0., 0.),
-            pt(10., 0.),
-            pt(10., 10.),
-            pt(0., 10.),
-        ])];
+        b.outline = vec![Polygon::new(vec![pt(0., 0.), pt(10., 0.), pt(10., 10.), pt(0., 10.)])];
         b.classes = vec![NetClass {
             name: "Default".into(),
             track_width: 0.2,
@@ -545,10 +526,7 @@ mod tests {
         let b = two_pad_board();
         let s = Substrate::build(&b, &SubstrateConfig::default());
         assert_eq!(s.check_orientation(), 0);
-        let owned = s.tri_status[0]
-            .iter()
-            .filter(|&&x| x != NONE && x != OUTSIDE)
-            .count();
+        let owned = s.tri_status[0].iter().filter(|&&x| x != NONE && x != OUTSIDE).count();
         assert!(owned >= 4, "pad triangles {owned}");
         assert!(s.tri_status[0].contains(&OUTSIDE));
         assert!(s.is_site.iter().filter(|&&x| x).count() > 100);

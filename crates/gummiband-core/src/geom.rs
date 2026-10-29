@@ -102,10 +102,7 @@ impl Rect {
         }
     }
     pub fn overlaps(&self, o: &Rect) -> bool {
-        self.min.x <= o.max.x
-            && o.min.x <= self.max.x
-            && self.min.y <= o.max.y
-            && o.min.y <= self.max.y
+        self.min.x <= o.max.x && o.min.x <= self.max.x && self.min.y <= o.max.y && o.min.y <= self.max.y
     }
     pub fn contains(&self, p: Point) -> bool {
         p.x >= self.min.x && p.x <= self.max.x && p.y >= self.min.y && p.y <= self.max.y
@@ -138,9 +135,7 @@ pub fn segs_intersect(a: Point, b: Point, c: Point, d: Point) -> bool {
     let d2 = orient(c, d, b);
     let d3 = orient(a, b, c);
     let d4 = orient(a, b, d);
-    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
-        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
-    {
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0)) && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0)) {
         return true;
     }
     (d1 == 0.0 && point_seg_dist(a, c, d) == 0.0)
@@ -172,10 +167,7 @@ impl Polygon {
 
     pub fn signed_area(&self) -> f64 {
         let n = self.pts.len();
-        (0..n)
-            .map(|i| self.pts[i].cross(self.pts[(i + 1) % n]))
-            .sum::<f64>()
-            * 0.5
+        (0..n).map(|i| self.pts[i].cross(self.pts[(i + 1) % n])).sum::<f64>() * 0.5
     }
 
     pub fn bbox(&self) -> Rect {
@@ -283,12 +275,8 @@ impl Shape {
     pub fn dist(&self, o: &Shape) -> f64 {
         use Shape::*;
         match (self, o) {
-            (Circle { c, r }, other) | (other, Circle { c, r }) => {
-                (other.dist_to_point(*c) - r).max(0.0)
-            }
-            (Capsule { a, b, r }, other) | (other, Capsule { a, b, r }) => {
-                (other.dist_to_seg(*a, *b) - r).max(0.0)
-            }
+            (Circle { c, r }, other) | (other, Circle { c, r }) => (other.dist_to_point(*c) - r).max(0.0),
+            (Capsule { a, b, r }, other) | (other, Capsule { a, b, r }) => (other.dist_to_seg(*a, *b) - r).max(0.0),
             (Polygon(p), Polygon(q)) => p.dist_to_poly(q),
         }
     }
@@ -367,14 +355,7 @@ pub fn capsule_polygon(a: Point, b: Point, r: f64, max_error: f64) -> Polygon {
 }
 
 /// Rectangle with rounded corners centred at the origin, rotated and moved to `at`.
-pub fn roundrect_polygon(
-    at: Point,
-    w: f64,
-    h: f64,
-    radius: f64,
-    angle_rad: f64,
-    max_error: f64,
-) -> Polygon {
+pub fn roundrect_polygon(at: Point, w: f64, h: f64, radius: f64, angle_rad: f64, max_error: f64) -> Polygon {
     let r = radius.min(w / 2.0).min(h / 2.0).max(0.0);
     let hx = w / 2.0 - r;
     let hy = h / 2.0 - r;

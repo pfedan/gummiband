@@ -7,9 +7,7 @@ pub type NetId = u32;
 pub type ClassId = u16;
 
 /// Set of copper layers as a bit mask (bit i = copper layer index i).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct LayerSet(pub u64);
 
 impl LayerSet {
@@ -159,10 +157,7 @@ pub struct Board {
 
 impl Board {
     pub fn layer_id(&self, name: &str) -> Option<LayerId> {
-        self.layers
-            .iter()
-            .position(|l| l.name == name)
-            .map(|i| i as LayerId)
+        self.layers.iter().position(|l| l.name == name).map(|i| i as LayerId)
     }
 
     pub fn all_layers(&self) -> LayerSet {
@@ -181,10 +176,7 @@ impl Board {
     }
 
     pub fn net_id(&self, name: &str) -> Option<NetId> {
-        self.nets
-            .iter()
-            .position(|n| n.name == name)
-            .map(|i| i as NetId)
+        self.nets.iter().position(|n| n.name == name).map(|i| i as NetId)
     }
 
     pub fn class_of(&self, net: NetId) -> &NetClass {
@@ -223,10 +215,7 @@ impl Board {
         if !main.contains(p) {
             return false;
         }
-        !self
-            .outline
-            .iter()
-            .any(|o| !std::ptr::eq(o, main) && o.contains(p))
+        !self.outline.iter().any(|o| !std::ptr::eq(o, main) && o.contains(p))
     }
 
     /// Distance from p to the board edge (0 outside).

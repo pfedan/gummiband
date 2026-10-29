@@ -63,11 +63,7 @@ pub fn strip_ranges(kb: &KicadBoard, opts: &StripOptions) -> Vec<Range<usize>> {
                         layers.extend(l.args().iter().filter_map(|x| x.as_str()));
                     }
                 }
-                if !layers.is_empty()
-                    && layers
-                        .iter()
-                        .all(|l| opts.zone_layers.iter().any(|z| z == l))
-                {
+                if !layers.is_empty() && layers.iter().all(|l| opts.zone_layers.iter().any(|z| z == l)) {
                     out.push(n.span());
                 }
             }

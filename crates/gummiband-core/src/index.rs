@@ -25,8 +25,7 @@ impl GridIndex {
     }
 
     fn range(&self, r: &Rect) -> (usize, usize, usize, usize) {
-        let f =
-            |v: f64, o: f64, n: usize| (((v - o) / self.cell).floor().max(0.0) as usize).min(n - 1);
+        let f = |v: f64, o: f64, n: usize| (((v - o) / self.cell).floor().max(0.0) as usize).min(n - 1);
         (
             f(r.min.x, self.origin.x, self.nx),
             f(r.max.x, self.origin.x, self.nx),

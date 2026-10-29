@@ -181,11 +181,7 @@ fn parse_node(text: &str, b: &[u8], pos: &mut usize) -> Result<Node, ParseError>
             }
             _ => {
                 let start = *pos;
-                while *pos < b.len()
-                    && !b[*pos].is_ascii_whitespace()
-                    && b[*pos] != b'('
-                    && b[*pos] != b')'
-                {
+                while *pos < b.len() && !b[*pos].is_ascii_whitespace() && b[*pos] != b'(' && b[*pos] != b')' {
                     *pos += 1;
                 }
                 Node::Atom(Atom::Symbol(text[start..*pos].to_string()), start..*pos)
