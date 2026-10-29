@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
 use crate::board::{Board, NetId, ObstacleKind};
-use crate::geom::{Point, Rect, orient, point_seg_dist, segs_intersect};
+use crate::geom::{Point, Rect, orient, point_seg_dist, pt, segs_intersect};
 use crate::topo::{Mesh, NONE, OUTSIDE, PAD_SITE, STEINER, Substrate};
 
 #[derive(Debug, Clone)]
@@ -440,9 +440,21 @@ impl<'a> Router<'a> {
                     zones.push(*r);
                 }
             } else {
+                // the whole fan-out of the part narrows alike (a zone per pin would leave
+                // a narrow track next to a wide one at the pin pitch)
                 let mut r = Rect::empty();
                 r.add(pin.pos);
-                zones.push(r.grow(pin.size.0.max(pin.size.1) / 2.0 + 0.8));
+                let r = r.grow(pin.size.0.max(pin.size.1) / 2.0 + 0.8);
+                zones.push(match self.board.courtyards.get(&pin.footprint) {
+                    Some(c) if c.contains(pin.pos) => {
+                        let c = c.grow(0.3);
+                        Rect {
+                            min: pt(c.min.x.min(r.min.x), c.min.y.min(r.min.y)),
+                            max: pt(c.max.x.max(r.max.x), c.max.y.max(r.max.y)),
+                        }
+                    }
+                    _ => r,
+                });
             }
         }
         (zones, neck_w)
