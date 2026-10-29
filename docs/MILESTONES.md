@@ -61,7 +61,7 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   copper through MCP tools as locked tracks, vias and zones, checks it, and then lets the
   autorouter do the rest around it. Needed tools: part info (pads, nets, courtyard,
   neighbours), add locked track/via/zone, check a region, route with locked copper kept.
-- Locked blocks: a KiCad group (parts plus their pre-routed locked copper, e.g. the datasheet
+- Blocks (fixed blocks): a KiCad group or placed design block (parts plus their pre-routed locked copper, e.g. the datasheet
   layout of a converter) moves only as a whole under --move-parts; inside it nothing changes.
 
 ## M4: Search and performance
