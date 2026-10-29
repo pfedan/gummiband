@@ -233,11 +233,6 @@ fn key(k: &NK) -> (u8, u32, u32) {
     }
 }
 
-/// The vertex of a placed via in mesh m.
-fn via_vertex(m: &Mesh, site: u32) -> u32 {
-    m.site_vert[&site]
-}
-
 impl<'a> Router<'a> {
     pub fn new(board: &'a Board, sub: &Substrate, cfg: RouterConfig) -> Router<'a> {
         Router {
@@ -903,7 +898,8 @@ impl<'a> Router<'a> {
         let info = self.via_info(net);
         for li in 0..self.nl() {
             let m = self.m(li);
-            let v = via_vertex(m, site);
+            // a via in a pad has no vertex on the pad's layer
+            let Some(&v) = m.site_vert.get(&site) else { continue };
             for &t in &m.vert_tris[v as usize] {
                 for &e in &m.tri_edges[t as usize] {
                     if self.cross[li][e as usize].is_empty() {
@@ -1483,23 +1479,42 @@ impl<'a> Router<'a> {
                     // via in pad: a plane fan-out may end on a via inside the source pad
                     if !free
                         && self.cfg.via_in_pad
-                        && conn.goal == Goal::Plane
                         && let Some(pin) = self.tri_pin(lu, t)
                         && self.pin_group[pin] == self.pin_group[conn.from]
                         && let Some(list) = self.sub.shared.pad_sites.get(&(pin as u32))
                     {
                         for &site in list {
                             let q = self.site_point(site);
-                            if self.in_plane(q, net) && self.sub.site_usable(site) && self.via_ok_site(site, net) {
-                                push(
-                                    &mut best,
-                                    &mut nodes,
-                                    &mut open,
-                                    NK::GoalSite { site },
-                                    q,
-                                    node.g + node.pos.dist(q) + self.cfg.via_cost,
-                                    idx,
-                                );
+                            if !self.sub.site_usable(site) || !self.via_ok_site(site, net) {
+                                continue;
+                            }
+                            if conn.goal == Goal::Plane {
+                                if self.in_plane(q, net) {
+                                    push(
+                                        &mut best,
+                                        &mut nodes,
+                                        &mut open,
+                                        NK::GoalSite { site },
+                                        q,
+                                        node.g + node.pos.dist(q) + self.cfg.via_cost,
+                                        idx,
+                                    );
+                                }
+                            } else {
+                                // leave the pad through a via to the other layers
+                                for l2 in 0..nl {
+                                    if l2 != lu && self.m(l2).site_tri[site as usize] != PAD_SITE {
+                                        push(
+                                            &mut best,
+                                            &mut nodes,
+                                            &mut open,
+                                            NK::Site { site, li: l2 as u8 },
+                                            q,
+                                            node.g + node.pos.dist(q) + self.cfg.via_cost * 2.0,
+                                            idx,
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -1566,7 +1581,7 @@ impl<'a> Router<'a> {
                             continue;
                         }
                         for l2 in 0..nl {
-                            if l2 != lu {
+                            if l2 != lu && self.m(l2).site_vert.contains_key(&site) {
                                 push(
                                     &mut best,
                                     &mut nodes,
@@ -1586,7 +1601,11 @@ impl<'a> Router<'a> {
                     }
                     let mut cand: Vec<(f64, u32)> = sites
                         .iter()
-                        .filter(|&&s| self.sub.shared.sites[s as usize].pad.is_none())
+                        .filter(|&&s| match self.sub.shared.sites[s as usize].pad {
+                            None => true,
+                            // a via into a target pad ends the connection (last resort)
+                            Some(p) => self.cfg.via_in_pad && is_target(p as usize),
+                        })
                         .map(|&s| (self.site_point(s).dist(node.pos), s))
                         .collect();
                     cand.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -1621,7 +1640,9 @@ impl<'a> Router<'a> {
                             continue;
                         }
                         tried += 1;
-                        if conn.goal == Goal::Plane && self.in_plane(q, net) {
+                        if self.sub.shared.sites[site as usize].pad.is_some()
+                            || (conn.goal == Goal::Plane && self.in_plane(q, net))
+                        {
                             push(
                                 &mut best,
                                 &mut nodes,
@@ -1651,7 +1672,7 @@ impl<'a> Router<'a> {
                 NK::Vert { site, li } => {
                     let lu = li as usize;
                     let m = self.m(lu);
-                    let v = via_vertex(m, site);
+                    let Some(&v) = m.site_vert.get(&site) else { continue };
                     for &t in &m.vert_tris[v as usize] {
                         let status = m.status[t as usize];
                         if !Substrate::passable(self.board, status, net) {
@@ -2048,7 +2069,7 @@ impl<'a> Router<'a> {
         // the net instead.
         let vip = self.cfg.via_in_pad;
         self.cfg.via_in_pad = true;
-        failed.retain(|&ci| self.conns[ci].goal != Goal::Plane || !self.route_one(ci));
+        failed.retain(|&ci| !self.route_one(ci));
         self.cfg.via_in_pad = vip;
         for &ci in &failed {
             if self.conns[ci].goal == Goal::Plane {

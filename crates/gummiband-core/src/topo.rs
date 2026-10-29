@@ -673,7 +673,9 @@ fn build_pad_sites(board: &Board, shared: &Shared) -> Vec<Site> {
     let mut out = Vec::new();
     for (pi, pin) in board.pins.iter().enumerate() {
         let net = &board.nets[pin.net as usize];
-        if net.planes.is_empty() || pin.layers.iter().filter(|&l| routing.has(l)).count() != 1 {
+        // plane nets for fan-outs; other nets only on pads big enough for a via
+        let big = pin.size.0.min(pin.size.1) >= board.rules.min_via_diameter;
+        if (net.planes.is_empty() && !big) || pin.layers.iter().filter(|&l| routing.has(l)).count() != 1 {
             continue;
         }
         let (w, h) = pin.size;
