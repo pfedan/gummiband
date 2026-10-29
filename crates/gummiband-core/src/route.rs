@@ -2087,6 +2087,8 @@ impl<'a> Router<'a> {
         }
         // Fan-outs that found no plane: try a via in the pad, then connect to the nearest pin of
         // the net instead.
+        // the second chance runs without hot spots: they must never cost a connection
+        self.cfg.hotspots = Default::default();
         let vip = self.cfg.via_in_pad;
         self.cfg.via_in_pad = true;
         failed.retain(|&ci| !self.route_one(ci));

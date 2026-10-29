@@ -35,9 +35,10 @@ pub struct RunStats {
 }
 
 impl RunStats {
-    /// Lower is better: completion first, then vias, then length.
+    /// Lower is better: completion first, then vias, then length. One unrouted connection
+    /// weighs as much as ten clearance violations (see the geometry stage).
     pub fn cost(&self) -> f64 {
-        (self.conns - self.routed) as f64 * 1e6 + self.vias as f64 * 2.0 + self.length * 0.05
+        (self.conns - self.routed) as f64 * 1e4 + self.vias as f64 * 2.0 + self.length * 0.05
     }
 }
 
