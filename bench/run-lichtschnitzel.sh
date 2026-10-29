@@ -2,6 +2,7 @@
 # Route the prepared Lichtschnitzel benchmark and judge it with the KiCad DRC.
 # Usage: bench/run-lichtschnitzel.sh [extra gummiband route args]
 set -eu
+export PATH=/opt/homebrew/opt/rustup/bin:$PATH
 W=$(cd "$(dirname "$0")" && pwd)/work
 [ -f "$W/lichtschnitzel/lichtschnitzel.kicad_pcb" ] || "$(dirname "$0")/prepare-lichtschnitzel.sh"
 mkdir -p "$W/routed"

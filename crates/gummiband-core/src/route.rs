@@ -2029,7 +2029,15 @@ impl<'a> Router<'a> {
         for _ in 0..3 {
             match self.search(ci) {
                 Some(chain) => {
+                    let before = if std::env::var("GB_VALIDATE_EACH").is_ok() { self.validate().len() } else { 0 };
                     if self.commit(ci, &chain) {
+                        if std::env::var("GB_VALIDATE_EACH").is_ok() {
+                            let v = self.validate();
+                            if v.len() > before {
+                                let kinds: Vec<String> = chain.iter().map(|n| format!("{:?}", n.kind)).collect();
+                                eprintln!("conn {ci} broke the state: {:?}\n  chain {}", &v[v.len().min(before)..], kinds.join(" "));
+                            }
+                        }
                         return true;
                     }
                 }
