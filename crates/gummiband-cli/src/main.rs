@@ -232,6 +232,13 @@ fn main() -> Result<()> {
                 s.length,
                 dt.as_secs_f64()
             );
+            let bound = gummiband_core::length_lower_bound(b);
+            println!(
+                "  length lower bound (signal nets, Steiner): {:.0} mm; signal length is at most {:.0}% above the optimum",
+                bound,
+                // plane fan-outs are not in the bound, so this ratio is an upper estimate
+                (s.length / bound - 1.0) * 100.0
+            );
             for u in s.unrouted.iter().take(40) {
                 println!("  unrouted: {u}");
             }
@@ -339,6 +346,7 @@ fn main() -> Result<()> {
                     "unrouted": st.unrouted,
                     "vias": st.vias,
                     "length_mm": st.length,
+                    "length_lower_bound_mm": gummiband_core::length_lower_bound(b),
                     "items_written": items.len(),
                     "violations": viol.iter().map(|v| serde_json::json!({
                         "what": v.what,

@@ -41,6 +41,36 @@ impl RunStats {
     }
 }
 
+/// Lower bound of the total track length: per net without plane the minimum spanning tree of
+/// its pins times sqrt(3)/2 (no Steiner tree is shorter than that). Plane nets count zero.
+pub fn length_lower_bound(board: &Board) -> f64 {
+    let mut total = 0.0;
+    for net in board.routable_nets() {
+        let n = &board.nets[net as usize];
+        if board.planes.iter().any(|p| p.net == net) {
+            continue;
+        }
+        let pts: Vec<geom::Point> = n.pins.iter().map(|&p| board.pins[p].pos).collect();
+        let mut in_tree = vec![false; pts.len()];
+        let mut dist = vec![f64::INFINITY; pts.len()];
+        dist[0] = 0.0;
+        for _ in 0..pts.len() {
+            let k = (0..pts.len())
+                .filter(|&k| !in_tree[k])
+                .min_by(|&a, &b| dist[a].total_cmp(&dist[b]))
+                .unwrap();
+            in_tree[k] = true;
+            total += dist[k];
+            for j in 0..pts.len() {
+                if !in_tree[j] {
+                    dist[j] = dist[j].min(pts[j].dist(pts[k]));
+                }
+            }
+        }
+    }
+    total * 3f64.sqrt() / 2.0
+}
+
 pub struct RouteResult {
     pub geometry: Geometry,
     pub stats: RunStats,
@@ -251,7 +281,10 @@ pub fn route_board(
     for c in rest {
         offer(&mut finalists, c);
     }
-    let mut rng = Rng(std::env::var("GB_EVO_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x5eed));
+    let mut rng = Rng(std::env::var("GB_EVO_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0x5eed));
     for generation in 1..=search.generations {
         if best.failed.is_empty() && generation > 2 {
             // complete: a few generations for vias and length are enough
