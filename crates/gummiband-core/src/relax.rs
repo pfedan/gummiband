@@ -144,7 +144,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     let mut push = pt(0.0, 0.0);
                     let reach = w / 2.0 + 2.0;
                     // static obstacles
-                    for oi in sub.obs_index.query_point(p, reach) {
+                    for oi in sub.shared.obs_index.query_point(p, reach) {
                         let o = &board.obstacles[oi as usize];
                         if !o.layers.has(layer) || (o.net == Some(net) && o.kind != ObstacleKind::Hole) {
                             continue;
@@ -160,7 +160,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             _ => o.clearance.max(c),
                         } + w / 2.0
                             + cfg.margin;
-                        let poly = &sub.obs_polys[oi as usize];
+                        let poly = &sub.shared.obs_polys[oi as usize];
                         let inside = poly.contains(p);
                         let (d, q) = nearest_on_poly(poly, p);
                         let d = if inside { -d } else { d };

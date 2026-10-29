@@ -179,7 +179,7 @@ fn main() -> Result<()> {
                 "substrate: {} vertices, {} triangles, {} via sites",
                 sub.verts.len(),
                 sub.tris.len(),
-                sub.is_site.iter().filter(|&&x| x).count()
+                sub.shared.sites.len()
             );
             for r in &res.portfolio {
                 println!(
