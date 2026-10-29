@@ -107,6 +107,26 @@ impl Rect {
     pub fn contains(&self, p: Point) -> bool {
         p.x >= self.min.x && p.x <= self.max.x && p.y >= self.min.y && p.y <= self.max.y
     }
+    /// True if the segment a-b has a point in the rectangle (clipping against the slabs).
+    pub fn touches_seg(&self, a: Point, b: Point) -> bool {
+        let (mut t0, mut t1) = (0.0f64, 1.0f64);
+        let d = b - a;
+        for (p, q, lo, hi) in [(a.x, d.x, self.min.x, self.max.x), (a.y, d.y, self.min.y, self.max.y)] {
+            if q.abs() < 1e-15 {
+                if p < lo || p > hi {
+                    return false;
+                }
+            } else {
+                let (u, v) = ((lo - p) / q, (hi - p) / q);
+                t0 = t0.max(u.min(v));
+                t1 = t1.min(u.max(v));
+                if t0 > t1 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
     pub fn width(&self) -> f64 {
         self.max.x - self.min.x
     }

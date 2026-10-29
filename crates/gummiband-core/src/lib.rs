@@ -85,6 +85,30 @@ pub struct RouteResult {
     pub offsets: HashMap<String, geom::Point>,
 }
 
+/// A progress report of the search: the best candidate after a phase.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Progress {
+    /// "portfolio", "generation 2", "geometry", "geometry generation 1", "polish",
+    /// "placement round 1"
+    pub phase: String,
+    pub routed: usize,
+    pub conns: usize,
+    pub vias: usize,
+    pub length: f64,
+    /// Clearance violations (None before the geometry step).
+    pub violations: Option<usize>,
+}
+
+/// Receives progress reports (from the search thread).
+#[derive(Clone)]
+pub struct ProgressFn(pub std::sync::Arc<dyn Fn(&Progress) + Send + Sync>);
+
+impl std::fmt::Debug for ProgressFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressFn")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
     /// Parallel runs per generation.
@@ -95,6 +119,23 @@ pub struct SearchConfig {
     pub geometry_generations: usize,
     /// Keep the best candidate of every generation (for an animation).
     pub frames: bool,
+    /// Called with the best candidate after every phase.
+    pub progress: Option<ProgressFn>,
+}
+
+impl SearchConfig {
+    fn report(&self, phase: &str, s: &RunStats) {
+        if let Some(p) = &self.progress {
+            (p.0)(&Progress {
+                phase: phase.to_string(),
+                routed: s.routed,
+                conns: s.conns,
+                vias: s.vias,
+                length: s.length,
+                violations: s.violations,
+            });
+        }
+    }
 }
 
 /// Routing order genome: a key per connection, identified by (net, from pin). Lower routes first.
@@ -290,6 +331,37 @@ pub fn route_board(
             break;
         };
         let moved = board.with_offsets(&next);
+        // fast path, the rubber band way: keep the topology of the best routing, let the pads
+        // take their track ends along and the relaxation push the tracks aside
+        let quick = {
+            let sub = Substrate::build(&moved, sub_cfg);
+            let mut res = RouteResult {
+                geometry: follow_parts(&cur, &moved, &best.1.geometry),
+                stats: best.1.stats.clone(),
+                portfolio: Vec::new(),
+                frames: Vec::new(),
+                offsets: next.clone(),
+            };
+            relax::relax(&moved, &sub, &mut res.geometry, &relax::RelaxConfig::default());
+            (sub, res)
+        };
+        let qs = score(&moved, &quick.1);
+        eprintln!(
+            "placement round {round}: {} parts shifted, kept topology: cost {:.0} (best {:.0})",
+            next.len(),
+            qs.1,
+            best_score.1
+        );
+        if qs.0 == best_score.0 && qs.1 < best_score.1 {
+            hot = qs.2.clone();
+            best_score = qs;
+            best = quick;
+            offsets = next;
+            let mut st = best.1.stats.clone();
+            st.violations = Some(best_score.2.len());
+            search.report(&format!("placement round {round}"), &st);
+            continue;
+        }
         let (sub, mut res) = route_fixed(&moved, sub_cfg, base, search);
         res.offsets = next.clone();
         let sc = score(&moved, &res);
@@ -307,6 +379,9 @@ pub fn route_board(
             best_score = sc;
             best = (sub, res);
         }
+        let mut st = best.1.stats.clone();
+        st.violations = Some(best_score.2.len());
+        search.report(&format!("placement round {round}"), &st);
     }
     best
 }
@@ -368,6 +443,7 @@ pub fn route_fixed(
     for c in rest {
         offer(&mut finalists, c);
     }
+    search.report("portfolio", &best.stats);
     if search.frames {
         frames.push((label(&best, "portfolio"), best.geo.clone(), false));
     }
@@ -400,6 +476,7 @@ pub fn route_fixed(
                 offer(&mut finalists, cand);
             }
         }
+        search.report(&format!("generation {generation}"), &best.stats);
         if search.frames {
             frames.push((
                 label(&best, &format!("generation {generation}")),
@@ -482,6 +559,7 @@ pub fn route_fixed(
         .into_iter()
         .min_by(|a, b| full_cost(a).total_cmp(&full_cost(b)))
         .unwrap();
+    search.report("geometry", &best.stats);
     if search.frames {
         frames.push((label(&best, "geometry"), best.geo.clone(), true));
     }
@@ -532,6 +610,7 @@ pub fn route_fixed(
                 best = c;
             }
         }
+        search.report(&format!("geometry generation {generation}"), &best.stats);
         if search.frames {
             frames.push((
                 label(&best, &format!("geometry generation {generation}")),
@@ -550,6 +629,7 @@ pub fn route_fixed(
         if full_cost(&c) < full_cost(&best) {
             best = c;
         }
+        search.report("polish", &best.stats);
     }
     (
         sub,
@@ -561,6 +641,69 @@ pub fn route_fixed(
             offsets: HashMap::new(),
         },
     )
+}
+
+/// The geometry of `geo` (routed on `from`) with every track end and via that sits on a pad
+/// moved along with that pad's footprint on `to` (same board, other offsets).
+fn follow_parts(from: &Board, to: &Board, geo: &Geometry) -> Geometry {
+    let shift = |p: geom::Point, net: NetId| -> geom::Point {
+        for (a, b) in from.pins.iter().zip(&to.pins) {
+            if a.net != net || a.pos.dist(b.pos) < 1e-9 {
+                continue;
+            }
+            if a.obstacles
+                .iter()
+                .any(|&o| from.obstacles[o].shape.dist_to_point(p) < 1e-6)
+            {
+                return p + (b.pos - a.pos);
+            }
+        }
+        p
+    };
+    let mut g = geo.clone();
+    for t in &mut g.tracks {
+        // neck zones go with the part they belong to
+        for nk in &mut t.necks {
+            if let Some((a, b)) = from
+                .pins
+                .iter()
+                .zip(&to.pins)
+                .find(|(a, b)| a.pos.dist(b.pos) > 1e-9 && nk.contains(a.pos))
+            {
+                let d = b.pos - a.pos;
+                *nk = geom::Rect {
+                    min: nk.min + d,
+                    max: nk.max + d,
+                };
+            }
+        }
+        let n = t.pts.len();
+        if n == 0 {
+            continue;
+        }
+        let (a, b) = (shift(t.pts[0], t.net), shift(t.pts[n - 1], t.net));
+        let (da, db) = (a - t.pts[0], b - t.pts[n - 1]);
+        if da.len() + db.len() == 0.0 {
+            continue;
+        }
+        // spread the end moves along the track so that it does not kink at the pad
+        let len: f64 = t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>().max(1e-9);
+        let reach = len.min(1.0);
+        let fade = |x: f64| (1.0 - x / reach).max(0.0);
+        let mut s = 0.0;
+        let pts = t.pts.clone();
+        for i in 0..n {
+            if i > 0 {
+                s += pts[i].dist(pts[i - 1]);
+            }
+            t.pts[i] = pts[i] + da * fade(s) + db * fade(len - s);
+        }
+        t.elems.clear();
+    }
+    for v in &mut g.vias {
+        v.at = shift(v.at, v.net);
+    }
+    g
 }
 
 /// New footprint offsets: movable parts with pads next to clearance problems step away from
@@ -602,33 +745,64 @@ fn shift_parts(
         }
         let step = away.norm() * (0.15 + 0.35 * rng.unit());
         for scale in [1.0, 0.5] {
-            let d = step * scale;
-            let moved = geom::Rect {
-                min: r.min + d,
-                max: r.max + d,
-            };
-            let inside = [
-                moved.min,
-                moved.max,
-                geom::pt(moved.min.x, moved.max.y),
-                geom::pt(moved.max.x, moved.min.y),
-            ]
-            .iter()
-            .all(|&q| board.inside(q));
-            // parts that already overlap may keep overlapping as much as before
-            let free = courtyards
-                .iter()
-                .all(|(other, o)| other == fp || overlap(o, &moved) <= overlap(o, &r) + 1e-9);
-            if inside && free {
-                let e = offsets.entry(fp.clone()).or_insert(geom::pt(0.0, 0.0));
-                *e = *e + d;
-                courtyards.insert(fp.clone(), moved);
+            // the part shoves the movable parts in its way along (a chain, as far as needed)
+            let mut trial_off = offsets.clone();
+            let mut trial_cy = courtyards.clone();
+            if shove(board, fp, step * scale, &mut trial_cy, &mut trial_off, 0) {
+                offsets = trial_off;
+                courtyards = trial_cy;
                 changed = true;
                 break;
             }
         }
     }
     changed.then_some(offsets)
+}
+
+/// Shift footprint `fp` by `d`; movable parts whose courtyards it would run into are shifted
+/// by the same amount first (up to a chain of four). False if a fixed part or the board edge is
+/// in the way.
+fn shove(
+    board: &Board,
+    fp: &str,
+    d: geom::Point,
+    courtyards: &mut HashMap<String, geom::Rect>,
+    offsets: &mut HashMap<String, geom::Point>,
+    depth: usize,
+) -> bool {
+    let Some(r) = courtyards.get(fp).copied() else {
+        return false;
+    };
+    let moved = geom::Rect {
+        min: r.min + d,
+        max: r.max + d,
+    };
+    let inside = [
+        moved.min,
+        moved.max,
+        geom::pt(moved.min.x, moved.max.y),
+        geom::pt(moved.max.x, moved.min.y),
+    ]
+    .iter()
+    .all(|&q| board.inside(q));
+    if !inside {
+        return false;
+    }
+    courtyards.insert(fp.to_string(), moved);
+    // parts that already overlapped may keep overlapping as much as before
+    let hit: Vec<String> = courtyards
+        .iter()
+        .filter(|(other, o)| other.as_str() != fp && overlap(o, &moved) > overlap(o, &r) + 1e-9)
+        .map(|(other, _)| other.clone())
+        .collect();
+    for other in hit {
+        if depth >= 4 || !board.movable.contains(&other) || !shove(board, &other, d, courtyards, offsets, depth + 1) {
+            return false;
+        }
+    }
+    let e = offsets.entry(fp.to_string()).or_insert(geom::pt(0.0, 0.0));
+    *e = *e + d;
+    true
 }
 
 fn overlap(a: &geom::Rect, b: &geom::Rect) -> f64 {

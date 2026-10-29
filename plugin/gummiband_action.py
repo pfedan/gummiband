@@ -97,12 +97,15 @@ class WxUi:
 
     def run_with_progress(self, fn):
         """Call ``fn(keep_going)`` while a progress dialog pulses; Cancel stops the router."""
-        dlg = wx.ProgressDialog(TITLE, "Routing...", maximum=100,
+        # the first message sets the dialog width: as long as a typical progress line
+        dlg = wx.ProgressDialog(TITLE, "geometry generation 3: 1000/1000 routed, 1000 vias, "
+                                "10000 mm, 100 clearance violations\n0 s", maximum=100,
                                 style=wx.PD_APP_MODAL | wx.PD_CAN_ABORT | wx.PD_ELAPSED_TIME)
         t0 = time.monotonic()
 
-        def keep_going() -> bool:
-            cont, _skip = dlg.Pulse(f"Routing... {time.monotonic() - t0:.0f} s")
+        def keep_going(progress=None) -> bool:
+            cont, _skip = dlg.Pulse(f"{runner.progress_text(progress)}\n"
+                                    f"{time.monotonic() - t0:.0f} s")
             return cont
 
         try:

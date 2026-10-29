@@ -77,6 +77,10 @@ enum Cmd {
         /// References that never move under --move-parts, comma separated.
         #[arg(long, value_delimiter = ',')]
         fixed: Vec<String>,
+        /// Print a "progress {json}" line after every phase of the search (best candidate so
+        /// far, elapsed seconds), for the KiCad plugin and other front ends.
+        #[arg(long)]
+        progress: bool,
     },
     /// Remove tracks, vias and outer copper zones (benchmark preparation).
     Strip {
@@ -188,6 +192,7 @@ fn main() -> Result<()> {
             frames,
             move_parts,
             fixed,
+            progress,
         } => {
             let keep = if keep_locked {
                 KeepCopper::Locked
@@ -244,6 +249,16 @@ fn main() -> Result<()> {
                     generations,
                     geometry_generations,
                     frames: frames.is_some(),
+                    progress: progress.then(|| {
+                        gummiband_core::ProgressFn(std::sync::Arc::new(move |p: &gummiband_core::Progress| {
+                            use std::io::Write;
+                            let mut v = serde_json::to_value(p).unwrap_or_default();
+                            v["seconds"] = serde_json::json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
+                            let mut out = std::io::stdout().lock();
+                            let _ = writeln!(out, "progress {v}");
+                            let _ = out.flush();
+                        }))
+                    }),
                 },
             );
             let dt = t0.elapsed();

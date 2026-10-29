@@ -25,14 +25,14 @@ pub struct Track {
     pub width: f64,
     pub layer: LayerId,
     pub net: NetId,
-    /// Zones (centre, radius) where the track narrows to `neck_w`.
-    pub necks: Vec<(Point, f64)>,
+    /// Zones where the track narrows to `neck_w`.
+    pub necks: Vec<crate::geom::Rect>,
     pub neck_w: f64,
 }
 
 impl Track {
     pub fn width_at(&self, p: Point) -> f64 {
-        if self.necks.iter().any(|&(c, r)| c.dist(p) < r) {
+        if self.necks.iter().any(|r| r.contains(p)) {
             self.neck_w
         } else {
             self.width
@@ -43,11 +43,7 @@ impl Track {
     /// as narrow only if the whole edge lies in a zone, so every piece that crosses such an edge
     /// touches the zone and is narrow as well.
     pub fn piece_width(&self, a: Point, b: Point) -> f64 {
-        if self
-            .necks
-            .iter()
-            .any(|&(c, r)| crate::geom::point_seg_dist(c, a, b) < r)
-        {
+        if self.necks.iter().any(|r| r.touches_seg(a, b)) {
             self.neck_w
         } else {
             self.width

@@ -87,7 +87,7 @@ def find_binary(env: Mapping[str, str] = os.environ, settings_path: Path = SETTI
 
 
 def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) -> List[str]:
-    cmd = [binary, "route", str(board), "-o", str(output)]
+    cmd = [binary, "route", str(board), "-o", str(output), "--progress"]
     if opts.keep_locked:
         cmd.append("--keep-locked")
     cmd += ["--runs", str(int(opts.runs)), "--via-cost", repr(float(opts.via_cost))]
@@ -135,32 +135,67 @@ class RouteResult:
         return int(m.group(1)) if m else None
 
 
+def parse_progress(line: str) -> Optional[dict]:
+    """The JSON of a ``progress {...}`` line of the router, or None."""
+    if not line.startswith("progress "):
+        return None
+    try:
+        p = json.loads(line[len("progress "):])
+    except ValueError:
+        return None
+    return p if isinstance(p, dict) else None
+
+
+def progress_text(p: Optional[dict]) -> str:
+    """One line for a progress dialog, e.g. "geometry generation 2: 347/348 routed, 261 vias,
+    2585 mm, 3 clearance violations"."""
+    if not p:
+        return "Routing..."
+    text = (f"{p.get('phase', '')}: {p.get('routed', 0)}/{p.get('conns', 0)} routed, "
+            f"{p.get('vias', 0)} vias, {p.get('length', 0):.0f} mm")
+    if p.get("violations") is not None:
+        text += f", {p['violations']} clearance violations"
+    return text
+
+
 def run_route(cmd: List[str], output: Path, cwd: Optional[Path] = None,
-              keep_going: Optional[Callable[[], bool]] = None) -> RouteResult:
-    """Run the router and wait for it. ``keep_going`` is polled about ten times a second while
-    the router runs (to update a progress dialog); returning False kills the router."""
+              keep_going: Optional[Callable[[Optional[dict]], bool]] = None) -> RouteResult:
+    """Run the router and wait for it. ``keep_going(progress)`` is polled about ten times a
+    second while the router runs, with the latest progress report (see ``parse_progress``);
+    returning False kills the router."""
     try:
         proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, errors="replace", env=tool_env())
     except OSError as e:
         raise RunnerError(f"cannot start {cmd[0]}: {e}") from e
-    out: dict = {}
+    out: dict = {"stdout": [], "progress": None}
 
-    def wait():
-        out["stdout"], out["stderr"] = proc.communicate()
+    def read_stdout():
+        for line in proc.stdout:
+            p = parse_progress(line)
+            if p is not None:
+                out["progress"] = p
+            else:
+                out["stdout"].append(line)
 
-    waiter = threading.Thread(target=wait, daemon=True)
-    waiter.start()
+    def read_stderr():
+        out["stderr"] = proc.stderr.read()
+
+    readers = [threading.Thread(target=f, daemon=True) for f in (read_stdout, read_stderr)]
+    for t in readers:
+        t.start()
     cancelled = False
-    while waiter.is_alive():
-        waiter.join(0.1)
-        if keep_going is not None and not cancelled and not keep_going():
+    while proc.poll() is None:
+        readers[0].join(0.1)
+        if keep_going is not None and not cancelled and not keep_going(out["progress"]):
             cancelled = True
             proc.kill()
-    waiter.join()
+    for t in readers:
+        t.join()
+    proc.wait()
     if cancelled:
         raise RouteCancelled("routing cancelled")
-    res = RouteResult(cmd, proc.returncode, out.get("stdout", ""), out.get("stderr", ""))
+    res = RouteResult(cmd, proc.returncode, "".join(out["stdout"]), out.get("stderr", ""))
     if res.returncode != 0 or not output.is_file():
         why = (f"exit code {res.returncode}" if res.returncode != 0
                else f"no output file {output}")

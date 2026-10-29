@@ -71,7 +71,7 @@ class CommandTest(unittest.TestCase):
         opts = runner.RouteOptions(keep_locked=True, runs=8, via_cost=2, geometry_generations=0)
         self.assertEqual(
             runner.build_command("gb", Path("/a/b.kicad_pcb"), Path("/t/o.kicad_pcb"), opts),
-            ["gb", "route", "/a/b.kicad_pcb", "-o", "/t/o.kicad_pcb", "--keep-locked",
+            ["gb", "route", "/a/b.kicad_pcb", "-o", "/t/o.kicad_pcb", "--progress", "--keep-locked",
              "--runs", "8", "--via-cost", "2.0"])
         opts.keep_locked = False
         self.assertNotIn("--keep-locked", runner.build_command("gb", Path("b"), Path("o"), opts))
@@ -80,6 +80,20 @@ class CommandTest(unittest.TestCase):
         opts = runner.RouteOptions(geometry_generations=3, frames_dir="/p/anim")
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
         self.assertEqual(cmd[-4:], ["--geometry-generations", "3", "--frames", "/p/anim"])
+
+    def test_progress(self):
+        line = ('progress {"phase":"geometry generation 1","routed":347,"conns":348,"vias":261,'
+                '"length":2585.4,"violations":3,"seconds":61.2}')
+        p = runner.parse_progress(line)
+        self.assertEqual(p["routed"], 347)
+        self.assertEqual(runner.progress_text(p),
+                         "geometry generation 1: 347/348 routed, 261 vias, 2585 mm, "
+                         "3 clearance violations")
+        p["violations"] = None
+        self.assertNotIn("violations", runner.progress_text(p))
+        self.assertIsNone(runner.parse_progress("best: seed 0"))
+        self.assertIsNone(runner.parse_progress("progress {broken"))
+        self.assertEqual(runner.progress_text(None), "Routing...")
 
     def test_tool_env_adds_install_dirs(self):
         env = runner.tool_env({"PATH": "/usr/bin"}, extra_dirs=("/opt/x/bin", "/usr/bin"))
@@ -146,13 +160,31 @@ sys.exit(101)""")
         exe = make_exe(self.dir / "slow", "import time\ntime.sleep(30)")
         calls = []
 
-        def keep_going():
+        def keep_going(progress=None):
             calls.append(1)
             return len(calls) < 3
 
         with self.assertRaises(runner.RouteCancelled):
             runner.run_route([str(exe)], self.out, self.dir, keep_going)
         self.assertEqual(len(calls), 3)
+
+    def test_progress_reaches_keep_going(self):
+        exe = make_exe(self.dir / "prog", f"""import sys, time, pathlib
+print('progress {{"phase":"portfolio","routed":1,"conns":2,"vias":0,"length":3}}', flush=True)
+time.sleep(0.5)
+print('best: seed 0')
+pathlib.Path({str(self.out)!r}).write_text('x')""")
+        seen = []
+
+        def keep_going(progress=None):
+            if progress:
+                seen.append(progress["phase"])
+            return True
+
+        res = runner.run_route([str(exe)], self.out, self.dir, keep_going)
+        self.assertIn("portfolio", seen)
+        self.assertNotIn("progress", res.stdout)
+        self.assertEqual(res.best_line(), "best: seed 0")
 
     def test_cannot_start(self):
         with self.assertRaises(runner.RunnerError):
