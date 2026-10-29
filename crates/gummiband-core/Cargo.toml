@@ -1,0 +1,10 @@
+[package]
+name = "gummiband-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rayon.workspace = true
+serde.workspace = true
+spade.workspace = true
