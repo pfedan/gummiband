@@ -11,6 +11,7 @@ padstacks, ...) are subtracted per type. The table shows completion, routing cau
 and time per board, then the totals; a change should win in sum and lose nowhere badly.
 """
 import argparse
+import re
 import collections
 import json
 import os
@@ -87,29 +88,35 @@ def main():
             dt = time.time() - t0
             open(pcb + ".log", "w").write(p.stdout)
             if p.returncode != 0 or not os.path.exists(pcb):
-                row[tag] = dict(unconn=None, errors=None, time=dt, kinds={})
+                row[tag] = dict(unconn=None, errors=None, time=dt, kinds={}, core=None)
                 continue
             unconn, c = drc(pcb)
             kinds = {k: v - pre.get(k, 0) for k, v in c.items() if v - pre.get(k, 0) > 0}
-            row[tag] = dict(unconn=unconn, errors=sum(kinds.values()), time=dt, kinds=kinds)
+            # the router's own check (KiCad caps its report at a few hundred per type)
+            m = re.search(r"clearance check: (\d+) violations", p.stdout)
+            core = int(m.group(1)) if m else None
+            row[tag] = dict(unconn=unconn, errors=sum(kinds.values()), time=dt, kinds=kinds, core=core)
             print(f"{name:20s} {tag}: unconnected {unconn}, errors {row[tag]['errors']} {kinds}, "
-                  f"{dt:.0f} s", flush=True)
+                  f"own check {core}, {dt:.0f} s", flush=True)
         rows.append(row)
     print()
-    print(f"{'board':20s} {'unconn old/new':>15s} {'errors old/new':>15s} {'time old/new':>14s}")
+    print(f"{'board':20s} {'unconn old/new':>15s} {'errors old/new':>15s} {'own old/new':>13s} "
+          f"{'time old/new':>14s}")
     tot = collections.Counter()
     for r in rows:
         o, n = r["old"], r["new"]
         fmt = lambda x: "fail" if x is None else str(x)
         print(f"{r['board']:20s} {fmt(o['unconn']) + '/' + fmt(n['unconn']):>15s} "
               f"{fmt(o['errors']) + '/' + fmt(n['errors']):>15s} "
+              f"{fmt(o['core']) + '/' + fmt(n['core']):>13s} "
               f"{o['time']:.0f}/{n['time']:.0f} s".rjust(14))
         for tag, x in (("old", o), ("new", n)):
             tot[tag + "_unconn"] += x["unconn"] or 0
             tot[tag + "_errors"] += x["errors"] or 0
+            tot[tag + "_core"] += x["core"] or 0
             tot[tag + "_time"] += x["time"]
     print(f"{'total':20s} {tot['old_unconn']}/{tot['new_unconn']:<10} {tot['old_errors']}/{tot['new_errors']:<10} "
-          f"{tot['old_time']:.0f}/{tot['new_time']:.0f} s")
+          f"{tot['old_core']}/{tot['new_core']:<10} {tot['old_time']:.0f}/{tot['new_time']:.0f} s")
 
 
 if __name__ == "__main__":
