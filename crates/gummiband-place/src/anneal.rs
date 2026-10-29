@@ -55,7 +55,12 @@ impl Raster {
                 let mut blocked = !outline.inside(c, margin + half_diag);
                 if !blocked {
                     for (q, bb) in fixed.iter().zip(&fb) {
-                        if c.x >= bb.x0 && c.x <= bb.x1 && c.y >= bb.y0 && c.y <= bb.y1 && q.contains(c, gap + half_diag) {
+                        if c.x >= bb.x0
+                            && c.x <= bb.x1
+                            && c.y >= bb.y0
+                            && c.y <= bb.y1
+                            && q.contains(c, gap + half_diag)
+                        {
                             blocked = true;
                             break;
                         }
@@ -224,16 +229,26 @@ impl Problem {
         }
         let mut decaps = Vec::new();
         for ((pa, pada), b, w) in decap_pairs {
-            let Some(a) = part_pins[*pa].get(*pada).copied() else { continue };
+            let Some(a) = part_pins[*pa].get(*pada).copied() else {
+                continue;
+            };
             match b {
                 Ok((pb, padb)) => {
                     if let Some(bb) = part_pins[*pb].get(*padb).copied()
                         && bb.0 != a.0
                     {
-                        decaps.push(Decap { a, b: Ok(bb), weight: *w });
+                        decaps.push(Decap {
+                            a,
+                            b: Ok(bb),
+                            weight: *w,
+                        });
                     }
                 }
-                Err(q) => decaps.push(Decap { a, b: Err(*q), weight: *w }),
+                Err(q) => decaps.push(Decap {
+                    a,
+                    b: Err(*q),
+                    weight: *w,
+                }),
             }
         }
         for (di, dc) in decaps.iter().enumerate() {
@@ -405,7 +420,18 @@ impl<'a> Placer<'a> {
     }
 
     /// One annealing run. `hard`: reject every move that leaves an overlap on a moved unit.
-    pub fn anneal(&mut self, rng: &mut Rng, iters: usize, t0: f64, t1: f64, l0: f64, l1: f64, r0: f64, r1: f64, hard: bool) {
+    pub fn anneal(
+        &mut self,
+        rng: &mut Rng,
+        iters: usize,
+        t0: f64,
+        t1: f64,
+        l0: f64,
+        l1: f64,
+        r0: f64,
+        r1: f64,
+        hard: bool,
+    ) {
         let n = self.p.units.len();
         if n == 0 {
             return;

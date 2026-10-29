@@ -58,6 +58,10 @@ enum Cmd {
         /// Draw the triangulation into the SVG.
         #[arg(long)]
         svg_tris: bool,
+        /// Write one SVG per generation (best candidate) into this folder, and an animated GIF
+        /// if ImageMagick is available.
+        #[arg(long)]
+        frames: Option<PathBuf>,
         /// Write a machine readable JSON report (stats, unrouted connections, violations,
         /// portfolio) for scripts and AI agents.
         #[arg(long)]
@@ -169,6 +173,7 @@ fn main() -> Result<()> {
             svg,
             svg_tris,
             report,
+            frames,
         } => {
             let keep = if keep_locked {
                 KeepCopper::Locked
@@ -199,6 +204,7 @@ fn main() -> Result<()> {
                     population: runs,
                     generations,
                     geometry_generations,
+                    frames: frames.is_some(),
                 },
             );
             let dt = t0.elapsed();
@@ -292,6 +298,48 @@ fn main() -> Result<()> {
                         "  {} at {:.3},{:.3}: {:.4} < {:.4}",
                         v.what, v.at.x, v.at.y, v.actual, v.required
                     );
+                }
+            }
+            if let Some(dir) = &frames {
+                std::fs::create_dir_all(dir)?;
+                let mut pngs = Vec::new();
+                for (i, (label, geo, relaxed)) in res.frames.iter().enumerate() {
+                    let v = if *relaxed {
+                        gummiband_core::check::check(b, geo)
+                    } else {
+                        Vec::new()
+                    };
+                    let svg_text = svg::render(b, None, geo, &v, false).replace(
+                        "</svg>",
+                        &format!(
+                            r##"<text x="{}" y="{}" font-size="2.2" font-family="Helvetica" fill="#eee">{}</text></svg>"##,
+                            b.bbox().min.x,
+                            b.bbox().min.y - 0.6,
+                            label
+                        ),
+                    );
+                    let f = dir.join(format!("frame-{i:03}.svg"));
+                    std::fs::write(&f, svg_text)?;
+                    let png = dir.join(format!("frame-{i:03}.png"));
+                    let ok = std::process::Command::new("rsvg-convert")
+                        .args(["-w", "1200", "-o"])
+                        .arg(&png)
+                        .arg(&f)
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if ok {
+                        pngs.push(png);
+                    }
+                }
+                if !pngs.is_empty() {
+                    let gif = dir.join("evolution.gif");
+                    let _ = std::process::Command::new("magick")
+                        .args(["-delay", "120", "-loop", "0"])
+                        .args(&pngs)
+                        .arg(&gif)
+                        .status();
+                    println!("frames: {} images, animation {}", pngs.len(), gif.display());
                 }
             }
             if let Some(path) = svg {

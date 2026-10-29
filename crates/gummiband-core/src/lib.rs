@@ -75,6 +75,8 @@ pub struct RouteResult {
     pub geometry: Geometry,
     pub stats: RunStats,
     pub portfolio: Vec<RunStats>,
+    /// The best candidate after every generation (label, geometry, relaxed), if requested.
+    pub frames: Vec<(String, Geometry, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +87,8 @@ pub struct SearchConfig {
     pub generations: usize,
     /// Generations that also run the geometry step and select by clearance violations.
     pub geometry_generations: usize,
+    /// Keep the best candidate of every generation (for an animation).
+    pub frames: bool,
 }
 
 /// Routing order genome: a key per connection, identified by (net, from pin). Lower routes first.
@@ -98,6 +102,8 @@ struct Candidate {
     failed: Vec<(NetId, usize)>,
     /// Nets with clearance violations after the geometry step.
     bad_nets: Vec<NetId>,
+    /// Where the geometry step left clearance violations.
+    hot: Vec<geom::Point>,
 }
 
 fn evaluate(
@@ -149,6 +155,7 @@ fn evaluate(
             .map(|&ci| (r.conns[ci].net, r.conns[ci].from))
             .collect(),
         bad_nets: Vec::new(),
+        hot: Vec::new(),
     }
 }
 
@@ -263,6 +270,20 @@ pub fn route_board(
         .map(|cfg| evaluate(board, &sub, cfg, None, 0))
         .collect();
     let mut portfolio: Vec<RunStats> = first.iter().map(|c| c.stats.clone()).collect();
+    let mut frames: Vec<(String, Geometry, bool)> = Vec::new();
+    let label = |c: &Candidate, what: &str| {
+        format!(
+            "{what}: {}/{} routed, {} vias, {:.0} mm{}",
+            c.stats.routed,
+            c.stats.conns,
+            c.stats.vias,
+            c.stats.length,
+            c.stats
+                .violations
+                .map(|v| format!(", {v} violations"))
+                .unwrap_or_default()
+        )
+    };
     // the best few candidates go through the geometry step at the end
     let keep = std::env::var("GB_FINALISTS")
         .ok()
@@ -280,6 +301,9 @@ pub fn route_board(
     let mut best = first.pop().unwrap();
     for c in rest {
         offer(&mut finalists, c);
+    }
+    if search.frames {
+        frames.push((label(&best, "portfolio"), best.geo.clone(), false));
     }
     let mut rng = Rng(std::env::var("GB_EVO_SEED")
         .ok()
@@ -310,6 +334,13 @@ pub fn route_board(
                 offer(&mut finalists, cand);
             }
         }
+        if search.frames {
+            frames.push((
+                label(&best, &format!("generation {generation}")),
+                best.geo.clone(),
+                false,
+            ));
+        }
     }
     offer(&mut finalists, best);
     if std::env::var("GB_NO_RELAX").is_ok() {
@@ -320,6 +351,7 @@ pub fn route_board(
                 geometry: best.geo,
                 stats: best.stats,
                 portfolio,
+                frames,
             },
         );
     }
@@ -333,6 +365,7 @@ pub fn route_board(
         nets.dedup();
         c.stats.violations = Some(v.len());
         c.bad_nets = nets;
+        c.hot = v.iter().map(|x| x.at).collect();
         c
     };
     let full_cost = |c: &Candidate| c.stats.cost() + c.stats.violations.unwrap_or(0) as f64 * 1000.0;
@@ -351,27 +384,45 @@ pub fn route_board(
         .into_iter()
         .min_by(|a, b| full_cost(a).total_cmp(&full_cost(b)))
         .unwrap();
+    if search.frames {
+        frames.push((label(&best, "geometry"), best.geo.clone(), true));
+    }
+    let mut hotspots: Vec<(geom::Point, f64)> = Vec::new();
     for generation in 1..=search.geometry_generations {
         if best.stats.violations == Some(0) && best.failed.is_empty() {
             break;
         }
-        let genomes: Vec<Genome> = (0..pop).map(|_| mutate_geo(&best, &mut rng)).collect();
-        let cfg = RouterConfig {
-            seed: 0,
-            fanout_first: best.stats.fanout_first,
-            via_cost: best.stats.via_cost,
-            ..base.clone()
-        };
-        let next: Vec<Candidate> = genomes
+        // hot spots: violation places of the best so far ask for more room; repeated places
+        // grow (negotiation in the spirit of PathFinder, driven by the geometry)
+        for &p in &best.hot {
+            match hotspots.iter_mut().find(|(c, _)| c.dist(p) < 0.6) {
+                Some(h) => h.1 = (h.1 + 0.06).min(0.3),
+                None => hotspots.push((p, 0.06)),
+            }
+        }
+        let identity: Genome = best.order.iter().enumerate().map(|(i, &k)| (k, i as f64)).collect();
+        // half the candidates keep the order and feel the hot spots at different strengths,
+        // the other half also mutate the order
+        let variants: Vec<(Genome, f64)> = (0..pop)
+            .map(|i| {
+                if i % 2 == 0 {
+                    (identity.clone(), 0.5 + 0.5 * (i / 2) as f64)
+                } else {
+                    (mutate_geo(&best, &mut rng), 1.0)
+                }
+            })
+            .collect();
+        let next: Vec<Candidate> = variants
             .par_iter()
-            .map(|g| {
-                geo_eval(evaluate(
-                    board,
-                    &sub,
-                    cfg.clone(),
-                    Some(g),
-                    search.generations + generation,
-                ))
+            .map(|(g, scale)| {
+                let cfg = RouterConfig {
+                    seed: 0,
+                    fanout_first: best.stats.fanout_first,
+                    via_cost: best.stats.via_cost,
+                    hotspots: std::sync::Arc::new(hotspots.iter().map(|&(p, x)| (p, x * scale)).collect()),
+                    ..base.clone()
+                };
+                geo_eval(evaluate(board, &sub, cfg, Some(g), search.generations + generation))
             })
             .collect();
         for c in next {
@@ -380,6 +431,13 @@ pub fn route_board(
                 best = c;
             }
         }
+        if search.frames {
+            frames.push((
+                label(&best, &format!("geometry generation {generation}")),
+                best.geo.clone(),
+                true,
+            ));
+        }
     }
     (
         sub,
@@ -387,6 +445,7 @@ pub fn route_board(
             geometry: best.geo,
             stats: best.stats,
             portfolio,
+            frames,
         },
     )
 }

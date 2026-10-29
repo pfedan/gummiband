@@ -35,6 +35,9 @@ pub struct RouterConfig {
     /// Extra cost (mm) for passing right next to a pad of another net that still waits for its
     /// route: keeps the escape of dense pin rows free.
     pub escape_cost: f64,
+    /// Hot spots (centre, extra clearance in mm) where an earlier geometry had violations: the
+    /// capacity model asks for more room there, so the topology spreads out.
+    pub hotspots: std::sync::Arc<Vec<(Point, f64)>>,
 }
 
 impl Default for RouterConfig {
@@ -50,6 +53,7 @@ impl Default for RouterConfig {
             margin: 0.01,
             via_in_pad: false,
             escape_cost: env("GB_ESCAPE", 0.0),
+            hotspots: Default::default(),
         }
     }
 }
@@ -459,6 +463,17 @@ impl<'a> Router<'a> {
         0.0
     }
 
+    /// Extra room asked for near hot spots, for an edge a-b.
+    fn hot_extra(&self, a: Point, b: Point) -> f64 {
+        let mut x: f64 = 0.0;
+        for &(c, extra) in self.cfg.hotspots.iter() {
+            if point_seg_dist(c, a, b) < 1.0 {
+                x = x.max(extra);
+            }
+        }
+        x
+    }
+
     /// Width of a track of `full` width with neck zones at edge e.
     fn width_at_edge(&self, li: usize, e: u32, full: f64, necks: &[(Point, f64)], neck_w: f64) -> f64 {
         if necks.is_empty() {
@@ -619,6 +634,7 @@ impl<'a> Router<'a> {
     }
 
     /// Pack items along a segment of length `len` with end needs; centre line intervals.
+    #[allow(clippy::too_many_arguments)]
     fn pack_with(
         board: &Board,
         items: &[Item],
@@ -626,6 +642,7 @@ impl<'a> Router<'a> {
         need_u: impl Fn(&Item) -> f64,
         need_v: impl Fn(&Item) -> f64,
         bounds: &[(f64, f64)],
+        extra_gap: f64,
     ) -> Option<Vec<(f64, f64)>> {
         let n = items.len();
         let mut lo = vec![0.0; n];
@@ -633,14 +650,14 @@ impl<'a> Router<'a> {
         for i in 0..n {
             let mut x = need_u(&items[i]).max(bounds.get(i).map_or(f64::NEG_INFINITY, |b| b.0));
             if i > 0 {
-                x = x.max(lo[i - 1] + Self::gap(board, &items[i - 1], &items[i]));
+                x = x.max(lo[i - 1] + Self::gap(board, &items[i - 1], &items[i]) + extra_gap);
             }
             lo[i] = x;
         }
         for i in (0..n).rev() {
             let mut y = (len - need_v(&items[i])).min(bounds.get(i).map_or(f64::INFINITY, |b| b.1));
             if i + 1 < n {
-                y = y.min(hi[i + 1] - Self::gap(board, &items[i], &items[i + 1]));
+                y = y.min(hi[i + 1] - Self::gap(board, &items[i], &items[i + 1]) - extra_gap);
             }
             hi[i] = y;
         }
@@ -702,13 +719,15 @@ impl<'a> Router<'a> {
             }
         };
         let bounds = self.apex_bounds(li, e, items, extra_apex);
+        let hot = self.hot_extra(m.verts[u as usize], m.verts[v as usize]);
         Self::pack_with(
             self.board,
             items,
             len,
-            |it| self.end_need(li, e, 0, it).max(extra_end(u, it)) + margin,
-            |it| self.end_need(li, e, 1, it).max(extra_end(v, it)) + margin,
+            |it| self.end_need(li, e, 0, it).max(extra_end(u, it)) + margin + hot,
+            |it| self.end_need(li, e, 1, it).max(extra_end(v, it)) + margin + hot,
             &bounds,
+            hot,
         )
     }
 
@@ -953,6 +972,7 @@ impl<'a> Router<'a> {
                         |it| self.vertex_need(li, vi, it) + margin,
                         |it| Self::via_need(&via, it) + margin,
                         &[],
+                        0.0,
                     );
                     if ok.is_none() {
                         return false;

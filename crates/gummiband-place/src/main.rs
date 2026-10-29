@@ -28,7 +28,10 @@ enum ShapeArg {
 }
 
 #[derive(Parser)]
-#[command(name = "gummiband-place", about = "Alternative placements of the Lichtschnitzel controller")]
+#[command(
+    name = "gummiband-place",
+    about = "Alternative placements of the Lichtschnitzel controller"
+)]
 struct Cli {
     /// Input board (placed, unrouted).
     board: PathBuf,
@@ -80,7 +83,12 @@ const BUCK_B: &[&str] = &[
 fn refs(d: &Design, names: &[&str]) -> Result<Vec<usize>> {
     names
         .iter()
-        .map(|n| d.by_ref.get(*n).copied().with_context(|| format!("part {n} not on the board")))
+        .map(|n| {
+            d.by_ref
+                .get(*n)
+                .copied()
+                .with_context(|| format!("part {n} not on the board"))
+        })
         .collect()
 }
 
@@ -101,7 +109,9 @@ fn plug_attachments(d: &Design, plug: usize) -> Vec<usize> {
         }
         // the output net: only small passives (PTC F*, capacitor C*) on it
         if others.len() >= 2
-            && others.iter().all(|&i| d.parts[i].reference.starts_with('F') || d.parts[i].reference.starts_with('C'))
+            && others
+                .iter()
+                .all(|&i| d.parts[i].reference.starts_with('F') || d.parts[i].reference.starts_with('C'))
         {
             best = others;
         }
@@ -306,7 +316,11 @@ fn main() -> Result<()> {
     {
         let b = outline.bbox();
         let free = b.area() - prob.raster.blocked(&b);
-        let mov: f64 = units.iter().flat_map(|u| u.members.iter()).map(|m| d.parts[m.part].court_area()).sum();
+        let mov: f64 = units
+            .iter()
+            .flat_map(|u| u.members.iter())
+            .map(|m| d.parts[m.part].court_area())
+            .sum();
         println!(
             "free area {:.0} mm2, movable courtyards {:.0} mm2 ({:.0} % of the free area)",
             free,
@@ -323,7 +337,12 @@ fn main() -> Result<()> {
         t.elapsed().as_secs_f64()
     );
     let failed = pl.legalize(0.25, 40.0);
-    println!("legalize: wire {:.0}, overlap {:.3} mm2, {} units without a spot", pl.wire(), pl.total_overlap(), failed);
+    println!(
+        "legalize: wire {:.0}, overlap {:.3} mm2, {} units without a spot",
+        pl.wire(),
+        pl.total_overlap(),
+        failed
+    );
     for u in 0..units.len() {
         let o = pl.overlap(u);
         if o > 1e-9 {
@@ -389,12 +408,21 @@ fn main() -> Result<()> {
             if quads[a].0 == quads[b].0 {
                 continue;
             }
-            if !quads[a].1.bbox().grow(1.0).union(&R::empty()).overlaps_r(&quads[b].1.bbox()) {
+            if !quads[a]
+                .1
+                .bbox()
+                .grow(1.0)
+                .union(&R::empty())
+                .overlaps_r(&quads[b].1.bbox())
+            {
                 continue;
             }
             let s = quads[a].1.separation(&quads[b].1);
             if s < min_sep.0 {
-                min_sep = (s, format!("{}-{}", d.parts[quads[a].0].reference, d.parts[quads[b].0].reference));
+                min_sep = (
+                    s,
+                    format!("{}-{}", d.parts[quads[a].0].reference, d.parts[quads[b].0].reference),
+                );
             }
         }
     }
@@ -407,7 +435,10 @@ fn main() -> Result<()> {
             outside.push(d.parts[*i].reference.clone());
         }
     }
-    println!("check: smallest courtyard separation {:.3} mm ({}), outside the margin: {:?}", min_sep.0, min_sep.1, outside);
+    println!(
+        "check: smallest courtyard separation {:.3} mm ({}), outside the margin: {:?}",
+        min_sep.0, min_sep.1, outside
+    );
     if min_sep.0 < 0.0 || !outside.is_empty() {
         bail!("placement check failed");
     }
@@ -429,7 +460,18 @@ fn main() -> Result<()> {
         .parts
         .iter()
         .enumerate()
-        .flat_map(|(i, p)| p.court.iter().map(move |r| (i, Quad { pos: p.pos, rot: p.rot, r: *r })))
+        .flat_map(|(i, p)| {
+            p.court.iter().map(move |r| {
+                (
+                    i,
+                    Quad {
+                        pos: p.pos,
+                        rot: p.rot,
+                        r: *r,
+                    },
+                )
+            })
+        })
         .collect();
     let owner_at = |c: Point, grow: f64| -> Option<usize> {
         // the part whose courtyard holds `c`; the largest one wins (plug labels, antenna keepout)
@@ -498,7 +540,12 @@ fn main() -> Result<()> {
                     let pts: Vec<Point> = zone_pts(n);
                     let mut zb = R::empty();
                     for p in &pts {
-                        zb = zb.union(&R { x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+                        zb = zb.union(&R {
+                            x0: p.x,
+                            y0: p.y,
+                            x1: p.x,
+                            y1: p.y,
+                        });
                     }
                     let owner = orig_quads
                         .iter()
@@ -510,7 +557,11 @@ fn main() -> Result<()> {
                         Some(i) => {
                             let f = xf(i);
                             patch.transform_zone(n, &f);
-                            println!("keepout {} follows {}", n.child_str("name").unwrap_or("?"), d.parts[i].reference);
+                            println!(
+                                "keepout {} follows {}",
+                                n.child_str("name").unwrap_or("?"),
+                                d.parts[i].reference
+                            );
                         }
                         None => println!("keepout {} stays", n.child_str("name").unwrap_or("?")),
                     }
@@ -594,4 +645,3 @@ impl Overlaps for R {
         self.x0 <= o.x1 && o.x0 <= self.x1 && self.y0 <= o.y1 && o.y0 <= self.y1
     }
 }
-

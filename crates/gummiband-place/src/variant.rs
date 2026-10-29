@@ -320,7 +320,11 @@ pub fn arrange(d: &Design, fx: &FixedSet, shape: &Shape, gap: f64) -> Result<Arr
             // the USB-C sits in the upper part of the left edge as in the original (y = 20 of 60)
             set_pose(&mut usb, o + pt(USB_EDGE, (h / 3.0).max(12.0)), USB_ROT_LEFT);
             // right holes in the corners if the antenna keepout (48 mm along the edge) leaves room
-            let right_x = if h / 2.0 - 24.0 >= HOLE_INSET + 3.45 + gap { w - HOLE_INSET } else { w - 12.0 };
+            let right_x = if h / 2.0 - 24.0 >= HOLE_INSET + 3.45 + gap {
+                w - HOLE_INSET
+            } else {
+                w - 12.0
+            };
             let hp = [
                 pt(HOLE_INSET, HOLE_INSET),
                 pt(right_x, HOLE_INSET),
@@ -336,7 +340,12 @@ pub fn arrange(d: &Design, fx: &FixedSet, shape: &Shape, gap: f64) -> Result<Arr
             let n = rail_a.len().max(rail_b.len()) as f64;
             let pitch = ((hi - lo - pw) / (n - 1.0)).min(18.5);
             if pitch < pw + gap {
-                bail!("plug rows do not fit: {:.1} mm for {} plugs of {:.1} mm", hi - lo, n, pw);
+                bail!(
+                    "plug rows do not fit: {:.1} mm for {} plugs of {:.1} mm",
+                    hi - lo,
+                    n,
+                    pw
+                );
             }
             let start = (lo + hi) / 2.0 - pitch * (n - 1.0) / 2.0 - (px0 + px1) / 2.0;
             for (i, u) in rail_a.iter_mut().enumerate() {
@@ -345,7 +354,11 @@ pub fn arrange(d: &Design, fx: &FixedSet, shape: &Shape, gap: f64) -> Result<Arr
             // the bottom row is turned by 180 degrees: its extents along the edge are mirrored
             let start_b = start + (px0 + px1);
             for (i, u) in rail_b.iter_mut().enumerate() {
-                set_pose(u, o + pt(start_b + pitch * i as f64, h - PLUG_EDGE), PLUG_ROT_TOP - 180.0);
+                set_pose(
+                    u,
+                    o + pt(start_b + pitch * i as f64, h - PLUG_EDGE),
+                    PLUG_ROT_TOP - 180.0,
+                );
             }
             let mut units = vec![usb, module];
             units.extend(holes);
@@ -366,7 +379,11 @@ pub fn arrange(d: &Design, fx: &FixedSet, shape: &Shape, gap: f64) -> Result<Arr
             let at = |phi: f64, rad: f64| c + pt(phi.to_radians().cos(), -phi.to_radians().sin()) * rad;
             let sag = |half: f64| r - (r * r - half * half).max(0.0).sqrt();
             // module on the right (0 deg), its antenna corners on the circle
-            set_pose(&mut module, at(0.0, r - MODULE_EDGE - sag(MODULE_HALF)), MODULE_ROT_RIGHT);
+            set_pose(
+                &mut module,
+                at(0.0, r - MODULE_EDGE - sag(MODULE_HALF)),
+                MODULE_ROT_RIGHT,
+            );
             set_pose(&mut usb, at(180.0, r - USB_EDGE), USB_ROT_LEFT);
             // plugs radially, rail A on the upper arc, rail B on the lower arc. The plug body is
             // not centred on its origin (pin 1): the middle of its front edge goes on the radius,
@@ -428,7 +445,12 @@ pub fn arrange(d: &Design, fx: &FixedSet, shape: &Shape, gap: f64) -> Result<Arr
             placed.extend(rail_b.iter().cloned());
             let first_a = centre + 1.5 * pitch;
             let last_a = centre - 1.5 * pitch;
-            let arcs = [(first_a, 180.0), (0.0, last_a), (180.0, 360.0 - first_a), (360.0 - last_a, 360.0)];
+            let arcs = [
+                (first_a, 180.0),
+                (0.0, last_a),
+                (180.0, 360.0 - first_a),
+                (360.0 - last_a, 360.0),
+            ];
             for (u, (a0, a1)) in holes.iter_mut().zip(arcs) {
                 let mid = (a0 + a1) / 2.0;
                 let mut found = false;

@@ -257,7 +257,10 @@ pub fn polygon_text(pts: &[Point], indent: usize) -> String {
     for chunk in pts.chunks(6) {
         s.push_str(&tabs);
         s.push('\t');
-        let items: Vec<String> = chunk.iter().map(|p| format!("(xy {} {})", fmt_mm(p.x), fmt_mm(p.y))).collect();
+        let items: Vec<String> = chunk
+            .iter()
+            .map(|p| format!("(xy {} {})", fmt_mm(p.x), fmt_mm(p.y)))
+            .collect();
         s.push_str(&items.join(" "));
         s.push('\n');
     }

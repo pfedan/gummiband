@@ -44,10 +44,12 @@ impl Grid {
     }
     fn n4(&self, i: usize, j: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
         let (nx, ny) = (self.nx as isize, self.ny as isize);
-        [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)].into_iter().filter_map(move |(di, dj)| {
-            let (a, b) = (i as isize + di, j as isize + dj);
-            (a >= 0 && b >= 0 && a < nx && b < ny).then_some((a as usize, b as usize))
-        })
+        [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)]
+            .into_iter()
+            .filter_map(move |(di, dj)| {
+                let (a, b) = (i as isize + di, j as isize + dj);
+                (a >= 0 && b >= 0 && a < nx && b < ny).then_some((a as usize, b as usize))
+            })
     }
 
     /// 4-connected components of the cells of `net`: list of cell lists.
@@ -106,7 +108,11 @@ impl Grid {
     /// Boundary of a hole free 4-connected region as a polygon (collinear points merged).
     fn trace(&self, net: u16) -> Vec<Point> {
         let inside = |i: isize, j: isize| -> bool {
-            i >= 0 && j >= 0 && (i as usize) < self.nx && (j as usize) < self.ny && self.c[self.idx(i as usize, j as usize)] == net
+            i >= 0
+                && j >= 0
+                && (i as usize) < self.nx
+                && (j as usize) < self.ny
+                && self.c[self.idx(i as usize, j as usize)] == net
         };
         // directed edges on the cell corner lattice, region on the left (y down: clockwise on screen)
         let w = self.nx + 1;
@@ -166,7 +172,14 @@ impl Grid {
 }
 
 /// `pins[n]`: pin positions of plane net n. `keepouts`: polygons where the plane must not go.
-pub fn split(outline: &Outline, pins: &[Vec<Point>], keepouts: &[Polygon], edge: f64, gap_cells: usize, h: f64) -> PlaneSplit {
+pub fn split(
+    outline: &Outline,
+    pins: &[Vec<Point>],
+    keepouts: &[Polygon],
+    edge: f64,
+    gap_cells: usize,
+    h: f64,
+) -> PlaneSplit {
     let b = outline.bbox();
     let nx = (b.w() / h).ceil() as usize;
     let ny = (b.h() / h).ceil() as usize;
@@ -187,7 +200,10 @@ pub fn split(outline: &Outline, pins: &[Vec<Point>], keepouts: &[Polygon], edge:
             if !outline.inside(c, edge + half_diag) {
                 continue;
             }
-            if keepouts.iter().any(|k| k.contains(c) || k.boundary_dist(c) < 0.5 + half_diag) {
+            if keepouts
+                .iter()
+                .any(|k| k.contains(c) || k.boundary_dist(c) < 0.5 + half_diag)
+            {
                 continue;
             }
             let mut best = (f64::INFINITY, NONE);
@@ -206,7 +222,10 @@ pub fn split(outline: &Outline, pins: &[Vec<Point>], keepouts: &[Polygon], edge:
     let seeds = |g: &Grid, n: usize, comp: &[usize]| -> usize {
         pins[n]
             .iter()
-            .filter(|p| g.cell_of(**p).is_some_and(|(i, j)| comp.binary_search(&g.idx(i, j)).is_ok()))
+            .filter(|p| {
+                g.cell_of(**p)
+                    .is_some_and(|(i, j)| comp.binary_search(&g.idx(i, j)).is_ok())
+            })
             .count()
     };
     let keep_main = |g: &mut Grid, notes: &mut Vec<String>, what: &str| {

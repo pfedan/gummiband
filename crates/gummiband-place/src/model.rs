@@ -48,7 +48,12 @@ impl R {
         if w > 0.0 && h > 0.0 { w * h } else { 0.0 }
     }
     pub fn corners(&self) -> [Point; 4] {
-        [pt(self.x0, self.y0), pt(self.x1, self.y0), pt(self.x1, self.y1), pt(self.x0, self.y1)]
+        [
+            pt(self.x0, self.y0),
+            pt(self.x1, self.y0),
+            pt(self.x1, self.y1),
+            pt(self.x0, self.y1),
+        ]
     }
     pub fn center(&self) -> Point {
         pt((self.x0 + self.x1) * 0.5, (self.y0 + self.y1) * 0.5)
@@ -205,7 +210,11 @@ impl Design {
                 keepouts,
             });
         }
-        let by_ref = parts.iter().enumerate().map(|(i, p)| (p.reference.clone(), i)).collect();
+        let by_ref = parts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.reference.clone(), i))
+            .collect();
         Design { parts, nets, by_ref }
     }
 }
@@ -300,7 +309,10 @@ fn courtyard(fp: &Node) -> Vec<R> {
     for (a, b) in &segs {
         if (a.x - b.x).abs() < tol && (a.y - b.y).abs() > tol {
             let v = (a.x, a.y.min(b.y), a.y.max(b.y));
-            if !vert.iter().any(|w| (w.0 - v.0).abs() < tol && (w.1 - v.1).abs() < tol && (w.2 - v.2).abs() < tol) {
+            if !vert
+                .iter()
+                .any(|w| (w.0 - v.0).abs() < tol && (w.1 - v.1).abs() < tol && (w.2 - v.2).abs() < tol)
+            {
                 vert.push(v);
             }
         }

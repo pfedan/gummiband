@@ -673,6 +673,7 @@ fn route_blocking(
             population: runs,
             generations: p.generations.unwrap_or(3),
             geometry_generations: p.geometry_generations.unwrap_or(0),
+            frames: false,
         },
     );
     let seconds = t0.elapsed().as_secs_f64();
