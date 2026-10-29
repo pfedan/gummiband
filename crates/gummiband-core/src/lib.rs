@@ -9,9 +9,11 @@ pub mod relax;
 pub mod route;
 pub mod topo;
 
+use std::collections::HashMap;
+
 use rayon::prelude::*;
 
-use board::Board;
+use board::{Board, NetId};
 use realize::Geometry;
 use route::{Router, RouterConfig};
 use topo::{Substrate, SubstrateConfig};
@@ -20,11 +22,20 @@ use topo::{Substrate, SubstrateConfig};
 pub struct RunStats {
     pub seed: u64,
     pub fanout_first: bool,
+    /// Generation of the evolutionary search (0 = initial portfolio).
+    pub generation: usize,
     pub conns: usize,
     pub routed: usize,
     pub vias: usize,
     pub length: f64,
     pub unrouted: Vec<String>,
+}
+
+impl RunStats {
+    /// Lower is better: completion first, then vias, then length.
+    pub fn cost(&self) -> f64 {
+        (self.conns - self.routed) as f64 * 1e6 + self.vias as f64 * 2.0 + self.length * 0.05
+    }
 }
 
 pub struct RouteResult {
@@ -33,104 +44,208 @@ pub struct RouteResult {
     pub portfolio: Vec<RunStats>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SearchConfig {
+    /// Parallel runs per generation.
+    pub population: usize,
+    /// Generations of the evolutionary search after the initial portfolio (0 = portfolio only).
+    pub generations: usize,
+}
+
+/// Routing order genome: a key per connection, identified by (net, from pin). Lower routes first.
+type Genome = HashMap<(NetId, usize), f64>;
+
+struct Candidate {
+    stats: RunStats,
+    geo: Geometry,
+    /// Final connection order and the unrouted connections, for the next genome.
+    order: Vec<(NetId, usize)>,
+    failed: Vec<(NetId, usize)>,
+}
+
+fn evaluate(
+    board: &Board,
+    sub: &Substrate,
+    cfg: RouterConfig,
+    genome: Option<&Genome>,
+    generation: usize,
+) -> Candidate {
+    let mut r = Router::new(board, sub, cfg.clone());
+    r.plan();
+    if let Some(g) = genome {
+        r.reorder(|c| g.get(&(c.net, c.from)).copied().unwrap_or(f64::MAX));
+    }
+    let routed = r.run();
+    debug_hooks(board, &mut r);
+    let geo = r.geometry();
+    let length = geo
+        .tracks
+        .iter()
+        .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
+        .sum();
+    let unrouted_ids = r.unrouted();
+    let unrouted = unrouted_ids
+        .iter()
+        .map(|&ci| {
+            let c = &r.conns[ci];
+            format!("{} from {}", board.nets[c.net as usize].name, board.pins[c.from].name)
+        })
+        .collect();
+    let stats = RunStats {
+        seed: cfg.seed,
+        fanout_first: cfg.fanout_first,
+        generation,
+        conns: r.conns.len(),
+        routed,
+        vias: geo.vias.len(),
+        length,
+        unrouted,
+    };
+    Candidate {
+        stats,
+        geo,
+        order: r.conns.iter().map(|c| (c.net, c.from)).collect(),
+        failed: unrouted_ids
+            .iter()
+            .map(|&ci| (r.conns[ci].net, r.conns[ci].from))
+            .collect(),
+    }
+}
+
+/// Environment controlled debugging output of a finished router run.
+fn debug_hooks(board: &Board, r: &mut Router) {
+    if let Ok(pin) = std::env::var("GB_WHY") {
+        // trace the search of the first unrouted connection from this pin
+        if let Some(ci) = r
+            .unrouted()
+            .into_iter()
+            .find(|&ci| board.pins[r.conns[ci].from].name == pin)
+        {
+            *r.trace.lock().unwrap() = Some(Vec::new());
+            r.route_one(ci);
+            let t = r.trace.lock().unwrap().take().unwrap_or_default();
+            eprintln!("why {pin}: {} expansions", t.len());
+            let _ = std::fs::write(
+                "/tmp/gb-why.txt",
+                t.iter()
+                    .map(|(p, l)| format!("{} {} {}", p.x, p.y, l))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+    }
+    if std::env::var("GB_VALIDATE").is_ok() {
+        let v = r.validate();
+        eprintln!("validate: {} problems", v.len());
+        for l in v.iter().take(15) {
+            eprintln!("  {l}");
+        }
+    }
+    if std::env::var("GB_DEBUG_VIAS").is_ok() {
+        for l in r.debug_via_pairs() {
+            eprintln!("{l}");
+        }
+        for l in r.debug_vias(12) {
+            eprintln!("{l}");
+        }
+    }
+    if std::env::var("GB_DEBUG_X").is_ok() {
+        for l in r.debug_intersections(12) {
+            eprintln!("{l}");
+        }
+    }
+}
+
+/// Small deterministic random source (splitmix64).
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// A mutant of the best candidate's order: failed connections move forward by a random
+/// amount, a few random connections are shuffled locally.
+fn mutate(best: &Candidate, rng: &mut Rng) -> Genome {
+    let n = best.order.len().max(1) as f64;
+    let mut g: Genome = best.order.iter().enumerate().map(|(i, &k)| (k, i as f64)).collect();
+    for k in &best.failed {
+        if let Some(v) = g.get_mut(k) {
+            *v -= n * (0.2 + 0.8 * rng.unit());
+        }
+    }
+    let shuffles = 1 + (rng.next() % (n as u64 / 20 + 2)) as usize;
+    let keys: Vec<(NetId, usize)> = best.order.clone();
+    for _ in 0..shuffles {
+        let k = keys[(rng.next() % keys.len().max(1) as u64) as usize];
+        if let Some(v) = g.get_mut(&k) {
+            *v += (rng.unit() - 0.5) * n * 0.3;
+        }
+    }
+    g
+}
+
 /// Route a board: build the substrate once, run a portfolio of router configurations in
-/// parallel and keep the best result (completion, then vias, then length).
+/// parallel, then improve the best routing order in generations of mutants (completion first,
+/// then vias, then length). The winner is relaxed into its final geometry.
 pub fn route_board(
     board: &Board,
     sub_cfg: &SubstrateConfig,
     base: &RouterConfig,
-    runs: usize,
+    search: &SearchConfig,
 ) -> (Substrate, RouteResult) {
     let sub = Substrate::build(board, sub_cfg);
-    let configs: Vec<RouterConfig> = (0..runs.max(1))
+    let pop = search.population.max(1);
+    let configs: Vec<RouterConfig> = (0..pop)
         .map(|i| RouterConfig {
             seed: i as u64,
             fanout_first: i % 2 == 0,
             ..base.clone()
         })
         .collect();
-    let results: Vec<(RunStats, Geometry)> = configs
+    let first: Vec<Candidate> = configs
         .into_par_iter()
-        .map(|cfg| {
-            let mut r = Router::new(board, &sub, cfg.clone());
-            r.plan();
-            let routed = r.run();
-            if let Ok(pin) = std::env::var("GB_WHY") {
-                // trace the search of the first unrouted connection from this pin
-                if let Some(ci) = r
-                    .unrouted()
-                    .into_iter()
-                    .find(|&ci| board.pins[r.conns[ci].from].name == pin)
-                {
-                    *r.trace.lock().unwrap() = Some(Vec::new());
-                    r.route_one(ci);
-                    let t = r.trace.lock().unwrap().take().unwrap_or_default();
-                    eprintln!("why {pin}: {} expansions", t.len());
-                    let _ = std::fs::write(
-                        "/tmp/gb-why.txt",
-                        t.iter()
-                            .map(|(p, l)| format!("{} {} {}", p.x, p.y, l))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    );
-                }
-            }
-            let geo = r.geometry();
-            if std::env::var("GB_VALIDATE").is_ok() {
-                let v = r.validate();
-                eprintln!("validate: {} problems", v.len());
-                for l in v.iter().take(15) {
-                    eprintln!("  {l}");
-                }
-            }
-            if std::env::var("GB_DEBUG_VIAS").is_ok() {
-                for l in r.debug_via_pairs() {
-                    eprintln!("{l}");
-                }
-                for l in r.debug_vias(12) {
-                    eprintln!("{l}");
-                }
-            }
-            if std::env::var("GB_DEBUG_X").is_ok() {
-                for l in r.debug_intersections(12) {
-                    eprintln!("{l}");
-                }
-            }
-            let length = geo
-                .tracks
-                .iter()
-                .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
-                .sum();
-            let unrouted = r
-                .unrouted()
-                .into_iter()
-                .map(|ci| {
-                    let c = &r.conns[ci];
-                    format!("{} from {}", board.nets[c.net as usize].name, board.pins[c.from].name)
-                })
-                .collect();
-            let stats = RunStats {
-                seed: cfg.seed,
-                fanout_first: cfg.fanout_first,
-                conns: r.conns.len(),
-                routed,
-                vias: geo.vias.len(),
-                length,
-                unrouted,
-            };
-            (stats, geo)
-        })
+        .map(|cfg| evaluate(board, &sub, cfg, None, 0))
         .collect();
-    let portfolio: Vec<RunStats> = results.iter().map(|r| r.0.clone()).collect();
-    let (stats, mut geometry) = results
+    let mut portfolio: Vec<RunStats> = first.iter().map(|c| c.stats.clone()).collect();
+    let mut best = first
         .into_iter()
-        .max_by(|a, b| {
-            a.0.routed
-                .cmp(&b.0.routed)
-                .then(b.0.vias.cmp(&a.0.vias))
-                .then(b.0.length.total_cmp(&a.0.length))
-        })
+        .min_by(|a, b| a.stats.cost().total_cmp(&b.stats.cost()))
         .unwrap();
+    let mut rng = Rng(0x5eed);
+    for generation in 1..=search.generations {
+        if best.failed.is_empty() && generation > 2 {
+            // complete: a few generations for vias and length are enough
+            break;
+        }
+        let genomes: Vec<Genome> = (0..pop).map(|_| mutate(&best, &mut rng)).collect();
+        let cfg = RouterConfig {
+            seed: 0,
+            fanout_first: best.stats.fanout_first,
+            ..base.clone()
+        };
+        let next: Vec<Candidate> = genomes
+            .par_iter()
+            .map(|g| evaluate(board, &sub, cfg.clone(), Some(g), generation))
+            .collect();
+        portfolio.extend(next.iter().map(|c| c.stats.clone()));
+        let cand = next
+            .into_iter()
+            .min_by(|a, b| a.stats.cost().total_cmp(&b.stats.cost()))
+            .unwrap();
+        if cand.stats.cost() < best.stats.cost() {
+            best = cand;
+        }
+    }
+    let mut geometry = best.geo;
     if std::env::var("GB_NO_RELAX").is_err() {
         relax::relax(board, &sub, &mut geometry, &relax::RelaxConfig::default());
     }
@@ -138,7 +253,7 @@ pub fn route_board(
         sub,
         RouteResult {
             geometry,
-            stats,
+            stats: best.stats,
             portfolio,
         },
     )

@@ -1925,6 +1925,13 @@ impl<'a> Router<'a> {
         self.conn_vias = vec![Vec::new(); self.conns.len()];
     }
 
+    /// Reorder the planned connections by a key (lower first; ties keep the plan order).
+    pub fn reorder(&mut self, key: impl Fn(&Conn) -> f64) {
+        let mut idx: Vec<usize> = (0..self.conns.len()).collect();
+        idx.sort_by(|&a, &b| key(&self.conns[a]).total_cmp(&key(&self.conns[b])).then(a.cmp(&b)));
+        self.conns = idx.iter().map(|&i| self.conns[i].clone()).collect();
+    }
+
     /// Route all planned connections. Returns the number routed.
     pub fn run(&mut self) -> usize {
         let mut failed = Vec::new();

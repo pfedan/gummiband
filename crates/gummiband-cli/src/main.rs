@@ -43,6 +43,9 @@ enum Cmd {
         /// Via cost in mm of track.
         #[arg(long, default_value_t = 1.5)]
         via_cost: f64,
+        /// Generations of the evolutionary order search after the portfolio.
+        #[arg(long, default_value_t = 0)]
+        generations: usize,
         /// Write a debug SVG.
         #[arg(long)]
         svg: Option<PathBuf>,
@@ -148,6 +151,7 @@ fn main() -> Result<()> {
             runs,
             via_pitch,
             via_cost,
+            generations,
             svg,
             svg_tris,
         } => {
@@ -176,7 +180,10 @@ fn main() -> Result<()> {
                     via_cost,
                     ..Default::default()
                 },
-                runs,
+                &gummiband_core::SearchConfig {
+                    population: runs,
+                    generations,
+                },
             );
             let dt = t0.elapsed();
             println!(
@@ -187,8 +194,8 @@ fn main() -> Result<()> {
             );
             for r in &res.portfolio {
                 println!(
-                    "  run seed {:2} fanout_first {:5}: {}/{} routed, {} vias, {:.0} mm",
-                    r.seed, r.fanout_first, r.routed, r.conns, r.vias, r.length
+                    "  gen {:2} seed {:2} fanout_first {:5}: {}/{} routed, {} vias, {:.0} mm",
+                    r.generation, r.seed, r.fanout_first, r.routed, r.conns, r.vias, r.length
                 );
             }
             let s = &res.stats;
