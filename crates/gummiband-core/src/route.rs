@@ -491,14 +491,10 @@ impl<'a> Router<'a> {
         let m = self.m(li);
         let [u, v] = m.edges[e as usize];
         let (a, b) = (m.verts[u as usize], m.verts[v as usize]);
-        // narrow only where the whole edge lies in a zone: the realized track narrows only
-        // inside the zones, so the topology must not count on more room than that
-        let mode = std::env::var("GB_NECKMODE").unwrap_or_default();
-        let hit = match mode.as_str() {
-            "touch" => necks.iter().any(|r| r.touches_seg(a, b)),
-            "one" => necks.iter().any(|r| r.contains(a) || r.contains(b)),
-            _ => necks.iter().any(|r| r.contains(a) && r.contains(b)),
-        };
+        // narrow where the edge touches a zone: the realized track narrows on every piece that
+        // touches a zone (that is what intersectsCourtyard() rules allow), and an exit from a
+        // fine pitch pad crosses its first edges right next to the pad
+        let hit = necks.iter().any(|r| r.touches_seg(a, b));
         if hit { neck_w } else { full }
     }
 
