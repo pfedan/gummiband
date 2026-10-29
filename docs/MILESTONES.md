@@ -56,6 +56,11 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   and quality metrics as JSON, and render PNG images of regions for visual inspection.
 - Stable JSON schemas, deterministic results for the same seed, incremental calls on an open
   session so an agent can iterate quickly.
+- Datasheet-guided pre-routing (idea from Daniel): the controlling agent reads the datasheet of
+  a critical part (layout recommendation of an eFuse, a buck converter, a crystal), places that
+  copper through MCP tools as locked tracks, vias and zones, checks it, and then lets the
+  autorouter do the rest around it. Needed tools: part info (pads, nets, courtyard,
+  neighbours), add locked track/via/zone, check a region, route with locked copper kept.
 
 ## M4: Search and performance
 
