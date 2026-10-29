@@ -154,8 +154,12 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         continue;
                     }
                     let need = match o.kind {
-                        ObstacleKind::Keepout { vias: no_vias, .. } => {
-                            if !no_vias {
+                        ObstacleKind::Keepout {
+                            vias: no_vias,
+                            tracks: no_tracks,
+                        } => {
+                            // a via must not drag its tracks into a track keepout either
+                            if !no_vias && !no_tracks {
                                 continue;
                             }
                             crate::board::KEEPOUT_GAP

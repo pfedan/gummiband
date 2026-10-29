@@ -1559,11 +1559,27 @@ impl<'a> Router<'a> {
                         .collect();
                     cand.sort_by(|a, b| a.0.total_cmp(&b.0));
                     let mut tried = 0;
+                    // vias of this path so far (hole to hole spacing within one connection)
+                    let mut own_vias: Vec<Point> = Vec::new();
+                    {
+                        let mut p = idx;
+                        while p != u32::MAX {
+                            if let NK::Site { site, .. } | NK::Vert { site, .. } = nodes[p as usize].kind {
+                                own_vias.push(self.site_point(site));
+                            }
+                            p = nodes[p as usize].parent;
+                        }
+                    }
+                    let (_, own_drill, _) = self.via_size(net);
+                    let hole_gap = own_drill + self.board.rules.hole_to_hole;
                     for (d, site) in cand {
                         if tried >= self.cfg.sites_per_tri {
                             break;
                         }
                         let q = self.site_point(site);
+                        if own_vias.iter().any(|v| v.dist(q) < hole_gap) {
+                            continue;
+                        }
                         if let Some((ep, es)) = entry_pos
                             && !self.half_chord_ok(t, lu, net, q, ep, es)
                         {
@@ -2029,13 +2045,21 @@ impl<'a> Router<'a> {
         for _ in 0..3 {
             match self.search(ci) {
                 Some(chain) => {
-                    let before = if std::env::var("GB_VALIDATE_EACH").is_ok() { self.validate().len() } else { 0 };
+                    let before = if std::env::var("GB_VALIDATE_EACH").is_ok() {
+                        self.validate().len()
+                    } else {
+                        0
+                    };
                     if self.commit(ci, &chain) {
                         if std::env::var("GB_VALIDATE_EACH").is_ok() {
                             let v = self.validate();
                             if v.len() > before {
                                 let kinds: Vec<String> = chain.iter().map(|n| format!("{:?}", n.kind)).collect();
-                                eprintln!("conn {ci} broke the state: {:?}\n  chain {}", &v[v.len().min(before)..], kinds.join(" "));
+                                eprintln!(
+                                    "conn {ci} broke the state: {:?}\n  chain {}",
+                                    &v[v.len().min(before)..],
+                                    kinds.join(" ")
+                                );
                             }
                         }
                         return true;

@@ -216,10 +216,21 @@ pub fn route_board(
         .map(|cfg| evaluate(board, &sub, cfg, None, 0))
         .collect();
     let mut portfolio: Vec<RunStats> = first.iter().map(|c| c.stats.clone()).collect();
-    let mut best = first
-        .into_iter()
-        .min_by(|a, b| a.stats.cost().total_cmp(&b.stats.cost()))
-        .unwrap();
+    // the best few candidates go through the geometry step at the end
+    let keep = 4;
+    let mut finalists: Vec<Candidate> = Vec::new();
+    let offer = |finalists: &mut Vec<Candidate>, c: Candidate| {
+        finalists.push(c);
+        finalists.sort_by(|a, b| a.stats.cost().total_cmp(&b.stats.cost()));
+        finalists.truncate(keep);
+    };
+    let mut first = first;
+    first.sort_by(|a, b| a.stats.cost().total_cmp(&b.stats.cost()));
+    let rest = first.split_off(1);
+    let mut best = first.pop().unwrap();
+    for c in rest {
+        offer(&mut finalists, c);
+    }
     let mut rng = Rng(0x5eed);
     for generation in 1..=search.generations {
         if best.failed.is_empty() && generation > 2 {
@@ -237,22 +248,49 @@ pub fn route_board(
             .map(|g| evaluate(board, &sub, cfg.clone(), Some(g), generation))
             .collect();
         portfolio.extend(next.iter().map(|c| c.stats.clone()));
-        let cand = next
-            .into_iter()
-            .min_by(|a, b| a.stats.cost().total_cmp(&b.stats.cost()))
-            .unwrap();
-        if cand.stats.cost() < best.stats.cost() {
-            best = cand;
+        for cand in next {
+            if cand.stats.cost() < best.stats.cost() {
+                let old = std::mem::replace(&mut best, cand);
+                offer(&mut finalists, old);
+            } else {
+                offer(&mut finalists, cand);
+            }
         }
     }
-    let mut geometry = best.geo;
-    if std::env::var("GB_NO_RELAX").is_err() {
-        relax::relax(board, &sub, &mut geometry, &relax::RelaxConfig::default());
+    offer(&mut finalists, best);
+    if std::env::var("GB_NO_RELAX").is_ok() {
+        let best = finalists.swap_remove(0);
+        return (
+            sub,
+            RouteResult {
+                geometry: best.geo,
+                stats: best.stats,
+                portfolio,
+            },
+        );
     }
+    // relax the finalists of the best completion and keep the cleanest geometry
+    let top = finalists[0].stats.routed;
+    let mut judged: Vec<(usize, Candidate)> = finalists
+        .into_iter()
+        .filter(|c| c.stats.routed == top)
+        .map(|mut c| {
+            relax::relax(board, &sub, &mut c.geo, &relax::RelaxConfig::default());
+            (check::check(board, &c.geo).len(), c)
+        })
+        .collect();
+    judged.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.stats.cost().total_cmp(&b.1.stats.cost())));
+    for (v, c) in &judged {
+        eprintln!(
+            "finalist gen {} {}/{} routed, {} vias, {:.0} mm: {v} violations",
+            c.stats.generation, c.stats.routed, c.stats.conns, c.stats.vias, c.stats.length
+        );
+    }
+    let (_, best) = judged.swap_remove(0);
     (
         sub,
         RouteResult {
-            geometry,
+            geometry: best.geo,
             stats: best.stats,
             portfolio,
         },
