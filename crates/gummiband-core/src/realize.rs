@@ -237,7 +237,41 @@ impl Router<'_> {
                 None => break,
             }
         }
-        best.unwrap_or_else(polyline)
+        // the band must stay inside the triangles its topology passes through; where the wraps
+        // would leave them (and could cross a neighbour), the funnel polyline is the safe choice
+        match best {
+            Some(b) if self.in_corridor(sid, &flatten(&b)) => b,
+            _ => polyline(),
+        }
+    }
+
+    /// True if the polyline stays in the corridor of seg `sid` (its crossed triangles and the
+    /// copper of its own net).
+    fn in_corridor(&self, sid: u32, path: &[Point]) -> bool {
+        let s = self.segs[sid as usize].as_ref().unwrap();
+        let m = &self.sub.m[s.li as usize];
+        let mut tris: Vec<u32> = Vec::new();
+        for c in &s.crossings {
+            tris.push(c.from);
+            tris.push(m.other_tri(c.e, c.from));
+        }
+        let in_tri = |t: u32, p: Point| {
+            let v = m.tris[t as usize];
+            let (a, b, c) = (m.verts[v[0] as usize], m.verts[v[1] as usize], m.verts[v[2] as usize]);
+            orient(a, b, p) >= -1e-9 && orient(b, c, p) >= -1e-9 && orient(c, a, p) >= -1e-9
+        };
+        let own = |p: Point| {
+            self.sub.shared.obs_index.query_point(p, 0.0).iter().any(|&o| {
+                self.board.obstacles[o as usize].net == Some(s.net) && self.sub.shared.obs_polys[o as usize].contains(p)
+            })
+        };
+        path.windows(2).all(|w| {
+            let n = ((w[0].dist(w[1]) / 0.05).ceil() as usize).clamp(1, 200);
+            (0..=n).all(|k| {
+                let p = w[0].lerp(w[1], k as f64 / n as f64);
+                tris.iter().any(|&t| in_tri(t, p)) || own(p)
+            })
+        })
     }
 
     pub fn geometry(&self) -> Geometry {
@@ -528,6 +562,37 @@ impl Router<'_> {
                         format!("#{k} e{} B {}", c.e, if b_right { "R" } else { "L" })
                     })
                     .collect();
+                let mm = &self.sub.m[sa.li as usize];
+                let tri_at = (0..mm.tris.len() as u32).find(|&t| {
+                    let v = mm.tris[t as usize];
+                    let (p, q, r) = (
+                        mm.verts[v[0] as usize],
+                        mm.verts[v[1] as usize],
+                        mm.verts[v[2] as usize],
+                    );
+                    orient(p, q, at) >= 0.0 && orient(q, r, at) >= 0.0 && orient(r, p, at) >= 0.0
+                });
+                if let Some(t) = tri_at {
+                    let es = mm.tri_edges[t as usize];
+                    let ca: Vec<usize> = sa
+                        .crossings
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| es.contains(&c.e))
+                        .map(|(k, _)| k)
+                        .collect();
+                    let cb: Vec<usize> = sb
+                        .crossings
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| es.contains(&c.e))
+                        .map(|(k, _)| k)
+                        .collect();
+                    out.push(format!(
+                        "   tri {t} status {} chords {:?}; A crosses its edges at {:?}, B at {:?}; A ends {:?}/{:?} B ends {:?}/{:?}",
+                        mm.status[t as usize], self.chords_debug(sa.li as usize, t), ca, cb, sa.start, sa.end, sb.start, sb.end
+                    ));
+                }
                 out.push(format!(
                     "segs {} ({}) x {} ({}) at {:.3},{:.3} li {}: {} vs {} crossings, common {:?}",
                     ids[a],
@@ -648,6 +713,71 @@ impl Router<'_> {
                         d,
                         need
                     ));
+                }
+            }
+        }
+        out
+    }
+}
+
+impl Router<'_> {
+    /// Debug: segments whose funnel polyline leaves the corridor of triangles they cross.
+    pub fn debug_corridors(&self, limit: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        for sid in 0..self.segs.len() as u32 {
+            let Some(s) = self.segs[sid as usize].as_ref() else {
+                continue;
+            };
+            let m = &self.sub.m[s.li as usize];
+            let mut tris: Vec<u32> = Vec::new();
+            for c in &s.crossings {
+                tris.push(c.from);
+                tris.push(m.other_tri(c.e, c.from));
+            }
+            if tris.is_empty() {
+                continue;
+            }
+            let own = |p: Point| {
+                self.sub.shared.obs_index.query_point(p, 0.0).iter().any(|&o| {
+                    self.board.obstacles[o as usize].net == Some(s.net)
+                        && self.sub.shared.obs_polys[o as usize].contains(p)
+                })
+            };
+            let inside = |p: Point| {
+                own(p)
+                    || tris.iter().any(|&t| {
+                        let v = m.tris[t as usize];
+                        let (a, b, c) = (m.verts[v[0] as usize], m.verts[v[1] as usize], m.verts[v[2] as usize]);
+                        orient(a, b, p) >= -1e-9 && orient(b, c, p) >= -1e-9 && orient(c, a, p) >= -1e-9
+                    })
+            };
+            let path = flatten(&self.seg_path(sid));
+            let mut bad = None;
+            for w in path.windows(2) {
+                for k in 1..20 {
+                    let p = w[0].lerp(w[1], k as f64 / 20.0);
+                    if !inside(p) {
+                        bad = Some(p);
+                        break;
+                    }
+                }
+                if bad.is_some() {
+                    break;
+                }
+            }
+            if let Some(p) = bad {
+                out.push(format!(
+                    "seg {sid} {} li {} leaves its corridor at {:.3},{:.3} ({} crossings, start {:?} end {:?})",
+                    self.board.nets[s.net as usize].name,
+                    s.li,
+                    p.x,
+                    p.y,
+                    s.crossings.len(),
+                    s.start,
+                    s.end
+                ));
+                if out.len() >= limit {
+                    break;
                 }
             }
         }

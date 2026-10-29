@@ -2162,6 +2162,14 @@ impl<'a> Router<'a> {
             .collect()
     }
 
+    /// Chords of triangle t (debugging aid).
+    pub fn chords_debug(&self, li: usize, t: u32) -> Vec<String> {
+        self.chords[li]
+            .get(&t)
+            .map(|l| l.iter().map(|c| format!("{}:{:?}->{:?}", c.seg, c.a, c.b)).collect())
+            .unwrap_or_default()
+    }
+
     /// Consistency checks of the topological state (debugging aid).
     pub fn validate(&self) -> Vec<String> {
         let mut out = Vec::new();

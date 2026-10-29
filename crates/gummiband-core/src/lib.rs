@@ -159,6 +159,11 @@ fn debug_hooks(board: &Board, r: &mut Router) {
             eprintln!("{l}");
         }
     }
+    if std::env::var("GB_DEBUG_CORRIDOR").is_ok() {
+        for l in r.debug_corridors(15) {
+            eprintln!("{l}");
+        }
+    }
     if std::env::var("GB_DEBUG_X").is_ok() {
         for l in r.debug_intersections(12) {
             eprintln!("{l}");
