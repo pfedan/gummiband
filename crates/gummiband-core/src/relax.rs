@@ -336,8 +336,9 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
     for (v, (p, ..)) in geo.vias.iter_mut().zip(&vias) {
         v.at = *p;
     }
+    let tracks = taut(board, sub, geo, tracks, cfg);
     for (t, pts) in geo.tracks.iter_mut().zip(tracks) {
-        let s = simplify(&pts, 0.001);
+        let s = simplify(&pts, 0.0005);
         *t = Track {
             elems: s.windows(2).map(|w| Elem::Line(w[0], w[1])).collect(),
             pts: s,
@@ -348,6 +349,133 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             neck_w: t.neck_w,
         };
     }
+}
+
+/// Final pull: replace runs of points by straight shortcuts wherever the shortcut keeps all
+/// clearances (to obstacles, vias and the current geometry of the other tracks). This removes
+/// the small waves the relaxation leaves and straightens the bands. Tracks are processed one by
+/// one, each against the already shortened ones.
+fn taut(
+    board: &Board,
+    sub: &Substrate,
+    geo: &Geometry,
+    mut tracks: Vec<Vec<Point>>,
+    cfg: &RelaxConfig,
+) -> Vec<Vec<Point>> {
+    let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
+    let bounds = board.bbox().grow(5.0);
+    let mut idx = GridIndex::new(bounds, 0.5);
+    // pieces: (a, b, track); a removed piece gets track = u32::MAX
+    let mut pieces: Vec<(Point, Point, u32)> = Vec::new();
+    let mut owned: Vec<Vec<u32>> = vec![Vec::new(); tracks.len()];
+    let add = |idx: &mut GridIndex,
+               pieces: &mut Vec<(Point, Point, u32)>,
+               owned: &mut Vec<Vec<u32>>,
+               ti: usize,
+               p: &[Point]| {
+        for w in p.windows(2) {
+            let id = pieces.len() as u32;
+            pieces.push((w[0], w[1], ti as u32));
+            let mut r = Rect::empty();
+            r.add(w[0]);
+            r.add(w[1]);
+            idx.insert(id, &r);
+            owned[ti].push(id);
+        }
+    };
+    for (ti, p) in tracks.iter().enumerate() {
+        add(&mut idx, &mut pieces, &mut owned, ti, p);
+    }
+    let routing_vias: Vec<(Point, f64, u32)> = geo.vias.iter().map(|v| (v.at, v.diameter / 2.0, v.net)).collect();
+    let m = cfg.margin * 0.5;
+    for ti in 0..tracks.len() {
+        let t = &geo.tracks[ti];
+        let (net, layer, c) = (t.net, t.layer, clr(t.net));
+        let clear = |a: Point, b: Point, pieces: &[(Point, Point, u32)], idx: &GridIndex| -> bool {
+            let w = t.piece_width(a, b);
+            let mut r = Rect::empty();
+            r.add(a);
+            r.add(b);
+            let rr = r.grow(w / 2.0 + 1.0);
+            for oi in sub.shared.obs_index.query(&rr) {
+                let o = &board.obstacles[oi as usize];
+                if !o.layers.has(layer) || (o.net == Some(net) && o.kind != ObstacleKind::Hole) {
+                    continue;
+                }
+                let need = match o.kind {
+                    ObstacleKind::Keepout { tracks, .. } => {
+                        if !tracks {
+                            continue;
+                        }
+                        0.0
+                    }
+                    ObstacleKind::Hole => board.rules.hole_clearance,
+                    _ => o.clearance.max(c),
+                } + w / 2.0
+                    + m;
+                if sub.shared.obs_polys[oi as usize].dist_to_seg(a, b) < need {
+                    return false;
+                }
+            }
+            for o in &board.outline {
+                if o.edges()
+                    .map(|(p, q)| crate::geom::seg_seg_dist(a, b, p, q))
+                    .fold(f64::INFINITY, f64::min)
+                    < board.rules.edge_clearance + w / 2.0 + m
+                {
+                    return false;
+                }
+            }
+            for &(vc, vr, vn) in &routing_vias {
+                if vn != net && point_seg_dist(vc, a, b) < vr + c.max(clr(vn)) + w / 2.0 + m {
+                    return false;
+                }
+            }
+            for pi in idx.query(&rr) {
+                let (p, q, tj) = pieces[pi as usize];
+                if tj == u32::MAX || tj as usize == ti {
+                    continue;
+                }
+                let o = &geo.tracks[tj as usize];
+                if o.net == net || o.layer != layer {
+                    continue;
+                }
+                let need = w / 2.0 + o.piece_width(p, q) / 2.0 + board.track_clearance(net, o.net) + m;
+                if crate::geom::seg_seg_dist(a, b, p, q) < need {
+                    return false;
+                }
+            }
+            true
+        };
+        let pts = &tracks[ti];
+        let n = pts.len();
+        if n <= 2 {
+            continue;
+        }
+        let mut out = vec![pts[0]];
+        let mut i = 0;
+        while i < n - 1 {
+            let mut j = i + 1;
+            let mut k = i + 2;
+            while k < n && k <= i + 80 {
+                if clear(pts[i], pts[k], &pieces, &idx) {
+                    j = k;
+                }
+                k += 1;
+            }
+            out.push(pts[j]);
+            i = j;
+        }
+        if out.len() < n {
+            for &id in &owned[ti] {
+                pieces[id as usize].2 = u32::MAX;
+            }
+            owned[ti].clear();
+            add(&mut idx, &mut pieces, &mut owned, ti, &out);
+            tracks[ti] = out;
+        }
+    }
+    tracks
 }
 
 /// Distance from p to the polygon boundary and the nearest boundary point.
