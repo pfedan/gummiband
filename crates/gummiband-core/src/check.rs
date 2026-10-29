@@ -142,7 +142,7 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
                         if !applies {
                             continue;
                         }
-                        0.0
+                        crate::board::KEEPOUT_GAP
                     }
                     ObstacleKind::Hole => board.rules.hole_clearance,
                     _ => o.clearance.max(clr(net)),

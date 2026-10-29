@@ -2,6 +2,9 @@
 
 use crate::geom::{Point, Polygon, Rect, Shape};
 
+/// Distance kept from rule areas: KiCad flags a track that merely touches one.
+pub const KEEPOUT_GAP: f64 = 0.02;
+
 pub type LayerId = u8;
 pub type NetId = u32;
 pub type ClassId = u16;

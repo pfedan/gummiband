@@ -310,7 +310,7 @@ impl<'a> Router<'a> {
         }
         let o = &self.board.obstacles[obs as usize];
         match o.kind {
-            ObstacleKind::Keepout { .. } => 0.0,
+            ObstacleKind::Keepout { .. } => crate::board::KEEPOUT_GAP,
             ObstacleKind::Hole => self.board.rules.hole_clearance.max(o.clearance),
             _ => o.clearance.max(c),
         }

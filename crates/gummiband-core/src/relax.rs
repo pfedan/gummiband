@@ -158,7 +158,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             if !no_vias {
                                 continue;
                             }
-                            0.0
+                            crate::board::KEEPOUT_GAP
                         }
                         ObstacleKind::Hole => board.rules.hole_clearance,
                         _ => o.clearance.max(vclr),
@@ -241,7 +241,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                                 if !tracks {
                                     continue;
                                 }
-                                0.0
+                                crate::board::KEEPOUT_GAP
                             }
                             ObstacleKind::Hole => board.rules.hole_clearance,
                             _ => o.clearance.max(c),
@@ -407,7 +407,7 @@ fn taut(
                         if !tracks {
                             continue;
                         }
-                        0.0
+                        crate::board::KEEPOUT_GAP
                     }
                     ObstacleKind::Hole => board.rules.hole_clearance,
                     _ => o.clearance.max(c),
