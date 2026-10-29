@@ -562,7 +562,7 @@ impl Router<'_> {
                     continue;
                 }
                 let m = &self.sub.m[s.li as usize];
-                let v = m.site_vert[&site];
+                let Some(&v) = m.site_vert.get(&site) else { continue };
                 let incident: Vec<usize> = s
                     .crossings
                     .iter()

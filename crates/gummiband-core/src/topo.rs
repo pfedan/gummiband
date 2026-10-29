@@ -23,6 +23,8 @@ pub const NONE: u32 = u32::MAX;
 pub const OUTSIDE: u32 = u32::MAX - 1;
 /// `vert_site` marker of a Steiner vertex (inserted to avoid sliver triangles).
 pub const STEINER: u32 = u32::MAX - 2;
+/// `site_tri` marker of a via-in-pad site on the layer of its pad.
+pub const PAD_SITE: u32 = u32::MAX - 3;
 
 #[derive(Debug, Clone)]
 pub struct SubstrateConfig {
@@ -64,6 +66,8 @@ pub struct SiteNeighbor {
 pub struct Site {
     pub p: Point,
     pub nbrs: Vec<SiteNeighbor>,
+    /// Via in pad: the pin whose pad holds the site.
+    pub pad: Option<u32>,
 }
 
 /// Immutable data shared by all router runs.
@@ -71,6 +75,8 @@ pub struct Shared {
     pub obs_polys: Vec<Polygon>,
     pub obs_index: GridIndex,
     pub sites: Vec<Site>,
+    /// Via-in-pad sites per pin.
+    pub pad_sites: HashMap<u32, Vec<u32>>,
     pub bounds: Rect,
 }
 
@@ -139,9 +145,16 @@ impl Substrate {
             obs_polys,
             obs_index,
             sites: Vec::new(),
+            pad_sites: HashMap::new(),
             bounds,
         };
         shared.sites = build_sites(board, &shared, cfg.via_pitch);
+        shared.sites.extend(build_pad_sites(board, &shared));
+        for (i, s) in shared.sites.iter().enumerate() {
+            if let Some(pin) = s.pad {
+                shared.pad_sites.entry(pin).or_default().push(i as u32);
+            }
+        }
         let nsites = shared.sites.len();
         let mut meshes: Vec<Mesh> = layers
             .par_iter()
@@ -154,8 +167,10 @@ impl Substrate {
         for m in &mut meshes {
             for (s, &ok) in usable.iter().enumerate() {
                 if !ok && m.site_tri[s] != NONE {
-                    let t = m.site_tri[s] as usize;
-                    m.tri_sites[t].retain(|&q| q != s as u32);
+                    let t = m.site_tri[s];
+                    if t != PAD_SITE {
+                        m.tri_sites[t as usize].retain(|&q| q != s as u32);
+                    }
                     m.site_tri[s] = NONE;
                 }
             }
@@ -333,9 +348,15 @@ impl Mesh {
                 _ => continue,
             };
             let Some(&t) = face_to_tri.get(&face) else { continue };
-            if m.status[t as usize] == NONE {
+            let st = m.status[t as usize];
+            if st == NONE {
                 m.tri_sites[t as usize].push(i as u32);
                 m.site_tri[i] = t;
+            } else if let Some(pin) = site.pad
+                && st != OUTSIDE
+                && board.obstacles[st as usize].pin == Some(pin as usize)
+            {
+                m.site_tri[i] = PAD_SITE;
             }
         }
         m
@@ -640,9 +661,73 @@ fn build_sites(board: &Board, shared: &Shared, pitch: f64) -> Vec<Site> {
             if nbrs.iter().any(|n| (n.dist as f64) < min_via_r) {
                 return None;
             }
-            Some(Site { p, nbrs })
+            Some(Site { p, nbrs, pad: None })
         })
         .collect()
+}
+
+/// Via-in-pad candidates: the centre (and the ends of the long axis) of SMD pads of plane nets.
+fn build_pad_sites(board: &Board, shared: &Shared) -> Vec<Site> {
+    let routing = board.routing_layers();
+    let min_via_r = board.rules.min_via_diameter / 2.0;
+    let mut out = Vec::new();
+    for (pi, pin) in board.pins.iter().enumerate() {
+        let net = &board.nets[pin.net as usize];
+        if net.planes.is_empty() || pin.layers.iter().filter(|&l| routing.has(l)).count() != 1 {
+            continue;
+        }
+        let (w, h) = pin.size;
+        let mut pts = vec![pin.pos];
+        let long = w.max(h);
+        if long > 1.2 {
+            let d = long / 2.0 - 0.35;
+            let dir = if w >= h { pt(1.0, 0.0) } else { pt(0.0, 1.0) };
+            pts.push(pin.pos + dir * d);
+            pts.push(pin.pos - dir * d);
+        }
+        for p in pts {
+            if board.edge_dist(p) < min_via_r + board.rules.edge_clearance {
+                continue;
+            }
+            let mut nbrs = Vec::new();
+            let mut ok = true;
+            for id in shared.obs_index.query_point(p, 2.5) {
+                let o = &board.obstacles[id as usize];
+                if o.pin == Some(pi) {
+                    continue;
+                }
+                let d = shared.obs_polys[id as usize].dist_to_point(p);
+                if let ObstacleKind::Keepout { vias, .. } = o.kind {
+                    if vias && d == 0.0 {
+                        ok = false;
+                    }
+                    continue;
+                }
+                if !o.layers.intersects(routing) && o.hole.is_none() {
+                    continue;
+                }
+                let mut dd = d;
+                if let Some(hr) = o.hole {
+                    let c = o.shape.bbox().center();
+                    dd = dd.min((p.dist(c) - hr).max(0.0));
+                }
+                if dd < 2.5 {
+                    nbrs.push(SiteNeighbor {
+                        obs: id,
+                        dist: dd as f32,
+                    });
+                }
+            }
+            if ok {
+                out.push(Site {
+                    p,
+                    nbrs,
+                    pad: Some(pi as u32),
+                });
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

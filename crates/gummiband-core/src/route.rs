@@ -12,7 +12,7 @@ use std::collections::{BinaryHeap, HashMap};
 
 use crate::board::{Board, NetId, ObstacleKind};
 use crate::geom::{Point, orient, point_seg_dist, segs_intersect};
-use crate::topo::{Mesh, NONE, OUTSIDE, STEINER, Substrate};
+use crate::topo::{Mesh, NONE, OUTSIDE, PAD_SITE, STEINER, Substrate};
 
 #[derive(Debug, Clone)]
 pub struct RouterConfig {
@@ -30,6 +30,8 @@ pub struct RouterConfig {
     pub sites_per_tri: usize,
     /// Extra clearance in mm kept in the capacity model (room for the geometry step).
     pub margin: f64,
+    /// Allow vias inside SMD pads for plane fan-outs (otherwise only as a last resort).
+    pub via_in_pad: bool,
 }
 
 impl Default for RouterConfig {
@@ -43,6 +45,7 @@ impl Default for RouterConfig {
             ripup_passes: env("GB_RIPUP", 3.0) as usize,
             sites_per_tri: 3,
             margin: 0.01,
+            via_in_pad: false,
         }
     }
 }
@@ -893,6 +896,9 @@ impl<'a> Router<'a> {
         for li in 0..self.nl() {
             let m = self.m(li);
             let t = m.site_tri[site as usize];
+            if t == PAD_SITE {
+                continue;
+            }
             let tv = m.tris[t as usize];
             if let Some(list) = self.chords[li].get(&t) {
                 // which new edge (s, v_i) each chord crosses and where
@@ -1001,6 +1007,12 @@ impl<'a> Router<'a> {
         let mut res = Vec::new();
         for li in 0..self.nl() {
             let t = self.m(li).site_tri[site as usize];
+            if t == PAD_SITE {
+                // via in pad: no vertex on the pad's own layer
+                self.sub.m[li].site_tri[site as usize] = NONE;
+                res.push((NONE, [NONE; 3]));
+                continue;
+            }
             // geometry of the old chords, before the mesh changes
             let mut old: Vec<(Chord, Vec<(usize, f64)>, Point)> = Vec::new();
             if let Some(list) = self.chords[li].remove(&t) {
@@ -1135,7 +1147,7 @@ impl<'a> Router<'a> {
         self.board
             .planes
             .iter()
-            .any(|pl| pl.net == net && pl.outline.contains(p) && pl.outline.boundary_dist(p) >= r + 0.5)
+            .any(|pl| pl.net == net && pl.outline.contains(p) && pl.outline.boundary_dist(p) >= r + 0.3)
     }
 
     fn add_via(&mut self, site: u32, net: NetId) {
@@ -1436,6 +1448,29 @@ impl<'a> Router<'a> {
                         );
                         continue;
                     }
+                    // via in pad: a plane fan-out may end on a via inside the source pad
+                    if !free
+                        && self.cfg.via_in_pad
+                        && conn.goal == Goal::Plane
+                        && let Some(pin) = self.tri_pin(lu, t)
+                        && self.pin_group[pin] == self.pin_group[conn.from]
+                        && let Some(list) = self.sub.shared.pad_sites.get(&(pin as u32))
+                    {
+                        for &site in list {
+                            let q = self.site_point(site);
+                            if self.in_plane(q, net) && self.sub.site_usable(site) && self.via_ok_site(site, net) {
+                                push(
+                                    &mut best,
+                                    &mut nodes,
+                                    &mut open,
+                                    NK::GoalSite { site },
+                                    q,
+                                    node.g + node.pos.dist(q) + self.cfg.via_cost,
+                                    idx,
+                                );
+                            }
+                        }
+                    }
                     // through hole copper of the net: switch layers for free
                     if !free && status != OUTSIDE && self.board.obstacles[status as usize].hole.is_some() {
                         for l2 in 0..nl {
@@ -1517,8 +1552,11 @@ impl<'a> Router<'a> {
                     if sites.is_empty() {
                         continue;
                     }
-                    let mut cand: Vec<(f64, u32)> =
-                        sites.iter().map(|&s| (self.site_point(s).dist(node.pos), s)).collect();
+                    let mut cand: Vec<(f64, u32)> = sites
+                        .iter()
+                        .filter(|&&s| self.sub.shared.sites[s as usize].pad.is_none())
+                        .map(|&s| (self.site_point(s).dist(node.pos), s))
+                        .collect();
                     cand.sort_by(|a, b| a.0.total_cmp(&b.0));
                     let mut tried = 0;
                     for (d, site) in cand {
@@ -1940,7 +1978,12 @@ impl<'a> Router<'a> {
                 failed.push(ci);
             }
         }
-        // Fan-outs that found no plane: connect to the nearest pin of the net instead.
+        // Fan-outs that found no plane: try a via in the pad, then connect to the nearest pin of
+        // the net instead.
+        let vip = self.cfg.via_in_pad;
+        self.cfg.via_in_pad = true;
+        failed.retain(|&ci| self.conns[ci].goal != Goal::Plane || !self.route_one(ci));
+        self.cfg.via_in_pad = vip;
         for &ci in &failed {
             if self.conns[ci].goal == Goal::Plane {
                 let c = &self.conns[ci];
