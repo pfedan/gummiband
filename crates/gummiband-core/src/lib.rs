@@ -63,6 +63,14 @@ pub fn route_board(
                     eprintln!("  {l}");
                 }
             }
+            if std::env::var("GB_DEBUG_VIAS").is_ok() {
+                for l in r.debug_via_pairs() {
+                    eprintln!("{l}");
+                }
+                for l in r.debug_vias(12) {
+                    eprintln!("{l}");
+                }
+            }
             if std::env::var("GB_DEBUG_X").is_ok() {
                 for l in r.debug_intersections(12) {
                     eprintln!("{l}");

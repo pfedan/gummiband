@@ -90,20 +90,26 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
     let mut tracks: Vec<Vec<Point>> = geo.tracks.iter().map(|t| resample(&t.pts, cfg.spacing)).collect();
     let bounds = board.bbox().grow(5.0);
     // vias as static obstacles: (centre, radius, net, clearance)
-    let vias: Vec<(Point, f64, u32, f64)> = geo
+    let mut vias: Vec<(Point, f64, u32, f64)> = geo
         .vias
         .iter()
         .map(|v| (v.at, v.diameter / 2.0, v.net, clr(v.net)))
         .collect();
-    let mut via_idx = GridIndex::new(bounds, 1.0);
-    for (i, v) in vias.iter().enumerate() {
-        let mut r = Rect::empty();
-        r.add(v.0);
-        via_idx.insert(i as u32, &r.grow(v.1));
-    }
     let edge_clr = board.rules.edge_clearance;
+    let routing = board.routing_layers();
+    // track ends that sit on a via of their net follow the via
+    let attach = |p: Point, net: u32, vias: &[(Point, f64, u32, f64)]| {
+        vias.iter().position(|v| v.2 == net && v.0.dist(p) < 1e-6)
+    };
+    let ends: Vec<(Option<usize>, Option<usize>)> = tracks
+        .iter()
+        .zip(&geo.tracks)
+        .map(|(p, t)| (attach(p[0], t.net, &vias), attach(*p.last().unwrap(), t.net, &vias)))
+        .collect();
 
     for it in 0..cfg.iterations {
+        // anneal: the last quarter only resolves clearances
+        let tension = if it * 4 >= cfg.iterations * 3 { 0.0 } else { cfg.tension };
         if it % 10 == 9 {
             tracks = tracks
                 .par_iter()
@@ -127,6 +133,86 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             r.add(pc.b);
             idx.insert(i as u32, &r);
         }
+        let mut via_idx = GridIndex::new(bounds, 1.0);
+        for (i, v) in vias.iter().enumerate() {
+            let mut r = Rect::empty();
+            r.add(v.0);
+            via_idx.insert(i as u32, &r.grow(v.1));
+        }
+        // vias move as well: pushed by obstacles, other vias and tracks of other nets
+        let moved: Vec<Point> = vias
+            .par_iter()
+            .enumerate()
+            .map(|(vi, &(vc, vr, vn, vclr))| {
+                let mut push = pt(0.0, 0.0);
+                for oi in sub.shared.obs_index.query_point(vc, vr + 1.0) {
+                    let o = &board.obstacles[oi as usize];
+                    if !o.layers.intersects(routing) && o.hole.is_none() {
+                        continue;
+                    }
+                    if o.net == Some(vn) && o.kind != ObstacleKind::Hole {
+                        continue;
+                    }
+                    let need = match o.kind {
+                        ObstacleKind::Keepout { vias: no_vias, .. } => {
+                            if !no_vias {
+                                continue;
+                            }
+                            0.0
+                        }
+                        ObstacleKind::Hole => board.rules.hole_clearance,
+                        _ => o.clearance.max(vclr),
+                    } + vr
+                        + cfg.margin;
+                    let poly = &sub.shared.obs_polys[oi as usize];
+                    let inside = poly.contains(vc);
+                    let (d, q) = nearest_on_poly(poly, vc);
+                    let d = if inside { -d } else { d };
+                    if d < need {
+                        let dir = if inside { (q - vc).norm() } else { (vc - q).norm() };
+                        push = push + dir * (need - d);
+                    }
+                }
+                for (vj, &(c2, r2, n2, clr2)) in vias.iter().enumerate() {
+                    if vj == vi || n2 == vn {
+                        continue;
+                    }
+                    let need = vr + r2 + vclr.max(clr2) + cfg.margin;
+                    let d = vc.dist(c2);
+                    if d < need && d > 1e-9 {
+                        push = push + (vc - c2).norm() * ((need - d) * 0.5);
+                    }
+                }
+                for pi in idx.query_point(vc, vr + 1.5) {
+                    let pc = &pieces[pi as usize];
+                    let o = &geo.tracks[pc.track as usize];
+                    if o.net == vn {
+                        continue;
+                    }
+                    let need = vr + o.width / 2.0 + vclr.max(clr(o.net)) + cfg.margin;
+                    let ab = pc.b - pc.a;
+                    let l2 = ab.len2();
+                    let tt = if l2 > 0.0 {
+                        ((vc - pc.a).dot(ab) / l2).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let q = pc.a + ab * tt;
+                    let d = vc.dist(q);
+                    if d < need {
+                        let dir = if d > 1e-9 { (vc - q).norm() } else { ab.perp().norm() };
+                        push = push + dir * ((need - d) * 0.5);
+                    }
+                }
+                let l = push.len();
+                let mv = if l > cfg.max_step {
+                    push * (cfg.max_step / l)
+                } else {
+                    push
+                };
+                vc + mv
+            })
+            .collect();
         let snapshot = &tracks;
         tracks = snapshot
             .par_iter()
@@ -140,7 +226,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     let p = pts[i];
                     // tension
                     let mid = (pts[i - 1] + pts[i + 1]) * 0.5;
-                    let mut mv = (mid - p) * cfg.tension;
+                    let mut mv = (mid - p) * tension;
                     let mut push = pt(0.0, 0.0);
                     let reach = w / 2.0 + 2.0;
                     // static obstacles
@@ -189,7 +275,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         let need = vr + vclr.max(c) + w / 2.0 + cfg.margin;
                         let d = p.dist(vc);
                         if d < need {
-                            push = push + (p - vc).norm() * (need - d);
+                            push = push + (p - vc).norm() * ((need - d) * 0.5);
                         }
                     }
                     // other tracks (they push back from their side, so take half)
@@ -232,6 +318,21 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 out
             })
             .collect();
+        for (v, p) in vias.iter_mut().zip(moved) {
+            v.0 = p;
+        }
+        for (pts, (a, b)) in tracks.iter_mut().zip(&ends) {
+            if let Some(a) = a {
+                pts[0] = vias[*a].0;
+            }
+            if let Some(b) = b {
+                let n = pts.len();
+                pts[n - 1] = vias[*b].0;
+            }
+        }
+    }
+    for (v, (p, ..)) in geo.vias.iter_mut().zip(&vias) {
+        v.at = *p;
     }
     for (t, pts) in geo.tracks.iter_mut().zip(tracks) {
         let s = simplify(&pts, 0.001);

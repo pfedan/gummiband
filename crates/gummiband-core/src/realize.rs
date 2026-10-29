@@ -109,7 +109,9 @@ impl Router<'_> {
         if a == u { (shi, slo) } else { (slo, shi) }
     }
 
-    /// Rubber band of one segment: lines and arcs.
+    /// Rubber band of one segment: lines and arcs. Starts with the bends of the funnel, then
+    /// adds every edge end vertex the band comes too close to as a further wrap, until the band
+    /// keeps its distance from all of them.
     pub fn seg_path(&self, sid: u32) -> Vec<Elem> {
         let s = self.segs[sid as usize].as_ref().unwrap();
         let start = self.end_point(s.start);
@@ -127,22 +129,6 @@ impl Router<'_> {
         portals.push((ends(end), ends(end)));
         let pts: Vec<(Point, Point)> = portals.iter().map(|(l, r)| (l.p, r.p)).collect();
         let bends = funnel_bends(&pts);
-        // Group bends around the same pivot into one wrap.
-        let mut wraps: Vec<Wrap> = Vec::new();
-        for &(i, left) in &bends {
-            let side = if left { portals[i].0 } else { portals[i].1 };
-            let r = side.p.dist(side.pivot);
-            let sgn = if left { 1.0 } else { -1.0 };
-            match wraps.last_mut() {
-                Some(w) if w.id == side.pivot_id && w.side == sgn => w.r = w.r.max(r),
-                _ => wraps.push(Wrap {
-                    c: side.pivot,
-                    r,
-                    side: sgn,
-                    id: side.pivot_id,
-                }),
-            }
-        }
         let polyline = || -> Vec<Elem> {
             let mut p = vec![start];
             for &(i, left) in &bends {
@@ -155,64 +141,75 @@ impl Router<'_> {
         if std::env::var("GB_NO_ARCS").is_ok() {
             return polyline();
         }
-        let mut circles = vec![Wrap {
-            c: start,
-            r: 0.0,
-            side: 1.0,
-            id: u32::MAX,
-        }];
-        circles.extend(wraps);
-        circles.push(Wrap {
-            c: end,
-            r: 0.0,
-            side: 1.0,
-            id: u32::MAX,
-        });
-        // tangent points between consecutive circles
-        let mut tangents = Vec::with_capacity(circles.len() - 1);
-        for w in circles.windows(2) {
-            match tangent(&w[0], &w[1]) {
-                Some(t) => tangents.push(t),
-                None => return polyline(),
+        // wraps with the portal index they belong to
+        let mut wraps: Vec<(usize, Wrap)> = Vec::new();
+        let add = |wraps: &mut Vec<(usize, Wrap)>, i: usize, left: bool| {
+            let side = if left { portals[i].0 } else { portals[i].1 };
+            let r = side.p.dist(side.pivot);
+            let sgn = if left { 1.0 } else { -1.0 };
+            if let Some(w) = wraps.iter_mut().find(|(_, w)| w.id == side.pivot_id && w.side == sgn) {
+                w.1.r = w.1.r.max(r);
+                return;
             }
+            let pos = wraps.iter().position(|(k, _)| *k > i).unwrap_or(wraps.len());
+            wraps.insert(
+                pos,
+                (
+                    i,
+                    Wrap {
+                        c: side.pivot,
+                        r,
+                        side: sgn,
+                        id: side.pivot_id,
+                    },
+                ),
+            );
+        };
+        for &(i, left) in &bends {
+            add(&mut wraps, i, left);
         }
-        let mut out = Vec::new();
-        for (i, &(a, b)) in tangents.iter().enumerate() {
-            if i > 0 {
-                let (prev_b, c) = (tangents[i - 1].1, circles[i]);
-                if prev_b.dist(a) > 1e-6 {
-                    // arc around c from prev_b to a, turning to c.side
-                    let a0 = (prev_b - c.c).y.atan2((prev_b - c.c).x);
-                    let a1 = (a - c.c).y.atan2((a - c.c).x);
-                    let mut sweep = a1 - a0;
-                    if c.side > 0.0 {
-                        while sweep < 0.0 {
-                            sweep += std::f64::consts::TAU;
-                        }
-                    } else {
-                        while sweep > 0.0 {
-                            sweep -= std::f64::consts::TAU;
-                        }
+        let mut best = band(start, end, &wraps.iter().map(|w| w.1).collect::<Vec<_>>());
+        for _ in 0..12 {
+            let Some(elems) = &best else { break };
+            let path = flatten(elems);
+            // the worst violated pivot
+            let mut worst: Option<(f64, usize, bool)> = None;
+            for i in 1..portals.len() - 1 {
+                for left in [true, false] {
+                    let side = if left { portals[i].0 } else { portals[i].1 };
+                    let r = side.p.dist(side.pivot);
+                    if r < 1e-6 {
+                        continue;
                     }
-                    if sweep.abs() > std::f64::consts::PI * 1.5 {
-                        return polyline();
-                    }
-                    let mid = c.c + pt(c.r, 0.0).rotate(a0 + sweep / 2.0);
-                    if sweep.abs() * c.r > 0.002 {
-                        out.push(Elem::Arc(prev_b, mid, a));
-                    } else {
-                        out.push(Elem::Line(prev_b, a));
+                    let d = path
+                        .windows(2)
+                        .map(|w| crate::geom::point_seg_dist(side.pivot, w[0], w[1]))
+                        .fold(f64::INFINITY, f64::min);
+                    let deficit = r - d;
+                    if deficit > 1e-4 && worst.is_none_or(|w| deficit > w.0) {
+                        worst = Some((deficit, i, left));
                     }
                 }
             }
-            if a.dist(b) > 1e-6 {
-                out.push(Elem::Line(a, b));
+            let Some((_, i, left)) = worst else { break };
+            let before = wraps.len();
+            let side = if left { portals[i].0 } else { portals[i].1 };
+            let known = wraps.iter().any(|(_, w)| {
+                w.id == side.pivot_id
+                    && w.side == if left { 1.0 } else { -1.0 }
+                    && w.r >= side.p.dist(side.pivot) - 1e-9
+            });
+            if known {
+                break;
+            }
+            add(&mut wraps, i, left);
+            let _ = before;
+            match band(start, end, &wraps.iter().map(|w| w.1).collect::<Vec<_>>()) {
+                Some(b) => best = Some(b),
+                None => break,
             }
         }
-        if out.is_empty() {
-            out.push(Elem::Line(start, end));
-        }
-        out
+        best.unwrap_or_else(polyline)
     }
 
     pub fn geometry(&self) -> Geometry {
@@ -246,6 +243,64 @@ impl Router<'_> {
         vias.sort_by(|a, b| a.at.x.total_cmp(&b.at.x).then(a.at.y.total_cmp(&b.at.y)));
         Geometry { tracks, vias }
     }
+}
+
+/// Tangent path from `start` around the wraps to `end`, with arcs on the wraps.
+fn band(start: Point, end: Point, wraps: &[Wrap]) -> Option<Vec<Elem>> {
+    let mut circles = vec![Wrap {
+        c: start,
+        r: 0.0,
+        side: 1.0,
+        id: u32::MAX,
+    }];
+    circles.extend_from_slice(wraps);
+    circles.push(Wrap {
+        c: end,
+        r: 0.0,
+        side: 1.0,
+        id: u32::MAX,
+    });
+    let mut tangents = Vec::with_capacity(circles.len() - 1);
+    for w in circles.windows(2) {
+        tangents.push(tangent(&w[0], &w[1])?);
+    }
+    let mut out = Vec::new();
+    for (i, &(a, b)) in tangents.iter().enumerate() {
+        if i > 0 {
+            let (prev_b, c) = (tangents[i - 1].1, circles[i]);
+            if prev_b.dist(a) > 1e-6 {
+                // arc around c from prev_b to a, turning to c.side
+                let a0 = (prev_b - c.c).y.atan2((prev_b - c.c).x);
+                let a1 = (a - c.c).y.atan2((a - c.c).x);
+                let mut sweep = a1 - a0;
+                if c.side > 0.0 {
+                    while sweep < 0.0 {
+                        sweep += std::f64::consts::TAU;
+                    }
+                } else {
+                    while sweep > 0.0 {
+                        sweep -= std::f64::consts::TAU;
+                    }
+                }
+                if sweep.abs() > std::f64::consts::PI * 1.5 {
+                    return None;
+                }
+                let mid = c.c + pt(c.r, 0.0).rotate(a0 + sweep / 2.0);
+                if sweep.abs() * c.r > 0.002 {
+                    out.push(Elem::Arc(prev_b, mid, a));
+                } else {
+                    out.push(Elem::Line(prev_b, a));
+                }
+            }
+        }
+        if a.dist(b) > 1e-6 {
+            out.push(Elem::Line(a, b));
+        }
+    }
+    if out.is_empty() {
+        out.push(Elem::Line(start, end));
+    }
+    Some(out)
 }
 
 pub fn flatten(elems: &[Elem]) -> Vec<Point> {
@@ -450,6 +505,111 @@ impl Router<'_> {
                 ));
                 if out.len() >= limit {
                     return out;
+                }
+            }
+        }
+        out
+    }
+}
+
+impl Router<'_> {
+    /// Debug: tracks too close to vias, with the topological situation.
+    pub fn debug_vias(&self, limit: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        let paths: Vec<(u32, Vec<Point>)> = (0..self.segs.len() as u32)
+            .filter(|&i| self.segs[i as usize].is_some())
+            .map(|i| (i, flatten(&self.seg_path(i))))
+            .collect();
+        let mut stats = [0usize; 4];
+        for (&site, via) in &self.vias {
+            let vp = self.site_point(site);
+            for (sid, path) in &paths {
+                let s = self.segs[*sid as usize].as_ref().unwrap();
+                if s.net == via.net {
+                    continue;
+                }
+                let need = via.r + via.clearance.max(s.clearance) + s.width / 2.0 - 0.005;
+                let d = path
+                    .windows(2)
+                    .map(|w| crate::geom::point_seg_dist(vp, w[0], w[1]))
+                    .fold(f64::INFINITY, f64::min);
+                if d >= need {
+                    continue;
+                }
+                let m = &self.sub.m[s.li as usize];
+                let v = m.site_vert[&site];
+                let incident: Vec<usize> = s
+                    .crossings
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| m.edges[c.e as usize].contains(&v))
+                    .map(|(k, _)| k)
+                    .collect();
+                let in_fan = s.crossings.iter().any(|c| {
+                    m.tris[c.from as usize].contains(&v) || m.tris[m.other_tri(c.e, c.from) as usize].contains(&v)
+                });
+                let kind = if !incident.is_empty() {
+                    0
+                } else if in_fan {
+                    1
+                } else {
+                    2
+                };
+                stats[kind] += 1;
+                if out.len() < limit {
+                    let portal_d: Vec<String> = incident
+                        .iter()
+                        .map(|&k| {
+                            let (l, r) = self.portal(*sid, k);
+                            format!("{:.3}/{:.3}", l.p.dist(vp), r.p.dist(vp))
+                        })
+                        .collect();
+                    out.push(format!(
+                        "via site {site} {} at {:.3},{:.3} vs seg {sid} {} li {}: dist {:.3} need {:.3} kind {kind} portals {:?}",
+                        self.board.nets[via.net as usize].name, vp.x, vp.y, self.board.nets[s.net as usize].name, s.li, d, need, portal_d
+                    ));
+                }
+            }
+        }
+        out.push(format!(
+            "via violations: incident {} fan-only {} outside-fan {}",
+            stats[0], stats[1], stats[2]
+        ));
+        out
+    }
+}
+
+impl Router<'_> {
+    /// Debug: pairs of vias of different nets closer than allowed.
+    pub fn debug_via_pairs(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let v: Vec<(&u32, &crate::route::ViaInfo)> = self.vias.iter().collect();
+        for i in 0..v.len() {
+            for j in i + 1..v.len() {
+                let (a, b) = (v[i], v[j]);
+                if a.1.net == b.1.net {
+                    continue;
+                }
+                let d = self.site_point(*a.0).dist(self.site_point(*b.0));
+                let need = a.1.r + b.1.r + a.1.clearance.max(b.1.clearance);
+                if d < need {
+                    let conns_a: Vec<usize> = (0..self.conns.len())
+                        .filter(|&c| self.conn_vias[c].contains(a.0))
+                        .collect();
+                    let conns_b: Vec<usize> = (0..self.conns.len())
+                        .filter(|&c| self.conn_vias[c].contains(b.0))
+                        .collect();
+                    out.push(format!(
+                        "vias {} ({}) {:?} and {} ({}) {:?}: {:.3} < {:.3}",
+                        a.0,
+                        self.board.nets[a.1.net as usize].name,
+                        conns_a,
+                        b.0,
+                        self.board.nets[b.1.net as usize].name,
+                        conns_b,
+                        d,
+                        need
+                    ));
                 }
             }
         }
