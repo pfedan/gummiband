@@ -28,10 +28,10 @@ pub struct RelaxConfig {
 impl Default for RelaxConfig {
     fn default() -> Self {
         RelaxConfig {
-            iterations: 200,
+            iterations: env_usize("GB_RELAX_IT", 400),
             spacing: 0.1,
             tension: 0.25,
-            margin: 0.003,
+            margin: 0.008,
             max_step: 0.03,
         }
     }
@@ -496,4 +496,8 @@ fn nearest_on_poly(poly: &crate::geom::Polygon, p: Point) -> (f64, Point) {
         }
     }
     best
+}
+
+fn env_usize(k: &str, d: usize) -> usize {
+    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
