@@ -29,7 +29,10 @@ impl Default for RelaxConfig {
     fn default() -> Self {
         RelaxConfig {
             iterations: env_usize("GB_RELAX_IT", 400),
-            spacing: 0.1,
+            spacing: std::env::var("GB_SPACING")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.05),
             tension: 0.25,
             margin: 0.008,
             max_step: 0.03,
@@ -154,12 +157,8 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         continue;
                     }
                     let need = match o.kind {
-                        ObstacleKind::Keepout {
-                            vias: no_vias,
-                            tracks: no_tracks,
-                        } => {
-                            // a via must not drag its tracks into a track keepout either
-                            if !no_vias && !no_tracks {
+                        ObstacleKind::Keepout { vias: no_vias, .. } => {
+                            if !no_vias {
                                 continue;
                             }
                             crate::board::KEEPOUT_GAP
