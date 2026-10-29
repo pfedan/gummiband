@@ -292,7 +292,7 @@ pub fn route_board(
     let keep = std::env::var("GB_FINALISTS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(8);
+        .unwrap_or(24);
     let mut finalists: Vec<Candidate> = Vec::new();
     let offer = |finalists: &mut Vec<Candidate>, c: Candidate| {
         finalists.push(c);
@@ -361,8 +361,9 @@ pub fn route_board(
     }
     // relax the finalists of the best completion and keep the cleanest geometry; then, if
     // asked, run generations that select by the clearance violations after the geometry step
-    let geo_eval = |mut c: Candidate| -> Candidate {
-        relax::relax(board, &sub, &mut c.geo, &relax::RelaxConfig::default());
+    let full_relax = relax::RelaxConfig::default();
+    let geo_eval_with = |mut c: Candidate, cfg: &relax::RelaxConfig| -> Candidate {
+        relax::relax(board, &sub, &mut c.geo, cfg);
         let v = check::check(board, &c.geo);
         let mut nets: Vec<NetId> = v.iter().flat_map(|x| [Some(x.nets.0), x.nets.1]).flatten().collect();
         nets.sort_unstable();
@@ -373,18 +374,41 @@ pub fn route_board(
         c.hot = v.iter().map(|x| x.at).collect();
         c
     };
+    let geo_eval = |c: Candidate| geo_eval_with(c, &full_relax);
     // a short is much worse than a clearance a little too small: it weighs six violations
     let full_cost = |c: &Candidate| {
         c.stats.cost() + c.stats.violations.unwrap_or(0) as f64 * 1000.0 + c.stats.shorts.unwrap_or(0) as f64 * 5000.0
     };
+    // successive halving: the topology cost predicts the finished geometry only weakly, so
+    // many finalists get a short relaxation first and only the best quarter the full one
     let top = finalists[0].stats.routed;
-    let judged: Vec<Candidate> = finalists
-        .into_iter()
-        .filter(|c| c.stats.routed == top)
-        .collect::<Vec<_>>()
-        .into_par_iter()
-        .map(geo_eval)
-        .collect();
+    let full_n = std::env::var("GB_FULL").ok().and_then(|v| v.parse().ok()).unwrap_or(6usize);
+    let pool: Vec<Candidate> = finalists.into_iter().filter(|c| c.stats.routed == top).collect();
+    let pool = if pool.len() > full_n {
+        let screen = relax::RelaxConfig {
+            iterations: (full_relax.iterations / 4).max(40),
+            ..full_relax.clone()
+        };
+        let mut screened: Vec<(Candidate, Geometry)> = pool
+            .into_par_iter()
+            .map(|c| {
+                let geo = c.geo.clone();
+                (geo_eval_with(c, &screen), geo)
+            })
+            .collect();
+        screened.sort_by(|a, b| full_cost(&a.0).total_cmp(&full_cost(&b.0)));
+        screened.truncate(full_n);
+        screened
+            .into_iter()
+            .map(|(mut c, geo)| {
+                c.geo = geo;
+                c
+            })
+            .collect()
+    } else {
+        pool
+    };
+    let judged: Vec<Candidate> = pool.into_par_iter().map(geo_eval).collect();
     for c in &judged {
         portfolio.push(c.stats.clone());
     }
