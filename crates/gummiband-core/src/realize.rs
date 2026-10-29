@@ -62,7 +62,7 @@ impl Router<'_> {
     fn end_point(&self, e: End) -> Point {
         match e {
             End::Pin(p) => self.board.pins[p].pos,
-            End::Vertex(v) => self.sub.verts[v as usize],
+            End::Via(site) => self.site_point(site),
         }
     }
 
@@ -74,8 +74,9 @@ impl Router<'_> {
         let list = &self.cross[li][c.e as usize];
         let items: Vec<Item> = self.items_on(li, c.e);
         let idx = list.iter().position(|&x| x == sid).unwrap();
-        let [u, v] = self.sub.edges[c.e as usize];
-        let (pu, pv) = (self.sub.verts[u as usize], self.sub.verts[v as usize]);
+        let m = &self.sub.m[li];
+        let [u, v] = m.edges[c.e as usize];
+        let (pu, pv) = (m.verts[u as usize], m.verts[v as usize]);
         let len = pu.dist(pv);
         let dir = (pv - pu) * (1.0 / len);
         let (lo, hi) = match self.pack(li, c.e, &items, None) {
@@ -103,8 +104,8 @@ impl Router<'_> {
             pivot_id: v,
         };
         // Leaving triangle `from` (counter-clockwise) through edge a->b: b is on the left.
-        let t = self.sub.tris[c.from as usize];
-        let a = t[self.sub.local_edge(c.from, c.e)];
+        let t = m.tris[c.from as usize];
+        let a = t[m.local_edge(c.from, c.e)];
         if a == u { (shi, slo) } else { (slo, shi) }
     }
 
@@ -236,7 +237,7 @@ impl Router<'_> {
             .vias
             .iter()
             .map(|(&v, info)| Via {
-                at: self.sub.verts[v as usize],
+                at: self.site_point(v),
                 diameter: info.r * 2.0,
                 drill: info.drill,
                 net: info.net,
@@ -451,111 +452,6 @@ impl Router<'_> {
                     return out;
                 }
             }
-        }
-        out
-    }
-}
-
-impl Router<'_> {
-    /// Debug: portals that the realized polyline misses, and portals with left/right swapped.
-    pub fn debug_portals(&self) -> (usize, usize, Vec<String>) {
-        let mut missed = 0;
-        let mut swapped = 0;
-        let mut notes = Vec::new();
-        for sid in 0..self.segs.len() as u32 {
-            let Some(s) = self.segs[sid as usize].as_ref() else { continue };
-            let path = flatten(&self.seg_path(sid));
-            for k in 0..s.crossings.len() {
-                let (l, r) = self.portal(sid, k);
-                let hit = path.windows(2).any(|w| {
-                    crate::geom::seg_seg_dist(w[0], w[1], l.p, r.p) < 1e-6
-                });
-                if !hit {
-                    missed += 1;
-                    if notes.len() < 10 {
-                        notes.push(format!("seg {sid} crossing {k}/{} edge {} misses portal", s.crossings.len(), s.crossings[k].e));
-                    }
-                }
-                // travel direction: from the centre of `from` to the centre of the next triangle
-                let c = s.crossings[k];
-                let a = self.sub.tri_center(c.from);
-                let b = self.sub.tri_center(self.sub.other_tri(c.e, c.from));
-                if orient(a, b, l.p) < 0.0 && orient(a, b, r.p) > 0.0 {
-                    swapped += 1;
-                }
-            }
-        }
-        (missed, swapped, notes)
-    }
-}
-
-impl Router<'_> {
-    /// Debug: explain why tracks come close to the via nearest to `p`.
-    pub fn probe(&self, p: Point) -> Vec<String> {
-        let mut out = Vec::new();
-        if std::env::var("GB_PROBE_TRACKS").is_ok() {
-            for sid in 0..self.segs.len() as u32 {
-                let Some(s) = self.segs[sid as usize].as_ref() else { continue };
-                let path = flatten(&self.seg_path(sid));
-                let d = path.windows(2).map(|w| crate::geom::point_seg_dist(p, w[0], w[1])).fold(f64::INFINITY, f64::min);
-                if d > 0.4 {
-                    continue;
-                }
-                out.push(format!("seg {sid} net {} li {} w {} dist {:.3}", self.board.nets[s.net as usize].name, s.li, s.width, d));
-                for (k, c) in s.crossings.iter().enumerate() {
-                    let (l, r) = self.portal(sid, k);
-                    if l.p.dist(p).min(r.p.dist(p)) > 1.5 {
-                        continue;
-                    }
-                    let [a, b] = self.sub.edges[c.e as usize];
-                    let items = self.items_on(s.li as usize, c.e);
-                    out.push(format!(
-                        "   e{} ({a}@{:.3},{:.3} - {b}@{:.3},{:.3}) len {:.3} from t{} list {:?} sides {:?} pack {:?} portal L {:.3},{:.3} R {:.3},{:.3}",
-                        c.e,
-                        self.sub.verts[a as usize].x, self.sub.verts[a as usize].y,
-                        self.sub.verts[b as usize].x, self.sub.verts[b as usize].y,
-                        self.sub.edge_len(c.e), c.from,
-                        self.cross[s.li as usize][c.e as usize],
-                        items.iter().map(|i| i.sides).collect::<Vec<_>>(),
-                        self.pack(s.li as usize, c.e, &items, None).map(|v| v.iter().map(|(x, y)| format!("{x:.3}..{y:.3}")).collect::<Vec<_>>()),
-                        l.p.x, l.p.y, r.p.x, r.p.y
-                    ));
-                }
-            }
-            return out;
-        }
-        let Some((&v, via)) = self.vias.iter().min_by(|a, b| self.sub.verts[*a.0 as usize].dist(p).total_cmp(&self.sub.verts[*b.0 as usize].dist(p))) else {
-            return out;
-        };
-        let vp = self.sub.verts[v as usize];
-        out.push(format!("via v{v} at {:.3},{:.3} net {} r {}", vp.x, vp.y, self.board.nets[via.net as usize].name, via.r));
-        for sid in 0..self.segs.len() as u32 {
-            let Some(s) = self.segs[sid as usize].as_ref() else { continue };
-            if s.net == via.net {
-                continue;
-            }
-            let path = flatten(&self.seg_path(sid));
-            let d = path.windows(2).map(|w| crate::geom::point_seg_dist(vp, w[0], w[1])).fold(f64::INFINITY, f64::min);
-            if d > via.r + 0.4 {
-                continue;
-            }
-            out.push(format!("  seg {sid} net {} li {} dist {:.3} start {:?} end {:?}", self.board.nets[s.net as usize].name, s.li, d, s.start, s.end));
-            for (k, c) in s.crossings.iter().enumerate() {
-                let [a, b] = self.sub.edges[c.e as usize];
-                let (l, r) = self.portal(sid, k);
-                let pd = l.p.dist(vp).min(r.p.dist(vp));
-                if pd < 1.5 {
-                    out.push(format!(
-                        "    cross {k} e{} ({a},{b}) incident {} portal dist {:.3}/{:.3} list {:?}",
-                        c.e,
-                        a == v || b == v,
-                        l.p.dist(vp),
-                        r.p.dist(vp),
-                        self.cross[s.li as usize][c.e as usize]
-                    ));
-                }
-            }
-            out.push(format!("    path {:?}", path.iter().map(|q| format!("{:.3},{:.3}", q.x, q.y)).collect::<Vec<_>>()));
         }
         out
     }

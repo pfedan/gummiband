@@ -1,10 +1,11 @@
-//! Routing substrate: one constrained Delaunay triangulation of the obstacle points of all
-//! routing layers. There are no free Steiner points: every edge runs between real obstacles, so
-//! the capacity of an edge is the room between the obstacles at its ends. Vias are inserted as
-//! new vertices when they are placed (a free triangle is split in three).
+//! Routing substrate: per routing layer one constrained Delaunay triangulation of the obstacles
+//! of that layer. There are no free Steiner points: every edge runs between real obstacles of
+//! its layer, so the capacity of an edge is the room between the obstacles at its ends. Vias
+//! are inserted as new vertices into every layer mesh when they are placed (the free triangle
+//! that holds the via site is split in three).
 //!
-//! Per routing layer every triangle is free or covered by an obstacle; edge ends carry the
-//! clearance demands of the obstacles that meet there.
+//! Every triangle is free or covered by an obstacle; edge ends carry the clearance demands of
+//! the obstacles that meet there.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,16 +21,24 @@ use crate::index::GridIndex;
 pub const NONE: u32 = u32::MAX;
 /// Obstacle id used for "outside the board".
 pub const OUTSIDE: u32 = u32::MAX - 1;
+/// `vert_site` marker of a Steiner vertex (inserted to avoid sliver triangles).
+pub const STEINER: u32 = u32::MAX - 2;
 
 #[derive(Debug, Clone)]
 pub struct SubstrateConfig {
     /// Pitch of the via site grid in mm.
     pub via_pitch: f64,
+    /// Pitch of the Steiner grid in free space (0 = none). Steiner vertices break up long sliver
+    /// triangles in empty regions; tracks keep clearance from them like from a tiny obstacle.
+    pub steiner_pitch: f64,
 }
 
 impl Default for SubstrateConfig {
     fn default() -> Self {
-        SubstrateConfig { via_pitch: 0.4 }
+        SubstrateConfig {
+            via_pitch: 0.4,
+            steiner_pitch: 1.5,
+        }
     }
 }
 
@@ -59,19 +68,16 @@ pub struct Site {
 
 /// Immutable data shared by all router runs.
 pub struct Shared {
-    pub layers: Vec<LayerId>,
     pub obs_polys: Vec<Polygon>,
     pub obs_index: GridIndex,
     pub sites: Vec<Site>,
     pub bounds: Rect,
 }
 
-/// The mesh. Cheap to clone (the static parts are shared); every router run owns one, because
-/// placing vias splits triangles.
+/// Triangulation of one routing layer.
 #[derive(Clone)]
-pub struct Substrate {
-    pub shared: Arc<Shared>,
-    pub layers: Vec<LayerId>,
+pub struct Mesh {
+    pub layer: LayerId,
     pub verts: Vec<Point>,
     /// Site id of a vertex that was inserted for a via (NONE for obstacle vertices).
     pub vert_site: Vec<u32>,
@@ -85,14 +91,27 @@ pub struct Substrate {
     pub edges: Vec<[u32; 2]>,
     pub edge_tris: Vec<[u32; 2]>,
     pub vert_tris: Vec<Vec<u32>>,
-    /// Per routing layer, per triangle: NONE (free), OUTSIDE or the covering obstacle.
-    pub tri_status: Vec<Vec<u32>>,
-    /// Per routing layer: triangles covered by each obstacle (fixed: vias only split free ones).
-    pub obs_tris: Arc<Vec<HashMap<u32, Vec<u32>>>>,
-    /// Per routing layer, per edge end (2 * edge + end): demands.
-    pub demands: Vec<Vec<Vec<Demand>>>,
+    /// Per triangle: NONE (free), OUTSIDE or the covering obstacle.
+    pub status: Vec<u32>,
+    /// Triangles covered by each obstacle (fixed: vias only split free triangles).
+    pub obs_tris: Arc<HashMap<u32, Vec<u32>>>,
+    /// Per edge end (2 * edge + end): demands.
+    pub demands: Vec<Vec<Demand>>,
     /// Unused via sites inside each triangle.
     pub tri_sites: Vec<Vec<u32>>,
+    /// Triangle that holds each unused site (NONE once placed or if not usable).
+    pub site_tri: Vec<u32>,
+    /// Vertex of each placed site.
+    pub site_vert: HashMap<u32, u32>,
+}
+
+/// All layer meshes. Cheap to clone (static parts shared); every router run owns one, because
+/// placing vias splits triangles.
+#[derive(Clone)]
+pub struct Substrate {
+    pub shared: Arc<Shared>,
+    pub layers: Vec<LayerId>,
+    pub m: Vec<Mesh>,
 }
 
 fn snap(v: f64) -> f64 {
@@ -103,7 +122,6 @@ impl Substrate {
     pub fn build(board: &Board, cfg: &SubstrateConfig) -> Substrate {
         let me = board.rules.max_error;
         let layers: Vec<LayerId> = board.routing_layers().iter().collect();
-        let routing = board.routing_layers();
         let obs_polys: Vec<Polygon> = board.obstacles.par_iter().map(|o| o.shape.to_polygon(me)).collect();
         let mut bounds = board.bbox();
         if bounds.width() <= 0.0 {
@@ -117,8 +135,54 @@ impl Substrate {
         for (i, p) in obs_polys.iter().enumerate() {
             obs_index.insert(i as u32, &p.bbox());
         }
+        let mut shared = Shared {
+            obs_polys,
+            obs_index,
+            sites: Vec::new(),
+            bounds,
+        };
+        shared.sites = build_sites(board, &shared, cfg.via_pitch);
+        let nsites = shared.sites.len();
+        let mut meshes: Vec<Mesh> = layers
+            .par_iter()
+            .map(|&l| Mesh::build(board, &shared, l, cfg.steiner_pitch))
+            .collect();
+        // a site is usable only if it lies in a free triangle on every layer
+        let usable: Vec<bool> = (0..nsites)
+            .map(|s| meshes.iter().all(|m| m.site_tri[s] != NONE))
+            .collect();
+        for m in &mut meshes {
+            for (s, &ok) in usable.iter().enumerate() {
+                if !ok && m.site_tri[s] != NONE {
+                    let t = m.site_tri[s] as usize;
+                    m.tri_sites[t].retain(|&q| q != s as u32);
+                    m.site_tri[s] = NONE;
+                }
+            }
+        }
+        Substrate {
+            shared: Arc::new(shared),
+            layers,
+            m: meshes,
+        }
+    }
 
-        // --- vertices and constraints
+    /// True if routing triangle status `s` lets net `net` in.
+    pub fn passable(board: &Board, s: u32, net: NetId) -> bool {
+        s == NONE
+            || (s != OUTSIDE
+                && board.obstacles[s as usize].net == Some(net)
+                && board.obstacles[s as usize].kind != ObstacleKind::Hole)
+    }
+
+    pub fn site_usable(&self, site: u32) -> bool {
+        self.m.iter().all(|m| m.site_tri[site as usize] != NONE)
+    }
+}
+
+impl Mesh {
+    fn build(board: &Board, shared: &Shared, l: LayerId, steiner_pitch: f64) -> Mesh {
+        let bounds = shared.bounds;
         let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> = ConstrainedDelaunayTriangulation::new();
         let mut handle_of: HashMap<(i64, i64), FixedVertexHandle> = HashMap::new();
         let mut constraints: Vec<(FixedVertexHandle, FixedVertexHandle)> = Vec::new();
@@ -129,7 +193,9 @@ impl Substrate {
                 let h = match handle_of.get(&key) {
                     Some(&h) => h,
                     None => {
-                        let Ok(h) = cdt.insert(Point2::new(snap(p.x), snap(p.y))) else { continue };
+                        let Ok(h) = cdt.insert(Point2::new(snap(p.x), snap(p.y))) else {
+                            continue;
+                        };
                         handle_of.insert(key, h);
                         h
                     }
@@ -147,39 +213,79 @@ impl Substrate {
         let frame = bounds.grow(2.0);
         add_poly(
             &mut cdt,
-            &Polygon::new(vec![frame.min, pt(frame.max.x, frame.min.y), frame.max, pt(frame.min.x, frame.max.y)]),
+            &Polygon::new(vec![
+                frame.min,
+                pt(frame.max.x, frame.min.y),
+                frame.max,
+                pt(frame.min.x, frame.max.y),
+            ]),
         );
         for o in &board.outline {
             add_poly(&mut cdt, o);
         }
         for (i, o) in board.obstacles.iter().enumerate() {
-            if !o.layers.intersects(routing) {
+            if !o.layers.has(l) {
                 continue;
             }
-            let p = &obs_polys[i];
-            if !p.bbox().overlaps(&frame) {
+            if let ObstacleKind::Keepout { tracks, .. } = o.kind
+                && !tracks
+            {
                 continue;
             }
-            add_poly(&mut cdt, p);
+            let p = &shared.obs_polys[i];
+            if p.bbox().overlaps(&frame) {
+                add_poly(&mut cdt, p);
+            }
+        }
+        // Steiner points in free space, away from all obstacles of this layer
+        let mut steiner = Vec::new();
+        if steiner_pitch > 0.0 {
+            let mut row = 0;
+            let mut y = bounds.min.y + steiner_pitch / 2.0;
+            while y < bounds.max.y {
+                let off = if row % 2 == 1 { steiner_pitch / 2.0 } else { 0.0 };
+                let mut x = bounds.min.x + steiner_pitch / 2.0 + off;
+                while x < bounds.max.x {
+                    let p = pt(x, y);
+                    let clear = board.edge_dist(p) >= steiner_pitch * 0.5
+                        && shared.obs_index.query_point(p, steiner_pitch * 0.5).iter().all(|&id| {
+                            !board.obstacles[id as usize].layers.has(l)
+                                || shared.obs_polys[id as usize].dist_to_point(p) >= steiner_pitch * 0.5
+                        });
+                    if clear {
+                        steiner.push(p);
+                    }
+                    x += steiner_pitch;
+                }
+                y += steiner_pitch * 0.866;
+                row += 1;
+            }
+        }
+        let mut steiner_handles = Vec::new();
+        for p in steiner {
+            if let Ok(h) = cdt.insert(Point2::new(snap(p.x), snap(p.y))) {
+                steiner_handles.push(h.index());
+            }
         }
         for (a, b) in constraints {
             if a != b {
                 cdt.add_constraint_and_split(a, b, |v| v);
             }
         }
-
-        // --- extract
         let verts: Vec<Point> = cdt.vertices().map(|v| pt(v.position().x, v.position().y)).collect();
         let mut tris = Vec::new();
         let mut face_to_tri: HashMap<usize, u32> = HashMap::new();
         for f in cdt.inner_faces() {
             let vs = f.vertices();
             face_to_tri.insert(f.fix().index(), tris.len() as u32);
-            tris.push([vs[0].fix().index() as u32, vs[1].fix().index() as u32, vs[2].fix().index() as u32]);
+            tris.push([
+                vs[0].fix().index() as u32,
+                vs[1].fix().index() as u32,
+                vs[2].fix().index() as u32,
+            ]);
         }
-        let mut s = Substrate {
-            shared: Arc::new(Shared { layers: layers.clone(), obs_polys, obs_index, sites: Vec::new(), bounds }),
-            layers: layers.clone(),
+        let mut m = Mesh {
+            layer: l,
             vert_site: vec![NONE; verts.len()],
             verts,
             tris,
@@ -188,64 +294,51 @@ impl Substrate {
             edges: Vec::new(),
             edge_tris: Vec::new(),
             vert_tris: Vec::new(),
-            tri_status: Vec::new(),
-            obs_tris: Arc::new(Vec::new()),
+            status: Vec::new(),
+            obs_tris: Arc::new(HashMap::new()),
             demands: Vec::new(),
             tri_sites: Vec::new(),
+            site_tri: vec![NONE; shared.sites.len()],
+            site_vert: HashMap::new(),
         };
-        s.build_topology();
-
-        // --- classify triangles per routing layer
-        let shared = s.shared.clone();
-        s.tri_status = layers
+        for h in steiner_handles {
+            m.vert_site[h] = STEINER;
+        }
+        m.build_topology();
+        m.status = m
+            .tris
             .iter()
-            .map(|&l| {
-                s.tris
-                    .par_iter()
-                    .map(|t| {
-                        let c = (s.verts[t[0] as usize] + s.verts[t[1] as usize] + s.verts[t[2] as usize]) * (1.0 / 3.0);
-                        classify(board, &shared, l, c)
-                    })
-                    .collect()
+            .map(|t| {
+                let c = (m.verts[t[0] as usize] + m.verts[t[1] as usize] + m.verts[t[2] as usize]) * (1.0 / 3.0);
+                classify(board, shared, l, c)
             })
             .collect();
-        s.obs_tris = Arc::new(
-            s.tri_status
-                .iter()
-                .map(|st| {
-                    let mut m: HashMap<u32, Vec<u32>> = HashMap::new();
-                    for (t, &o) in st.iter().enumerate() {
-                        if o != NONE && o != OUTSIDE {
-                            m.entry(o).or_default().push(t as u32);
-                        }
-                    }
-                    m
-                })
-                .collect(),
-        );
-        s.demands = (0..layers.len())
-            .into_par_iter()
-            .map(|li| (0..s.edges.len() as u32).flat_map(|e| { let [a, b] = s.edge_demands(li, e); [a, b] }).collect())
+        let mut ot: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (t, &o) in m.status.iter().enumerate() {
+            if o != NONE && o != OUTSIDE {
+                ot.entry(o).or_default().push(t as u32);
+            }
+        }
+        m.obs_tris = Arc::new(ot);
+        m.demands = (0..m.edges.len() as u32)
+            .flat_map(|e| {
+                let [a, b] = m.edge_demands(e);
+                [a, b]
+            })
             .collect();
-
-        // --- via sites on a staggered grid, located in free triangles
-        let sites = build_sites(board, &shared, cfg.via_pitch);
-        s.tri_sites = vec![Vec::new(); s.tris.len()];
-        for (i, site) in sites.iter().enumerate() {
+        m.tri_sites = vec![Vec::new(); m.tris.len()];
+        for (i, site) in shared.sites.iter().enumerate() {
             let face = match cdt.locate(Point2::new(site.p.x, site.p.y)) {
                 PositionInTriangulation::OnFace(f) => f.index(),
                 _ => continue,
             };
             let Some(&t) = face_to_tri.get(&face) else { continue };
-            if (0..layers.len()).all(|li| s.tri_status[li][t as usize] == NONE) {
-                s.tri_sites[t as usize].push(i as u32);
+            if m.status[t as usize] == NONE {
+                m.tri_sites[t as usize].push(i as u32);
+                m.site_tri[i] = t;
             }
         }
-        drop(shared);
-        let mut sh = Arc::try_unwrap(s.shared).ok().expect("shared is unique while building");
-        sh.sites = sites;
-        s.shared = Arc::new(sh);
-        s
+        m
     }
 
     fn build_topology(&mut self) {
@@ -267,7 +360,9 @@ impl Substrate {
                 self.tri_edges[ti][k] = e;
             }
         }
-        self.tri_nbrs = (0..self.tris.len()).map(|ti| self.tri_edges[ti].map(|e| self.other_tri(e, ti as u32))).collect();
+        self.tri_nbrs = (0..self.tris.len())
+            .map(|ti| self.tri_edges[ti].map(|e| self.other_tri(e, ti as u32)))
+            .collect();
         self.vert_tris = vec![Vec::new(); self.verts.len()];
         for (ti, t) in self.tris.iter().enumerate() {
             for &v in t {
@@ -281,9 +376,9 @@ impl Substrate {
         if a == t { b } else { a }
     }
 
-    /// Demands at both ends of edge e on routing layer li.
-    fn edge_demands(&self, li: usize, e: u32) -> [Vec<Demand>; 2] {
-        let st = &self.tri_status[li];
+    /// Demands at both ends of edge e.
+    fn edge_demands(&self, e: u32) -> [Vec<Demand>; 2] {
+        let st = &self.status;
         let [a, b] = self.edges[e as usize];
         let mut res: [Vec<Demand>; 2] = [Vec::new(), Vec::new()];
         for (end, (u, v)) in [(a, b), (b, a)].into_iter().enumerate() {
@@ -330,9 +425,9 @@ impl Substrate {
         res
     }
 
-    /// Demands at the `end` (0 = edges[e][0], 1 = edges[e][1]) of edge e on routing layer li.
-    pub fn demands(&self, li: usize, e: u32, end: usize) -> &[Demand] {
-        &self.demands[li][e as usize * 2 + end]
+    /// Demands at the `end` (0 = edges[e][0], 1 = edges[e][1]) of edge e.
+    pub fn demands(&self, e: u32, end: usize) -> &[Demand] {
+        &self.demands[e as usize * 2 + end]
     }
 
     pub fn tri_center(&self, t: u32) -> Point {
@@ -347,47 +442,47 @@ impl Substrate {
 
     /// Local index (0..3) of edge e in triangle t.
     pub fn local_edge(&self, t: u32, e: u32) -> usize {
-        self.tri_edges[t as usize].iter().position(|&x| x == e).expect("edge not in triangle")
-    }
-
-    /// True if routing triangle status `s` lets net `net` in.
-    pub fn passable(board: &Board, s: u32, net: NetId) -> bool {
-        s == NONE
-            || (s != OUTSIDE
-                && board.obstacles[s as usize].net == Some(net)
-                && board.obstacles[s as usize].kind != ObstacleKind::Hole)
+        self.tri_edges[t as usize]
+            .iter()
+            .position(|&x| x == e)
+            .expect("edge not in triangle")
     }
 
     pub fn check_orientation(&self) -> usize {
         self.tris
             .iter()
-            .filter(|t| orient(self.verts[t[0] as usize], self.verts[t[1] as usize], self.verts[t[2] as usize]) <= 0.0)
+            .filter(|t| {
+                orient(
+                    self.verts[t[0] as usize],
+                    self.verts[t[1] as usize],
+                    self.verts[t[2] as usize],
+                ) <= 0.0
+            })
             .count()
     }
 
-    /// Split free triangle t at site `site`. Returns the new vertex and the three triangles
-    /// X_k = (v_k, v_k+1, s), where X_0 keeps the id t. Edge k of the old triangle is local edge 0
-    /// of X_k, the new edge (v_k+1, s) local edge 1 and (s, v_k) local edge 2.
-    pub fn split(&mut self, t: u32, site: u32) -> (u32, [u32; 3]) {
-        let p = self.shared.sites[site as usize].p;
+    /// Split free triangle t at site `site` (point p). Returns the new vertex and the three
+    /// triangles X_k = (v_k, v_k+1, s), where X_0 keeps the id t. Edge k of the old triangle is
+    /// local edge 0 of X_k, the new edge (v_k+1, s) local edge 1 and (s, v_k) local edge 2.
+    pub fn split(&mut self, t: u32, site: u32, p: Point, sites: &[Site]) -> (u32, [u32; 3]) {
         let s = self.verts.len() as u32;
         self.verts.push(p);
         self.vert_site.push(site);
         self.vert_tris.push(Vec::new());
+        self.site_vert.insert(site, s);
+        self.site_tri[site as usize] = NONE;
         let [v0, v1, v2] = self.tris[t as usize];
         let old_edges = self.tri_edges[t as usize];
         let old_nbrs = self.tri_nbrs[t as usize];
         let x = [t, self.tris.len() as u32, self.tris.len() as u32 + 1];
-        // new edges E_i = (v_i, s)
+        let vs = [v0, v1, v2];
         let e_new: Vec<u32> = (0..3)
             .map(|i| {
-                let v = [v0, v1, v2][i];
-                self.edges.push([v.min(s), v.max(s)]);
+                self.edges.push([vs[i].min(s), vs[i].max(s)]);
                 self.edge_tris.push([NONE, NONE]);
                 (self.edges.len() - 1) as u32
             })
             .collect();
-        let vs = [v0, v1, v2];
         for k in 0..3 {
             let tri = [vs[k], vs[(k + 1) % 3], s];
             let edges = [old_edges[k], e_new[(k + 1) % 3], e_new[k]];
@@ -400,20 +495,15 @@ impl Substrate {
                 self.tris.push(tri);
                 self.tri_edges.push(edges);
                 self.tri_nbrs.push(nbrs);
-                for li in 0..self.layers.len() {
-                    let st = self.tri_status[li][t as usize];
-                    self.tri_status[li].push(st);
-                }
+                self.status.push(NONE);
                 self.tri_sites.push(Vec::new());
             }
-            // old edge k: replace t by X_k on its side
             let oe = old_edges[k] as usize;
             for side in 0..2 {
                 if self.edge_tris[oe][side] == t {
                     self.edge_tris[oe][side] = x[k];
                 }
             }
-            // neighbour across old edge k points to X_k
             let nb = old_nbrs[k];
             if nb != NONE {
                 for j in 0..3 {
@@ -427,7 +517,6 @@ impl Substrate {
             // E_k is shared by X_k (local 2) and X_k-1 (local 1)
             self.edge_tris[e_new[k] as usize] = [x[k], x[(k + 2) % 3]];
         }
-        // vertex -> triangles
         for (k, &v) in vs.iter().enumerate() {
             let list = &mut self.vert_tris[v as usize];
             list.retain(|&q| q != t);
@@ -436,30 +525,36 @@ impl Substrate {
         }
         self.vert_tris[s as usize] = x.to_vec();
         // redistribute the remaining sites
-        let rest: Vec<u32> = std::mem::take(&mut self.tri_sites[t as usize]).into_iter().filter(|&q| q != site).collect();
+        let rest: Vec<u32> = std::mem::take(&mut self.tri_sites[t as usize])
+            .into_iter()
+            .filter(|&q| q != site)
+            .collect();
         for q in rest {
-            let qp = self.shared.sites[q as usize].p;
+            let qp = sites[q as usize].p;
+            let mut home = NONE;
             for &xt in &x {
                 let tv = self.tris[xt as usize];
-                let (a, b, c) = (self.verts[tv[0] as usize], self.verts[tv[1] as usize], self.verts[tv[2] as usize]);
+                let (a, b, c) = (
+                    self.verts[tv[0] as usize],
+                    self.verts[tv[1] as usize],
+                    self.verts[tv[2] as usize],
+                );
                 if orient(a, b, qp) > 0.0 && orient(b, c, qp) > 0.0 && orient(c, a, qp) > 0.0 {
-                    self.tri_sites[xt as usize].push(q);
+                    home = xt;
                     break;
                 }
             }
+            self.site_tri[q as usize] = home;
+            if home != NONE {
+                self.tri_sites[home as usize].push(q);
+            }
         }
         // demands of the touched edges
-        for li in 0..self.layers.len() {
-            for e in old_edges.iter().chain(e_new.iter()) {
-                let [a, b] = self.edge_demands(li, *e);
-                let d = &mut self.demands[li];
-                let i = *e as usize * 2;
-                if d.len() < i + 2 {
-                    d.resize(i + 2, Vec::new());
-                }
-                d[i] = a;
-                d[i + 1] = b;
-            }
+        self.demands.resize(self.edges.len() * 2, Vec::new());
+        for &e in old_edges.iter().chain(e_new.iter()) {
+            let [a, b] = self.edge_demands(e);
+            self.demands[e as usize * 2] = a;
+            self.demands[e as usize * 2 + 1] = b;
         }
         (s, x)
     }
@@ -536,10 +631,12 @@ fn build_sites(board: &Board, shared: &Shared, pitch: f64) -> Vec<Site> {
                     return None;
                 }
                 if dd < 2.5 {
-                    nbrs.push(SiteNeighbor { obs: id, dist: dd as f32 });
+                    nbrs.push(SiteNeighbor {
+                        obs: id,
+                        dist: dd as f32,
+                    });
                 }
             }
-            // Too close to copper of every net: no via fits at all.
             if nbrs.iter().any(|n| (n.dist as f64) < min_via_r) {
                 return None;
             }
@@ -556,7 +653,16 @@ pub(crate) mod tests {
 
     pub fn two_pad_board() -> Board {
         let mut b = Board::default();
-        b.layers = vec![Layer { name: "F.Cu".into(), is_plane: false }, Layer { name: "B.Cu".into(), is_plane: false }];
+        b.layers = vec![
+            Layer {
+                name: "F.Cu".into(),
+                is_plane: false,
+            },
+            Layer {
+                name: "B.Cu".into(),
+                is_plane: false,
+            },
+        ];
         b.outline = vec![Polygon::new(vec![pt(0., 0.), pt(10., 0.), pt(10., 10.), pt(0., 10.)])];
         b.classes = vec![NetClass {
             name: "Default".into(),
@@ -566,7 +672,13 @@ pub(crate) mod tests {
             via_drill: 0.3,
             priority: 0,
         }];
-        b.nets = vec![Net { name: "A".into(), class: 0, pins: vec![0, 1], planes: LayerSet::default(), priority: 0 }];
+        b.nets = vec![Net {
+            name: "A".into(),
+            class: 0,
+            pins: vec![0, 1],
+            planes: LayerSet::default(),
+            priority: 0,
+        }];
         for (i, x) in [2.0, 8.0].into_iter().enumerate() {
             b.obstacles.push(Obstacle {
                 shape: Shape::Polygon(roundrect_polygon(pt(x, 5.), 1.0, 1.0, 0.0, 0.0, 0.005)),
@@ -594,11 +706,12 @@ pub(crate) mod tests {
     fn substrate_classifies_pads_and_outside() {
         let b = two_pad_board();
         let s = Substrate::build(&b, &SubstrateConfig::default());
-        assert_eq!(s.check_orientation(), 0);
-        let owned = s.tri_status[0].iter().filter(|&&x| x != NONE && x != OUTSIDE).count();
+        let m = &s.m[0];
+        assert_eq!(m.check_orientation(), 0);
+        let owned = m.status.iter().filter(|&&x| x != NONE && x != OUTSIDE).count();
         assert!(owned >= 2, "pad triangles {owned}");
-        assert!(s.tri_status[0].contains(&OUTSIDE));
-        let sites: usize = s.tri_sites.iter().map(|v| v.len()).sum();
+        assert!(m.status.contains(&OUTSIDE));
+        let sites = (0..s.shared.sites.len() as u32).filter(|&q| s.site_usable(q)).count();
         assert!(sites > 100, "sites {sites}");
     }
 
@@ -606,22 +719,25 @@ pub(crate) mod tests {
     fn split_keeps_the_mesh_consistent() {
         let b = two_pad_board();
         let mut s = Substrate::build(&b, &SubstrateConfig::default());
-        let t = (0..s.tris.len()).find(|&t| !s.tri_sites[t].is_empty()).unwrap() as u32;
-        let site = s.tri_sites[t as usize][0];
-        let (v, x) = s.split(t, site);
-        assert_eq!(s.check_orientation(), 0);
+        let site = (0..s.shared.sites.len() as u32).find(|&q| s.site_usable(q)).unwrap();
+        let p = s.shared.sites[site as usize].p;
+        let shared = s.shared.clone();
+        let m = &mut s.m[1];
+        let t = m.site_tri[site as usize];
+        let (v, x) = m.split(t, site, p, &shared.sites);
+        assert_eq!(m.check_orientation(), 0);
         for &xt in &x {
-            assert!(s.tris[xt as usize].contains(&v));
+            assert!(m.tris[xt as usize].contains(&v));
             for k in 0..3 {
-                let e = s.tri_edges[xt as usize][k];
-                let [a, b2] = s.edges[e as usize];
-                let tv = s.tris[xt as usize];
+                let e = m.tri_edges[xt as usize][k];
+                let [a, b2] = m.edges[e as usize];
+                let tv = m.tris[xt as usize];
                 let (p, q) = (tv[k], tv[(k + 1) % 3]);
                 assert!((a == p && b2 == q) || (a == q && b2 == p));
-                assert!(s.edge_tris[e as usize].contains(&xt));
-                let nb = s.tri_nbrs[xt as usize][k];
+                assert!(m.edge_tris[e as usize].contains(&xt));
+                let nb = m.tri_nbrs[xt as usize][k];
                 if nb != NONE {
-                    assert!(s.tri_edges[nb as usize].contains(&e));
+                    assert!(m.tri_edges[nb as usize].contains(&e));
                 }
             }
         }

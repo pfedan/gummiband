@@ -49,20 +49,20 @@ pub fn render(board: &Board, sub: Option<&Substrate>, geo: &Geometry, viol: &[Vi
     }
     let routing: Vec<u8> = board.routing_layers().iter().collect();
     if let (Some(sub), true) = (sub, show_tris) {
-        let mut d = String::new();
-        for t in &sub.tris {
-            let p: Vec<Point> = t.iter().map(|&v| sub.verts[v as usize]).collect();
-            let _ = write!(
-                d,
-                "M{:.3},{:.3} L{:.3},{:.3} L{:.3},{:.3} Z ",
-                p[0].x, p[0].y, p[1].x, p[1].y, p[2].x, p[2].y
-            );
+        for (mi, m) in sub.m.iter().enumerate() {
+            let mut d = String::new();
+            for t in &m.tris {
+                let p: Vec<Point> = t.iter().map(|&v| m.verts[v as usize]).collect();
+                let _ = write!(
+                    d,
+                    "M{:.3},{:.3} L{:.3},{:.3} L{:.3},{:.3} Z ",
+                    p[0].x, p[0].y, p[1].x, p[1].y, p[2].x, p[2].y
+                );
+            }
+            let color = if mi == 0 { "#5a3a3a" } else { "#3a4a5a" };
+            let _ = writeln!(s, r#"<path d="{d}" fill="none" stroke="{color}" stroke-width="0.01"/>"#);
         }
-        let _ = writeln!(s, r##"<path d="{d}" fill="none" stroke="#444" stroke-width="0.01"/>"##);
-        let _ = sub
-            .tri_status
-            .iter()
-            .map(|st| st.iter().filter(|&&x| x == NONE).count());
+        let _ = NONE;
     }
     // obstacles: back layer first
     for &l in routing.iter().rev() {

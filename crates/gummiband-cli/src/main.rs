@@ -167,7 +167,10 @@ fn main() -> Result<()> {
             let t0 = std::time::Instant::now();
             let (sub, res) = gummiband_core::route_board(
                 b,
-                &SubstrateConfig { via_pitch },
+                &SubstrateConfig {
+                    via_pitch,
+                    ..Default::default()
+                },
                 &RouterConfig {
                     via_cost,
                     ..Default::default()
@@ -177,8 +180,8 @@ fn main() -> Result<()> {
             let dt = t0.elapsed();
             println!(
                 "substrate: {} vertices, {} triangles, {} via sites",
-                sub.verts.len(),
-                sub.tris.len(),
+                sub.m.iter().map(|m| m.verts.len()).sum::<usize>(),
+                sub.m.iter().map(|m| m.tris.len()).sum::<usize>(),
                 sub.shared.sites.len()
             );
             for r in &res.portfolio {
@@ -199,6 +202,25 @@ fn main() -> Result<()> {
             );
             for u in s.unrouted.iter().take(40) {
                 println!("  unrouted: {u}");
+            }
+            if let Ok(near) = std::env::var("GB_NEAR") {
+                let v: Vec<f64> = near.split(',').filter_map(|x| x.parse().ok()).collect();
+                let p = gummiband_core::geom::pt(v[0], v[1]);
+                for t in &res.geometry.tracks {
+                    if let Some(q) = t.pts.iter().find(|q| q.dist(p) < v.get(2).copied().unwrap_or(0.3)) {
+                        println!(
+                            "near: {} layer {} vertex {:.3},{:.3} ends {:.3},{:.3} -> {:.3},{:.3}",
+                            b.nets[t.net as usize].name,
+                            b.layers[t.layer as usize].name,
+                            q.x,
+                            q.y,
+                            t.pts[0].x,
+                            t.pts[0].y,
+                            t.pts.last().unwrap().x,
+                            t.pts.last().unwrap().y
+                        );
+                    }
+                }
             }
             let viol = gummiband_core::check::check(b, &res.geometry);
             println!("clearance check: {} violations", viol.len());

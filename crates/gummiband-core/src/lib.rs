@@ -62,17 +62,6 @@ pub fn route_board(
                 for l in v.iter().take(15) {
                     eprintln!("  {l}");
                 }
-                let (m, sw, notes) = r.debug_portals();
-                eprintln!("portals: {m} missed, {sw} swapped");
-                for n in notes {
-                    eprintln!("  {n}");
-                }
-            }
-            if let Ok(pp) = std::env::var("GB_PROBE") {
-                let xy: Vec<f64> = pp.split(',').filter_map(|v| v.parse().ok()).collect();
-                for l in r.probe(geom::pt(xy[0], xy[1])) {
-                    eprintln!("{l}");
-                }
             }
             if std::env::var("GB_DEBUG_X").is_ok() {
                 for l in r.debug_intersections(12) {

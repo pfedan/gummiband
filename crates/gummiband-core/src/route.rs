@@ -3,15 +3,16 @@
 //! positions, and no two chords of different nets may interleave. So each layer stays planar
 //! and the realization can pull every segment taut without crossings.
 //!
-//! Vias sit on via sites inside free triangles. Placing one splits the triangle in three; the
-//! routes that already cross it are threaded through the new triangles.
+//! Each routing layer has its own mesh. Vias sit on via sites inside free triangles; placing
+//! one splits the triangle that holds the site in every layer mesh, and the routes that already
+//! cross those triangles are threaded through the new ones.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
 use crate::board::{Board, NetId, ObstacleKind};
 use crate::geom::{Point, orient, point_seg_dist, segs_intersect};
-use crate::topo::{NONE, OUTSIDE, Substrate};
+use crate::topo::{Mesh, NONE, OUTSIDE, STEINER, Substrate};
 
 #[derive(Debug, Clone)]
 pub struct RouterConfig {
@@ -63,7 +64,8 @@ pub struct Conn {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum End {
     Pin(usize),
-    Vertex(u32),
+    /// A via, by site id.
+    Via(u32),
 }
 
 /// One crossing of a route segment: edge e, left from triangle `from`.
@@ -110,7 +112,7 @@ pub struct ViaInfo {
     pub users: u32,
 }
 
-/// Mutable routing state. Owns its copy of the mesh, because vias split triangles.
+/// Mutable routing state. Owns its copy of the meshes, because vias split triangles.
 #[derive(Clone)]
 pub struct Router<'a> {
     pub board: &'a Board,
@@ -120,6 +122,7 @@ pub struct Router<'a> {
     pub cross: Vec<Vec<Vec<u32>>>,
     chords: Vec<HashMap<u32, Vec<Chord>>>,
     pub segs: Vec<Option<Seg>>,
+    /// Placed vias by site id.
     pub vias: HashMap<u32, ViaInfo>,
     via_cells: HashMap<(i32, i32), Vec<u32>>,
     pub conns: Vec<Conn>,
@@ -131,14 +134,31 @@ pub struct Router<'a> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum NK {
     /// In triangle t on layer li, entered through local edge `entry` (3 = none) at `slot`.
-    Tri { t: u32, li: u8, entry: u8, slot: u16 },
-    /// At an existing via vertex v on layer li.
-    Vert { v: u32, li: u8 },
-    /// At a new via on site `site` inside free triangle t, continuing on layer li.
-    Site { t: u32, site: u32, li: u8 },
-    GoalPin { pin: usize },
-    GoalVia { v: u32 },
-    GoalSite { t: u32, site: u32 },
+    Tri {
+        t: u32,
+        li: u8,
+        entry: u8,
+        slot: u16,
+    },
+    /// At an existing via vertex (by site) on layer li.
+    Vert {
+        site: u32,
+        li: u8,
+    },
+    /// At a new via on `site`, continuing on layer li.
+    Site {
+        site: u32,
+        li: u8,
+    },
+    GoalPin {
+        pin: usize,
+    },
+    GoalVia {
+        site: u32,
+    },
+    GoalSite {
+        site: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -186,23 +206,27 @@ pub struct ExtraApex {
 fn key(k: &NK) -> (u8, u32, u32) {
     match *k {
         NK::Tri { t, li, entry, slot } => (0, t, ((li as u32) << 24) | ((entry as u32) << 16) | slot as u32),
-        NK::Vert { v, li } => (1, v, li as u32),
+        NK::Vert { site, li } => (1, site, li as u32),
         NK::GoalPin { pin } => (2, pin as u32, 0),
-        NK::GoalVia { v } => (3, v, 0),
-        NK::Site { site, li, .. } => (4, site, li as u32),
-        NK::GoalSite { site, .. } => (5, site, 0),
+        NK::GoalVia { site } => (3, site, 0),
+        NK::Site { site, li } => (4, site, li as u32),
+        NK::GoalSite { site } => (5, site, 0),
     }
+}
+
+/// The vertex of a placed via in mesh m.
+fn via_vertex(m: &Mesh, site: u32) -> u32 {
+    m.site_vert[&site]
 }
 
 impl<'a> Router<'a> {
     pub fn new(board: &'a Board, sub: &Substrate, cfg: RouterConfig) -> Router<'a> {
-        let nl = sub.layers.len();
         Router {
             board,
             sub: sub.clone(),
             cfg,
-            cross: vec![vec![Vec::new(); sub.edges.len()]; nl],
-            chords: vec![HashMap::new(); nl],
+            cross: sub.m.iter().map(|m| vec![Vec::new(); m.edges.len()]).collect(),
+            chords: vec![HashMap::new(); sub.m.len()],
             segs: Vec::new(),
             vias: HashMap::new(),
             via_cells: HashMap::new(),
@@ -210,6 +234,18 @@ impl<'a> Router<'a> {
             conn_segs: Vec::new(),
             conn_vias: Vec::new(),
         }
+    }
+
+    fn m(&self, li: usize) -> &Mesh {
+        &self.sub.m[li]
+    }
+
+    fn nl(&self) -> usize {
+        self.sub.m.len()
+    }
+
+    pub fn site_point(&self, site: u32) -> Point {
+        self.sub.shared.sites[site as usize].p
     }
 
     // ------------------------------------------------------------------ clearances
@@ -228,54 +264,85 @@ impl<'a> Router<'a> {
     }
 
     fn obs_net(&self, obs: u32) -> Option<NetId> {
-        if obs == OUTSIDE { None } else { self.board.obstacles[obs as usize].net }
+        if obs == OUTSIDE {
+            None
+        } else {
+            self.board.obstacles[obs as usize].net
+        }
+    }
+
+    /// Via at mesh vertex v of layer li, if any. A via vertex without via (a via that was
+    /// ripped up, or a split that was not used) is a phantom: tracks keep their clearance from
+    /// the point, so that they never bunch up at a free vertex.
+    fn via_at(&self, li: usize, v: u32) -> Option<ViaInfo> {
+        let site = self.m(li).vert_site[v as usize];
+        if site == NONE {
+            return None;
+        }
+        Some(self.vias.get(&site).copied().unwrap_or(ViaInfo {
+            net: NetId::MAX,
+            r: 0.0,
+            drill: 0.0,
+            clearance: 0.0,
+            users: 0,
+        }))
+    }
+
+    fn via_need(via: &ViaInfo, it: &Item) -> f64 {
+        if via.net == it.net {
+            0.0
+        } else {
+            via.r + via.clearance.max(it.c) + it.w / 2.0
+        }
     }
 
     /// Distance from the edge end vertex to the centre line of a track of `it`.
     fn end_need(&self, li: usize, e: u32, end: usize, it: &Item) -> f64 {
+        let m = self.m(li);
         let mut need: f64 = 0.0;
-        for d in self.sub.demands(li, e, end) {
+        for d in m.demands(e, end) {
             if self.obs_net(d.obs) == Some(it.net) {
                 continue;
             }
             need = need.max((self.eff_clearance(d.obs, it.c) + it.w / 2.0) * d.factor as f64);
         }
-        let v = self.sub.edges[e as usize][end];
-        if let Some(via) = self.vias.get(&v)
-            && via.net != it.net
-        {
-            need = need.max(via.r + via.clearance.max(it.c) + it.w / 2.0);
+        if let Some(via) = self.via_at(li, m.edges[e as usize][end]) {
+            need = need.max(Self::via_need(&via, it));
         }
         need
     }
 
-    /// Need of a track at an obstacle vertex v (vertex demands only), for a new edge.
+    /// Need of a track at vertex v (vertex demands only), for a new edge.
     fn vertex_need(&self, li: usize, v: u32, it: &Item) -> f64 {
+        let m = self.m(li);
         let mut need: f64 = 0.0;
-        for &t in &self.sub.vert_tris[v as usize] {
-            let o = self.sub.tri_status[li][t as usize];
+        for &t in &m.vert_tris[v as usize] {
+            let o = m.status[t as usize];
             if o == NONE || self.obs_net(o) == Some(it.net) {
                 continue;
             }
             need = need.max(self.eff_clearance(o, it.c) + it.w / 2.0);
         }
-        if let Some(via) = self.vias.get(&v)
-            && via.net != it.net
-        {
-            need = need.max(via.r + via.clearance.max(it.c) + it.w / 2.0);
+        if let Some(via) = self.via_at(li, v) {
+            need = need.max(Self::via_need(&via, it));
         }
         need
     }
 
     fn item_of(&self, seg: u32) -> Item {
         let s = self.segs[seg as usize].as_ref().unwrap();
-        Item { net: s.net, w: s.width, c: s.clearance, sides: [2, 2] }
+        Item {
+            net: s.net,
+            w: s.width,
+            c: s.clearance,
+            sides: [2, 2],
+        }
     }
 
     /// Item of segment `seg` crossing edge e, with its sides relative to the two apexes.
     fn item_on(&self, li: usize, e: u32, seg: u32) -> Item {
         let mut it = self.item_of(seg);
-        for (k, &t) in self.sub.edge_tris[e as usize].iter().enumerate() {
+        for (k, &t) in self.m(li).edge_tris[e as usize].iter().enumerate() {
             if t != NONE {
                 it.sides[k] = self.chord_side(li, e, t, seg);
             }
@@ -284,27 +351,38 @@ impl<'a> Router<'a> {
     }
 
     pub fn items_on(&self, li: usize, e: u32) -> Vec<Item> {
-        self.cross[li][e as usize].iter().map(|&s| self.item_on(li, e, s)).collect()
+        self.cross[li][e as usize]
+            .iter()
+            .map(|&s| self.item_on(li, e, s))
+            .collect()
     }
 
     /// Side of the apex of t the chord of `seg` in t passes, seen on edge e (see [`Item`]).
     fn chord_side(&self, li: usize, e: u32, t: u32, seg: u32) -> u8 {
         let Some(list) = self.chords[li].get(&t) else { return 2 };
-        let Some(ch) = list.iter().find(|c| c.seg == seg) else { return 2 };
-        let ke = self.sub.local_edge(t, e) as u8;
+        let Some(ch) = list.iter().find(|c| c.seg == seg) else {
+            return 2;
+        };
+        let ke = self.m(li).local_edge(t, e) as u8;
         let other = if ch.a == CPos::Edge(ke) { ch.b } else { ch.a };
-        self.side_of_pos(t, e, other)
+        self.side_of_pos(li, t, e, other)
     }
 
     /// Side (0/1 = towards edges[e][0]/[1]) for a chord from edge e to `other` in triangle t.
-    fn side_of_pos(&self, t: u32, e: u32, other: CPos) -> u8 {
-        let [u, v] = self.sub.edges[e as usize];
-        let tv = self.sub.tris[t as usize];
+    fn side_of_pos(&self, li: usize, t: u32, e: u32, other: CPos) -> u8 {
+        let m = self.m(li);
+        let [u, v] = m.edges[e as usize];
+        let tv = m.tris[t as usize];
         let x = match other {
             CPos::Edge(k) => {
-                // the edge (x, apex): x is its endpoint on e
                 let (p, q) = (tv[k as usize], tv[(k as usize + 1) % 3]);
-                if p == u || q == u { u } else if p == v || q == v { v } else { return 2 }
+                if p == u || q == u {
+                    u
+                } else if p == v || q == v {
+                    v
+                } else {
+                    return 2;
+                }
             }
             CPos::Vertex(i) => tv[i as usize],
         };
@@ -320,49 +398,40 @@ impl<'a> Router<'a> {
     /// Lower and upper bounds of each item's centre line from the apex obstacles of the two
     /// triangles next to e (an obstacle or via at the apex blocks the middle of the edge).
     fn apex_bounds(&self, li: usize, e: u32, items: &[Item], extra: Option<ExtraApex>) -> Vec<(f64, f64)> {
+        let m = self.m(li);
         let mut b = vec![(f64::NEG_INFINITY, f64::INFINITY); items.len()];
-        let [u, v] = self.sub.edges[e as usize];
-        let pu = self.sub.verts[u as usize];
-        let pv = self.sub.verts[v as usize];
+        let [u, v] = m.edges[e as usize];
+        let pu = m.verts[u as usize];
+        let pv = m.verts[v as usize];
         let len = pu.dist(pv);
         if len <= 0.0 {
             return b;
         }
         let dir = (pv - pu) * (1.0 / len);
-        let m = self.cfg.margin;
-        for (k, &t) in self.sub.edge_tris[e as usize].iter().enumerate() {
-            if t == NONE || self.sub.tri_status[li][t as usize] != NONE {
+        let margin = self.cfg.margin;
+        for (k, &t) in m.edge_tris[e as usize].iter().enumerate() {
+            if t == NONE || m.status[t as usize] != NONE {
                 continue;
             }
-            let w = *self.sub.tris[t as usize].iter().find(|&&x| x != u && x != v).unwrap();
-            let pw = self.sub.verts[w as usize];
-            let h = (pw - pu).cross(dir).abs();
-            let proj = (pw - pu).dot(dir);
-            // obstacles at the apex: (net, clearance rule obstacle or via)
-            let via_here = self.vias.get(&w).copied().or(match extra {
-                Some(x) if x.side == k => Some(x.via),
-                _ => None,
-            });
-            let extra_p = match extra {
-                Some(x) if x.side == k => Some(x.p),
-                _ => None,
-            };
-            let (h, proj) = match extra_p {
-                Some(p) => ((p - pu).cross(dir).abs(), (p - pu).dot(dir)),
-                None => (h, proj),
-            };
-            let mut obs: Vec<u32> = Vec::new();
-            if extra_p.is_none() {
-                for &tt in &self.sub.vert_tris[w as usize] {
-                    let o = self.sub.tri_status[li][tt as usize];
-                    if o != NONE && !obs.contains(&o) {
-                        obs.push(o);
+            let (pw, obs, via_here) = match extra {
+                Some(x) if x.side == k => (x.p, Vec::new(), Some(x.via)),
+                _ => {
+                    let w = *m.tris[t as usize].iter().find(|&&x| x != u && x != v).unwrap();
+                    let mut obs: Vec<u32> = Vec::new();
+                    for &tt in &m.vert_tris[w as usize] {
+                        let o = m.status[tt as usize];
+                        if o != NONE && !obs.contains(&o) {
+                            obs.push(o);
+                        }
                     }
+                    (m.verts[w as usize], obs, self.via_at(li, w))
                 }
-            }
+            };
             if obs.is_empty() && via_here.is_none() {
                 continue;
             }
+            let h = (pw - pu).cross(dir).abs();
+            let proj = (pw - pu).dot(dir);
             for (i, it) in items.iter().enumerate() {
                 let side = it.sides[k];
                 if side > 1 {
@@ -374,15 +443,13 @@ impl<'a> Router<'a> {
                         need = need.max(self.eff_clearance(o, it.c) + it.w / 2.0);
                     }
                 }
-                if let Some(via) = via_here
-                    && via.net != it.net
-                {
-                    need = need.max(via.r + via.clearance.max(it.c) + it.w / 2.0);
+                if let Some(via) = via_here {
+                    need = need.max(Self::via_need(&via, it));
                 }
                 if need <= 0.0 {
                     continue;
                 }
-                let need = need + m;
+                let need = need + margin;
                 if need <= h {
                     continue;
                 }
@@ -398,7 +465,11 @@ impl<'a> Router<'a> {
     }
 
     fn gap(a: &Item, b: &Item) -> f64 {
-        if a.net == b.net { 0.0 } else { a.w / 2.0 + a.c.max(b.c) + b.w / 2.0 }
+        if a.net == b.net {
+            0.0
+        } else {
+            a.w / 2.0 + a.c.max(b.c) + b.w / 2.0
+        }
     }
 
     /// Pack items along a segment of length `len` with end needs; centre line intervals.
@@ -429,11 +500,23 @@ impl<'a> Router<'a> {
         if (0..n).any(|i| lo[i] > hi[i] + 1e-9) {
             return None;
         }
-        Some(lo.into_iter().zip(hi).map(|(a, b)| if a > b { ((a + b) / 2.0, (a + b) / 2.0) } else { (a, b) }).collect())
+        Some(
+            lo.into_iter()
+                .zip(hi)
+                .map(|(a, b)| if a > b { ((a + b) / 2.0, (a + b) / 2.0) } else { (a, b) })
+                .collect(),
+        )
     }
 
     /// Centre line intervals of all items on edge e (u to v), or None if they do not fit.
-    pub fn pack(&self, li: usize, e: u32, items: &[Item], extra_via: Option<(u32, &ViaInfo)>) -> Option<Vec<(f64, f64)>> {
+    /// `extra_via` is a via about to be placed at site (vertex of this mesh).
+    pub fn pack(
+        &self,
+        li: usize,
+        e: u32,
+        items: &[Item],
+        extra_via: Option<(u32, &ViaInfo)>,
+    ) -> Option<Vec<(f64, f64)>> {
         self.pack_ext(li, e, items, extra_via, None)
     }
 
@@ -445,30 +528,38 @@ impl<'a> Router<'a> {
         extra_via: Option<(u32, &ViaInfo)>,
         extra_apex: Option<ExtraApex>,
     ) -> Option<Vec<(f64, f64)>> {
+        let m = self.m(li);
+        let len = m.edge_len(e);
+        let [u, v] = m.edges[e as usize];
+        let margin = self.cfg.margin;
         let mut extra_apex = extra_apex;
-        // a via about to be placed at the apex vertex of an adjacent triangle
-        if let Some((vv, via)) = extra_via {
-            for (k, &t) in self.sub.edge_tris[e as usize].iter().enumerate() {
-                if t != NONE && self.sub.tris[t as usize].contains(&vv) && !self.sub.edges[e as usize].contains(&vv) {
-                    extra_apex = Some(ExtraApex { side: k, p: self.sub.verts[vv as usize], via: *via });
+        let mut via_vertex_here = NONE;
+        if let Some((site, via)) = extra_via
+            && let Some(&vv) = m.site_vert.get(&site)
+        {
+            via_vertex_here = vv;
+            for (k, &t) in m.edge_tris[e as usize].iter().enumerate() {
+                if t != NONE && m.tris[t as usize].contains(&vv) && vv != u && vv != v {
+                    extra_apex = Some(ExtraApex {
+                        side: k,
+                        p: m.verts[vv as usize],
+                        via: *via,
+                    });
                 }
             }
         }
-        let bounds = self.apex_bounds(li, e, items, extra_apex);
-        let len = self.sub.edge_len(e);
-        let [u, v] = self.sub.edges[e as usize];
-        let m = self.cfg.margin;
-        let via_need = |vert: u32, it: &Item| -> f64 {
+        let extra_end = |vert: u32, it: &Item| -> f64 {
             match extra_via {
-                Some((vv, via)) if vv == vert && via.net != it.net => via.r + via.clearance.max(it.c) + it.w / 2.0,
+                Some((_, via)) if vert == via_vertex_here => Self::via_need(via, it),
                 _ => 0.0,
             }
         };
+        let bounds = self.apex_bounds(li, e, items, extra_apex);
         Self::pack_with(
             items,
             len,
-            |it| self.end_need(li, e, 0, it).max(via_need(u, it)) + m,
-            |it| self.end_need(li, e, 1, it).max(via_need(v, it)) + m,
+            |it| self.end_need(li, e, 0, it).max(extra_end(u, it)) + margin,
+            |it| self.end_need(li, e, 1, it).max(extra_end(v, it)) + margin,
             &bounds,
         )
     }
@@ -508,9 +599,10 @@ impl<'a> Router<'a> {
         match p {
             CPos::Vertex(i) => i as f64,
             CPos::Edge(k) => {
-                let e = self.sub.tri_edges[t as usize][k as usize];
+                let m = self.m(li);
+                let e = m.tri_edges[t as usize][k as usize];
                 let f = self.edge_frac(li, e, seg, slot);
-                let forward = self.sub.tris[t as usize][k as usize] == self.sub.edges[e as usize][0];
+                let forward = m.tris[t as usize][k as usize] == m.edges[e as usize][0];
                 k as f64 + if forward { f } else { 1.0 - f }
             }
         }
@@ -518,13 +610,14 @@ impl<'a> Router<'a> {
 
     /// Approximate point of a boundary position (for geometric chord tests).
     fn pos_point(&self, t: u32, li: usize, p: CPos, seg: Option<u32>, slot: Option<usize>) -> Point {
+        let m = self.m(li);
         match p {
-            CPos::Vertex(i) => self.sub.verts[self.sub.tris[t as usize][i as usize] as usize],
+            CPos::Vertex(i) => m.verts[m.tris[t as usize][i as usize] as usize],
             CPos::Edge(k) => {
-                let e = self.sub.tri_edges[t as usize][k as usize];
+                let e = m.tri_edges[t as usize][k as usize];
                 let f = self.edge_frac(li, e, seg, slot);
-                let [u, v] = self.sub.edges[e as usize];
-                self.sub.verts[u as usize].lerp(self.sub.verts[v as usize], f)
+                let [u, v] = m.edges[e as usize];
+                m.verts[u as usize].lerp(m.verts[v as usize], f)
             }
         }
     }
@@ -532,7 +625,9 @@ impl<'a> Router<'a> {
     /// Can a chord of `net` from `a` (slot sa) to `b` (slot sb) be added to triangle t?
     #[allow(clippy::too_many_arguments)]
     fn chord_ok(&self, t: u32, li: usize, net: NetId, a: CPos, sa: Option<usize>, b: CPos, sb: Option<usize>) -> bool {
-        let Some(list) = self.chords[li].get(&t) else { return true };
+        let Some(list) = self.chords[li].get(&t) else {
+            return true;
+        };
         let x = self.coord(t, li, a, None, sa);
         let y = self.coord(t, li, b, None, sb);
         let (lo, hi) = if x < y { (x, y) } else { (y, x) };
@@ -556,7 +651,9 @@ impl<'a> Router<'a> {
 
     /// Can a half chord from interior point `p` to boundary position `b` be added to t?
     fn half_chord_ok(&self, t: u32, li: usize, net: NetId, p: Point, b: CPos, sb: Option<usize>) -> bool {
-        let Some(list) = self.chords[li].get(&t) else { return true };
+        let Some(list) = self.chords[li].get(&t) else {
+            return true;
+        };
         let q = self.pos_point(t, li, b, None, sb);
         list.iter().all(|ch| {
             self.segs[ch.seg as usize].as_ref().unwrap().net == net || {
@@ -575,7 +672,22 @@ impl<'a> Router<'a> {
 
     fn via_size(&self, net: NetId) -> (f64, f64, f64) {
         let c = self.board.class_of(net);
-        (c.via_diameter / 2.0, c.via_drill, c.clearance.max(self.board.rules.min_clearance))
+        (
+            c.via_diameter / 2.0,
+            c.via_drill,
+            c.clearance.max(self.board.rules.min_clearance),
+        )
+    }
+
+    fn via_info(&self, net: NetId) -> ViaInfo {
+        let (r, drill, clearance) = self.via_size(net);
+        ViaInfo {
+            net,
+            r,
+            drill,
+            clearance,
+            users: 0,
+        }
     }
 
     /// Static and via spacing checks of a via of `net` at site `site`.
@@ -605,10 +717,17 @@ impl<'a> Router<'a> {
             for dy in -2..=2 {
                 if let Some(list) = self.via_cells.get(&(cx + dx, cy + dy)) {
                     for &w in list {
+                        if w == site {
+                            continue;
+                        }
                         let o = &self.vias[&w];
-                        let d = p.dist(self.sub.verts[w as usize]);
+                        let d = p.dist(self.site_point(w));
                         let holes = drill / 2.0 + o.drill / 2.0 + self.board.rules.hole_to_hole;
-                        let need = if o.net == net { holes } else { (r + o.r + clr.max(o.clearance)).max(holes) };
+                        let need = if o.net == net {
+                            holes
+                        } else {
+                            (r + o.r + clr.max(o.clearance)).max(holes)
+                        };
                         if d < need {
                             return false;
                         }
@@ -619,88 +738,88 @@ impl<'a> Router<'a> {
         true
     }
 
-    /// Can a via of `net` be placed at existing vertex v? Some(true) if one of the net is there.
-    fn via_ok_vertex(&self, v: u32, net: NetId) -> Option<bool> {
-        let site = self.sub.vert_site[v as usize];
-        if site == NONE {
-            return None;
-        }
-        if let Some(via) = self.vias.get(&v) {
+    /// Can a via of `net` be used at the existing via vertex of `site`? Some(true) if a via of
+    /// the net is already there.
+    fn via_ok_vertex(&self, site: u32, net: NetId) -> Option<bool> {
+        if let Some(via) = self.vias.get(&site) {
             return if via.net == net { Some(true) } else { None };
         }
         if !self.site_clear(site, net) {
             return None;
         }
-        let (r, drill, clr) = self.via_size(net);
-        let info = ViaInfo { net, r, drill, clearance: clr, users: 0 };
-        for &t in &self.sub.vert_tris[v as usize] {
-            for &e in &self.sub.tri_edges[t as usize] {
-                for li in 0..self.sub.layers.len() {
+        let info = self.via_info(net);
+        for li in 0..self.nl() {
+            let m = self.m(li);
+            let v = via_vertex(m, site);
+            for &t in &m.vert_tris[v as usize] {
+                for &e in &m.tri_edges[t as usize] {
                     if self.cross[li][e as usize].is_empty() {
                         continue;
                     }
                     let items = self.items_on(li, e);
-                    self.pack(li, e, &items, Some((v, &info)))?;
+                    self.pack(li, e, &items, Some((site, &info)))?;
                 }
             }
         }
         Some(false)
     }
 
-    /// Can a via of `net` be placed at site `site` inside free triangle t (splitting it)?
-    fn via_ok_site(&self, t: u32, site: u32, net: NetId) -> bool {
-        if !self.site_clear(site, net) {
+    /// Can a via of `net` be placed at the unused `site` (splitting its triangles)?
+    fn via_ok_site(&self, site: u32, net: NetId) -> bool {
+        if !self.sub.site_usable(site) || !self.site_clear(site, net) {
             return false;
         }
-        let p = self.sub.shared.sites[site as usize].p;
-        let (r, _, clr) = self.via_size(net);
-        let tv = self.sub.tris[t as usize];
-        for li in 0..self.sub.layers.len() {
-            let Some(list) = self.chords[li].get(&t) else { continue };
-            // which new edge (s, v_i) each chord crosses and where
-            let mut per_edge: [Vec<(f64, Item)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-            for ch in list {
-                let it = self.item_of(ch.seg);
-                for (i, u) in self.rethread_hits(t, li, ch, p) {
-                    per_edge[i].push((u, it));
+        let p = self.site_point(site);
+        let via = self.via_info(net);
+        for li in 0..self.nl() {
+            let m = self.m(li);
+            let t = m.site_tri[site as usize];
+            let tv = m.tris[t as usize];
+            if let Some(list) = self.chords[li].get(&t) {
+                // which new edge (s, v_i) each chord crosses and where
+                let mut per_edge: [Vec<(f64, Item)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+                for ch in list {
+                    let it = self.item_of(ch.seg);
+                    for (i, u) in self.rethread_hits(t, li, ch, p) {
+                        per_edge[i].push((u, it));
+                    }
+                }
+                for (i, hits) in per_edge.iter_mut().enumerate() {
+                    if hits.is_empty() {
+                        continue;
+                    }
+                    // order from v_i (u = 1) towards s (u = 0)
+                    hits.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    let items: Vec<Item> = hits.iter().map(|h| h.1).collect();
+                    let vi = tv[i];
+                    let len = p.dist(m.verts[vi as usize]);
+                    let margin = self.cfg.margin;
+                    let ok = Self::pack_with(
+                        &items,
+                        len,
+                        |it| self.vertex_need(li, vi, it) + margin,
+                        |it| Self::via_need(&via, it) + margin,
+                        &[],
+                    );
+                    if ok.is_none() {
+                        return false;
+                    }
                 }
             }
-            for (i, hits) in per_edge.iter_mut().enumerate() {
-                if hits.is_empty() {
-                    continue;
-                }
-                // order from v_i (u = 1) towards s (u = 0)
-                hits.sort_by(|a, b| b.0.total_cmp(&a.0));
-                let items: Vec<Item> = hits.iter().map(|h| h.1).collect();
-                let vi = tv[i];
-                let len = p.dist(self.sub.verts[vi as usize]);
-                let m = self.cfg.margin;
-                let ok = Self::pack_with(
-                    &items,
-                    len,
-                    |it| self.vertex_need(li, vi, it) + m,
-                    |it| if it.net == net { 0.0 } else { r + clr.max(it.c) + it.w / 2.0 + m },
-                    &[],
-                );
-                if ok.is_none() {
-                    return false;
-                }
-            }
-        }
-        // the old edges get the via as apex of their new triangle
-        let via = ViaInfo { net, r, drill: 0.0, clearance: clr, users: 0 };
-        for li in 0..self.sub.layers.len() {
+            // the old edges get the via as apex of their new triangle
             for k in 0..3 {
-                let e = self.sub.tri_edges[t as usize][k];
+                let e = m.tri_edges[t as usize][k];
                 if self.cross[li][e as usize].is_empty() {
                     continue;
                 }
-                let side_idx = self.sub.edge_tris[e as usize].iter().position(|&x| x == t).unwrap();
+                let side_idx = m.edge_tris[e as usize].iter().position(|&x| x == t).unwrap();
                 let mut items = self.items_on(li, e);
                 let chords = self.chords[li].get(&t);
                 for (it, &sg) in items.iter_mut().zip(&self.cross[li][e as usize]) {
                     it.sides[side_idx] = 2;
-                    let Some(ch) = chords.and_then(|l| l.iter().find(|c| c.seg == sg)) else { continue };
+                    let Some(ch) = chords.and_then(|l| l.iter().find(|c| c.seg == sg)) else {
+                        continue;
+                    };
                     let hits = self.rethread_hits(t, li, ch, p);
                     let at_start = ch.a == CPos::Edge(k as u8);
                     let hit = if at_start { hits.first() } else { hits.last() };
@@ -711,10 +830,12 @@ impl<'a> Router<'a> {
                             CPos::Edge(_) => continue,
                         },
                     };
-                    let [u, _] = self.sub.edges[e as usize];
-                    it.sides[side_idx] = if x == u { 0 } else { 1 };
+                    it.sides[side_idx] = if x == m.edges[e as usize][0] { 0 } else { 1 };
                 }
-                if self.pack_ext(li, e, &items, None, Some(ExtraApex { side: side_idx, p, via })).is_none() {
+                if self
+                    .pack_ext(li, e, &items, None, Some(ExtraApex { side: side_idx, p, via }))
+                    .is_none()
+                {
                     return false;
                 }
             }
@@ -725,116 +846,160 @@ impl<'a> Router<'a> {
     /// Where an existing chord of triangle t crosses the new edges (s, v_i) if t is split at p:
     /// (i, u) with u the position along s -> v_i (0 at s, 1 at v_i), in chord order.
     fn rethread_hits(&self, t: u32, li: usize, ch: &Chord, p: Point) -> Vec<(usize, f64)> {
+        let m = self.m(li);
         let a = self.pos_point(t, li, ch.a, Some(ch.seg), None);
         let b = self.pos_point(t, li, ch.b, Some(ch.seg), None);
-        let tv = self.sub.tris[t as usize];
+        let tv = m.tris[t as usize];
+        // the ray s -> v_i crosses the chord iff v_i and s lie on opposite sides of it
+        let mut os = orient(a, b, p);
+        if os == 0.0 {
+            os = 1e-300;
+        }
         let mut hits = Vec::new();
         for i in 0..3 {
-            let vi = self.sub.verts[tv[i] as usize];
-            if let Some((tc, u)) = seg_param_intersection(a, b, p, vi)
-                && tc > 1e-9
-                && tc < 1.0 - 1e-9
-                && u < 1.0 - 1e-9
-            {
-                hits.push((tc, i, u));
+            if ch.a == CPos::Vertex(i as u8) || ch.b == CPos::Vertex(i as u8) {
+                continue;
             }
+            let vi = m.verts[tv[i] as usize];
+            let ov = orient(a, b, vi);
+            if os * ov >= 0.0 {
+                continue;
+            }
+            let (tc, u) = line_params(a, b, p, vi);
+            hits.push((tc, i, u.clamp(1e-6, 1.0 - 1e-6)));
         }
         hits.sort_by(|x, y| x.0.total_cmp(&y.0));
         hits.into_iter().map(|(_, i, u)| (i, u)).collect()
     }
 
-    /// Split free triangle t at `site` and thread the existing chords through the new triangles.
-    /// Returns the new vertex and the triangles X_k (X_k holds old edge k).
-    fn split_at(&mut self, t: u32, site: u32) -> (u32, [u32; 3]) {
-        let p = self.sub.shared.sites[site as usize].p;
-        let nl = self.sub.layers.len();
-        // geometry of the old chords, before the mesh changes
-        let mut old: Vec<(usize, Chord, Vec<(usize, f64)>, Point)> = Vec::new();
-        for li in 0..nl {
+    /// Place a via vertex at `site` in every layer mesh: split the triangle that holds it and
+    /// thread the existing chords through the new triangles. Returns per layer the old triangle
+    /// and the new ones X_k (X_k holds old edge k).
+    fn split_at(&mut self, site: u32) -> Vec<(u32, [u32; 3])> {
+        let p = self.site_point(site);
+        let shared = self.sub.shared.clone();
+        let mut res = Vec::new();
+        for li in 0..self.nl() {
+            let t = self.m(li).site_tri[site as usize];
+            // geometry of the old chords, before the mesh changes
+            let mut old: Vec<(Chord, Vec<(usize, f64)>, Point)> = Vec::new();
             if let Some(list) = self.chords[li].remove(&t) {
                 for ch in list {
                     let hits = self.rethread_hits(t, li, &ch, p);
                     let a = self.pos_point(t, li, ch.a, Some(ch.seg), None);
                     let b = self.pos_point(t, li, ch.b, Some(ch.seg), None);
-                    // a point just inside the triangle along the chord, to find the start triangle
-                    old.push((li, ch, hits, a.lerp(b, 1e-6)));
+                    old.push((ch, hits, a.lerp(b, 1e-6)));
                 }
             }
-        }
-        let old_tv = self.sub.tris[t as usize];
-        let old_edges = self.sub.tri_edges[t as usize];
-        let (s, x) = self.sub.split(t, site);
-        for li in 0..nl {
-            self.cross[li].resize(self.sub.edges.len(), Vec::new());
-        }
-        let new_edge = |k: usize, sub: &Substrate| -> u32 { sub.tri_edges[x[k] as usize][2] }; // E_k = (s, v_k)
-        let mut on_edge: Vec<HashMap<u32, Vec<(f64, u32)>>> = vec![HashMap::new(); nl];
-        for (li, ch, hits, start_pt) in old {
-            // start triangle
-            let mut cur = match ch.a {
-                CPos::Edge(k) => x[k as usize],
-                CPos::Vertex(_) => *x
+            let old_tv = self.m(li).tris[t as usize];
+            let old_edges = self.m(li).tri_edges[t as usize];
+            let (_, x) = self.sub.m[li].split(t, site, p, &shared.sites);
+            let ne = self.m(li).edges.len();
+            self.cross[li].resize(ne, Vec::new());
+            let mut on_edge: HashMap<u32, Vec<(f64, u32)>> = HashMap::new();
+            for (ch, hits, start_pt) in old {
+                let m = &self.sub.m[li];
+                let new_edge = |k: usize| -> u32 { m.tri_edges[x[k] as usize][2] }; // E_k = (s, v_k)
+                let mut cur = match ch.a {
+                    CPos::Edge(k) => x[k as usize],
+                    CPos::Vertex(_) => *x
+                        .iter()
+                        .find(|&&xt| {
+                            let tv = m.tris[xt as usize];
+                            let (a, b, c) = (
+                                m.verts[tv[0] as usize],
+                                m.verts[tv[1] as usize],
+                                m.verts[tv[2] as usize],
+                            );
+                            orient(a, b, start_pt) >= -1e-12
+                                && orient(b, c, start_pt) >= -1e-12
+                                && orient(c, a, start_pt) >= -1e-12
+                        })
+                        .unwrap_or(&x[0]),
+                };
+                let local_of_vertex = |xt: u32, v: u32| m.tris[xt as usize].iter().position(|&q| q == v).unwrap() as u8;
+                let mut pos = match ch.a {
+                    CPos::Edge(_) => CPos::Edge(0),
+                    CPos::Vertex(i) => CPos::Vertex(local_of_vertex(cur, old_tv[i as usize])),
+                };
+                let mut hits = hits;
+                if hits.len() == 2 && !m.tri_edges[cur as usize].contains(&new_edge(hits[0].0)) {
+                    hits.swap(0, 1);
+                }
+                if hits
                     .iter()
-                    .find(|&&xt| {
-                        let tv = self.sub.tris[xt as usize];
-                        let (a, b, c) = (self.sub.verts[tv[0] as usize], self.sub.verts[tv[1] as usize], self.sub.verts[tv[2] as usize]);
-                        orient(a, b, start_pt) >= -1e-12 && orient(b, c, start_pt) >= -1e-12 && orient(c, a, start_pt) >= -1e-12
-                    })
-                    .unwrap_or(&x[0]),
-            };
-            let local_of_vertex = |xt: u32, v: u32, sub: &Substrate| sub.tris[xt as usize].iter().position(|&q| q == v).unwrap() as u8;
-            let mut pos = match ch.a {
-                CPos::Edge(_) => CPos::Edge(0),
-                CPos::Vertex(i) => CPos::Vertex(local_of_vertex(cur, old_tv[i as usize], &self.sub)),
-            };
-            let mut new_cross: Vec<Crossing> = Vec::new();
-            let mut new_chords: Vec<(u32, Chord)> = Vec::new();
-            for (i, u) in hits {
-                let e = new_edge(i, &self.sub);
-                let k_out = self.sub.local_edge(cur, e) as u8;
-                new_chords.push((cur, Chord { seg: ch.seg, a: pos, b: CPos::Edge(k_out) }));
-                new_cross.push(Crossing { e, from: cur });
-                on_edge[li].entry(e).or_default().push((u, ch.seg));
-                let next = self.sub.other_tri(e, cur);
-                pos = CPos::Edge(self.sub.local_edge(next, e) as u8);
-                cur = next;
-            }
-            let end = match ch.b {
-                CPos::Edge(_) => CPos::Edge(0),
-                CPos::Vertex(i) => CPos::Vertex(local_of_vertex(cur, old_tv[i as usize], &self.sub)),
-            };
-            new_chords.push((cur, Chord { seg: ch.seg, a: pos, b: end }));
-            // splice the crossings into the segment
-            let seg = self.segs[ch.seg as usize].as_mut().unwrap();
-            let exit = match ch.b {
-                CPos::Edge(k) => seg.crossings.iter().position(|c| c.e == old_edges[k as usize] && c.from == t),
-                CPos::Vertex(_) => None,
-            };
-            match exit {
-                Some(ix) => {
-                    seg.crossings[ix].from = cur;
-                    for (j, c) in new_cross.into_iter().enumerate() {
-                        seg.crossings.insert(ix + j, c);
+                    .any(|h| !(0..3).any(|k| m.tri_edges[x[k] as usize].contains(&new_edge(h.0))))
+                    || hits
+                        .first()
+                        .is_some_and(|h| !m.tri_edges[cur as usize].contains(&new_edge(h.0)))
+                {
+                    hits.clear();
+                }
+                let mut new_cross: Vec<Crossing> = Vec::new();
+                let mut new_chords: Vec<(u32, Chord)> = Vec::new();
+                for (i, u) in hits {
+                    let e = new_edge(i);
+                    let k_out = m.local_edge(cur, e) as u8;
+                    new_chords.push((
+                        cur,
+                        Chord {
+                            seg: ch.seg,
+                            a: pos,
+                            b: CPos::Edge(k_out),
+                        },
+                    ));
+                    new_cross.push(Crossing { e, from: cur });
+                    on_edge.entry(e).or_default().push((u, ch.seg));
+                    let next = m.other_tri(e, cur);
+                    pos = CPos::Edge(m.local_edge(next, e) as u8);
+                    cur = next;
+                }
+                let end = match ch.b {
+                    CPos::Edge(_) => CPos::Edge(0),
+                    CPos::Vertex(i) => CPos::Vertex(local_of_vertex(cur, old_tv[i as usize])),
+                };
+                new_chords.push((
+                    cur,
+                    Chord {
+                        seg: ch.seg,
+                        a: pos,
+                        b: end,
+                    },
+                ));
+                // splice the crossings into the segment
+                let seg = self.segs[ch.seg as usize].as_mut().unwrap();
+                let exit = match ch.b {
+                    CPos::Edge(k) => seg
+                        .crossings
+                        .iter()
+                        .position(|c| c.e == old_edges[k as usize] && c.from == t),
+                    CPos::Vertex(_) => None,
+                };
+                match exit {
+                    Some(ix) => {
+                        seg.crossings[ix].from = cur;
+                        for (j, c) in new_cross.into_iter().enumerate() {
+                            seg.crossings.insert(ix + j, c);
+                        }
                     }
+                    None => seg.crossings.extend(new_cross),
                 }
-                None => seg.crossings.extend(new_cross),
-            }
-            seg.chord_tris.retain(|&q| q != t);
-            for (xt, c) in new_chords {
-                if !seg.chord_tris.contains(&xt) {
-                    seg.chord_tris.push(xt);
+                seg.chord_tris.retain(|&q| q != t);
+                for (xt, c) in new_chords {
+                    if !seg.chord_tris.contains(&xt) {
+                        seg.chord_tris.push(xt);
+                    }
+                    self.chords[li].entry(xt).or_default().push(c);
                 }
-                self.chords[li].entry(xt).or_default().push(c);
             }
-        }
-        // order on the new edges: from v_i (edges[e][0]) towards s
-        for (li, m) in on_edge.into_iter().enumerate() {
-            for (e, mut list) in m {
+            // order on the new edges: from v_i (edges[e][0]) towards s
+            for (e, mut list) in on_edge {
                 list.sort_by(|a, b| b.0.total_cmp(&a.0));
                 self.cross[li][e as usize] = list.into_iter().map(|(_, sg)| sg).collect();
             }
+            res.push((t, x));
         }
-        (s, x)
+        res
     }
 
     fn in_plane(&self, p: Point, net: NetId) -> bool {
@@ -845,23 +1010,28 @@ impl<'a> Router<'a> {
             .any(|pl| pl.net == net && pl.outline.contains(p) && pl.outline.boundary_dist(p) >= r + 0.5)
     }
 
-    fn add_via(&mut self, v: u32, net: NetId) {
-        if let Some(via) = self.vias.get_mut(&v) {
+    fn add_via(&mut self, site: u32, net: NetId) {
+        if let Some(via) = self.vias.get_mut(&site) {
             via.users += 1;
             return;
         }
-        let (r, drill, clearance) = self.via_size(net);
-        self.vias.insert(v, ViaInfo { net, r, drill, clearance, users: 1 });
-        self.via_cells.entry(Self::via_cell(self.sub.verts[v as usize])).or_default().push(v);
+        let mut info = self.via_info(net);
+        info.users = 1;
+        self.vias.insert(site, info);
+        self.via_cells
+            .entry(Self::via_cell(self.site_point(site)))
+            .or_default()
+            .push(site);
     }
 
-    fn remove_via(&mut self, v: u32) {
-        let Some(via) = self.vias.get_mut(&v) else { return };
+    fn remove_via(&mut self, site: u32) {
+        let Some(via) = self.vias.get_mut(&site) else { return };
         via.users -= 1;
         if via.users == 0 {
-            self.vias.remove(&v);
-            if let Some(list) = self.via_cells.get_mut(&Self::via_cell(self.sub.verts[v as usize])) {
-                list.retain(|&x| x != v);
+            self.vias.remove(&site);
+            let c = Self::via_cell(self.site_point(site));
+            if let Some(list) = self.via_cells.get_mut(&c) {
+                list.retain(|&x| x != site);
             }
         }
     }
@@ -869,15 +1039,11 @@ impl<'a> Router<'a> {
     // ------------------------------------------------------------------ search
 
     fn tri_pin(&self, li: usize, t: u32) -> Option<usize> {
-        let s = self.sub.tri_status[li][t as usize];
+        let s = self.m(li).status[t as usize];
         if s == NONE || s == OUTSIDE {
             return None;
         }
         self.board.obstacles[s as usize].pin
-    }
-
-    fn all_free(&self, t: u32) -> bool {
-        (0..self.sub.layers.len()).all(|li| self.sub.tri_status[li][t as usize] == NONE)
     }
 
     /// A* for one connection. Returns the node chain from start to goal.
@@ -885,30 +1051,54 @@ impl<'a> Router<'a> {
         let conn = &self.conns[ci];
         let net = conn.net;
         let cls = self.board.class_of(net);
-        let item = Item { net, w: cls.track_width, c: cls.clearance.max(self.board.rules.min_clearance), sides: [2, 2] };
+        let item = Item {
+            net,
+            w: cls.track_width,
+            c: cls.clearance.max(self.board.rules.min_clearance),
+            sides: [2, 2],
+        };
         let src = &self.board.pins[conn.from];
         let target_pts: Vec<Point> = match &conn.goal {
             Goal::Pins(p) => p.iter().map(|&p| self.board.pins[p].pos).collect(),
             Goal::Plane => Vec::new(),
         };
-        let h = |p: Point| -> f64 { target_pts.iter().map(|&q| q.dist(p)).fold(f64::INFINITY, f64::min).min(1e9) * if target_pts.is_empty() { 0.0 } else { 1.0 } };
+        let h = |p: Point| -> f64 {
+            if target_pts.is_empty() {
+                0.0
+            } else {
+                target_pts.iter().map(|&q| q.dist(p)).fold(f64::INFINITY, f64::min)
+            }
+        };
         let is_target = |pin: usize| -> bool {
             match &conn.goal {
                 Goal::Pins(p) => p.contains(&pin),
                 Goal::Plane => {
                     let pn = &self.board.pins[pin];
+                    // a nearby through hole pin of the net reaches the plane as well
                     pin != conn.from
                         && pn.net == net
-                        && self.board.planes.iter().any(|pl| pl.net == net && pn.layers.has(pl.layer))
+                        && pn.pos.dist(src.pos) < 3.0
+                        && self
+                            .board
+                            .planes
+                            .iter()
+                            .any(|pl| pl.net == net && pn.layers.has(pl.layer))
                 }
             }
         };
-        let nl = self.sub.layers.len();
+        let nl = self.nl();
 
         let mut nodes: Vec<Node> = Vec::new();
         let mut best: HashMap<(u8, u32, u32), f64> = HashMap::new();
         let mut open = BinaryHeap::new();
-        let push = |best: &mut HashMap<(u8, u32, u32), f64>, nodes: &mut Vec<Node>, open: &mut BinaryHeap<Open>, kind: NK, pos: Point, g: f64, parent: u32| {
+        type Best = HashMap<(u8, u32, u32), f64>;
+        let push = |best: &mut Best,
+                    nodes: &mut Vec<Node>,
+                    open: &mut BinaryHeap<Open>,
+                    kind: NK,
+                    pos: Point,
+                    g: f64,
+                    parent: u32| {
             let k = key(&kind);
             if let Some(&b) = best.get(&k)
                 && b <= g + 1e-9
@@ -920,19 +1110,33 @@ impl<'a> Router<'a> {
             open.push(Open(g + h(pos), (nodes.len() - 1) as u32));
         };
 
-        for (li, &l) in self.sub.layers.iter().enumerate() {
-            if !src.layers.has(l) {
+        for (li, m) in self.sub.m.iter().enumerate() {
+            if !src.layers.has(m.layer) {
                 continue;
             }
             for &o in &src.obstacles {
-                for &t in self.sub.obs_tris[li].get(&(o as u32)).map(|v| v.as_slice()).unwrap_or(&[]) {
-                    push(&mut best, &mut nodes, &mut open, NK::Tri { t, li: li as u8, entry: 3, slot: 0 }, src.pos, 0.0, u32::MAX);
+                for &t in m.obs_tris.get(&(o as u32)).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    push(
+                        &mut best,
+                        &mut nodes,
+                        &mut open,
+                        NK::Tri {
+                            t,
+                            li: li as u8,
+                            entry: 3,
+                            slot: 0,
+                        },
+                        src.pos,
+                        0.0,
+                        u32::MAX,
+                    );
                 }
             }
         }
 
-        // crossings out of triangle t (layer lu) through local edge k, from boundary position `from`
-        let cross_out = |best: &mut HashMap<(u8, u32, u32), f64>,
+        // crossings out of triangle t (layer lu) through local edge k
+        #[allow(clippy::too_many_arguments)]
+        let cross_out = |best: &mut Best,
                          nodes: &mut Vec<Node>,
                          open: &mut BinaryHeap<Open>,
                          t: u32,
@@ -942,40 +1146,70 @@ impl<'a> Router<'a> {
                          interior: Option<Point>,
                          node: &Node,
                          idx: u32| {
-            let t2 = self.sub.tri_nbrs[t as usize][k as usize];
+            let m = self.m(lu);
+            let t2 = m.tri_nbrs[t as usize][k as usize];
             if t2 == NONE {
                 return;
             }
-            let s2 = self.sub.tri_status[lu][t2 as usize];
+            let s2 = m.status[t2 as usize];
             if !Substrate::passable(self.board, s2, net) {
                 return;
             }
-            let free = self.sub.tri_status[lu][t as usize] == NONE;
-            let e = self.sub.tri_edges[t as usize][k as usize];
-            let k2 = self.sub.local_edge(t2, e) as u8;
+            let free = m.status[t as usize] == NONE;
+            let e = m.tri_edges[t as usize][k as usize];
+            let k2 = m.local_edge(t2, e) as u8;
             if !free && s2 != NONE {
-                push(best, nodes, open, NK::Tri { t: t2, li: lu as u8, entry: 3, slot: 0 }, node.pos, node.g, idx);
+                push(
+                    best,
+                    nodes,
+                    open,
+                    NK::Tri {
+                        t: t2,
+                        li: lu as u8,
+                        entry: 3,
+                        slot: 0,
+                    },
+                    node.pos,
+                    node.g,
+                    idx,
+                );
                 return;
+            }
+            // never enter a triangle this path already passed on this layer (no loops)
+            {
+                let mut p = idx;
+                while p != u32::MAX {
+                    match nodes[p as usize].kind {
+                        NK::Tri { t: tp, li: lp, .. } if lp as usize == lu => {
+                            if tp == t2 {
+                                return;
+                            }
+                        }
+                        NK::Tri { .. } => {}
+                        _ => break,
+                    }
+                    p = nodes[p as usize].parent;
+                }
             }
             let mut item = item;
             if free && let Some((cp, cs)) = chord_from {
                 // the chord in t fixes the side of t's apex on the exit edge ...
-                let side_idx = self.sub.edge_tris[e as usize].iter().position(|&x| x == t).unwrap();
-                item.sides[side_idx] = self.side_of_pos(t, e, cp);
+                let side_idx = m.edge_tris[e as usize].iter().position(|&x| x == t).unwrap();
+                item.sides[side_idx] = self.side_of_pos(lu, t, e, cp);
                 // ... and on the entry edge, which must still fit
                 if let (CPos::Edge(ke), Some(js)) = (cp, cs) {
-                    let e_in = self.sub.tri_edges[t as usize][ke as usize];
+                    let e_in = m.tri_edges[t as usize][ke as usize];
                     let mut it_in = item;
                     it_in.sides = [2, 2];
-                    let si = self.sub.edge_tris[e_in as usize].iter().position(|&x| x == t).unwrap();
-                    it_in.sides[si] = self.side_of_pos(t, e_in, CPos::Edge(k));
+                    let si = m.edge_tris[e_in as usize].iter().position(|&x| x == t).unwrap();
+                    it_in.sides[si] = self.side_of_pos(lu, t, e_in, CPos::Edge(k));
                     if self.slot_interval(lu, e_in, js, it_in).is_none() {
                         return;
                     }
                 }
             }
-            let [u, v] = self.sub.edges[e as usize];
-            let (pu, pv) = (self.sub.verts[u as usize], self.sub.verts[v as usize]);
+            let [u, v] = m.edges[e as usize];
+            let (pu, pv) = (m.verts[u as usize], m.verts[v as usize]);
             let len = pu.dist(pv);
             let dir = (pv - pu) * (1.0 / len);
             let n = self.cross[lu][e as usize].len();
@@ -992,9 +1226,24 @@ impl<'a> Router<'a> {
                         continue;
                     }
                 }
-                let Some((lo, hi)) = self.slot_interval(lu, e, j, item) else { continue };
+                let Some((lo, hi)) = self.slot_interval(lu, e, j, item) else {
+                    continue;
+                };
                 let q = pu + dir * (node.pos - pu).dot(dir).clamp(lo, hi);
-                push(best, nodes, open, NK::Tri { t: t2, li: lu as u8, entry: k2, slot: j as u16 }, q, node.g + node.pos.dist(q), idx);
+                push(
+                    best,
+                    nodes,
+                    open,
+                    NK::Tri {
+                        t: t2,
+                        li: lu as u8,
+                        entry: k2,
+                        slot: j as u16,
+                    },
+                    q,
+                    node.g + node.pos.dist(q),
+                    idx,
+                );
             }
         };
 
@@ -1021,21 +1270,50 @@ impl<'a> Router<'a> {
                 }
                 NK::Tri { t, li, entry, slot } => {
                     let lu = li as usize;
-                    let status = self.sub.tri_status[lu][t as usize];
+                    let m = self.m(lu);
+                    let status = m.status[t as usize];
                     let free = status == NONE;
-                    let entry_pos = if entry < 3 { Some((CPos::Edge(entry), Some(slot as usize))) } else { None };
+                    let entry_pos = if entry < 3 {
+                        Some((CPos::Edge(entry), Some(slot as usize)))
+                    } else {
+                        None
+                    };
                     if let Some(pin) = self.tri_pin(lu, t)
                         && is_target(pin)
                     {
                         let q = self.board.pins[pin].pos;
-                        push(&mut best, &mut nodes, &mut open, NK::GoalPin { pin }, q, node.g + node.pos.dist(q), idx);
+                        push(
+                            &mut best,
+                            &mut nodes,
+                            &mut open,
+                            NK::GoalPin { pin },
+                            q,
+                            node.g + node.pos.dist(q),
+                            idx,
+                        );
                         continue;
                     }
                     // through hole copper of the net: switch layers for free
                     if !free && status != OUTSIDE && self.board.obstacles[status as usize].hole.is_some() {
                         for l2 in 0..nl {
-                            if l2 != lu && self.sub.tri_status[l2][t as usize] == status {
-                                push(&mut best, &mut nodes, &mut open, NK::Tri { t, li: l2 as u8, entry: 3, slot: 0 }, node.pos, node.g, idx);
+                            if l2 == lu {
+                                continue;
+                            }
+                            for &t2 in self.m(l2).obs_tris.get(&status).map(|v| v.as_slice()).unwrap_or(&[]) {
+                                push(
+                                    &mut best,
+                                    &mut nodes,
+                                    &mut open,
+                                    NK::Tri {
+                                        t: t2,
+                                        li: l2 as u8,
+                                        entry: 3,
+                                        slot: 0,
+                                    },
+                                    node.pos,
+                                    node.g,
+                                    idx,
+                                );
                             }
                         }
                     }
@@ -1044,80 +1322,144 @@ impl<'a> Router<'a> {
                             cross_out(&mut best, &mut nodes, &mut open, t, lu, k, entry_pos, None, &node, idx);
                         }
                     }
-                    if !free || !self.all_free(t) {
+                    if !free {
                         continue;
                     }
                     // existing via vertices at the corners
                     for i in 0..3u8 {
-                        let v = self.sub.tris[t as usize][i as usize];
-                        let Some(existing) = self.via_ok_vertex(v, net) else { continue };
+                        let v = m.tris[t as usize][i as usize];
+                        let site = m.vert_site[v as usize];
+                        if site == NONE || site == STEINER {
+                            continue;
+                        }
+                        let Some(existing) = self.via_ok_vertex(site, net) else {
+                            continue;
+                        };
                         if let Some((ep, es)) = entry_pos
                             && !self.chord_ok(t, lu, net, ep, es, CPos::Vertex(i), None)
                         {
                             continue;
                         }
-                        let q = self.sub.verts[v as usize];
+                        let q = m.verts[v as usize];
                         let d = node.pos.dist(q);
                         let vc = if existing { 0.1 } else { self.cfg.via_cost };
                         if conn.goal == Goal::Plane && self.in_plane(q, net) {
-                            push(&mut best, &mut nodes, &mut open, NK::GoalVia { v }, q, node.g + d + vc * 0.5, idx);
+                            push(
+                                &mut best,
+                                &mut nodes,
+                                &mut open,
+                                NK::GoalVia { site },
+                                q,
+                                node.g + d + vc * 0.5,
+                                idx,
+                            );
                             continue;
                         }
                         for l2 in 0..nl {
                             if l2 != lu {
-                                push(&mut best, &mut nodes, &mut open, NK::Vert { v, li: l2 as u8 }, q, node.g + d + vc, idx);
+                                push(
+                                    &mut best,
+                                    &mut nodes,
+                                    &mut open,
+                                    NK::Vert { site, li: l2 as u8 },
+                                    q,
+                                    node.g + d + vc,
+                                    idx,
+                                );
                             }
                         }
                     }
                     // new vias on sites inside the triangle (nearest few)
-                    let sites = &self.sub.tri_sites[t as usize];
+                    let sites = &m.tri_sites[t as usize];
                     if sites.is_empty() {
                         continue;
                     }
-                    let mut cand: Vec<(f64, u32)> = sites.iter().map(|&s| (self.sub.shared.sites[s as usize].p.dist(node.pos), s)).collect();
+                    let mut cand: Vec<(f64, u32)> =
+                        sites.iter().map(|&s| (self.site_point(s).dist(node.pos), s)).collect();
                     cand.sort_by(|a, b| a.0.total_cmp(&b.0));
                     let mut tried = 0;
                     for (d, site) in cand {
                         if tried >= self.cfg.sites_per_tri {
                             break;
                         }
-                        let q = self.sub.shared.sites[site as usize].p;
+                        let q = self.site_point(site);
                         if let Some((ep, es)) = entry_pos
                             && !self.half_chord_ok(t, lu, net, q, ep, es)
                         {
                             continue;
                         }
-                        if !self.via_ok_site(t, site, net) {
+                        if !self.via_ok_site(site, net) {
                             continue;
                         }
                         tried += 1;
                         if conn.goal == Goal::Plane && self.in_plane(q, net) {
-                            push(&mut best, &mut nodes, &mut open, NK::GoalSite { t, site }, q, node.g + d + self.cfg.via_cost * 0.5, idx);
+                            push(
+                                &mut best,
+                                &mut nodes,
+                                &mut open,
+                                NK::GoalSite { site },
+                                q,
+                                node.g + d + self.cfg.via_cost * 0.5,
+                                idx,
+                            );
                             continue;
                         }
                         for l2 in 0..nl {
                             if l2 != lu {
-                                push(&mut best, &mut nodes, &mut open, NK::Site { t, site, li: l2 as u8 }, q, node.g + d + self.cfg.via_cost, idx);
+                                push(
+                                    &mut best,
+                                    &mut nodes,
+                                    &mut open,
+                                    NK::Site { site, li: l2 as u8 },
+                                    q,
+                                    node.g + d + self.cfg.via_cost,
+                                    idx,
+                                );
                             }
                         }
                     }
                 }
-                NK::Vert { v, li } => {
+                NK::Vert { site, li } => {
                     let lu = li as usize;
-                    for &t in &self.sub.vert_tris[v as usize] {
-                        let status = self.sub.tri_status[lu][t as usize];
+                    let m = self.m(lu);
+                    let v = via_vertex(m, site);
+                    for &t in &m.vert_tris[v as usize] {
+                        let status = m.status[t as usize];
                         if !Substrate::passable(self.board, status, net) {
                             continue;
                         }
-                        let i = self.sub.tris[t as usize].iter().position(|&x| x == v).unwrap() as u8;
+                        let i = m.tris[t as usize].iter().position(|&x| x == v).unwrap() as u8;
                         let k = (i + 1) % 3;
-                        cross_out(&mut best, &mut nodes, &mut open, t, lu, k, Some((CPos::Vertex(i), None)), None, &node, idx);
+                        cross_out(
+                            &mut best,
+                            &mut nodes,
+                            &mut open,
+                            t,
+                            lu,
+                            k,
+                            Some((CPos::Vertex(i), None)),
+                            None,
+                            &node,
+                            idx,
+                        );
                     }
                 }
-                NK::Site { t, li, .. } => {
+                NK::Site { site, li } => {
                     let lu = li as usize;
+                    let t = self.m(lu).site_tri[site as usize];
                     for k in 0..3u8 {
-                        cross_out(&mut best, &mut nodes, &mut open, t, lu, k, None, Some(node.pos), &node, idx);
+                        cross_out(
+                            &mut best,
+                            &mut nodes,
+                            &mut open,
+                            t,
+                            lu,
+                            k,
+                            None,
+                            Some(node.pos),
+                            &node,
+                            idx,
+                        );
                     }
                 }
             }
@@ -1133,42 +1475,61 @@ impl<'a> Router<'a> {
         let mut chain = chain.to_vec();
         let net = self.conns[ci].net;
         // Place new vias first: split their triangles and rewrite the chain to the new mesh.
-        let mut placed: Vec<(u32, u32)> = Vec::new(); // (old triangle, site)
+        let mut split_tris: Vec<(usize, u32)> = Vec::new(); // (layer, old triangle)
         for i in 0..chain.len() {
-            let (t, site, li) = match chain[i].kind {
-                NK::Site { t, site, li } => (t, site, Some(li)),
-                NK::GoalSite { t, site } => (t, site, None),
+            let (site, li) = match chain[i].kind {
+                NK::Site { site, li } => (site, Some(li)),
+                NK::GoalSite { site } => (site, None),
                 _ => continue,
             };
-            if placed.iter().any(|&(_, s)| s == site) {
-                continue;
+            if !self.sub.site_usable(site) {
+                return false;
             }
-            let (v, x) = self.split_at(t, site);
-            placed.push((t, site));
+            let per_layer = self.split_at(site);
+            for (l, &(t, _)) in per_layer.iter().enumerate() {
+                split_tris.push((l, t));
+            }
             chain[i].kind = match li {
-                Some(li) => NK::Vert { v, li },
-                None => NK::GoalVia { v },
+                Some(li) => NK::Vert { site, li },
+                None => NK::GoalVia { site },
             };
             // the arriving triangle node: old t entered through edge k -> X_k entered through 0
             if i > 0
-                && let NK::Tri { t: tp, li: lp, entry, slot } = chain[i - 1].kind
-                && tp == t
+                && let NK::Tri {
+                    t: tp,
+                    li: lp,
+                    entry,
+                    slot,
+                } = chain[i - 1].kind
                 && entry < 3
+                && tp == per_layer[lp as usize].0
             {
-                chain[i - 1].kind = NK::Tri { t: x[entry as usize], li: lp, entry: 0, slot };
+                chain[i - 1].kind = NK::Tri {
+                    t: per_layer[lp as usize].1[entry as usize],
+                    li: lp,
+                    entry: 0,
+                    slot,
+                };
             }
         }
         // every consecutive pair of triangle nodes must still be adjacent
         for w in chain.windows(2) {
-            if let (NK::Tri { t, li, .. }, NK::Tri { t: t2, li: l2, entry, .. }) = (w[0].kind, w[1].kind)
+            if let (
+                NK::Tri { t, li, .. },
+                NK::Tri {
+                    t: t2, li: l2, entry, ..
+                },
+            ) = (w[0].kind, w[1].kind)
                 && li == l2
                 && entry < 3
-                && !self.sub.tri_edges[t as usize].contains(&self.sub.tri_edges[t2 as usize][entry as usize])
             {
-                return false;
+                let m = self.m(li as usize);
+                if !m.tri_edges[t as usize].contains(&m.tri_edges[t2 as usize][entry as usize]) {
+                    return false;
+                }
             }
-            if let NK::Tri { t, .. } = w[0].kind
-                && placed.iter().any(|&(old, _)| old == t)
+            if let NK::Tri { t, li, .. } = w[0].kind
+                && split_tris.contains(&(li as usize, t))
                 && !matches!(w[1].kind, NK::Vert { .. } | NK::GoalVia { .. })
             {
                 return false;
@@ -1185,8 +1546,8 @@ impl<'a> Router<'a> {
         let mut start = End::Pin(conn.from);
         while i < chain.len() {
             let NK::Tri { li, .. } = chain[i].kind else {
-                if let NK::Vert { v, .. } = chain[i].kind {
-                    start = End::Vertex(v);
+                if let NK::Vert { site, .. } = chain[i].kind {
+                    start = End::Via(site);
                 }
                 i += 1;
                 continue;
@@ -1202,16 +1563,26 @@ impl<'a> Router<'a> {
             }
             let last_t = run.last().unwrap().0;
             let end = match chain.get(j).map(|n| n.kind) {
-                Some(NK::Vert { v, .. }) | Some(NK::GoalVia { v }) => {
-                    self.add_via(v, net);
-                    via_ids.push(v);
-                    End::Vertex(v)
+                Some(NK::Vert { site, .. }) | Some(NK::GoalVia { site }) => {
+                    self.add_via(site, net);
+                    via_ids.push(site);
+                    End::Via(site)
                 }
                 Some(NK::GoalPin { pin }) => End::Pin(pin),
                 // through hole layer change: the run ends at that pin
                 _ => End::Pin(self.tri_pin(li as usize, last_t).unwrap_or(conn.from)),
             };
-            let seg = Seg { net, conn: ci as u32, li, width, clearance, start, end, crossings: Vec::new(), chord_tris: Vec::new() };
+            let seg = Seg {
+                net,
+                conn: ci as u32,
+                li,
+                width,
+                clearance,
+                start,
+                end,
+                crossings: Vec::new(),
+                chord_tris: Vec::new(),
+            };
             seg_ids.push(self.insert_seg(seg, &run));
             start = end;
             i = j;
@@ -1226,25 +1597,37 @@ impl<'a> Router<'a> {
     fn insert_seg(&mut self, mut s: Seg, run: &[(u32, u8, u16)]) -> u32 {
         let id = self.segs.len() as u32;
         let li = s.li as usize;
-        let vpos = |t: u32, v: u32| CPos::Vertex(self.sub.tris[t as usize].iter().position(|&x| x == v).unwrap_or(0) as u8);
+        let m = &self.sub.m[li];
+        let vert = |e: End| match e {
+            End::Via(site) => m.site_vert.get(&site).copied(),
+            End::Pin(_) => None,
+        };
+        let vpos = |t: u32, v: u32| CPos::Vertex(m.tris[t as usize].iter().position(|&x| x == v).unwrap_or(0) as u8);
         let mut chords: Vec<(u32, Chord)> = Vec::new();
         // leaving a via vertex: the chord in the triangle before the first crossing
-        if let (End::Vertex(v), Some(&(t0, e0, _))) = (s.start, run.first())
+        if let (Some(v), Some(&(t0, e0, _))) = (vert(s.start), run.first())
             && e0 < 3
         {
-            let e = self.sub.tri_edges[t0 as usize][e0 as usize];
-            let from = self.sub.other_tri(e, t0);
-            if from != NONE && self.sub.tri_status[li][from as usize] == NONE && self.sub.tris[from as usize].contains(&v) {
-                chords.push((from, Chord { seg: id, a: vpos(from, v), b: CPos::Edge(self.sub.local_edge(from, e) as u8) }));
+            let e = m.tri_edges[t0 as usize][e0 as usize];
+            let from = m.other_tri(e, t0);
+            if from != NONE && m.status[from as usize] == NONE && m.tris[from as usize].contains(&v) {
+                chords.push((
+                    from,
+                    Chord {
+                        seg: id,
+                        a: vpos(from, v),
+                        b: CPos::Edge(m.local_edge(from, e) as u8),
+                    },
+                ));
             }
         }
         for (idx, &(t, entry, _)) in run.iter().enumerate() {
-            if self.sub.tri_status[li][t as usize] != NONE {
+            if m.status[t as usize] != NONE {
                 continue;
             }
             let a = if entry < 3 {
                 CPos::Edge(entry)
-            } else if let End::Vertex(v) = s.start {
+            } else if let Some(v) = vert(s.start) {
                 vpos(t, v)
             } else {
                 continue;
@@ -1253,20 +1636,24 @@ impl<'a> Router<'a> {
                 if e2 >= 3 {
                     continue;
                 }
-                CPos::Edge(self.sub.local_edge(t, self.sub.tri_edges[t2 as usize][e2 as usize]) as u8)
-            } else if let End::Vertex(v) = s.end {
+                CPos::Edge(m.local_edge(t, m.tri_edges[t2 as usize][e2 as usize]) as u8)
+            } else if let Some(v) = vert(s.end) {
                 vpos(t, v)
             } else {
                 continue;
             };
             chords.push((t, Chord { seg: id, a, b }));
         }
+        let mut crossings = Vec::new();
         for &(t, entry, slot) in run {
             if entry >= 3 {
                 continue;
             }
-            let e = self.sub.tri_edges[t as usize][entry as usize];
-            let from = self.sub.other_tri(e, t);
+            let e = m.tri_edges[t as usize][entry as usize];
+            let from = m.other_tri(e, t);
+            crossings.push((e, from, slot));
+        }
+        for (e, from, slot) in crossings {
             let list = &mut self.cross[li][e as usize];
             let j = (slot as usize).min(list.len());
             list.insert(j, id);
@@ -1282,7 +1669,9 @@ impl<'a> Router<'a> {
 
     pub fn rip_up(&mut self, ci: usize) {
         for sid in std::mem::take(&mut self.conn_segs[ci]) {
-            let Some(s) = self.segs[sid as usize].take() else { continue };
+            let Some(s) = self.segs[sid as usize].take() else {
+                continue;
+            };
             let li = s.li as usize;
             for c in &s.crossings {
                 self.cross[li][c.e as usize].retain(|&x| x != sid);
@@ -1314,8 +1703,20 @@ impl<'a> Router<'a> {
                     if b.planes.iter().any(|pl| pl.net == net && pin.layers.has(pl.layer)) {
                         continue; // through hole pin reaches the plane itself
                     }
-                    let key = if self.cfg.fanout_first { i64::MIN / 2 + prio } else { prio };
-                    conns.push((key, 0.0, Conn { net, from: p, goal: Goal::Plane }));
+                    let key = if self.cfg.fanout_first {
+                        i64::MIN / 2 + prio
+                    } else {
+                        prio
+                    };
+                    conns.push((
+                        key,
+                        0.0,
+                        Conn {
+                            net,
+                            from: p,
+                            goal: Goal::Plane,
+                        },
+                    ));
                 }
                 continue;
             }
@@ -1331,7 +1732,15 @@ impl<'a> Router<'a> {
                     .min_by(|a, b| a.1.total_cmp(&b.1))
                     .unwrap();
                 let tree: Vec<usize> = (0..pins.len()).filter(|&j| in_tree[j]).map(|j| pins[j]).collect();
-                conns.push((prio, d, Conn { net, from: pins[k], goal: Goal::Pins(tree) }));
+                conns.push((
+                    prio,
+                    d,
+                    Conn {
+                        net,
+                        from: pins[k],
+                        goal: Goal::Pins(tree),
+                    },
+                ));
                 in_tree[k] = true;
                 for j in 0..pins.len() {
                     dist[j] = dist[j].min(b.pins[pins[j]].pos.dist(b.pins[pins[k]].pos));
@@ -1362,7 +1771,12 @@ impl<'a> Router<'a> {
         for &ci in &failed {
             if self.conns[ci].goal == Goal::Plane {
                 let c = &self.conns[ci];
-                let pins: Vec<usize> = self.board.nets[c.net as usize].pins.iter().copied().filter(|&p| p != c.from).collect();
+                let pins: Vec<usize> = self.board.nets[c.net as usize]
+                    .pins
+                    .iter()
+                    .copied()
+                    .filter(|&p| p != c.from)
+                    .collect();
                 self.conns[ci].goal = Goal::Pins(pins);
             }
         }
@@ -1414,7 +1828,11 @@ impl<'a> Router<'a> {
         let c = &self.conns[ci];
         let a = self.board.pins[c.from].pos;
         let b = match &c.goal {
-            Goal::Pins(p) => p.iter().map(|&q| self.board.pins[q].pos).min_by(|x, y| x.dist(a).total_cmp(&y.dist(a))).unwrap_or(a),
+            Goal::Pins(p) => p
+                .iter()
+                .map(|&q| self.board.pins[q].pos)
+                .min_by(|x, y| x.dist(a).total_cmp(&y.dist(a)))
+                .unwrap_or(a),
             Goal::Plane => a,
         };
         let radius = 1.0 + a.dist(b) * 0.15;
@@ -1425,10 +1843,11 @@ impl<'a> Router<'a> {
             }
             let near = segs.iter().any(|&s| {
                 let s = self.segs[s as usize].as_ref().unwrap();
+                let m = self.m(s.li as usize);
                 s.crossings.iter().any(|cr| {
-                    let [u, v] = self.sub.edges[cr.e as usize];
-                    let m = (self.sub.verts[u as usize] + self.sub.verts[v as usize]) * 0.5;
-                    point_seg_dist(m, a, b) < radius
+                    let [u, v] = m.edges[cr.e as usize];
+                    let mid = (m.verts[u as usize] + m.verts[v as usize]) * 0.5;
+                    point_seg_dist(mid, a, b) < radius
                 })
             });
             if near {
@@ -1440,11 +1859,70 @@ impl<'a> Router<'a> {
     }
 
     pub fn unrouted(&self) -> Vec<usize> {
-        (0..self.conns.len()).filter(|&ci| self.conn_segs[ci].is_empty()).collect()
+        (0..self.conns.len())
+            .filter(|&ci| self.conn_segs[ci].is_empty())
+            .collect()
+    }
+
+    /// Consistency checks of the topological state (debugging aid).
+    pub fn validate(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut over = 0;
+        for li in 0..self.nl() {
+            for (e, list) in self.cross[li].iter().enumerate() {
+                if list.is_empty() {
+                    continue;
+                }
+                let items = self.items_on(li, e as u32);
+                if self.pack(li, e as u32, &items, None).is_none() {
+                    over += 1;
+                }
+                for &s in list {
+                    let seg = self.segs[s as usize].as_ref();
+                    if seg.is_none_or(|sg| sg.li as usize != li || !sg.crossings.iter().any(|c| c.e as usize == e)) {
+                        out.push(format!("edge {e} lists seg {s} which does not cross it"));
+                    }
+                }
+            }
+        }
+        if over > 0 {
+            out.push(format!("{over} edges over capacity"));
+        }
+        for (sid, s) in self.segs.iter().enumerate() {
+            let Some(s) = s else { continue };
+            let m = self.m(s.li as usize);
+            for w in s.crossings.windows(2) {
+                if m.other_tri(w[0].e, w[0].from) != w[1].from {
+                    out.push(format!(
+                        "seg {sid}: crossing chain broken at edge {} -> {}",
+                        w[0].e, w[1].e
+                    ));
+                    break;
+                }
+            }
+            for c in &s.crossings {
+                if !self.cross[s.li as usize][c.e as usize].contains(&(sid as u32)) {
+                    out.push(format!("seg {sid}: missing in list of edge {}", c.e));
+                }
+            }
+        }
+        out
     }
 }
 
+/// Intersection of the lines ab and cd: (parameter on ab, parameter on cd).
+fn line_params(a: Point, b: Point, c: Point, d: Point) -> (f64, f64) {
+    let r = b - a;
+    let s = d - c;
+    let den = r.cross(s);
+    if den.abs() < 1e-300 {
+        return (0.5, 0.5);
+    }
+    ((c - a).cross(s) / den, (c - a).cross(r) / den)
+}
+
 /// Intersection of segments ab and cd: (parameter on ab, parameter on cd).
+#[allow(dead_code)]
 fn seg_param_intersection(a: Point, b: Point, c: Point, d: Point) -> Option<(f64, f64)> {
     let r = b - a;
     let s = d - c;
@@ -1454,7 +1932,11 @@ fn seg_param_intersection(a: Point, b: Point, c: Point, d: Point) -> Option<(f64
     }
     let t = (c - a).cross(s) / den;
     let u = (c - a).cross(r) / den;
-    if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) { Some((t, u)) } else { None }
+    if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
+        Some((t, u))
+    } else {
+        None
+    }
 }
 
 fn jitter(seed: u64, x: u64) -> f64 {
@@ -1487,63 +1969,5 @@ mod tests {
         assert_eq!(p.len(), 2, "straight track expected: {p:?}");
         assert!((p[0].dist(p[1]) - 6.0).abs() < 1e-9);
         assert!(crate::check::check(&b, &geo).is_empty());
-    }
-}
-
-impl Router<'_> {
-    /// Consistency checks of the topological state (debugging aid).
-    pub fn validate(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        let mut over = 0;
-        for li in 0..self.sub.layers.len() {
-            for (e, list) in self.cross[li].iter().enumerate() {
-                if list.is_empty() {
-                    continue;
-                }
-                let items = self.items_on(li, e as u32);
-                if self.pack(li, e as u32, &items, None).is_none() {
-                    over += 1;
-                }
-                for &s in list {
-                    let seg = self.segs[s as usize].as_ref();
-                    if seg.is_none_or(|sg| sg.li as usize != li || !sg.crossings.iter().any(|c| c.e as usize == e)) {
-                        out.push(format!("edge {e} lists seg {s} which does not cross it"));
-                    }
-                }
-            }
-        }
-        if over > 0 {
-            out.push(format!("{over} edges over capacity"));
-        }
-        for (sid, s) in self.segs.iter().enumerate() {
-            let Some(s) = s else { continue };
-            for w in s.crossings.windows(2) {
-                let next_from = self.sub.other_tri(w[0].e, w[0].from);
-                if next_from != w[1].from {
-                    out.push(format!("seg {sid}: crossing chain broken at edge {} -> {}", w[0].e, w[1].e));
-                    break;
-                }
-            }
-            for c in &s.crossings {
-                if !self.cross[s.li as usize][c.e as usize].contains(&(sid as u32)) {
-                    out.push(format!("seg {sid}: missing in list of edge {}", c.e));
-                }
-                if !self.sub.tri_edges[c.from as usize].contains(&c.e) {
-                    out.push(format!("seg {sid}: crossing from tri {} not on edge {}", c.from, c.e));
-                }
-            }
-            if let (End::Vertex(v), Some(c)) = (s.start, s.crossings.first())
-                && !self.sub.tris[c.from as usize].contains(&v)
-            {
-                out.push(format!("seg {sid}: first crossing not at start via"));
-            }
-            if let (End::Vertex(v), Some(c)) = (s.end, s.crossings.last()) {
-                let last = self.sub.other_tri(c.e, c.from);
-                if !self.sub.tris[last as usize].contains(&v) {
-                    out.push(format!("seg {sid}: last crossing not at end via"));
-                }
-            }
-        }
-        out
     }
 }
