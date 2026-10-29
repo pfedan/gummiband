@@ -274,6 +274,8 @@ pub fn route_board(
     let mut judged: Vec<(usize, Candidate)> = finalists
         .into_iter()
         .filter(|c| c.stats.routed == top)
+        .collect::<Vec<_>>()
+        .into_par_iter()
         .map(|mut c| {
             relax::relax(board, &sub, &mut c.geo, &relax::RelaxConfig::default());
             (check::check(board, &c.geo).len(), c)

@@ -44,7 +44,7 @@ enum Cmd {
         #[arg(long, default_value_t = 1.5)]
         via_cost: f64,
         /// Generations of the evolutionary order search after the portfolio.
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 3)]
         generations: usize,
         /// Write a debug SVG.
         #[arg(long)]
