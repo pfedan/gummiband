@@ -407,13 +407,24 @@ impl<'a> Router<'a> {
     pub fn necks(&self, ci: usize) -> (Vec<(Point, f64)>, f64) {
         let c = &self.conns[ci];
         let cls = self.board.class_of(c.net);
-        let neck_w = self.board.rules.min_track_width.max(0.25).min(cls.track_width);
-        if neck_w >= cls.track_width - 1e-9 {
-            return (Vec::new(), cls.track_width);
-        }
         let mut pins = vec![c.from];
         if let Goal::Pins(p) = &c.goal {
             pins.extend(p.iter().copied());
+        }
+        // near pins the track may narrow to the pad width (fine pitch parts), never below the
+        // board minimum
+        let pad_w = pins
+            .iter()
+            .map(|&p| self.board.pins[p].size.0.min(self.board.pins[p].size.1))
+            .fold(f64::INFINITY, f64::min);
+        let neck_w = self
+            .board
+            .rules
+            .min_track_width
+            .max(pad_w.min(0.25))
+            .min(cls.track_width);
+        if neck_w >= cls.track_width - 1e-9 {
+            return (Vec::new(), cls.track_width);
         }
         let mut zones = Vec::new();
         for &p in &pins {

@@ -804,16 +804,24 @@ impl Reader {
         }
     }
 
-    /// Chain loose Edge.Cuts segments into closed polygons.
+    /// Chain loose Edge.Cuts segments into closed polygons. Exact joints first; chains left
+    /// open are then joined at their nearest ends (older files leave gaps of a few 0.1 mm that
+    /// KiCad bridges as well). Chains that stay open are dropped.
     fn finish_outline(&mut self) {
         let mut segs = std::mem::take(&mut self.edges);
+        let all_segs = segs.clone();
         let tol = 1e-3;
+        let gap = 0.3;
+        let mut dropped = false;
+        let mut open: Vec<Vec<Point>> = Vec::new();
         while let Some((a, b)) = segs.pop() {
             let mut chain = vec![a, b];
+            let mut closed = false;
             loop {
                 let end = *chain.last().unwrap();
                 if end.dist(chain[0]) < tol && chain.len() > 2 {
                     chain.pop();
+                    closed = true;
                     break;
                 }
                 let Some(i) = segs.iter().position(|(p, q)| p.dist(end) < tol || q.dist(end) < tol) else {
@@ -822,9 +830,83 @@ impl Reader {
                 let (p, q) = segs.swap_remove(i);
                 chain.push(if p.dist(end) < tol { q } else { p });
             }
-            if chain.len() >= 3 {
+            if closed {
                 self.b.outline.push(Polygon::new(chain));
+            } else {
+                open.push(chain);
             }
+        }
+        // join open chains: the end of the current chain goes to the nearest free end (its own
+        // start closes it)
+        while let Some(mut chain) = open.pop() {
+            loop {
+                let end = *chain.last().unwrap();
+                let own = end.dist(chain[0]);
+                let best = open
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, c)| [(i, false, c[0].dist(end)), (i, true, c.last().unwrap().dist(end))])
+                    .min_by(|x, y| x.2.total_cmp(&y.2));
+                match best {
+                    Some((i, rev, d)) if d < gap && d < own => {
+                        let mut c = open.swap_remove(i);
+                        if rev {
+                            c.reverse();
+                        }
+                        chain.extend(c);
+                    }
+                    _ => {
+                        if own < gap && chain.len() > 2 {
+                            self.b.outline.push(Polygon::new(chain));
+                        } else {
+                            dropped = true;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if dropped {
+            self.outline_from_lines(all_segs);
+        }
+    }
+
+    /// Fallback for outlines that do not chain into closed polygons (panels with mouse bites
+    /// and T joints): the board is the bounding box of Edge.Cuts and every edge line is an
+    /// obstacle on all copper layers, so routes stay on their side of the cuts.
+    fn outline_from_lines(&mut self, segs: Vec<(Point, Point)>) {
+        let mut lines = segs;
+        for o in std::mem::take(&mut self.b.outline) {
+            lines.extend(o.edges());
+        }
+        let mut bb = Rect::empty();
+        for (a, b) in &lines {
+            bb.add(*a);
+            bb.add(*b);
+        }
+        self.b.outline.push(Polygon::new(vec![
+            bb.min,
+            pt(bb.max.x, bb.min.y),
+            bb.max,
+            pt(bb.min.x, bb.max.y),
+        ]));
+        let layers = LayerSet::all(self.b.layers.len());
+        let clearance = self.b.rules.edge_clearance;
+        eprintln!(
+            "board outline does not close: bounding box, {} edge lines as obstacles",
+            lines.len()
+        );
+        for (a, b) in lines {
+            self.push_obstacle(Obstacle {
+                shape: Shape::Capsule { a, b, r: 0.005 },
+                layers,
+                net: None,
+                kind: ObstacleKind::Graphic,
+                hole: None,
+                clearance,
+                pin: None,
+                locked: true,
+            });
         }
     }
 }

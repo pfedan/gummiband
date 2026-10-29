@@ -35,3 +35,27 @@ each board is in `boards/out/<board>.route.log`.
 `prepare-lichtschnitzel.sh` strips the real Lichtschnitzel controller board,
 `run-lichtschnitzel.sh` routes it and prints the KiCad DRC summary; `drc_report.py` summarizes a
 DRC JSON report in more detail.
+
+## Real boards (external)
+
+`kicad-autorouter-benchmarks.zip` (not in the repository; sources and licenses in its
+`QUELLEN.md`) holds four fully routed open hardware boards. `prepare-ext.sh [zip]` unpacks it
+into `work/ext/src/` and strips every track, via and pour outside the plane layers into
+`work/ext/<name>/`; the plane layers are marked as KiCad `power` layers in the stripped file, so
+the board describes itself. `run-ext.sh NAME [route args]` routes one board into
+`work/ext/routed/NAME/` and prints the KiCad DRC summary.
+
+| Name | Board | Routing layers | Planes kept | Notes |
+| --- | --- | --- | --- | --- |
+| `corne` | Corne Cherry hotswap (panel of two halves) | F, B | none | Edge.Cuts with mouse bites and T joints: the outline falls back to the bounding box with the edge lines as obstacles; GND is routed as a net |
+| `arty` | Arty MPW Tester | F, B | In1 (GND), In2 (split power) | cut-out in the middle, copper logos |
+| `ulx3s` | ULX3S (ECP5 BGA 381, 0.8 mm) | F, B | In1 (split power), In2 (GND) | the original also routes on In2 |
+| `jetson` | Jetson Orin baseboard | F, In3, In5, B | In1, In2, In4, In6 | 1927 connections, diff pairs, custom rules |
+
+First results (2026-10-29, `--runs 14 --generations 1`, no geometry generations):
+
+| Board | Routed | Vias | Time | Main problems |
+| --- | --- | --- | --- | --- |
+| `arty` | 322/323 | 179 | 10 s | two tracks on top of each other along the left edge, FTDI area |
+| `corne` | 471/482 | 453 | 136 s | the two RP2040 fan-outs (0.4 mm pitch) |
+| `ulx3s` | 651/796 | 377 | 304 s | BGA escape on two signal layers, bundles along the board edge |

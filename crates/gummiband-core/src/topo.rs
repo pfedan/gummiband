@@ -276,16 +276,28 @@ impl Mesh {
                 row += 1;
             }
         }
+        let mut skipped_constraints = 0usize;
         let mut steiner_handles = Vec::new();
         for p in steiner {
             if let Ok(h) = cdt.insert(Point2::new(snap(p.x), snap(p.y))) {
                 steiner_handles.push(h.index());
             }
         }
+        // spade can trip over nearly degenerate crossings of constraint edges (an assertion
+        // after it already split the edge); the triangulation stays valid, only that constraint
+        // piece is missing, so such a constraint is skipped
         for (a, b) in constraints {
             if a != b {
-                cdt.add_constraint_and_split(a, b, |v| v);
+                let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    cdt.add_constraint_and_split(a, b, |v| v);
+                }));
+                if ok.is_err() {
+                    skipped_constraints += 1;
+                }
             }
+        }
+        if skipped_constraints > 0 {
+            eprintln!("layer {l}: {skipped_constraints} degenerate constraint edges skipped");
         }
         let verts: Vec<Point> = cdt.vertices().map(|v| pt(v.position().x, v.position().y)).collect();
         let mut tris = Vec::new();

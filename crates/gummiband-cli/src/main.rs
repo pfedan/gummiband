@@ -16,6 +16,10 @@ struct Cli {
     /// Worker threads (default: RAYON_NUM_THREADS or all cores).
     #[arg(long, global = true)]
     threads: Option<usize>,
+    /// Treat these copper layers as planes (not routed; their zones stay), comma separated.
+    /// Layers of KiCad type "power" are planes anyway.
+    #[arg(long, global = true, value_delimiter = ',')]
+    plane_layers: Vec<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -93,6 +97,7 @@ fn main() -> Result<()> {
                 &board,
                 &ReadOptions {
                     keep,
+                    plane_layers: cli.plane_layers.clone(),
                     ..Default::default()
                 },
             )?;
@@ -184,6 +189,7 @@ fn main() -> Result<()> {
                 &board,
                 &ReadOptions {
                     keep,
+                    plane_layers: cli.plane_layers.clone(),
                     ..Default::default()
                 },
             )?;
@@ -225,7 +231,9 @@ fn main() -> Result<()> {
                     r.conns,
                     r.vias,
                     r.length,
-                    r.violations.map(|v| format!(", {v} violations ({} shorts)", r.shorts.unwrap_or(0))).unwrap_or_default()
+                    r.violations
+                        .map(|v| format!(", {v} violations ({} shorts)", r.shorts.unwrap_or(0)))
+                        .unwrap_or_default()
                 );
             }
             let s = &res.stats;
@@ -429,6 +437,7 @@ fn main() -> Result<()> {
                 &board,
                 &ReadOptions {
                     keep: KeepCopper::All,
+                    plane_layers: cli.plane_layers.clone(),
                     ..Default::default()
                 },
             )?;

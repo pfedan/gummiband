@@ -229,15 +229,13 @@ impl Board {
             .max_by(|a, b| a.signed_area().abs().total_cmp(&b.signed_area().abs()))
     }
 
-    /// True if p lies inside the board (inside the main outline, outside cut-outs).
+    /// True if p lies inside the board: inside an odd number of outline polygons (a board may
+    /// consist of several pieces, cut-outs lie inside a piece, islands inside cut-outs).
     pub fn inside(&self, p: Point) -> bool {
-        let Some(main) = self.main_outline() else {
+        if self.outline.is_empty() {
             return true;
-        };
-        if !main.contains(p) {
-            return false;
         }
-        !self.outline.iter().any(|o| !std::ptr::eq(o, main) && o.contains(p))
+        self.outline.iter().filter(|o| o.contains(p)).count() % 2 == 1
     }
 
     /// Distance from p to the board edge (0 outside).

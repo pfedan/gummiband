@@ -375,9 +375,7 @@ pub fn route_board(
     };
     // a short is much worse than a clearance a little too small: it weighs six violations
     let full_cost = |c: &Candidate| {
-        c.stats.cost()
-            + c.stats.violations.unwrap_or(0) as f64 * 1000.0
-            + c.stats.shorts.unwrap_or(0) as f64 * 5000.0
+        c.stats.cost() + c.stats.violations.unwrap_or(0) as f64 * 1000.0 + c.stats.shorts.unwrap_or(0) as f64 * 5000.0
     };
     let top = finalists[0].stats.routed;
     let judged: Vec<Candidate> = finalists
