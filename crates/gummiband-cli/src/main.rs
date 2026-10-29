@@ -13,6 +13,9 @@ use gummiband_kicad::{KeepCopper, ReadOptions, read_board, write};
 #[derive(Parser)]
 #[command(name = "gummiband", about = "Topological rubber band autorouter for KiCad")]
 struct Cli {
+    /// Worker threads (default: RAYON_NUM_THREADS or all cores).
+    #[arg(long, global = true)]
+    threads: Option<usize>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -76,6 +79,9 @@ enum Cmd {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(n) = cli.threads {
+        rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global()?;
+    }
     match cli.cmd {
         Cmd::Info { board, keep_all } => {
             let keep = if keep_all { KeepCopper::All } else { KeepCopper::Locked };

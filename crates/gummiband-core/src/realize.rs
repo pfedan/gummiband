@@ -512,13 +512,20 @@ impl Router<'_> {
                         .map(|_| p[0])
                 });
                 let Some(at) = hit else { continue };
-                let common: Vec<String> = sa
+let common: Vec<String> = sa
                     .crossings
                     .iter()
-                    .filter(|c| sb.crossings.iter().any(|d| d.e == c.e))
-                    .map(|c| {
+                    .enumerate()
+                    .filter(|(_, c)| sb.crossings.iter().any(|d| d.e == c.e))
+                    .map(|(k, c)| {
+                        let m = &self.sub.m[sa.li as usize];
                         let l = &self.cross[sa.li as usize][c.e as usize];
-                        format!("e{}[{:?}]", c.e, l)
+                        let ia = l.iter().position(|&x| x == ids[a]).unwrap_or(0);
+                        let ib = l.iter().position(|&x| x == ids[b]).unwrap_or(0);
+                        let first = m.tris[c.from as usize][m.local_edge(c.from, c.e)];
+                        let a_is_u = first == m.edges[c.e as usize][0];
+                        let b_right = (ib < ia) == a_is_u;
+                        format!("#{k} e{} B {}", c.e, if b_right { "R" } else { "L" })
                     })
                     .collect();
                 out.push(format!(
