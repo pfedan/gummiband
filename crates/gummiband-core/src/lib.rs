@@ -251,7 +251,7 @@ pub fn route_board(
     for c in rest {
         offer(&mut finalists, c);
     }
-    let mut rng = Rng(0x5eed);
+    let mut rng = Rng(std::env::var("GB_EVO_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x5eed));
     for generation in 1..=search.generations {
         if best.failed.is_empty() && generation > 2 {
             // complete: a few generations for vias and length are enough
