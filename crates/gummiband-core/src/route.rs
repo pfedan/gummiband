@@ -1106,12 +1106,27 @@ impl<'a> Router<'a> {
                         .or_else(|| x.iter().find(|&&xt| m.tris[xt as usize].contains(&old_tv[i as usize])))
                         .unwrap_or(&x[0]),
                 };
-                let local_of_vertex = |xt: u32, v: u32| m.tris[xt as usize].iter().position(|&q| q == v).unwrap() as u8;
+                // (0 if the vertex is missing: only after a degenerate rethreading, see below)
+                let local_of_vertex =
+                    |xt: u32, v: u32| m.tris[xt as usize].iter().position(|&q| q == v).unwrap_or(0) as u8;
+                // a chord from vertex to vertex runs along an old edge: it stays in the new
+                // triangle that holds both vertices, without crossings
+                if let (CPos::Vertex(i), CPos::Vertex(j)) = (ch.a, ch.b)
+                    && let Some(&xt) = x.iter().find(|&&xt| {
+                        let tv = m.tris[xt as usize];
+                        tv.contains(&old_tv[i as usize]) && tv.contains(&old_tv[j as usize])
+                    })
+                {
+                    cur = xt;
+                }
                 let mut pos = match ch.a {
                     CPos::Edge(_) => CPos::Edge(0),
                     CPos::Vertex(i) => CPos::Vertex(local_of_vertex(cur, old_tv[i as usize])),
                 };
                 let mut hits = hits;
+                if let (CPos::Vertex(_), CPos::Vertex(_)) = (ch.a, ch.b) {
+                    hits.clear();
+                }
                 if hits.len() == 2 && !m.tri_edges[cur as usize].contains(&new_edge(hits[0].0)) {
                     hits.swap(0, 1);
                 }
