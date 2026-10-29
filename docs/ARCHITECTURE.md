@@ -77,64 +77,62 @@ Units: millimetres as `f64` in the core. The writer rounds to KiCad's nanometre 
 
 ## Routing substrate
 
-One triangulation for all layers keeps vias simple: a via is a vertex shared by every layer.
+Each routing layer has its own constrained Delaunay triangulation (`topo::Mesh`) of the
+obstacles on that layer. Edges run between real obstacles, so the room on an edge is the room
+between the obstacles at its ends (a shared mesh for all layers turned the pads of one layer
+into ghost points on the other, and capacities went wrong).
 
-- Vertices: polygon vertices of all obstacles (all layers), pin anchor points, board outline
-  vertices and free via sites (a jittered grid plus points on the medial axis of large gaps,
-  filtered by via clearance on every layer).
-- Constraint edges: obstacle polygon edges and the outline (intersections are split).
-- Per layer, each triangle is free, blocked or owned by one net (inside a pad or locked copper of
-  that net). A route of net N may enter a triangle that is free or owned by N.
-- Per layer, each edge has a capacity: its length minus the space its two end vertices need
-  (clearance to the obstacle at that vertex, or the via radius plus clearance for an occupied via
-  site). Every route crossing it uses width plus clearance.
+- Vertices: obstacle polygon vertices, board outline, a frame, and a coarse Steiner grid
+  (2.5 mm) in empty regions that breaks up long sliver triangles.
+- Per triangle: free, outside, or covered by an obstacle (a net's own pads are passable).
+- Edge end demands: clearance plus half width from the obstacle at the vertex, and 1/sin(angle)
+  for obstacle sides leaving the vertex at a sharp angle.
+- Apex constraints: an obstacle or via at the vertex opposite an edge blocks the middle of the
+  edge; each crossing knows on which side of that apex it passes.
+- Via sites: a 0.4 mm grid of candidate points, plus via-in-pad points for plane nets. Placing a
+  via splits the triangle that holds the site in every layer mesh; routes that already cross it
+  are threaded through the three new triangles.
+- Phantom points: Steiner vertices and via vertices whose via was ripped up keep a half
+  clearance, so tracks never bunch up at a free vertex.
 
 ## Topological routing
 
-A route on one layer is a sequence of edge crossings between two vertices. Each crossing has a
-slot: its position among the other routes crossing that edge. Inside one triangle every route is
-a chord between two boundary positions; a new chord is legal if it does not interleave with an
-existing chord. So the layout of each layer stays planar by construction and the geometry step
-can always realize it if capacities hold.
+A route on one layer is a sequence of edge crossings. Each crossing has a slot (its position
+among the other routes on that edge). Inside a free triangle every route is a chord between two
+boundary positions; a new chord must not interleave with an existing chord of another net, so
+each layer stays planar by construction.
 
-- Search: A* over states (triangle, entry edge, slot, layer), cost = Euclidean length of the
-  guiding path through edge midpoints at the slot position, plus via cost, plus congestion and
-  history penalties (negotiated congestion, PathFinder style) for edges near capacity.
-- Layer change: at a free via site vertex; the via then occupies the vertex on all layers.
-- Multi pin nets: Kruskal MST over pins (and locked copper of the net), routed as two pin
-  connections; a connection may end on any copper already routed for the net.
-- Rip-up and reroute: a connection that fails rips up the connections that block it (those that
-  use the full capacity or the slots it needs), with growing history costs.
-- Order: by priority, then by bounding box size (short first). The portfolio runs several orders
-  and seeds in parallel (rayon) and keeps the best result (completion, then vias, then length).
+- Search: A* over (triangle, entry edge, slot, layer), loop free, with via transitions to sites
+  inside the triangle or to existing via vertices, through-hole pads as free layer changes,
+  plane fan-out goals (a via inside the plane outline or a nearby through-hole pad).
+- Capacity: packing of all crossings on an edge with end demands, apex bounds, net class
+  clearances and custom rule clearances between net pairs.
+- Track width: net class width; near pins it may neck down to 0.25 mm if no minimum width rule
+  forbids it (or inside the courtyards a rule exempts).
+- Multi pin nets: Prim order, each new pin to the tree; overlapping pads of one net count as
+  one pin.
+- Rip-up and reroute of connections near a failed one, via-in-pad as a last resort for
+  fan-outs.
 
-## Geometric realization
+## Geometry
 
-For each layer and each edge, the slots give the order of routes. Each route gets a portal on
-every edge it crosses: an interval that leaves room for the routes on either side and the
-clearance to the edge end vertices. The shortest path through the portals is the funnel
-(string pulling) algorithm. Where the taut path bends at a portal end, it wraps around the
-obstacle or neighbour route there; the bend is replaced with an arc of the inflated radius, so
-tracks follow obstacles at exactly their clearance. Later steps spread routes apart where
-capacity is generous (even spacing, "gummiband" relaxation).
+1. Portals on every crossed edge (room for the neighbours and the edge end clearances) and the
+   funnel algorithm give a first taut polyline.
+2. Elastic optimizer (`relax`): every track is a chain of points under tension, obstacles,
+   vias and other tracks push with their clearance, vias move as well and drag their tracks.
+   All tracks relax in parallel (Jacobi rounds); the last quarter resolves clearances only.
+3. Taut pass: straight shortcuts wherever they keep all clearances (removes the waves).
+4. Fillets: every corner is rounded with the largest arc that keeps all clearances; the output
+   uses real KiCad arcs.
+5. Clearance check in the core; the KiCad DRC is the final judge in the benchmark.
 
-## Plane nets and current
+## Search
 
-- Nets with a plane on an inner layer (a copper zone of that net on a non routing layer) are
-  connected by fan-out: each pad gets a short track to a via into the plane, as close as the
-  rules allow. Only pads that cannot reach a plane are routed on the signal layers.
-- Track width comes from the net class (Output 1.5 mm, Input 0.75 mm on the test board); the
-  capacity model uses the real width, so wide current tracks take their space in the topology.
-
-## Elastic optimizer (radical track)
-
-Beside the discrete pipeline we build a continuous one: every route is an elastic band (a chain
-of points with tension) and every obstacle and foreign route pushes with a clearance potential.
-Bands relax in parallel (each band reads the last state of the others, Jacobi style), which
-shortens routes, spreads them evenly and resolves small clearance violations without rip-up.
-Topology changes (a band snapping over an obstacle when that is shorter) are allowed between
-relaxation rounds. The discrete router supplies the start topology; the relaxation turns it into
-the final, smooth geometry. Both tracks share the board model and the checks.
+A portfolio of router runs (different orders, fan-outs first or last) runs on all cores. Then
+an evolutionary search improves the routing order: each generation mutates the best order
+(failed connections move forward, a few random moves) and evaluates the mutants in parallel.
+The best few candidates go through the geometry step and the one with the fewest violations
+wins.
 
 ## Parallelism
 
