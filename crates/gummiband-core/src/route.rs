@@ -1088,8 +1088,10 @@ impl<'a> Router<'a> {
                 let new_edge = |k: usize| -> u32 { m.tri_edges[x[k] as usize][2] }; // E_k = (s, v_k)
                 let mut cur = match ch.a {
                     CPos::Edge(k) => x[k as usize],
-                    CPos::Vertex(_) => *x
+                    // the sub-triangle that has the chord's vertex and contains its start
+                    CPos::Vertex(i) => *x
                         .iter()
+                        .filter(|&&xt| m.tris[xt as usize].contains(&old_tv[i as usize]))
                         .find(|&&xt| {
                             let tv = m.tris[xt as usize];
                             let (a, b, c) = (
@@ -1101,6 +1103,7 @@ impl<'a> Router<'a> {
                                 && orient(b, c, start_pt) >= -1e-12
                                 && orient(c, a, start_pt) >= -1e-12
                         })
+                        .or_else(|| x.iter().find(|&&xt| m.tris[xt as usize].contains(&old_tv[i as usize])))
                         .unwrap_or(&x[0]),
                 };
                 let local_of_vertex = |xt: u32, v: u32| m.tris[xt as usize].iter().position(|&q| q == v).unwrap() as u8;

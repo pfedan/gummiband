@@ -201,9 +201,29 @@ impl Mesh {
         let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> = ConstrainedDelaunayTriangulation::new();
         let mut handle_of: HashMap<(i64, i64), FixedVertexHandle> = HashMap::new();
         let mut constraints: Vec<(FixedVertexHandle, FixedVertexHandle)> = Vec::new();
-        let mut add_poly = |cdt: &mut ConstrainedDelaunayTriangulation<Point2<f64>>, poly: &Polygon| {
+        // long obstacle sides get extra vertices: a channel between a pin and the long side of
+        // an exposed pad (or the board edge) is then measured across, by a short mesh edge,
+        // and not by the long diagonals to the far corners
+        let refine = std::env::var("GB_REFINE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.6f64);
+        let mut add_poly = |cdt: &mut ConstrainedDelaunayTriangulation<Point2<f64>>, poly: &Polygon, split: bool| {
+            let mut pts = Vec::with_capacity(poly.pts.len());
+            for i in 0..poly.pts.len() {
+                let (a, b) = (poly.pts[i], poly.pts[(i + 1) % poly.pts.len()]);
+                pts.push(a);
+                let n = if split && refine > 0.0 {
+                    (a.dist(b) / refine).floor() as usize
+                } else {
+                    0
+                };
+                for k in 1..=n {
+                    pts.push(a + (b - a) * (k as f64 / (n + 1) as f64));
+                }
+            }
             let mut hs = Vec::new();
-            for &p in &poly.pts {
+            for &p in &pts {
                 let key = ((p.x * 1e5).round() as i64, (p.y * 1e5).round() as i64);
                 let h = match handle_of.get(&key) {
                     Some(&h) => h,
@@ -234,9 +254,10 @@ impl Mesh {
                 frame.max,
                 pt(frame.min.x, frame.max.y),
             ]),
+            false,
         );
         for o in &board.outline {
-            add_poly(&mut cdt, o);
+            add_poly(&mut cdt, o, true);
         }
         for (i, o) in board.obstacles.iter().enumerate() {
             if !o.layers.has(l) {
@@ -249,7 +270,7 @@ impl Mesh {
             }
             let p = &shared.obs_polys[i];
             if p.bbox().overlaps(&frame) {
-                add_poly(&mut cdt, p);
+                add_poly(&mut cdt, p, true);
             }
         }
         // Steiner points in free space, away from all obstacles of this layer
