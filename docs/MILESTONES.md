@@ -63,3 +63,10 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   offsets) and a fitness that includes the final DRC result.
 - Benchmarks against Freerouting on the controller and the injector board.
 - Profiling: incremental capacity checks, cheaper relaxation.
+
+## M5: User documentation
+
+- A user guide (requested by Daniel): installation (binary, plugin environment, `rsvg-convert`
+  and ImageMagick for animations), the KiCad plugin dialog, the CLI with all options, the MCP
+  server for AI agents, and typical workflows (pre-routing and locking power lanes, routing by
+  priority, judging results with the KiCad DRC, placement variants).

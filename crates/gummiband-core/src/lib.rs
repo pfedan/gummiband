@@ -97,6 +97,7 @@ pub struct SearchConfig {
 /// Routing order genome: a key per connection, identified by (net, from pin). Lower routes first.
 type Genome = HashMap<(NetId, usize), f64>;
 
+#[derive(Clone)]
 struct Candidate {
     stats: RunStats,
     geo: Geometry,
@@ -472,6 +473,17 @@ pub fn route_board(
                 best.geo.clone(),
                 true,
             ));
+        }
+    }
+    // polish: a few clearance spots are often left that more rounds without tension resolve
+    if best.stats.violations.unwrap_or(0) > 0 && std::env::var("GB_NO_POLISH").is_err() {
+        let polish = relax::RelaxConfig {
+            tension: 0.0,
+            ..full_relax.clone()
+        };
+        let c = geo_eval_with(best.clone(), &polish);
+        if full_cost(&c) < full_cost(&best) {
+            best = c;
         }
     }
     (
