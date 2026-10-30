@@ -36,12 +36,12 @@
             ],
             "entrypoint": "gummiband_finish.py",
             "icons-light": [
-                "icons/gummiband-light-24.png",
-                "icons/gummiband-light-48.png"
+                "icons/finish-light-24.png",
+                "icons/finish-light-48.png"
             ],
             "icons-dark": [
-                "icons/gummiband-dark-24.png",
-                "icons/gummiband-dark-48.png"
+                "icons/finish-dark-24.png",
+                "icons/finish-dark-48.png"
             ]
         }
     ]

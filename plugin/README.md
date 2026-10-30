@@ -28,7 +28,7 @@ Your board file is not written; save it yourself when you like the result.
    the old SWIG action plugins.
 4. Restart KiCad (or use the reload button in *Preferences > Plugins*). KiCad creates a
    virtual environment for the plugin
-   (`~/Library/Caches/kicad/10.0/python-environments/gummiband.kicad-plugin` on macOS),
+   (`~/Library/Caches/kicad/10.0/python-environments/com.github.pfedan.gummiband` on macOS),
    with access to the interpreter's own packages (`--system-site-packages`, so wxPython comes
    from KiCad's Python), and pip-installs `requirements.txt` into it, which pulls
    `kicad-python` (module `kipy`) and its dependencies from PyPI. This needs internet access
@@ -104,7 +104,7 @@ python3 dev_run.py board.kicad_pcb --route --runs 4 [--keep-locked]
 
 To run the tests and the dry run with the plugin's real environment (Python 3.9 with
 `kipy`, which also checks the conversion to API objects), use the interpreter of the plugin
-venv, e.g. `~/Library/Caches/kicad/10.0/python-environments/gummiband.kicad-plugin/bin/python`.
+venv, e.g. `~/Library/Caches/kicad/10.0/python-environments/com.github.pfedan.gummiband/bin/python`.
 
 Debugging inside KiCad: start KiCad with `KICAD_ALLOC_CONSOLE=1 KICAD_ENABLE_WXTRACE=1
 WXTRACE=KICAD_API` to see the API trace and the plugin's stderr.
