@@ -61,28 +61,34 @@ fn surely_outside(dx: f64, dy: f64, r: f64) -> bool {
 struct NearPiece {
     mid: Point,
     /// Half the track width plus half the piece length: bounds the piece around `mid`.
-    extent: f64,
+    extent: f32,
+    /// The largest track clearance its net can ask for against any other net.
+    clr: f32,
     net: u32,
     id: u32,
 }
 
-/// The pieces of one layer in a grid.
-struct LayerPieces {
+/// Pieces in a grid, with the bounds that size a query.
+struct Tier {
     grid: PointGrid,
     /// In grid order.
     near: Vec<NearPiece>,
     /// Pieces and their keys in id order while building, kept to reuse the buffers.
     raw: Vec<NearPiece>,
     mids: Vec<Point>,
+    max_extent: f64,
+    max_clr: f64,
 }
 
-impl LayerPieces {
-    fn new(bounds: Rect, cell: f64) -> LayerPieces {
-        LayerPieces {
+impl Tier {
+    fn new(bounds: Rect, cell: f64) -> Tier {
+        Tier {
             grid: PointGrid::new(bounds, cell, &[]),
             near: Vec::new(),
             raw: Vec::new(),
             mids: Vec::new(),
+            max_extent: 0.0,
+            max_clr: 0.0,
         }
     }
 
@@ -93,9 +99,10 @@ impl LayerPieces {
         self.near.clear();
         let raw = &self.raw;
         self.near.extend(self.grid.ids().iter().map(|&i| raw[i as usize]));
+        let (e, c) = raw.iter().fold((0.0f32, 0.0f32), |(e, c), r| (e.max(r.extent), c.max(r.clr)));
+        (self.max_extent, self.max_clr) = (e as f64, c as f64);
     }
 
-    /// Calls `f` for all pieces near `p`, by cell and within a cell by ascending id.
     #[inline]
     fn for_each_near(&self, p: Point, radius: f64, mut f: impl FnMut(&NearPiece)) {
         self.grid.for_each_run(p, radius, |lo, hi| {
@@ -103,6 +110,28 @@ impl LayerPieces {
                 f(r);
             }
         });
+    }
+}
+
+/// The pieces of one layer. A single wide or high clearance net would size the query of every
+/// point on the board, so the few tracks that reach far sit in a coarse grid of their own.
+/// Pushes must add up in the same order whatever the grids: by the cell of the fine grid and
+/// within a cell by id, see `order_key`.
+struct LayerPieces {
+    fine: Tier,
+    far: Tier,
+}
+
+impl LayerPieces {
+    fn new(bounds: Rect) -> LayerPieces {
+        LayerPieces {
+            fine: Tier::new(bounds, 0.25),
+            far: Tier::new(bounds, 1.0),
+        }
+    }
+
+    fn order_key(&self, r: &NearPiece) -> (u32, u32) {
+        (self.fine.grid.cell_of(r.mid) as u32, r.id)
     }
 }
 
@@ -178,19 +207,38 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         .max(board.obstacles.iter().map(|o| o.clearance).fold(0.0, f64::max))
         .max(board.rules.hole_clearance);
     let max_w = geo.tracks.iter().map(|t| t.width).fold(0.0, f64::max);
-    // the same reach for track pairs only: obstacles often demand much more
-    let max_track_clr = board
-        .classes
-        .iter()
-        .map(|c| c.clearance)
-        .fold(board.rules.min_clearance, f64::max)
-        .max(board.pair_clearance.values().copied().fold(0.0, f64::max));
     let n_layers = geo.tracks.iter().map(|t| t.layer as usize + 1).max().unwrap_or(0);
     let half_w = |t: &Track| if t.necks.is_empty() { t.width } else { t.width.max(t.neck_w) } / 2.0;
-    let mut max_hw = vec![0.0f64; n_layers];
-    for t in &geo.tracks {
-        max_hw[t.layer as usize] = max_hw[t.layer as usize].max(half_w(t));
+    // per net the largest clearance it can ask for against any other net
+    let mut net_clr: Vec<f64> = (0..board.nets.len() as u32).map(clr).collect();
+    for (&(a, b), &c) in &board.pair_clearance {
+        net_clr[a as usize] = net_clr[a as usize].max(c);
+        net_clr[b as usize] = net_clr[b as usize].max(c);
     }
+    // per layer the tenth of the points that reaches farthest goes into the far tier
+    let far_track: Vec<bool> = {
+        let reach = |ti: usize| half_w(&geo.tracks[ti]) + net_clr[geo.tracks[ti].net as usize];
+        let mut limit = vec![f64::INFINITY; n_layers];
+        for (l, limit) in limit.iter_mut().enumerate() {
+            let mut by: Vec<(f64, usize)> = (0..geo.tracks.len())
+                .filter(|&ti| geo.tracks[ti].layer as usize == l)
+                .map(|ti| (reach(ti), tracks[ti].len()))
+                .collect();
+            by.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            let total: usize = by.iter().map(|b| b.1).sum();
+            let mut sum = 0;
+            for (r, n) in by {
+                sum += n;
+                *limit = r;
+                if sum * 10 >= total * 9 {
+                    break;
+                }
+            }
+        }
+        (0..geo.tracks.len())
+            .map(|ti| reach(ti) > limit[geo.tracks[ti].layer as usize])
+            .collect()
+    };
     let obs_boxes: Vec<Rect> = sub.shared.obs_polys.iter().map(|p| p.bbox()).collect();
     let bounds = board.bbox().grow(5.0);
     // every point query below looks at one cell only: the cell lists hold all obstacles within
@@ -274,7 +322,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
     // while annealing only a few spots still move: cells near the points and vias that moved
     // in the previous round are the only ones worth visiting (None: visit everything)
     let mut dirty: Option<Vec<bool>> = None;
-    let mut grids: Vec<LayerPieces> = (0..n_layers).map(|_| LayerPieces::new(bounds, 0.25)).collect();
+    let mut grids: Vec<LayerPieces> = (0..n_layers).map(|_| LayerPieces::new(bounds)).collect();
     let mut via_at: Vec<Point> = Vec::with_capacity(vias.len());
     let mut via_grid = PointGrid::new(bounds, 1.0, &[]);
     let mut pieces: Vec<Piece> = Vec::new();
@@ -300,13 +348,15 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         }
         pieces.clear();
         for g in &mut grids {
-            g.raw.clear();
+            g.fine.raw.clear();
+            g.far.raw.clear();
         }
-        // pieces by their midpoints per layer; queries grow by the longest half piece
-        let mut half = 0.0f64;
+        // pieces by their midpoints per layer; queries grow by the largest extent
         for (ti, p) in tracks.iter().enumerate() {
             let t = &geo.tracks[ti];
-            let (hw, raw) = (half_w(t), &mut grids[t.layer as usize].raw);
+            let g = &mut grids[t.layer as usize];
+            let (hw, nc) = (half_w(t), (net_clr[t.net as usize] as f32).next_up());
+            let raw = if far_track[ti] { &mut g.far.raw } else { &mut g.fine.raw };
             for w in p.windows(2) {
                 let id = pieces.len() as u32;
                 pieces.push(Piece {
@@ -315,16 +365,19 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     track: ti as u32,
                 });
                 let hl = (w[1] - w[0]).len2().sqrt() * 0.5 * SURE;
-                half = half.max(hl);
                 raw.push(NearPiece {
                     mid: (w[0] + w[1]) * 0.5,
-                    extent: hw + hl,
+                    extent: ((hw + hl) as f32).next_up(),
+                    clr: nc,
                     net: t.net,
                     id,
                 });
             }
         }
-        grids.iter_mut().for_each(LayerPieces::rebuild);
+        for g in &mut grids {
+            g.fine.rebuild();
+            g.far.rebuild();
+        }
         let (pieces, grids) = (&pieces, &grids);
         via_at.clear();
         via_at.extend(vias.iter().map(|v| v.0));
@@ -406,15 +459,18 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     }
                 }
                 // candidates of all layers, back in the order of one grid over all of them
-                let mut near: Vec<(usize, u32)> = Vec::new();
-                let base = vr + max_clr + cfg.margin;
+                let mut near: Vec<(u32, u32)> = Vec::new();
                 for g in grids {
-                    g.for_each_near(vc, base + max_w / 2.0 + 0.1 + half, |r| {
-                        let (dm, lim) = (vc - r.mid, base + r.extent);
-                        if r.net != vn && !surely_outside(dm.x, dm.y, lim) {
-                            near.push((g.grid.cell_of(r.mid), r.id));
-                        }
-                    });
+                    for tier in [&g.fine, &g.far] {
+                        let radius = vr + vclr.max(tier.max_clr) + cfg.margin + tier.max_extent;
+                        tier.for_each_near(vc, radius, |r| {
+                            let dm = vc - r.mid;
+                            let lim = vr + vclr.max(r.clr as f64) + cfg.margin + r.extent as f64;
+                            if r.net != vn && !surely_outside(dm.x, dm.y, lim) {
+                                near.push(g.order_key(r));
+                            }
+                        });
+                    }
                 }
                 near.sort_unstable();
                 for &(_, pi) in &near {
@@ -450,7 +506,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             .enumerate()
             .map(|(ti, pts)| {
                 let t = &geo.tracks[ti];
-                let (c, net) = (clr(t.net), t.net);
+                let (c, net, nc) = (clr(t.net), t.net, net_clr[t.net as usize]);
                 let (grid, obs_cells) = (&grids[t.layer as usize], &layer_cells[t.layer as usize]);
                 let mut out = pts.clone();
                 let n = pts.len();
@@ -458,7 +514,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 let inner: Vec<Point> = (1..n.saturating_sub(1))
                     .into_par_iter()
                     .with_min_len(32)
-                    .map(|i| {
+                    .map_init(Vec::new, |near: &mut Vec<(u32, u32)>, i| {
                         let p = pts[i];
                         if dirty.as_ref().is_some_and(|d| !d[cells.cell_of(p)]) {
                             return p;
@@ -522,13 +578,21 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             }
                         }
                         // other tracks (they push back from their side, so take half)
-                        let clr_reach = w / 2.0 + max_track_clr + cfg.margin;
-                        grid.for_each_near(p, clr_reach + max_hw[t.layer as usize] + half, |r| {
-                            let (dm, lim) = (p - r.mid, clr_reach + r.extent);
-                            if r.net == net || surely_outside(dm.x, dm.y, lim) {
-                                return;
-                            }
-                            let pc = &pieces[r.id as usize];
+                        near.clear();
+                        let base = w / 2.0 + cfg.margin;
+                        for tier in [&grid.fine, &grid.far] {
+                            let radius = base + nc.max(tier.max_clr) + tier.max_extent;
+                            tier.for_each_near(p, radius, |r| {
+                                let dm = p - r.mid;
+                                let lim = base + nc.max(r.clr as f64) + r.extent as f64;
+                                if r.net != net && !surely_outside(dm.x, dm.y, lim) {
+                                    near.push(grid.order_key(r));
+                                }
+                            });
+                        }
+                        near.sort_unstable();
+                        for &(_, pi) in near.iter() {
+                            let pc = &pieces[pi as usize];
                             let o = &geo.tracks[pc.track as usize];
                             let need = w / 2.0
                                 + o.piece_width(pc.a, pc.b) / 2.0
@@ -547,7 +611,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                                 let dir = if d > 1e-9 { (p - q).norm() } else { ab.perp().norm() };
                                 push = push + dir * ((need - d) * 0.5);
                             }
-                        });
+                        }
                         // constraints win over tension: drop the tension part that points into the push
                         if push.len2() > 0.0 {
                             let pn = push.norm();
