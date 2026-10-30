@@ -61,6 +61,9 @@ pub struct AddLockedOut {
     /// The working copy (<input>.prerouted.kicad_pcb); the input file stays untouched.
     pub path: String,
     pub items_added: usize,
+    /// Problems found at the points of the new copper (only those: the track between two
+    /// points is not checked): off board, touching other nets, on a plane layer.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
@@ -213,6 +216,11 @@ pub struct RouteIn {
     /// Portfolio size: router runs with different orders (default 14, fixed so that results
     /// do not depend on the machine).
     pub runs: Option<usize>,
+    /// Weight of the pull between the nets of differential pairs (default 0: off; 1 is a good
+    /// start, it can cost clearance on tight boards).
+    pub pair_pull: Option<f64>,
+    /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
+    pub layer_dirs: Option<f64>,
     /// Generations of the evolutionary order search after the portfolio (default 3).
     pub generations: Option<usize>,
     /// Generations that select by clearance violations after the geometry step (default 0,
@@ -698,7 +706,31 @@ impl Gummiband {
     fn add_locked(&self, p: AddLockedIn) -> Result<(String, AddLockedOut)> {
         let (path, kb, options) =
             self.with_entry(&p.board, |e| Ok((e.path.clone(), e.kb.clone(), e.options.clone())))?;
+        // a working copy is the current state, whatever id the call names
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("board");
+        let work = if stem.ends_with(".prerouted") {
+            path.clone()
+        } else {
+            path.with_file_name(format!("{stem}.prerouted.kicad_pcb"))
+        };
+        let kb = if work.is_file() {
+            Arc::new(read(&work, true)?)
+        } else {
+            kb
+        };
         let b = &kb.board;
+        let mut warnings = Vec::new();
+        let foreign = |at: gummiband_core::geom::Point, r: f64, layer: Option<u8>, net: u32| -> Option<String> {
+            b.obstacles
+                .iter()
+                .find(|o| {
+                    o.net.is_some_and(|n| n != net)
+                        && layer.is_none_or(|l| o.layers.has(l))
+                        && o.shape.dist_to_point(at) < r
+                })
+                .and_then(|o| o.net)
+                .map(|n| b.nets[n as usize].name.clone())
+        };
         let net_of = |name: &str| b.net_id(name).with_context(|| format!("no net named {name:?}"));
         let mut items = Vec::new();
         for t in &p.tracks {
@@ -710,6 +742,21 @@ impl Gummiband {
                 bail!("a track needs at least two points");
             }
             let width = t.width.unwrap_or(b.class_of(net).track_width);
+            if width <= 0.0 {
+                bail!("track of {} has width {width}", t.net);
+            }
+            if b.layers[layer as usize].is_plane {
+                warnings.push(format!("track of {} on plane layer {}", t.net, t.layer));
+            }
+            for q in &t.points {
+                let at = gummiband_core::geom::pt(q[0], q[1]);
+                if !b.inside(at) {
+                    warnings.push(format!("track of {} leaves the board at {}, {}", t.net, q[0], q[1]));
+                }
+                if let Some(o) = foreign(at, width / 2.0, Some(layer), net) {
+                    warnings.push(format!("track of {} touches {o} at {}, {}", t.net, q[0], q[1]));
+                }
+            }
             for w in t.points.windows(2) {
                 items.push(write::Item::Track {
                     a: gummiband_core::geom::pt(w[0][0], w[0][1]),
@@ -723,6 +770,13 @@ impl Gummiband {
         for v in &p.vias {
             let net = net_of(&v.net)?;
             let c = b.class_of(net);
+            let at = gummiband_core::geom::pt(v.x, v.y);
+            if !b.inside(at) {
+                warnings.push(format!("via of {} off the board at {}, {}", v.net, v.x, v.y));
+            }
+            if let Some(o) = foreign(at, v.diameter.unwrap_or(c.via_diameter) / 2.0, None, net) {
+                warnings.push(format!("via of {} touches {o} at {}, {}", v.net, v.x, v.y));
+            }
             items.push(write::Item::Via {
                 at: gummiband_core::geom::pt(v.x, v.y),
                 diameter: v.diameter.unwrap_or(c.via_diameter),
@@ -733,13 +787,6 @@ impl Gummiband {
         if items.is_empty() {
             bail!("nothing to add");
         }
-        // a working copy, so that the input stays as it is; further calls add to the copy
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("board");
-        let work = if stem.ends_with(".prerouted") {
-            path.clone()
-        } else {
-            path.with_file_name(format!("{stem}.prerouted.kicad_pcb"))
-        };
         std::fs::write(&work, write::add_locked(&kb, &items)).with_context(|| format!("writing {}", work.display()))?;
         if work != path {
             external::copy_project_files(&path, &work);
@@ -757,6 +804,7 @@ impl Gummiband {
             board: id,
             path: work.display().to_string(),
             items_added: items.len(),
+            warnings,
         };
         Ok((format!("{} locked items in {}", out.items_added, out.path), out))
     }
@@ -772,6 +820,9 @@ impl Gummiband {
                     .filter(|n| n.to_lowercase().contains(&p.net.to_lowercase()))
                     .take(10)
                     .collect();
+                if close.is_empty() {
+                    bail!("no net named {:?} (see list_nets)", p.net);
+                }
                 bail!("no net named {:?}; similar: {}", p.net, close.join(", "))
             };
             let mut o = if p.reset.unwrap_or(false) {
@@ -852,6 +903,8 @@ fn route_blocking(
         },
         &RouterConfig {
             via_cost: p.via_cost.unwrap_or(3.0),
+            pair_pull: p.pair_pull.unwrap_or(0.0),
+            layer_dirs: p.layer_dirs.unwrap_or(0.5),
             ..Default::default()
         },
         &gummiband_core::SearchConfig {

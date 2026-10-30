@@ -87,6 +87,7 @@ impl Router<'_> {
         match e {
             End::Pin(p) => self.board.pins[p].pos,
             End::Via(site) => self.site_point(site),
+            End::Point(p) => p,
         }
     }
 

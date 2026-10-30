@@ -88,6 +88,8 @@ pub enum End {
     Pin(usize),
     /// A via, by site id.
     Via(u32),
+    /// A point on kept copper of the net.
+    Point(Point),
 }
 
 /// One crossing of a route segment: edge e, left from triangle `from`.
@@ -2278,7 +2280,10 @@ impl<'a> Router<'a> {
         let mut i = 0;
         // the search may have started at another pin of the group
         let mut start = match chain.first().map(|n| n.kind) {
-            Some(NK::Tri { t, li, .. }) if self.has_kept => End::Pin(self.tri_pin(li as usize, t).unwrap_or(conn.from)),
+            Some(NK::Tri { t, li, .. }) if self.has_kept => match self.tri_pin(li as usize, t) {
+                Some(p) => End::Pin(p),
+                None => End::Point(chain[0].pos),
+            },
             _ => End::Pin(conn.from),
         };
         while i < chain.len() {
@@ -2307,7 +2312,12 @@ impl<'a> Router<'a> {
                 }
                 Some(NK::GoalPin { pin }) => End::Pin(pin),
                 // through hole layer change: the run ends at that pin
-                _ => End::Pin(self.tri_pin(li as usize, last_t).unwrap_or(conn.from)),
+                // or at a kept via of the net
+                _ => match self.tri_pin(li as usize, last_t) {
+                    Some(p) => End::Pin(p),
+                    None if self.has_kept => End::Point(chain[j - 1].pos),
+                    None => End::Pin(conn.from),
+                },
             };
             let seg = Seg {
                 net,
@@ -2340,7 +2350,7 @@ impl<'a> Router<'a> {
         let m = &self.sub.m[li];
         let vert = |e: End| match e {
             End::Via(site) => m.site_vert.get(&site).copied(),
-            End::Pin(_) => None,
+            End::Pin(_) | End::Point(_) => None,
         };
         let vpos = |t: u32, v: u32| CPos::Vertex(m.tris[t as usize].iter().position(|&x| x == v).unwrap_or(0) as u8);
         let mut chords: Vec<(u32, Chord)> = Vec::new();
