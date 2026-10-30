@@ -291,6 +291,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         })
         .collect();
     let near_edge: Vec<bool> = (0..cells.len())
+        .into_par_iter()
         .map(|c| {
             let (r, half) = cells.cell_rect(c);
             let mid = (r.min + r.max) * 0.5;
@@ -780,17 +781,35 @@ fn taut(
                     return false;
                 }
             }
+            // only what lies within reach of the box of a-b can be too close
+            let need = board.rules.edge_clearance + w / 2.0 + m;
+            let edge_box = r.grow(need + 1e-9);
             for o in &board.outline {
+                let near = |(p, q): &(Point, Point)| {
+                    p.x.max(q.x) >= edge_box.min.x
+                        && p.x.min(q.x) <= edge_box.max.x
+                        && p.y.max(q.y) >= edge_box.min.y
+                        && p.y.min(q.y) <= edge_box.max.y
+                };
                 if o.edges()
-                    .map(|(p, q)| crate::geom::seg_seg_dist(a, b, p, q))
-                    .fold(f64::INFINITY, f64::min)
-                    < board.rules.edge_clearance + w / 2.0 + m
+                    .filter(near)
+                    .any(|(p, q)| crate::geom::seg_seg_dist(a, b, p, q) < need)
                 {
                     return false;
                 }
             }
             for &(vc, vr, vn) in &routing_vias {
-                if vn != net && point_seg_dist(vc, a, b) < vr + c.max(clr(vn)) + w / 2.0 + m {
+                if vn == net {
+                    continue;
+                }
+                let need = vr + c.max(clr(vn)) + w / 2.0 + m;
+                let reach = need + 1e-9;
+                if vc.x >= r.min.x - reach
+                    && vc.x <= r.max.x + reach
+                    && vc.y >= r.min.y - reach
+                    && vc.y <= r.max.y + reach
+                    && point_seg_dist(vc, a, b) < need
+                {
                     return false;
                 }
             }
