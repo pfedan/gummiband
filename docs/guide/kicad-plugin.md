@@ -57,13 +57,15 @@ at instead of rerouting the board:
 1. Start a track by hand if you like, or just select any track, via or pad of the nets you want
    finished (several nets at once are fine).
 2. Click the button. Without a selection the plugin asks for one.
-3. All copper on the board stays, locked or not. The router adds only what is missing on the
-   selected nets, continuing a started track from where it ends: copper that touches no pad of its
-   net counts as a pin, so the new track starts right there.
+3. The router adds what is missing on the selected nets, continuing a started track from where
+   it ends: copper that touches no pad of its net counts as a pin, so the new track starts right
+   there. Existing copper stays, with one exception: where a connection finds no way, unlocked
+   tracks of other nets within 8 mm of its pin may be rerouted to make room. Locked copper and
+   plane nets such as GND never move.
 4. The additions arrive as one undo step. There is no dialog: the action runs with the defaults
    (14 runs, via cost 3.0) and without geometry generations, so it is quick.
 
-This is the plugin's form of `gummiband route --keep-all --nets A,B`. The button is new and not
+This is the plugin's form of `gummiband route --keep-all --nets A,B --give 8`. The button is new and not
 yet tested live in KiCad, so run the DRC on the result.
 
 ## Without a dialog

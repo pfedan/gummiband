@@ -33,7 +33,9 @@ the named nets. In KiCad the same is the toolbar action *Finish selected nets wi
 select a track, via or pad of the nets and click, see [Routing in KiCad](kicad-plugin.md).
 The router adds to what is there: pins that already sit on one piece of copper count as
 connected, and a connection may ride along existing copper of its net instead of drawing a new
-track beside it. This is new, so run the DRC afterwards.
+track beside it. Add `--give 8` to let unlocked tracks of other nets near a blocked pin move out
+of the way (they are rerouted; locked copper and plane nets stay). This is new, so run the DRC
+afterwards.
 
 ## Pre-route and lock power lanes
 
