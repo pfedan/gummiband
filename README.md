@@ -50,8 +50,9 @@ Then pick how you want to use it:
 2. Lock the copper you want to keep (select, right click, *Locking > Lock*).
 3. Click *Route with Gummiband* in the PCB editor's plugin toolbar.
 4. Leave the defaults (keep locked copper, 14 runs, via cost 3.0, 3 geometry
-   generations) and press OK. A progress dialog shows the phase, the routed connections, vias,
-   length and remaining violations.
+   generations) and press OK. A window shows the phase, the generation, the routed connections,
+   vias, length and remaining violations. The result keeps improving until you press *Accept
+   current result*; the window tells you when the search has settled.
 5. Look at the result. It arrives as one undo step, so Ctrl/Cmd+Z takes it back entirely.
 6. Refill zones (B) and run the DRC. Fix or reroute what is left by hand, then save.
 

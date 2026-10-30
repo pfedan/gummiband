@@ -68,7 +68,8 @@ class FindBinaryTest(unittest.TestCase):
 
 class CommandTest(unittest.TestCase):
     def test_build_command(self):
-        opts = runner.RouteOptions(keep_locked=True, runs=8, via_cost=2, geometry_generations=0)
+        opts = runner.RouteOptions(keep_locked=True, runs=8, via_cost=2, geometry_generations=0,
+                                   until_stop=False)
         self.assertEqual(
             runner.build_command("gb", Path("/a/b.kicad_pcb"), Path("/t/o.kicad_pcb"), opts),
             ["gb", "route", "/a/b.kicad_pcb", "-o", "/t/o.kicad_pcb", "--progress", "--keep-locked",
@@ -85,7 +86,7 @@ class CommandTest(unittest.TestCase):
         self.assertNotIn("--keep-locked", cmd)
 
     def test_quality_and_animation(self):
-        opts = runner.RouteOptions(geometry_generations=3, frames_dir="/p/anim")
+        opts = runner.RouteOptions(geometry_generations=3, frames_dir="/p/anim", until_stop=False)
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
         self.assertEqual(cmd[-4:], ["--geometry-generations", "3", "--frames", "/p/anim"])
 
@@ -199,6 +200,49 @@ pathlib.Path({str(self.out)!r}).write_text('x')""")
             runner.run_route([str(self.dir / "missing")], self.out, self.dir)
 
 
+class AcceptTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.out = self.dir / "o.kicad_pcb"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_accept_ends_the_run_and_the_result_counts(self):
+        # waits for the end of stdin like --until-stop, then writes its result
+        exe = make_exe(self.dir / "gb", f"""
+import sys
+print('progress {{"phase": "geometry generation 1", "generation": 1, "converged": true}}', flush=True)
+sys.stdin.read()
+open({str(self.out)!r}, "w").write("done")
+""")
+        seen = []
+        def keep_going(p):
+            seen.append(p)
+            return True
+        res = runner.run_route([str(exe)], self.out, self.dir, keep_going,
+                               lambda: bool(seen and seen[-1]))
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(self.out.read_text(), "done")
+        self.assertTrue(runner.converged(seen[-1]))
+
+    def test_command_flag(self):
+        opts = runner.RouteOptions(until_stop=True)
+        self.assertIn("--until-stop", runner.build_command("gb", Path("b"), Path("o"), opts))
+        off = runner.RouteOptions(until_stop=False)
+        self.assertNotIn("--until-stop", runner.build_command("gb", Path("b"), Path("o"), off))
+        finish = runner.RouteOptions(finish_nets=["A"])
+        self.assertNotIn("--until-stop", runner.build_command("gb", Path("b"), Path("o"), finish))
+        pairs = runner.RouteOptions(until_stop=True, pairs=True)
+        self.assertNotIn("--until-stop", runner.build_command("gb", Path("b"), Path("o"), pairs))
+
+    def test_prefer_width_flag(self):
+        opts = runner.RouteOptions(prefer_width=0.25)
+        cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
+        self.assertEqual(cmd[cmd.index("--prefer-width") + 1], "0.25")
+
+
 class TailTest(unittest.TestCase):
     def test_tail(self):
         self.assertEqual(runner.tail(""), "(empty)")
@@ -209,7 +253,8 @@ class TailTest(unittest.TestCase):
 class AdvancedCommandTest(unittest.TestCase):
     def test_defaults_add_nothing(self):
         cmd = runner.build_command("gb", Path("b"), Path("o"),
-                                   runner.RouteOptions(geometry_generations=0, keep_locked=False))
+                                   runner.RouteOptions(geometry_generations=0, keep_locked=False,
+                                                       until_stop=False))
         self.assertEqual(cmd, ["gb", "route", "b", "-o", "o", "--progress",
                                "--runs", "14", "--via-cost", "3.0"])
 

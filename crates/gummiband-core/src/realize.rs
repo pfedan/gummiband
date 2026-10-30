@@ -317,25 +317,38 @@ impl Router<'_> {
         if self.soft_on {
             return self.soft_geometry();
         }
+        self.tagged_geometry().0
+    }
+
+    /// The geometry of a router without soft copper, with the segment of each track and the
+    /// site of each via.
+    pub(crate) fn tagged_geometry(&self) -> (Geometry, Vec<u32>, Vec<u32>) {
         let ids: Vec<u32> = (0..self.segs.len() as u32)
             .filter(|&i| self.segs[i as usize].is_some())
             .collect();
-        let tracks: Vec<Track> = ids.par_iter().flat_map_iter(|&sid| self.seg_tracks(sid)).collect();
-        let mut vias: Vec<Via> = self
+        let (tracks, segs): (Vec<Track>, Vec<u32>) = ids
+            .par_iter()
+            .flat_map_iter(|&sid| self.seg_tracks(sid).into_iter().map(move |t| (t, sid)))
+            .unzip();
+        let mut vias: Vec<(Via, u32)> = self
             .vias
             .iter()
-            .map(|(&v, info)| Via {
-                at: self.site_point(v),
-                diameter: info.r * 2.0,
-                drill: info.drill,
-                net: info.net,
-                layer: None,
-                origin: None,
-                resting: false,
+            .map(|(&v, info)| {
+                let via = Via {
+                    at: self.site_point(v),
+                    diameter: info.r * 2.0,
+                    drill: info.drill,
+                    net: info.net,
+                    layer: None,
+                    origin: None,
+                    resting: false,
+                };
+                (via, v)
             })
             .collect();
-        vias.sort_by(|a, b| a.at.x.total_cmp(&b.at.x).then(a.at.y.total_cmp(&b.at.y)));
-        Geometry { tracks, vias }
+        vias.sort_by(|a, b| a.0.at.x.total_cmp(&b.0.at.x).then(a.0.at.y.total_cmp(&b.0.at.y)));
+        let (vias, sites) = vias.into_iter().unzip();
+        (Geometry { tracks, vias }, segs, sites)
     }
 
     /// The tracks of a routed segment: its band without the stretches on kept copper.

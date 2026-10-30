@@ -15,7 +15,7 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -44,6 +44,9 @@ class ConsoleUi:
 
     def run_with_progress(self, fn, busy: str = "Routing..."):
         return fn(None)
+
+    def run_with_metrics(self, fn, open_end: bool = False):
+        return fn(None, None)
 
     def info(self, text: str):
         print(text)
@@ -201,6 +204,15 @@ class WxUi:
         finally:
             dlg.Destroy()
 
+    def run_with_metrics(self, fn, open_end: bool = False):
+        """Call ``fn(keep_going, accept)`` while a window shows the state of the search."""
+        window = MetricsWindow(self.title, open_end)
+        window.Show()
+        try:
+            return fn(window.keep_going, window.accepted)
+        finally:
+            window.Destroy()
+
     def info(self, text: str):
         wx.MessageBox(text, self.title, wx.OK | wx.ICON_INFORMATION)
 
@@ -220,6 +232,120 @@ class WxUi:
         dlg.CentreOnScreen()
         dlg.ShowModal()
         dlg.Destroy()
+
+
+METRICS = (("Generation", "generation"), ("Routed", "routed"), ("Vias", "vias"),
+           ("Track length", "length"), ("Clearance violations", "violations"),
+           ("Without noticeable gain", "stale"), ("Failed side branches", "level"),
+           ("Time", "time"))
+COURSES = (("vias", wx.Colour(60, 120, 200)), ("length", wx.Colour(70, 160, 110)),
+           ("violations", wx.Colour(210, 90, 60))) if wx is not None else ()
+
+
+class MetricsWindow(wx.Frame if wx is not None else object):
+    """Metrics of the running search, their course and the choice to take the result."""
+
+    def __init__(self, title: str, open_end: bool):
+        super().__init__(None, title=title, style=wx.DEFAULT_FRAME_STYLE & ~wx.CLOSE_BOX
+                         | wx.STAY_ON_TOP)
+        self.t0 = time.monotonic()
+        self.seen = None
+        self.history: List[dict] = []
+        self.go_on = True
+        self.take = False
+        panel = wx.Panel(self)
+        self.phase = wx.StaticText(panel, label="Routing...")
+        font = self.phase.GetFont()
+        self.phase.SetFont(font.Bold())
+        grid = wx.FlexGridSizer(len(METRICS), 2, 4, 16)
+        self.values = {}
+        for label, key in METRICS:
+            grid.Add(wx.StaticText(panel, label=label + ":"))
+            self.values[key] = wx.StaticText(panel, label="-")
+            grid.Add(self.values[key], 0, wx.EXPAND)
+        grid.AddGrowableCol(1)
+        self.course = wx.Panel(panel, size=(420, 90))
+        self.course.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+        self.course.Bind(wx.EVT_PAINT, self.paint)
+        self.hint = wx.StaticText(panel, label="")
+        self.accept_button = wx.Button(panel, label="Accept current result")
+        self.accept_button.Disable()
+        self.accept_button.Show(open_end)
+        self.accept_button.Bind(wx.EVT_BUTTON, self.on_accept)
+        cancel = wx.Button(panel, label="Cancel")
+        cancel.Bind(wx.EVT_BUTTON, self.on_cancel)
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+        buttons.AddStretchSpacer()
+        buttons.Add(cancel, 0, wx.RIGHT, 8)
+        buttons.Add(self.accept_button)
+        box = wx.BoxSizer(wx.VERTICAL)
+        box.Add(self.phase, 0, wx.ALL, 12)
+        box.Add(grid, 0, wx.LEFT | wx.RIGHT | wx.EXPAND, 12)
+        box.Add(self.course, 0, wx.ALL | wx.EXPAND, 12)
+        box.Add(self.hint, 0, wx.LEFT | wx.RIGHT | wx.EXPAND, 12)
+        box.Add(buttons, 0, wx.ALL | wx.EXPAND, 12)
+        panel.SetSizer(box)
+        box.SetSizeHints(self)
+        self.CenterOnScreen()
+
+    def on_accept(self, _event):
+        self.take = True
+        self.accept_button.Disable()
+        self.hint.SetLabel("Finishing the best result...")
+
+    def on_cancel(self, _event):
+        self.go_on = False
+
+    def accepted(self) -> bool:
+        return self.take
+
+    def keep_going(self, progress=None) -> bool:
+        if progress is not None and progress is not self.seen:
+            self.seen = progress
+            self.show(progress)
+        self.values["time"].SetLabel(f"{time.monotonic() - self.t0:.0f} s")
+        wx.YieldIfNeeded()
+        return self.go_on
+
+    def show(self, p: dict):
+        self.history.append(p)
+        self.phase.SetLabel(p.get("phase", ""))
+        v = self.values
+        if p.get("generation", 0) > 0:
+            v["generation"].SetLabel(str(p["generation"]))
+        v["routed"].SetLabel(f"{p.get('routed', 0)} of {p.get('conns', 0)}")
+        v["vias"].SetLabel(str(p.get("vias", 0)))
+        v["length"].SetLabel(f"{p.get('length', 0):.0f} mm")
+        count = p.get("violations")
+        v["violations"].SetLabel("-" if count is None else str(count))
+        v["stale"].SetLabel(f"{p.get('stale', 0)} generations")
+        v["level"].SetLabel(str(p.get("level", 0)))
+        if p.get("generation", 0) > 0 and not self.take:
+            self.accept_button.Enable()
+            self.hint.SetLabel("The search has settled. Accepting the result now is recommended."
+                               if runner.converged(p) else "")
+        self.course.Refresh()
+
+    def paint(self, _event):
+        """Vias, length and violations over the reports, each scaled to its own range."""
+        dc = wx.AutoBufferedPaintDC(self.course)
+        dc.SetBackground(wx.Brush(self.GetBackgroundColour()))
+        dc.Clear()
+        w, h = self.course.GetClientSize()
+        rows = [p for p in self.history if p.get("violations") is not None]
+        rows = rows[::len(rows) // w + 1]
+        x = 0
+        for key, colour in COURSES:
+            ys = [p[key] for p in rows]
+            if len(ys) > 1:
+                lo, hi = min(ys), max(ys)
+                dc.SetPen(wx.Pen(colour, 2))
+                dc.DrawLines([wx.Point(i * (w - 1) // (len(ys) - 1),
+                                       h - 18 - int((y - lo) * (h - 22) / max(hi - lo, 1)))
+                              for i, y in enumerate(ys)])
+            dc.SetTextForeground(colour)
+            dc.DrawText(key, x, h - 16)
+            x += dc.GetTextExtent(key)[0] + 12
 
 
 # Steps -------------------------------------------------------------------------------------
@@ -331,7 +457,8 @@ def main() -> int:
         src = save_copy(board, work)
         out = work / f"{src.stem}-routed.kicad_pcb"
         cmd = runner.build_command(binary, src, out, opts)
-        res = ui.run_with_progress(lambda keep_going: runner.run_route(cmd, out, work, keep_going))
+        res = ui.run_with_metrics(lambda keep_going, accept: runner.run_route(
+            cmd, out, work, keep_going, accept), runner.open_ended(opts))
         before, after = src.read_text(encoding="utf-8"), out.read_text(encoding="utf-8")
         plan = bf.plan_from_texts(before, after, opts.keep_locked)
         moves = bf.plan_moves(before, after) if opts.move_parts else None

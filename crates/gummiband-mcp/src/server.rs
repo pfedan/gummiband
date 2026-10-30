@@ -1200,6 +1200,9 @@ fn route_blocking(
         frames: false,
         progress: None,
         seed: p.seed,
+        open_end: None,
+        air: 0.0,
+        prefer_width: 0.0,
     };
     let (res, pair_reports) = if p.pairs == Some(true) {
         let cfg = gummiband_core::pairs::PairConfig {
