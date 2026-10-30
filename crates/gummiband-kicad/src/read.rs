@@ -69,6 +69,7 @@ pub fn read_board(path: &Path, opts: &ReadOptions) -> Result<KicadBoard> {
         let rules = crate::dru::parse_rules(&dru);
         kb.board.pair_clearance = crate::dru::pair_clearances(&kb.board, &rules).into_iter().collect();
         crate::dru::apply_width_rules(&mut kb.board, &dru);
+        crate::dru::apply_pair_rules(&mut kb.board, &dru);
     }
     Ok(kb)
 }
@@ -92,6 +93,7 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
     };
 
     r.read_layers(&root, opts);
+    r.read_stackup(&root);
     r.read_rules(pro);
     r.read_classes(pro);
     r.read_net_table(&root);
@@ -197,6 +199,30 @@ fn glob_match(pat: &str, s: &str) -> bool {
 }
 
 impl Reader {
+    /// Copper and dielectric layers of the stackup, for impedance estimates.
+    fn read_stackup(&mut self, root: &Node) {
+        let Some(st) = root.child("setup").and_then(|x| x.child("stackup")) else { return };
+        let number = |l: &Node, k: &str| l.child(k).and_then(|c| c.args().first()).and_then(|v| v.as_f64());
+        for l in st.children("layer") {
+            let name = l.args().first().and_then(|x| x.as_str()).unwrap_or("");
+            let kind = l.child_str("type").unwrap_or("");
+            let Some(thickness) = number(l, "thickness") else { continue };
+            if kind == "copper" {
+                self.b.stackup.push(StackItem {
+                    copper: self.b.layer_id(name),
+                    thickness,
+                    epsilon_r: 1.0,
+                });
+            } else if kind == "core" || kind == "prepreg" {
+                self.b.stackup.push(StackItem {
+                    copper: None,
+                    thickness,
+                    epsilon_r: number(l, "epsilon_r").unwrap_or(4.5),
+                });
+            }
+        }
+    }
+
     fn read_layers(&mut self, root: &Node, opts: &ReadOptions) {
         let mut cu: Vec<(i64, String, bool)> = Vec::new();
         if let Some(layers) = root.child("layers") {
@@ -279,6 +305,10 @@ impl Reader {
                 priority: prio.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
                 min_width: None,
                 neck_refs: Vec::new(),
+                diff_width: f("diff_pair_width", 0.0),
+                diff_gap: f("diff_pair_gap", 0.0),
+                diff_via_gap: f("diff_pair_via_gap", 0.0),
+                ..Default::default()
             });
         }
         if !self.b.classes.iter().any(|c| c.name == "Default") {
@@ -293,6 +323,7 @@ impl Reader {
                     priority: i32::MAX,
                     min_width: None,
                     neck_refs: Vec::new(),
+                    ..Default::default()
                 },
             );
         }

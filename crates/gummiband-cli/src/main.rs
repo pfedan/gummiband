@@ -79,6 +79,17 @@ enum Cmd {
         /// Weight of the pull between the nets of differential pairs (0 = off).
         #[arg(long, default_value_t = 0.0)]
         pair_pull: f64,
+        /// Route differential pairs as one wide track and split it into two parallel tracks.
+        #[arg(long)]
+        pairs: bool,
+        /// With --pairs: length difference left within a pair in mm; the shorter track gets
+        /// bumps down to this (a `skew` rule in the .kicad_dru may ask for less).
+        #[arg(long, default_value_t = 0.1)]
+        pair_skew: f64,
+        /// With --pairs: target differential impedance in ohm. Sets the track width per layer
+        /// from the board's stackup; the gap stays.
+        #[arg(long)]
+        pair_zdiff: Option<f64>,
         /// Generations of the evolutionary order search after the portfolio.
         #[arg(long, default_value_t = 3)]
         generations: usize,
@@ -232,6 +243,9 @@ fn main() -> Result<()> {
             layer_dirs,
             pair_pull,
             via_pass,
+            pairs,
+            pair_skew,
+            pair_zdiff,
             generations,
             geometry_generations,
             svg,
@@ -294,6 +308,9 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            if let (true, Some(z)) = (pairs, pair_zdiff) {
+                gummiband_core::pairs::apply_zdiff(&mut kb.board, z);
+            }
             // debugging: GB_SHIFT="R8:0.3,0;C4:0,-0.2" routes the board with these parts shifted
             let shifted_in;
             let b = match std::env::var("GB_SHIFT") {
@@ -348,12 +365,24 @@ fn main() -> Result<()> {
             // the nets asked for, and the nets that give way when a connection finds no way
             let mut given: std::collections::BTreeSet<String> = Default::default();
             let mut radius = 0.0;
+            let mut pair_reports = Vec::new();
             let (routed_board, sub, res) = loop {
                 let mut board = b.only_nets(&nets, &given);
                 if shove {
                     board.soften(&nets);
                 }
-                let (sub, res) = gummiband_core::route_board(&board, &sub_cfg, &router_cfg, &search_cfg);
+                let (sub, res) = if pairs {
+                    let pair_cfg = gummiband_core::pairs::PairConfig {
+                        skew: pair_skew,
+                        zdiff: pair_zdiff,
+                    };
+                    let (sub, res, reports) =
+                        gummiband_core::pairs::route_pairs(&board, &sub_cfg, &router_cfg, &search_cfg, &pair_cfg);
+                    pair_reports = reports;
+                    (sub, res)
+                } else {
+                    gummiband_core::route_board(&board, &sub_cfg, &router_cfg, &search_cfg)
+                };
                 if res.stats.unrouted.is_empty() || nets.is_empty() || radius >= give {
                     break (board, sub, res);
                 }
@@ -461,6 +490,23 @@ fn main() -> Result<()> {
                     c,
                     t,
                     100.0 * c / t.max(1e-9)
+                );
+            }
+            for r in &pair_reports {
+                println!(
+                    "  pair {} / {}: {}, width {:.3} gap {:.3}, {:.0} ohm, {:.2} / {:.2} mm, skew {:.3} mm, {} vias, {} swaps {}",
+                    r.p,
+                    r.n,
+                    if r.wide { "wide" } else { "single" },
+                    r.width,
+                    r.gap,
+                    r.zdiff,
+                    r.length_p,
+                    r.length_n,
+                    r.skew,
+                    r.vias,
+                    r.swaps,
+                    r.note
                 );
             }
             let viol = gummiband_core::check::check(b, &res.geometry);
@@ -622,6 +668,7 @@ fn main() -> Result<()> {
                     "connections": st.conns,
                     "routed": st.routed,
                     "unrouted": st.unrouted,
+                    "pairs": pair_reports,
                     "vias": st.vias,
                     "length_mm": st.length,
                     "length_lower_bound_mm": gummiband_core::length_lower_bound(b),

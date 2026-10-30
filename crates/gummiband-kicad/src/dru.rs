@@ -32,6 +32,8 @@ pub struct ClearanceRule {
     pub name: String,
     pub min: f64,
     cond: Expr,
+    /// The rule holds only outside coupled pairs (`!AB.isCoupledDiffPair()`).
+    not_coupled: bool,
 }
 
 /// Item properties a condition can ask for.
@@ -66,6 +68,7 @@ pub fn parse_rules(text: &str) -> Vec<ClearanceRule> {
                     name: name.clone(),
                     min,
                     cond: expr.clone(),
+                    not_coupled: cond.contains("!AB.isCoupledDiffPair()"),
                 });
             }
         }
@@ -107,6 +110,70 @@ pub fn apply_width_rules(board: &mut Board, text: &str) {
     }
 }
 
+/// The preferred value of a constraint, else its minimum.
+fn constraint_opt(c: &Node) -> Option<f64> {
+    let v = c.child("opt").or_else(|| c.child("min"))?;
+    let v = v.args().first()?.as_str()?;
+    v.trim_end_matches("mm").parse().ok()
+}
+
+/// Width and gap of differential pairs per net class, from rules with a `diff_pair_gap`
+/// constraint: `A.NetClass == 'X'` or `A.inDiffPair('pattern')` conditions, for all layers or
+/// for inner or outer layers. Rules further down win, as in KiCad. `skew` limits go along.
+pub fn apply_pair_rules(board: &mut Board, text: &str) {
+    let text: String = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let wrapped = format!("(rules {text})");
+    let Ok(root) = sexpr::parse(&wrapped) else { return };
+    let pairs = board.diff_pairs();
+    for r in root.children("rule") {
+        let Some(cond) = r.child_str("condition") else { continue };
+        let of = |name: &str| {
+            r.children("constraint")
+                .find(|c| c.args().first().and_then(|x| x.as_str()) == Some(name))
+        };
+        let gap = of("diff_pair_gap").and_then(constraint_opt);
+        let width = of("track_width").and_then(constraint_opt);
+        let skew = of("skew").and_then(|c| c.child("max")?.args().first()?.as_str()?.trim_end_matches("mm").parse().ok());
+        if gap.is_none() && skew.is_none() {
+            continue;
+        }
+        let mut classes = quoted_after(cond, "A.NetClass == ");
+        for pat in quoted_after(cond, "A.inDiffPair(") {
+            for &(p, n) in &pairs {
+                let (a, b) = (&board.nets[p as usize], &board.nets[n as usize]);
+                if glob(&pat, &a.name) || glob(&pat, &b.name) {
+                    classes.push(board.classes[a.class as usize].name.clone());
+                }
+            }
+        }
+        let layer = r.child_str("layer").unwrap_or("");
+        let (outer, inner) = match layer {
+            "inner" => (false, true),
+            "outer" | "F.Cu" | "B.Cu" => (true, false),
+            "" => (true, true),
+            _ => (false, true),
+        };
+        for cls in board.classes.iter_mut().filter(|k| classes.contains(&k.name)) {
+            let (w, g) = (width.unwrap_or(0.0), gap.unwrap_or(0.0));
+            if gap.is_some() {
+                if outer {
+                    cls.diff_outer = Some((w, g));
+                }
+                if inner {
+                    cls.diff_inner = Some((w, g));
+                }
+            }
+            if skew.is_some() {
+                cls.diff_skew = skew;
+            }
+        }
+    }
+}
+
 /// The quoted strings that follow each occurrence of `prefix`.
 fn quoted_after(s: &str, prefix: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -130,9 +197,15 @@ pub fn pair_clearances(board: &Board, rules: &[ClearanceRule]) -> HashMap<(NetId
         return out;
     }
     let n = board.nets.len();
+    let partners: std::collections::HashSet<(NetId, NetId)> = board
+        .diff_pairs()
+        .into_iter()
+        .map(|(a, b)| (a.min(b), a.max(b)))
+        .collect();
     for a in 0..n {
         for b in a + 1..n {
             let (na, nb) = (&board.nets[a], &board.nets[b]);
+            let coupled = partners.contains(&(a as NetId, b as NetId));
             let pa = ItemProps {
                 kind: "Track",
                 net: &na.name,
@@ -145,7 +218,7 @@ pub fn pair_clearances(board: &Board, rules: &[ClearanceRule]) -> HashMap<(NetId
             };
             let mut best: f64 = 0.0;
             for r in rules {
-                if eval(&r.cond, &pa, &pb) || eval(&r.cond, &pb, &pa) {
+                if !(coupled && r.not_coupled) && (eval(&r.cond, &pa, &pb) || eval(&r.cond, &pb, &pa)) {
                     best = best.max(r.min);
                 }
             }
@@ -388,6 +461,50 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pair_rules_by_class_and_layer() {
+        use gummiband_core::board::{Layer, Net, NetClass};
+        let mut b = Board::default();
+        b.rules.min_clearance = 0.1;
+        b.layers = ["F.Cu", "In1.Cu", "B.Cu"]
+            .iter()
+            .map(|n| Layer {
+                name: n.to_string(),
+                is_plane: false,
+            })
+            .collect();
+        b.classes = vec![NetClass {
+            name: "USB".into(),
+            track_width: 0.2,
+            clearance: 0.1,
+            ..Default::default()
+        }];
+        for name in ["D_P", "D_N"] {
+            b.nets.push(Net {
+                name: name.into(),
+                class: 0,
+                pins: vec![0, 1],
+                planes: Default::default(),
+                priority: 0,
+            });
+        }
+        apply_pair_rules(
+            &mut b,
+            r#"(version 1)
+(rule a (layer outer) (condition "(A.NetClass == 'USB')")
+  (constraint track_width (opt 0.16mm)) (constraint diff_pair_gap (opt 0.138mm)))
+(rule b (layer inner) (condition "A.NetClass == 'USB'")
+  (constraint track_width (opt 0.155mm)) (constraint diff_pair_gap (opt 0.144mm)))
+(rule c (condition "A.inDiffPair('D_*')") (constraint skew (max 0.5mm)))"#,
+        );
+        let c = &b.classes[0];
+        assert_eq!(c.diff_outer, Some((0.16, 0.138)));
+        assert_eq!(c.diff_inner, Some((0.155, 0.144)));
+        assert_eq!(c.diff_skew, Some(0.5));
+        assert_eq!(b.pair_shape(0, 1, 0), (0.16, 0.138, 0.138));
+        assert_eq!(b.pair_shape(0, 1, 1), (0.155, 0.144, 0.144));
+    }
 
     #[test]
     fn parses_the_3w_rule() {

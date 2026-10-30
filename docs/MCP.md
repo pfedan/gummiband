@@ -84,7 +84,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `part_info` | `board`, `reference` | pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
-| `route` | `board`, `runs?`, `generations?`, `geometry_generations?`, `keep_locked?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below) |
+| `route` | `board`, `runs?`, `generations?`, `geometry_generations?`, `keep_locked?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below); with `pairs` one entry per differential pair |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?` | PNG (image content) and its path, region, pixels per mm |
 

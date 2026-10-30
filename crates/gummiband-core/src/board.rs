@@ -46,7 +46,7 @@ pub struct Layer {
     pub is_plane: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct NetClass {
     pub name: String,
     pub track_width: f64,
@@ -61,6 +61,22 @@ pub struct NetClass {
     /// Footprints (references) inside whose courtyard the minimum width does not apply.
     #[serde(default)]
     pub neck_refs: Vec<String>,
+    /// Track width, gap and via gap of differential pairs (0: not set).
+    #[serde(default)]
+    pub diff_width: f64,
+    #[serde(default)]
+    pub diff_gap: f64,
+    #[serde(default)]
+    pub diff_via_gap: f64,
+    /// Width and gap of differential pairs on outer and on inner layers, from custom rules; they
+    /// win over the values above.
+    #[serde(default)]
+    pub diff_outer: Option<(f64, f64)>,
+    #[serde(default)]
+    pub diff_inner: Option<(f64, f64)>,
+    /// Largest length difference within a pair, from custom rules.
+    #[serde(default)]
+    pub diff_skew: Option<f64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -185,7 +201,19 @@ pub struct Board {
     /// Unlocked copper that is part of the topology instead of an obstacle, see [`Board::soften`].
     #[serde(skip)]
     pub soft: crate::import::SoftCopper,
+    /// Stackup from top to bottom, if the board has one.
+    #[serde(default)]
+    pub stackup: Vec<StackItem>,
 }
+
+/// A layer of the stackup: copper (with its layer) or dielectric.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct StackItem {
+    pub copper: Option<LayerId>,
+    pub thickness: f64,
+    pub epsilon_r: f64,
+}
+
 
 /// One kept track, arc or via of the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -349,6 +377,84 @@ impl Board {
             }
         }
         out
+    }
+
+    /// Track width, gap and via gap of a differential pair on a layer: custom rules, then the net
+    /// class, then track width and clearance. The gap is never below the clearance of the nets.
+    pub fn pair_shape(&self, p: NetId, n: NetId, layer: LayerId) -> (f64, f64, f64) {
+        let (cp, cn) = (self.class_of(p), self.class_of(n));
+        let outer = layer == 0 || layer as usize + 1 == self.layers.len();
+        let (w, g) = if outer { cp.diff_outer } else { cp.diff_inner }.unwrap_or((0.0, 0.0));
+        let set = |x: f64, d: f64| if x > 0.0 { x } else { d };
+        let (w, g) = (set(w, set(cp.diff_width, cp.track_width)), set(g, cp.diff_gap));
+        let clr = self.track_clearance(p, n).max(cn.clearance);
+        // a little above: exactly the clearance is a coin flip after rounding to the file's grid
+        let g = g.max(clr + 0.005);
+        (w, g, set(cp.diff_via_gap, g).max(clr + 0.005))
+    }
+
+    /// Differential impedance of a pair on a layer in ohm, from the stackup: IPC-2141 formulas,
+    /// microstrip on outer layers, symmetric stripline on inner ones. Good to a few percent;
+    /// a field solver or the manufacturer has the last word.
+    pub fn zdiff(&self, layer: LayerId, w: f64, g: f64) -> Option<f64> {
+        let at = self.stackup.iter().position(|s| s.copper == Some(layer))?;
+        let t = self.stackup[at].thickness;
+        // dielectric up to the next copper on each side
+        let side = |it: &mut dyn Iterator<Item = &StackItem>| -> Option<(f64, f64)> {
+            let (mut h, mut e) = (0.0, 0.0);
+            for s in it {
+                if s.copper.is_some() {
+                    return (h > 0.0).then_some((h, e / h));
+                }
+                h += s.thickness;
+                e += s.thickness * s.epsilon_r;
+            }
+            None
+        };
+        let up = side(&mut self.stackup[..at].iter().rev());
+        let down = side(&mut self.stackup[at + 1..].iter());
+        match (up, down) {
+            (Some((h1, e1)), Some((h2, e2))) => {
+                let b = h1 + h2 + t;
+                let er = (h1 * e1 + h2 * e2) / (h1 + h2);
+                let z0 = 60.0 / er.sqrt() * (1.9 * b / (0.8 * w + t)).ln();
+                Some(2.0 * z0 * (1.0 - 0.347 * (-2.9 * g / b).exp()))
+            }
+            (Some((h, er)), None) | (None, Some((h, er))) => {
+                let z0 = 87.0 / (er + 1.41).sqrt() * (5.98 * h / (0.8 * w + t)).ln();
+                Some(2.0 * z0 * (1.0 - 0.48 * (-0.96 * g / h).exp()))
+            }
+            (None, None) => None,
+        }
+    }
+
+    /// Track width that gives `target` ohm on a layer with gap g.
+    pub fn width_for_zdiff(&self, layer: LayerId, g: f64, target: f64, min_w: f64) -> Option<f64> {
+        let (mut lo, mut hi) = (min_w, 2.0);
+        if self.zdiff(layer, lo, g)? < target {
+            return Some(lo);
+        }
+        for _ in 0..40 {
+            let mid = (lo + hi) / 2.0;
+            if self.zdiff(layer, mid, g)? > target {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        // the writer's grid is fine enough, a board house's is not finer than a micrometre
+        Some((lo * 1000.0).round() / 1000.0)
+    }
+
+    /// The largest differential impedance of a pair over the routing layers, in ohm.
+    pub fn pair_impedance(&self, p: NetId, n: NetId) -> Option<f64> {
+        self.routing_layers()
+            .iter()
+            .filter_map(|l| {
+                let (w, g, _) = self.pair_shape(p, n, l);
+                self.zdiff(l, w, g)
+            })
+            .fold(None, |a: Option<f64>, z| Some(a.map_or(z, |x| x.max(z))))
     }
 
     /// The board for routing only `nets` and `given` (all nets if `nets` is empty). The unlocked
