@@ -82,9 +82,11 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `load_board` | `path`, `keep_locked?` | board id, layers (plane flag), outline box and size, pins, nets, routable nets, connections, planes, net classes (priority, width, clearance, via), custom rule count, custom clearance net pairs, kept net options |
 | `list_nets` | `board`, `filter?`, `include_single?` | nets with class, pin count, plane flag, effective priority, skip flag |
 | `part_info` | `board`, `reference` | pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
+| `move_part` | `board`, `reference`, `x`, `y`, `rotation?` | id and path of the working copy with the footprint at its new position, `items_added`, `warnings` |
+| `add_zone` | `board`, `net`, `layer`, `points`, `priority?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
-| `route` | `board`, `runs?`, `generations?`, `geometry_generations?`, `keep_locked?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below); with the experimental `pairs` one entry per differential pair |
+| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?` | PNG (image content) and its path, region, pixels per mm |
 
@@ -117,6 +119,30 @@ footprints whose courtyard lies within 3 mm.
 
 ```json
 {"name": "part_info", "arguments": {"board": "b1", "reference": "U6"}}
+```
+
+### move_part
+
+Preliminary. Moves a footprint to a new position in mm (and rotation in degrees, unchanged if
+left out) in the working copy `<input>.prerouted.kicad_pcb`; the input file stays untouched and
+the returned board id is the one to route. Courtyards and overlaps are not checked, so run `drc`
+or `render` on the result. Pads, their nets and the footprint's own copper move along.
+
+```json
+{"name": "move_part", "arguments": {"board": "b1", "reference": "C12", "x": 152.4, "y": 118.0, "rotation": 90}}
+```
+
+### add_zone
+
+Preliminary, tested on small boards only. Adds a copper zone of `net` on `layer` with the
+outline `points` (`[x, y]` in mm, at least three) and `priority` (default 0) to the working copy.
+On a KiCad power layer the zone becomes a plane the router connects to with vias; on a routing
+layer it is kept like any other zone. Gummiband does not fill zones: KiCad does it when it fills
+the zones, and `drc` runs with a refill, so the result is judged correctly.
+
+```json
+{"name": "add_zone", "arguments": {"board": "b1", "net": "GND", "layer": "In1.Cu",
+  "points": [[140, 110], [200, 110], [200, 150], [140, 150]]}}
 ```
 
 ### add_locked_copper
@@ -166,7 +192,10 @@ stay). Defaults match the CLI: `runs` 14 (a constant, so results do not depend o
 `geometry_generations` 0, `via_pitch` 0.5 mm, `via_cost` 3.0, `layer_dirs` 0.5 (preferred
 directions per layer for every third run, 0 = off), `pair_pull` 0 (experimental pull between the
 nets of a differential pair), `pairs` false (experimental: a pair as one wide track that is split
-in two, see the CLI guide), `pair_skew` 0.1 mm, `pair_zdiff` none. `output` defaults to
+in two, see the CLI guide), `pair_skew` 0.1 mm, `pair_zdiff` none. `seed` picks the search seed
+(default fixed): the same seed gives the same result, another one a different try. `keep_all`
+keeps every track and via of the input and adds to it, like `--keep-all` on the command line;
+with `nets` only those nets are routed and everything else stays. `output` defaults to
 `<input>.routed.kicad_pcb` next to the input; the `.kicad_pro` and `.kicad_dru` are copied next
 to the output if missing, so `drc` and `load_board` work on it. `nets` routes only the listed
 nets for this call.
@@ -176,7 +205,10 @@ Result fields: `board`, `input`, `output`, `seconds`, `threads`, `connections`, 
 `violations_total`, `violations_by_kind`, `violations` (first `max_violations`, default 50:
 `what`, `x`, `y`, `actual_mm`, `required_mm`, `nets` [routed net, other net or null]),
 `portfolio` (per run: `generation`, `seed`, `fanout_first`, `routed`, `connections`, `vias`,
-`length_mm`, `violations`), `copied`.
+`length_mm`, `violations`), `pairs` (with `pairs`), `nets` (per routed net, longest first: `net`,
+`length_mm`, `vias`, `min_width_mm`, `max_width_mm`), `blocked` (per unrouted connection the
+`nets` that run in its way, a neighbourhood estimate rather than an exact analysis, meant for
+choosing what to prioritize, skip or move), `copied`.
 
 ```json
 {"name": "route", "arguments": {"board": "b1", "runs": 2, "generations": 0}}
@@ -254,13 +286,10 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
 
 ## Open points
 
-- Incremental routing on top of existing copper (route selected nets and keep the rest) needs
-  `KeepCopper::All` plus per net stripping in the writer; today a route replaces all unlocked
-  copper, so skipped nets end up without tracks.
-- Pre-routing through `add_locked_copper` has tracks and vias only; locked zones (a copper
-  island from a datasheet) are not there yet.
-- Not reachable through MCP yet: creating a board, placement (`--move-parts`, `gummiband-place`),
-  zones, the search seed (`GB_EVO_SEED`), `--keep-all` (adding to all existing copper) and per net
-  numbers such as track widths (`--net-widths`).
+- `move_part` and `add_zone` are new and tested on small boards only; `move_part` checks no
+  courtyards, and a zone is not filled until KiCad fills it.
+- Not reachable through MCP yet: creating a board, the automatic placement search
+  (`--move-parts`, `gummiband-place`), `--shove` and `--give`, and per net widths and priorities
+  from files (`--net-widths`, `--net-priorities`; priorities go through `set_net_options`).
 - Progress notifications during long routes, and cancellation (the core has no cancel hook).
 - `route` returns Gummiband's own clearance check; KiCad's verdict needs a `drc` call.
