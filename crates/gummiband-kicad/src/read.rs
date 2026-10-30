@@ -551,7 +551,7 @@ impl Reader {
         let shape = a.get(2).and_then(|x| x.as_str()).unwrap_or("rect");
         let at = pad.child_f64s("at").unwrap_or_default();
         let local = pt(at.first().copied().unwrap_or(0.0), at.get(1).copied().unwrap_or(0.0));
-        let angle = at.get(2).copied().unwrap_or(fp_rot);
+        let angle = at.get(2).copied().unwrap_or(0.0);
         let center = fp_pos + kicad_rot(local, fp_rot);
         let size = pad.child_f64s("size").unwrap_or_else(|| vec![0.0, 0.0]);
         let (w, h) = (
@@ -1086,5 +1086,28 @@ impl Reader {
                 locked: true,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pad's angle in the file is absolute, not relative to the footprint, and KiCad leaves it
+    /// out when it is 0: the pad of a footprint at -90 degrees whose local angle is 90.
+    #[test]
+    fn missing_pad_angle_means_zero_in_a_rotated_footprint() {
+        let text = r#"(kicad_pcb (version 20240108) (generator "test")
+            (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+            (net 0 "") (net 1 "A") (net 2 "B")
+            (footprint "test" (layer "F.Cu") (at 10 10 -90)
+                (pad "1" smd roundrect (at -1 0) (size 0.3 0.7) (layers "F.Cu") (net 1 "A"))
+                (pad "2" smd roundrect (at 1 0 270) (size 0.3 0.7) (layers "F.Cu") (net 2 "B"))))"#;
+        let kb = parse_board(text.to_string(), None, &ReadOptions::default()).unwrap();
+        let size = |name: &str| kb.board.pins.iter().find(|p| p.name.ends_with(name)).unwrap().size;
+        let (w, h) = size(".1");
+        assert!((w - 0.3).abs() < 1e-3 && (h - 0.7).abs() < 1e-3, "{w} x {h}");
+        let (w, h) = size(".2");
+        assert!((w - 0.7).abs() < 1e-3 && (h - 0.3).abs() < 1e-3, "{w} x {h}");
     }
 }
