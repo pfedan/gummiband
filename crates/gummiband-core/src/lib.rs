@@ -5,6 +5,7 @@ pub mod check;
 pub mod geom;
 pub mod import;
 pub mod index;
+pub mod pairs;
 pub mod realize;
 pub mod relax;
 pub mod route;

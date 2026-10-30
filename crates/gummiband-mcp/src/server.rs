@@ -219,6 +219,15 @@ pub struct RouteIn {
     /// Weight of the pull between the nets of differential pairs (default 0: off; 1 is a good
     /// start, it can cost clearance on tight boards).
     pub pair_pull: Option<f64>,
+    /// Experimental: route differential pairs as one wide track and split it into two parallel
+    /// tracks, width and gap from net classes and custom rules (default false). Check the result
+    /// with drc; on dense boards it costs connections.
+    pub pairs: Option<bool>,
+    /// With pairs: length difference left within a pair in mm (default 0.1).
+    pub pair_skew: Option<f64>,
+    /// With pairs: target differential impedance in ohm; sets the track width per layer from
+    /// the stackup, the gap stays.
+    pub pair_zdiff: Option<f64>,
     /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
     pub layer_dirs: Option<f64>,
     /// Generations of the evolutionary order search after the portfolio (default 3).
@@ -394,6 +403,28 @@ pub struct PortfolioOut {
     pub shorts: Option<usize>,
 }
 
+/// A differential pair after `route` with `pairs`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PairOut {
+    pub p: String,
+    pub n: String,
+    /// False if the pair was routed as two separate nets.
+    pub wide: bool,
+    /// Why the pair or a part of it was not routed as one wide track.
+    pub note: String,
+    pub width_mm: f64,
+    pub gap_mm: f64,
+    /// Differential impedance from the stackup in ohm, 0 if unknown.
+    pub zdiff_ohm: f64,
+    pub length_p_mm: f64,
+    pub length_n_mm: f64,
+    /// Largest length difference over the pair's paths from pad to pad.
+    pub skew_mm: f64,
+    pub vias: usize,
+    /// Polarity swaps through the pair's vias.
+    pub swaps: usize,
+}
+
 /// The fields of `gummiband route --report`, plus a few for the session.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RouteOut {
@@ -417,6 +448,8 @@ pub struct RouteOut {
     /// The first max_violations violations.
     pub violations: Vec<ViolationOut>,
     pub portfolio: Vec<PortfolioOut>,
+    /// Differential pairs, with `pairs` set.
+    pub pairs: Vec<PairOut>,
     /// Project files copied next to the output.
     pub copied: Vec<String>,
 }
@@ -895,26 +928,43 @@ fn route_blocking(
     let b = &board;
     let runs = p.runs.filter(|&r| r > 0).unwrap_or(gummiband_core::DEFAULT_RUNS);
     let t0 = std::time::Instant::now();
-    let (_sub, res) = gummiband_core::route_board(
-        b,
-        &SubstrateConfig {
-            via_pitch: p.via_pitch.unwrap_or(0.5),
-            ..Default::default()
-        },
-        &RouterConfig {
-            via_cost: p.via_cost.unwrap_or(3.0),
-            pair_pull: p.pair_pull.unwrap_or(0.0),
-            layer_dirs: p.layer_dirs.unwrap_or(0.5),
-            ..Default::default()
-        },
-        &gummiband_core::SearchConfig {
-            population: runs,
-            generations: p.generations.unwrap_or(3),
-            geometry_generations: p.geometry_generations.unwrap_or(0),
-            frames: false,
-            progress: None,
-        },
-    );
+    let tuned;
+    let b = match p.pair_zdiff {
+        Some(z) if p.pairs == Some(true) => {
+            let mut c = b.clone();
+            gummiband_core::pairs::apply_zdiff(&mut c, z);
+            tuned = c;
+            &tuned
+        }
+        _ => b,
+    };
+    let sub_cfg = SubstrateConfig {
+        via_pitch: p.via_pitch.unwrap_or(0.5),
+        ..Default::default()
+    };
+    let router_cfg = RouterConfig {
+        via_cost: p.via_cost.unwrap_or(3.0),
+        pair_pull: p.pair_pull.unwrap_or(0.0),
+        layer_dirs: p.layer_dirs.unwrap_or(0.5),
+        ..Default::default()
+    };
+    let search_cfg = gummiband_core::SearchConfig {
+        population: runs,
+        generations: p.generations.unwrap_or(3),
+        geometry_generations: p.geometry_generations.unwrap_or(0),
+        frames: false,
+        progress: None,
+    };
+    let (res, pair_reports) = if p.pairs == Some(true) {
+        let cfg = gummiband_core::pairs::PairConfig {
+            skew: p.pair_skew.unwrap_or(0.1),
+            zdiff: p.pair_zdiff,
+        };
+        let (_, res, reports) = gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, &search_cfg, &cfg);
+        (res, reports)
+    } else {
+        (gummiband_core::route_board(b, &sub_cfg, &router_cfg, &search_cfg).1, Vec::new())
+    };
     let seconds = t0.elapsed().as_secs_f64();
     let viol = gummiband_core::check::check(b, &res.geometry);
 
@@ -981,6 +1031,23 @@ fn route_blocking(
         length_mm: st.length,
         items_written: items.len(),
         skipped_nets: skipped,
+        pairs: pair_reports
+            .iter()
+            .map(|r| PairOut {
+                p: r.p.clone(),
+                n: r.n.clone(),
+                wide: r.wide,
+                note: r.note.clone(),
+                width_mm: r.width,
+                gap_mm: r.gap,
+                zdiff_ohm: r.zdiff,
+                length_p_mm: r.length_p,
+                length_n_mm: r.length_n,
+                skew_mm: r.skew,
+                vias: r.vias,
+                swaps: r.swaps,
+            })
+            .collect(),
         violations_total: viol.len(),
         violations_by_kind: by_kind,
         violations: viol

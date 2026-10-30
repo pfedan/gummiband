@@ -147,6 +147,31 @@ vias of the other nets are no obstacles but part of the topology (`gummiband-cor
    uses real KiCad arcs.
 5. Clearance check in the core; the KiCad DRC is the final judge in the benchmark.
 
+## Differential pairs
+
+With `--pairs` (`gummiband_core::pairs`, experimental, off by default) a pair is routed as one wide
+track and split afterwards.
+
+1. Merge: the two nets become one net whose track is as wide as both tracks and their gap, with a
+   via that holds both vias of the pair. The pads of an end merge into one pin (their hull, if it
+   keeps its distance from foreign copper). A pair has one wide track, between its two ends
+   farthest apart; other pins get single tracks in the last pass.
+2. The normal search and geometry steps route that net.
+3. Split: the centre line is offset to both sides, arcs stay arcs, folds on the inner side of tight
+   bends are cut out. The tracks leave the pads straight and join the curves past the pad tips.
+4. Polarity: if the P pad lies on different sides at the two ends, the pair changes sides through
+   one of its vias (vias in line instead of side by side). Without a via the pair is routed as two
+   single nets.
+5. Repair: clearance problems within 6 mm of an end take the tracks and vias away up to the last
+   problem; the normal router connects pad and track end. If that finds no way, the end stays.
+6. Last pass: what is still open is routed around everything as single tracks.
+7. Tuning: the shorter track of a path gets 45 degree bumps on its outer side, where they fit,
+   down to `--pair-skew` or a `skew` rule.
+
+Width, gap and via gap per layer come from `diff_pair_gap` and `track_width` rules in the
+`.kicad_dru`, then the net class. `--pair-zdiff` sets the width per layer from the stackup with the
+IPC-2141 formulas (microstrip outside, symmetric stripline inside); the report gives the estimate.
+
 ## Search
 
 A portfolio of router runs (different orders, fan-outs first or last) runs on all cores. Then
