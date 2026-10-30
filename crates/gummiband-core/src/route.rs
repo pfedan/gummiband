@@ -155,6 +155,8 @@ pub struct Router<'a> {
     pub conn_vias: Vec<Vec<u32>>,
     /// Pins whose pads overlap (same net) share a group: they are connected already.
     pub pin_group: Vec<u32>,
+    /// The board has kept tracks or vias.
+    pub has_kept: bool,
     /// Per pin: number of unrouted connections that start or end there.
     pending: Vec<u32>,
     /// Debugging: positions expanded by the last search of a traced connection.
@@ -303,6 +305,10 @@ impl<'a> Router<'a> {
             conn_vias: Vec::new(),
             trace: Default::default(),
             pin_group: Self::pin_groups(board, sub),
+            has_kept: board
+                .obstacles
+                .iter()
+                .any(|o| matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via)),
             pending: vec![0; board.pins.len()],
         }
     }
@@ -338,6 +344,45 @@ impl<'a> Router<'a> {
                         if a != b {
                             parent[a as usize] = b;
                         }
+                    }
+                }
+            }
+        }
+        // kept copper connects pins: everything on one piece of copper is one pin already
+        let kept = |o: &crate::board::Obstacle| matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via);
+        let mut seen = vec![false; board.obstacles.len()];
+        for start in 0..board.obstacles.len() {
+            if seen[start] || !kept(&board.obstacles[start]) {
+                continue;
+            }
+            seen[start] = true;
+            let net = board.obstacles[start].net;
+            let mut stack = vec![start];
+            let mut first_pin: Option<u32> = None;
+            while let Some(o) = stack.pop() {
+                let poly = &sub.shared.obs_polys[o];
+                for q in sub.shared.obs_index.query(&poly.bbox()) {
+                    let q = q as usize;
+                    let other = &board.obstacles[q];
+                    if other.net != net
+                        || !other.layers.intersects(board.obstacles[o].layers)
+                        || poly.dist_to_poly(&sub.shared.obs_polys[q]) > 0.0
+                    {
+                        continue;
+                    }
+                    if let Some(pj) = other.pin {
+                        match first_pin {
+                            None => first_pin = Some(pj as u32),
+                            Some(f) => {
+                                let (a, b) = (find(&mut parent, f), find(&mut parent, pj as u32));
+                                if a != b {
+                                    parent[a as usize] = b;
+                                }
+                            }
+                        }
+                    } else if kept(other) && !seen[q] {
+                        seen[q] = true;
+                        stack.push(q);
                     }
                 }
             }
@@ -517,6 +562,18 @@ impl<'a> Router<'a> {
             }
         }
         (zones, neck_w)
+    }
+
+    /// True if triangle t lies in kept tracks or vias (the search only gets there on its own
+    /// net).
+    fn on_kept(&self, li: usize, t: u32) -> bool {
+        let st = self.m(li).status[t as usize];
+        st != NONE
+            && st != OUTSIDE
+            && matches!(
+                self.board.obstacles[st as usize].kind,
+                ObstacleKind::Track | ObstacleKind::Via
+            )
     }
 
     /// Extra cost of the step a-b on routing layer li for leaving the layer's preferred
@@ -1744,7 +1801,12 @@ impl<'a> Router<'a> {
                         slot: j as u16,
                     },
                     q,
-                    node.g + node.pos.dist(q) + self.across(lu, node.pos, q) + escape,
+                    // on kept copper of the net the way is already there
+                    if self.on_kept(lu, t2) {
+                        node.g
+                    } else {
+                        node.g + node.pos.dist(q) + self.across(lu, node.pos, q) + escape
+                    },
                     idx,
                 );
             }

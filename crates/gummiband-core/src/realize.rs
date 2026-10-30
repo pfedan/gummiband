@@ -6,7 +6,7 @@
 
 use rayon::prelude::*;
 
-use crate::board::{LayerId, NetId};
+use crate::board::{LayerId, NetId, ObstacleKind};
 use crate::geom::{Point, arc_polyline, orient, pt};
 use crate::route::{End, Item, Router};
 
@@ -276,18 +276,60 @@ impl Router<'_> {
             .collect();
         let tracks: Vec<Track> = ids
             .par_iter()
-            .map(|&sid| {
+            .flat_map_iter(|&sid| {
                 let s = self.segs[sid as usize].as_ref().unwrap();
                 let elems = self.seg_path(sid);
-                Track {
-                    pts: flatten(&elems),
+                let pts = flatten(&elems);
+                let layer = self.sub.layers[s.li as usize];
+                // the stretches on kept copper of the net need no new track
+                let on_kept = |p: Point| {
+                    self.sub.shared.obs_index.query_point(p, 0.0).into_iter().any(|o| {
+                        let o = &self.board.obstacles[o as usize];
+                        o.net == Some(s.net)
+                            && o.layers.has(layer)
+                            && matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via)
+                            && o.shape.dist_to_point(p) <= 0.0
+                    })
+                };
+                let track = |pts: Vec<Point>, elems: Vec<Elem>| Track {
+                    pts,
                     elems,
                     width: s.width,
-                    layer: self.sub.layers[s.li as usize],
+                    layer,
                     net: s.net,
                     necks: s.necks.clone(),
                     neck_w: s.neck_w,
+                };
+                let kept: Vec<bool> = if self.has_kept {
+                    pts.iter().map(|&p| on_kept(p)).collect()
+                } else {
+                    Vec::new()
+                };
+                if !kept.iter().any(|&k| k) {
+                    return vec![track(pts, elems)];
                 }
+                // runs of points off the copper, with one point on it at each end
+                let mut out = Vec::new();
+                let mut run: Vec<Point> = Vec::new();
+                for (i, &p) in pts.iter().enumerate() {
+                    let free = !kept[i] || (i + 1 < pts.len() && !kept[i + 1]) || (i > 0 && !kept[i - 1]);
+                    if free {
+                        run.push(p);
+                    }
+                    if !free || (kept[i] && i > 0 && !kept[i - 1]) {
+                        if run.len() >= 2 {
+                            let e = run.windows(2).map(|w| Elem::Line(w[0], w[1])).collect();
+                            out.push(track(std::mem::take(&mut run), e));
+                        } else {
+                            run.clear();
+                        }
+                    }
+                }
+                if run.len() >= 2 {
+                    let e = run.windows(2).map(|w| Elem::Line(w[0], w[1])).collect();
+                    out.push(track(run, e));
+                }
+                out
             })
             .filter(|t| t.pts.len() >= 2)
             .collect();

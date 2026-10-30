@@ -33,6 +33,11 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   skipped nets).
 - **Follow-me routing:** the user draws the start of a track, Gummiband proposes the rest to
   the target (single connection search from the end of the drawn copper, shown as a preview).
+  Basis exists but is experimental: `route --keep-all --nets A,B` adds to existing copper, pins
+  on one piece of kept copper count as connected and the search rides kept copper for free.
+  Open: new tracks next to kept tracks keep too little clearance (about 50 raw violations on
+  a small test, relaxation does not cure them); the capacity near kept tracks needs a look
+  before the plugin action makes sense.
 
 ## M3: Quality and degrees of freedom
 

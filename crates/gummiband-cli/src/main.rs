@@ -41,6 +41,13 @@ enum Cmd {
         /// Keep only locked tracks and vias as fixed copper (default: remove all).
         #[arg(long)]
         keep_locked: bool,
+        /// Keep all existing tracks and vias as fixed copper and add to them (for completing
+        /// a partly routed board or finishing a started track).
+        #[arg(long)]
+        keep_all: bool,
+        /// Route only these nets, comma separated (the others stay as they are).
+        #[arg(long, value_delimiter = ',')]
+        nets: Vec<String>,
         /// Portfolio size (parallel router runs with different orders).
         #[arg(long, default_value_t = 0)]
         runs: usize,
@@ -193,6 +200,8 @@ fn main() -> Result<()> {
             board,
             output,
             keep_locked,
+            keep_all,
+            nets,
             runs,
             via_pitch,
             via_cost,
@@ -209,7 +218,9 @@ fn main() -> Result<()> {
             net_widths,
             teardrops,
         } => {
-            let keep = if keep_locked {
+            let keep = if keep_all {
+                KeepCopper::All
+            } else if keep_locked {
                 KeepCopper::Locked
             } else {
                 KeepCopper::None
@@ -225,6 +236,17 @@ fn main() -> Result<()> {
                 },
             )?;
             let mut kb = kb;
+            if !nets.is_empty() {
+                for n in &nets {
+                    if kb.board.net_id(n).is_none() {
+                        anyhow::bail!("no net named {n:?}");
+                    }
+                }
+                // nets without pins get no connections, their copper stays an obstacle
+                for n in kb.board.nets.iter_mut().filter(|n| !nets.contains(&n.name)) {
+                    n.pins.clear();
+                }
+            }
             if let Some(path) = &net_widths {
                 let map: std::collections::HashMap<String, f64> =
                     serde_json::from_str(&std::fs::read_to_string(path)?)?;
@@ -474,8 +496,8 @@ fn main() -> Result<()> {
                 });
             }
             let opts = write::StripOptions {
-                unlocked: true,
-                locked: !keep_locked,
+                unlocked: !keep_all,
+                locked: !keep_locked && !keep_all,
                 zone_layers: vec![],
             };
             let ranges = write::strip_ranges(&kb, &opts);
