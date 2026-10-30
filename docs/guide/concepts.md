@@ -109,7 +109,9 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
 - **Partial routing.** Every run replaces all unlocked copper. There is no "route selected nets"
   and no follow-me routing from a half drawn track yet. Lock what you want to keep.
 - **Differential pairs and length matching.** Pairs are routed as two independent nets.
-- **Teardrops.** Add them with KiCad's own teardrop feature after routing.
+- **Teardrops.** Gummiband draws none itself. `--teardrops` (experimental, command line only)
+  switches on KiCad's own teardrop feature for the vias and pads of the output, and KiCad
+  builds the shapes when it fills the zones.
 - **Per net options from a file.** Priorities come from net classes; a `gummiband.toml` next to
   the board is planned. The MCP server has per net priority and skip today.
 - **More rule conditions.** Only the clearance and minimum width rules above; no rules by

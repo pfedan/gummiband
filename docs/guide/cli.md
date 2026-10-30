@@ -86,6 +86,7 @@ A good default for a real two layer board with a few hundred connections is the 
 | --- | --- | --- |
 | `--move-parts` | off | During the geometry generations, parts next to clearance problems may shift a little to open a channel. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay (by footprint library name and by reference prefix J, P, CN, USB, H, MH, SW, TP). The output file has the moved footprints at their new positions, and the console lists every move. |
 | `--fixed R1,U3` | none | More references that never move under `--move-parts`. |
+| `--teardrops` | off | Experimental. Switches on KiCad's teardrop setting for every via and every connected pad in the output file. The teardrop shapes themselves are built by KiCad when you fill the zones (B); that this works on every board is not confirmed yet. Not in the plugin. |
 | `--net-widths widths.json` | none | Track width per net from a JSON file `{"net name": width_mm, ...}`, overriding the net class width. `bench/net_widths.py ORIGINAL.kicad_pcb --json widths.json` extracts the widths a designer used in an existing routing. |
 
 ### Output and reports
