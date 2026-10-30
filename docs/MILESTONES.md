@@ -71,6 +71,13 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
 - Benchmarks against Freerouting on the controller and the injector board.
 - Profiling: incremental capacity checks, cheaper relaxation.
 
+## M4b: GPU experiment
+
+- Relaxation, clearance check and candidate screening fit a compute shader (wgpu): uniform
+  Jacobi rounds over many points with grid neighbourhoods. Topological A* does not. Decide after
+  the CPU micro-optimisation, from the share of run time that relaxation still takes. The gain
+  would be search breadth (hundreds of screened finalists), not only speed.
+
 ## M5: User documentation
 
 - A user guide (requested by Daniel): installation (binary, plugin environment, `rsvg-convert`
