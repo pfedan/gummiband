@@ -35,6 +35,9 @@ because they fit only one board. *Defaults* brings back the values below.
 | Via cost (mm of track) | 3.0 | How much track a via is worth to the router. Lower values give more vias and shorter tracks, higher values fewer vias. The search also tries values around it. |
 | Generations | 3 | Rounds of the order search after the first runs, judged by routed connections, vias and length. |
 | Geometry generations | 3 | Extra search rounds judged by the clearance check of the drawn tracks, not only by the topology. 0 is fastest; each round costs about one full routing pass and removes violations. |
+| Let parts shift to open channels | off | The geometry generations may shift parts next to clearance problems (`--move-parts`), so at least one of them is needed. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay. The moved footprints arrive in the same undo step as the tracks, and the message box lists them. |
+| Parts that never move | | With the option above: references that stay in addition (`--fixed`). |
+| Open Edit Teardrops after routing | off | Opens KiCad's *Edit Teardrops* dialog after the run. Enable the teardrops there: the plugin cannot do it itself, see below. |
 | Save an animation of the generations | off | Writes one image per generation and an `evolution.gif` into `gummiband-evolution/` next to the project. Needs `rsvg-convert` and ImageMagick. |
 
 **Advanced**
@@ -54,9 +57,10 @@ because they fit only one board. *Defaults* brings back the values below.
 | Differential impedance | 0 (off) | `--pair-zdiff` | With pairs: sets the track width per layer from the stackup. |
 | Pair pull | 0 | `--pair-pull` | How strongly the two nets of a pair attract each other while routing. |
 
-`--move-parts` and `--teardrops` are not in the dialog: the plugin takes over tracks and vias only,
-so moved footprints and teardrop settings would not reach the open board. Use the
-[command line](cli.md) for those.
+**Teardrops.** KiCad's plugin API has no setting for teardrops on vias and pads, so `--teardrops`
+cannot act on the open board. The check box opens KiCad's own dialog instead. The wedges at track
+width changes are a project setting in *Board Setup*. Footprints in a KiCad group move in the plugin
+too, but tracks and vias kept in such a group stay where they are; the message box warns about it.
 
 Press OK and a progress dialog shows the phase (portfolio, generation n, geometry, geometry
 generation n, polish), the routed connections, vias, track length and the remaining violations of

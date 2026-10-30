@@ -38,6 +38,11 @@ class RouteOptions:
     finish_nets: Optional[List[str]] = None
     # whether the dialog asks for the animation; frames_dir is what the router gets
     animate: bool = False
+    # let the geometry generations shift parts; the plugin takes the moves over
+    move_parts: bool = False
+    fixed: Optional[List[str]] = None  # references that never move
+    # open KiCad's Edit Teardrops after the run: the API cannot set them on vias and pads
+    teardrops: bool = False
     # the defaults of the advanced options are those of the command line
     generations: int = 3
     via_pitch: float = 0.5
@@ -76,8 +81,8 @@ class PlaceOptions:
 
 # Options the dialogs remember in settings.json. What only makes sense on one board (references,
 # layer names, net files) starts empty every time.
-ROUTE_SAVED = ("keep_locked", "runs", "via_cost", "geometry_generations", "animate", "generations",
-               "via_pitch", "layer_dirs", "via_pass", "negotiate", "threads", "pairs", "pair_pull",
+ROUTE_SAVED = ("keep_locked", "runs", "via_cost", "geometry_generations", "animate", "move_parts",
+               "teardrops", "generations", "via_pitch", "layer_dirs", "via_pass", "negotiate", "threads", "pairs", "pair_pull",
                "pair_skew", "pair_zdiff")
 PLACE_SAVED = ("starts", "gap", "halo", "seed", "iters", "margin", "threads")
 
@@ -214,6 +219,10 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
     if opts.geometry_generations > 0:
         cmd += ["--geometry-generations", str(int(opts.geometry_generations))]
     cmd += _changed(opts, ROUTE_FLAGS)
+    if opts.move_parts:
+        cmd.append("--move-parts")
+        if opts.fixed:
+            cmd += ["--fixed", ",".join(opts.fixed)]
     if opts.pairs:
         cmd.append("--pairs")
         cmd += _changed(opts, PAIR_FLAGS)

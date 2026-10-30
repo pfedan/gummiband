@@ -223,6 +223,14 @@ class AdvancedCommandTest(unittest.TestCase):
                             ("--net-widths", "/p/w.json"), ("--net-priorities", "/p/p.json")):
             self.assertEqual(cmd[cmd.index(flag) + 1], value)
 
+    def test_move_parts(self):
+        opts = runner.RouteOptions(fixed=["U1", "U2"])
+        self.assertNotIn("--fixed", runner.build_command("gb", Path("b"), Path("o"), opts))
+        opts.move_parts = True
+        cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
+        self.assertIn("--move-parts", cmd)
+        self.assertEqual(cmd[cmd.index("--fixed") + 1], "U1,U2")
+
     def test_pair_options_need_pairs(self):
         opts = runner.RouteOptions(pair_skew=0.2, pair_zdiff=90.0, pair_pull=1.0)
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)

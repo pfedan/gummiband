@@ -29,6 +29,7 @@ except ImportError:  # e.g. Linux system Python without wxPython: run with defau
 
 TITLE = "Route with Gummiband"
 API_TIMEOUT_MS = 120_000  # creating thousands of items in one commit takes a while
+TEARDROP_ACTION = "pcbnew.GlobalEdit.editTeardrops"
 
 
 # User interface ----------------------------------------------------------------------------
@@ -243,11 +244,20 @@ def save_copy(board, folder: Path) -> Path:
     return dst
 
 
-def report(plan: bf.ImportPlan, applied, res: runner.RouteResult) -> str:
+def report(plan: bf.ImportPlan, applied, res: runner.RouteResult,
+           moves: Optional[bf.PartMoves] = None) -> str:
     lines = [
         f"Removed: {bf.format_counts(applied.removed)}",
         f"Created: {bf.format_counts(applied.created)}",
     ]
+    if moves is not None:
+        lines.append(f"Moved parts: {applied.moved}"
+                     + (f" ({' '.join(p[0] for p in moves.poses)})" if moves.poses else ""))
+        if applied.missing:
+            lines.append(f"Not found on the board: {' '.join(applied.missing)}")
+        if moves.stale_copper:
+            lines.append(f"Warning: {moves.stale_copper} kept tracks and vias moved with a "
+                         "footprint group in the router, here they stayed where they were")
     if plan.keep and not plan.add_only:
         lines.append(f"Kept locked: {bf.format_counts(plan.summary()['keep'])}")
     best = res.best_line()
@@ -270,6 +280,14 @@ def report(plan: bf.ImportPlan, applied, res: runner.RouteResult) -> str:
         lines.append(f"Nets not found on the board: {', '.join(sorted(applied.unknown_nets))}")
     lines += [f"Warning: {w}" for w in plan.warnings[:5]]
     return "\n".join(lines)
+
+
+def open_teardrops(kicad) -> None:
+    """Last step: KiCad answers only after its dialog closes, and a timeout then means nothing."""
+    try:
+        kicad.run_action(TEARDROP_ACTION)
+    except Exception as e:
+        print(f"Edit Teardrops: {e}", file=sys.stderr)
 
 
 def main() -> int:
@@ -314,9 +332,10 @@ def main() -> int:
         out = work / f"{src.stem}-routed.kicad_pcb"
         cmd = runner.build_command(binary, src, out, opts)
         res = ui.run_with_progress(lambda keep_going: runner.run_route(cmd, out, work, keep_going))
-        plan = bf.plan_from_texts(src.read_text(encoding="utf-8"),
-                                  out.read_text(encoding="utf-8"), opts.keep_locked)
-        applied = kicad_apply.apply_plan(board, plan)
+        before, after = src.read_text(encoding="utf-8"), out.read_text(encoding="utf-8")
+        plan = bf.plan_from_texts(before, after, opts.keep_locked)
+        moves = bf.plan_moves(before, after) if opts.move_parts else None
+        applied = kicad_apply.apply_plan(board, plan, moves.poses if moves else ())
     except runner.RouteCancelled:
         shutil.rmtree(work, ignore_errors=True)
         return 0
@@ -327,7 +346,9 @@ def main() -> int:
         ui.error(f"Routing failed:\n\n{traceback.format_exc()}\nFiles kept in {work}")
         return 1
     shutil.rmtree(work, ignore_errors=True)
-    ui.info(report(plan, applied, res))
+    ui.info(report(plan, applied, res, moves))
+    if opts.teardrops:
+        open_teardrops(kicad)
     return 0
 
 

@@ -256,6 +256,48 @@ def plan_from_texts(original_text: str, routed_text: str, keep_locked: bool) -> 
     return plan_import(read_copper(original_text), read_copper(routed_text), keep_locked)
 
 
+@dataclass
+class PartMoves:
+    """Footprints that ``route --move-parts`` shifted."""
+    poses: List[Tuple[str, float, float]]  # reference and new position
+    stale_copper: int  # kept tracks and vias that moved along with a footprint group
+
+
+def _reference(fp: sexpr.Node) -> Optional[str]:
+    for prop in sexpr.children(fp, "property"):
+        words = sexpr.atoms(prop)
+        if len(words) >= 2 and words[0] == "Reference":
+            return words[1]
+    for text in sexpr.children(fp, "fp_text"):
+        words = sexpr.atoms(text)
+        if len(words) >= 2 and words[0] == "reference":
+            return words[1]
+    return None
+
+
+def _positions(text: str) -> Dict[str, Point]:
+    out = {}
+    for fp in sexpr.iter_top_level(text, ("footprint", "module")):
+        ref, at = _reference(fp), sexpr.floats(sexpr.child(fp, "at"), 2)
+        if ref and at:
+            out[ref] = at
+    return out
+
+
+def plan_moves(original_text: str, routed_text: str) -> PartMoves:
+    """Compare the footprints of the routed file with those of the file that was routed."""
+    before = _positions(original_text)
+    poses = []
+    for ref, at in sorted(_positions(routed_text).items()):
+        old = before.get(ref)
+        if old and max(abs(at[0] - old[0]), abs(at[1] - old[1])) > 1e-6:
+            poses.append((ref, at[0], at[1]))
+    old_copper = {it.uuid: it for it in read_copper(original_text).items}
+    stale = sum(1 for it in read_copper(routed_text).items
+                if it.uuid in old_copper and it != old_copper[it.uuid])
+    return PartMoves(poses, stale)
+
+
 def format_counts(c: Counter, kinds: Iterable[str] = COPPER_HEADS) -> str:
     names = {"segment": "tracks", "arc": "arcs", "via": "vias"}
     return ", ".join(f"{c.get(k, 0)} {names[k]}" for k in kinds)

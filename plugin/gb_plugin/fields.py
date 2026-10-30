@@ -56,6 +56,18 @@ ROUTE_TABS: Tuple = (
         int_field("geometry_generations", "Geometry generations:",
                   "Search rounds judged by the clearance check of the drawn tracks. 0 is fastest, "
                   "more is cleaner; each costs about one routing pass.", 0, 20),
+        Field("move_parts", "Let parts shift to open channels",
+              "The geometry generations may shift parts next to clearance problems, so it needs "
+              "at least one of them. Locked footprints, connectors, modules, mounting holes, "
+              "switches, jumpers and test points stay. The moves arrive in the same undo step.",
+              "check"),
+        Field("fixed", "Parts that never move:",
+              "References that stay in addition, separated by commas or spaces. Not remembered.",
+              "refs", requires="move_parts"),
+        Field("teardrops", "Open Edit Teardrops after routing",
+              "KiCad's API cannot switch teardrops on for vias and pads, so its Edit Teardrops "
+              "dialog opens after the run: enable them there. Wedges at track width changes are "
+              "a setting in Board Setup.", "check"),
         Field("animate", "Save an animation of the generations",
               "One image per generation and evolution.gif in gummiband-evolution next to the "
               "project. Needs rsvg-convert and ImageMagick.", "check"),
