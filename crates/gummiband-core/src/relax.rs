@@ -681,10 +681,8 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     .map_init(Sweep::default, |sweep: &mut Sweep, i| {
                         let p = pts[i];
                         if dirty.as_ref().is_some_and(|d| !d[cells.cell_of(p)]) {
-                            prof::add(Slot::PointsSkipped, 1);
                             return p;
                         }
-                        prof::add(Slot::Points, 1);
                         let w = t.width_at(p);
                         // tension
                         let mid = (pts[i - 1] + pts[i + 1]) * 0.5;
@@ -774,7 +772,6 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             }
                         }
                         near.sort_unstable();
-                        prof::add(Slot::Candidates, near.len() as u64);
                         for &(_, pi) in near.iter() {
                             let pc = &pieces[pi as usize];
                             let o = &geo.tracks[pc.track as usize];
