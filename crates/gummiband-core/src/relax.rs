@@ -113,6 +113,27 @@ impl Tier {
     }
 }
 
+/// How far a point may lie from the point of the last grid sweep and reuse its result.
+const SWEEP_SKIN: f64 = 0.4;
+
+/// Scratch of the point loop.
+struct Sweep {
+    /// Pieces within the skin of `anchor`, and the candidates of the current point.
+    anchor: Point,
+    list: Vec<NearPiece>,
+    near: Vec<(u32, u32)>,
+}
+
+impl Default for Sweep {
+    fn default() -> Sweep {
+        Sweep {
+            anchor: pt(f64::INFINITY, f64::INFINITY),
+            list: Vec::new(),
+            near: Vec::new(),
+        }
+    }
+}
+
 /// The pieces of one layer. A single wide or high clearance net would size the query of every
 /// point on the board, so the few tracks that reach far sit in a coarse grid of their own.
 /// Pushes must add up in the same order whatever the grids: by the cell of the fine grid and
@@ -526,7 +547,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 let inner: Vec<Point> = (1..n.saturating_sub(1))
                     .into_par_iter()
                     .with_min_len(32)
-                    .map_init(Vec::new, |near: &mut Vec<(u32, u32)>, i| {
+                    .map_init(Sweep::default, |sweep: &mut Sweep, i| {
                         let p = pts[i];
                         if dirty.as_ref().is_some_and(|d| !d[cells.cell_of(p)]) {
                             return p;
@@ -590,17 +611,31 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             }
                         }
                         // other tracks (they push back from their side, so take half)
+                        // the pieces near one point serve the next points along the track too
+                        if (p - sweep.anchor).len2() >= SWEEP_SKIN * SWEEP_SKIN {
+                            sweep.anchor = p;
+                            sweep.list.clear();
+                            let base = half_w(t) + cfg.margin + SWEEP_SKIN + 1e-6;
+                            for tier in [&grid.fine, &grid.far] {
+                                let radius = base + nc.max(tier.max_clr) + tier.max_extent;
+                                tier.for_each_near(p, radius, |r| {
+                                    let dm = p - r.mid;
+                                    let lim = base + nc.max(r.clr as f64) + r.extent as f64;
+                                    if r.net != net && !surely_outside(dm.x, dm.y, lim) {
+                                        sweep.list.push(*r);
+                                    }
+                                });
+                            }
+                        }
+                        let Sweep { near, list, .. } = sweep;
                         near.clear();
                         let base = w / 2.0 + cfg.margin;
-                        for tier in [&grid.fine, &grid.far] {
-                            let radius = base + nc.max(tier.max_clr) + tier.max_extent;
-                            tier.for_each_near(p, radius, |r| {
-                                let dm = p - r.mid;
-                                let lim = base + nc.max(r.clr as f64) + r.extent as f64;
-                                if r.net != net && !surely_outside(dm.x, dm.y, lim) {
-                                    near.push(grid.order_key(r));
-                                }
-                            });
+                        for r in list.iter() {
+                            let dm = p - r.mid;
+                            let lim = base + nc.max(r.clr as f64) + r.extent as f64;
+                            if !surely_outside(dm.x, dm.y, lim) {
+                                near.push(grid.order_key(r));
+                            }
                         }
                         near.sort_unstable();
                         for &(_, pi) in near.iter() {
