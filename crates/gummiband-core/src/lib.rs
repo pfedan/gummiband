@@ -186,6 +186,8 @@ struct Candidate {
     bad_nets: Vec<NetId>,
     /// Where the geometry step left clearance violations.
     hot: Vec<geom::Point>,
+    /// The configuration of this run.
+    cfg: RouterConfig,
 }
 
 fn evaluate(
@@ -195,6 +197,7 @@ fn evaluate(
     genome: Option<&Genome>,
     generation: usize,
 ) -> Candidate {
+    let cfg_used = cfg.clone();
     let mut r = Router::new(board, sub, cfg.clone());
     r.plan();
     if let Some(g) = genome {
@@ -241,6 +244,7 @@ fn evaluate(
             .collect(),
         bad_nets: Vec::new(),
         hot: Vec::new(),
+        cfg: cfg_used,
     }
 }
 
@@ -445,8 +449,8 @@ pub fn route_fixed(
             fanout_first: i % 2 == 0,
             // the via cost is part of the search: spread it around the configured value
             via_cost: base.via_cost * [1.0, 1.0, 0.6, 1.6, 0.8, 1.3][(i / 2) % 6],
-            // half of the runs with the via pass: the finished geometry decides if it stays
-            via_pass: if (i / 2) % 2 == 0 { base.via_pass } else { 0.0 },
+            // the via pass comes at the very end, see below
+            via_pass: 0.0,
             // and so are the layer directions: every third run uses them, if there is a
             // choice of layers
             layer_dirs: if (i % 3 == 2 || std::env::var("GB_DIRS_ALL").is_ok())
@@ -651,7 +655,7 @@ pub fn route_fixed(
                     fanout_first: best.stats.fanout_first,
                     via_cost: best.stats.via_cost,
                     layer_dirs: best.stats.layer_dirs,
-                    via_pass: best.stats.via_pass,
+                    via_pass: 0.0,
                     hotspots: std::sync::Arc::new(hotspots.iter().map(|&(p, x)| (p, x * scale)).collect()),
                     ..base.clone()
                 };
@@ -687,6 +691,23 @@ pub fn route_fixed(
             best = c;
         }
         search.report("polish", &best.stats);
+    }
+    // the winner again with the via pass: it stays only if nothing else gets worse
+    if base.via_pass > 0.0 && best.stats.vias > 0 {
+        let identity: Genome = best.order.iter().enumerate().map(|(i, &k)| (k, i as f64)).collect();
+        let cfg = RouterConfig {
+            via_pass: base.via_pass,
+            ..best.cfg.clone()
+        };
+        let c = geo_eval(evaluate(board, &sub, cfg, Some(&identity), best.stats.generation));
+        let fewer = c.stats.routed >= best.stats.routed
+            && c.stats.violations <= best.stats.violations
+            && c.stats.shorts <= best.stats.shorts
+            && c.stats.vias < best.stats.vias;
+        if fewer {
+            best = c;
+            search.report("via pass", &best.stats);
+        }
     }
     (
         sub,
