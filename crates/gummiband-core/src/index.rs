@@ -178,6 +178,18 @@ impl PointGrid {
         &self.ids
     }
 
+    /// Where each cell begins in `ids()`, one entry more than there are cells.
+    #[cfg(feature = "gpu")]
+    pub fn starts(&self) -> &[u32] {
+        &self.start
+    }
+
+    /// Origin, cell size and number of cells in x and y.
+    #[cfg(feature = "gpu")]
+    pub fn layout(&self) -> (Point, f64, usize, usize) {
+        (self.origin, self.cell, self.nx, self.ny)
+    }
+
     fn clamp(&self, v: f64, o: f64, n: usize) -> usize {
         (((v - o) / self.cell).floor().max(0.0) as usize).min(n - 1)
     }

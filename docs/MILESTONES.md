@@ -110,10 +110,29 @@ the violations are the price of the last connections through the pin rows. Origi
 
 ## M4b: GPU experiment
 
-- Relaxation, clearance check and candidate screening fit a compute shader (wgpu): uniform
-  Jacobi rounds over many points with grid neighbourhoods. Topological A* does not. Decide after
-  the CPU micro-optimisation, from the share of run time that relaxation still takes. The gain
-  would be search breadth (hundreds of screened finalists), not only speed.
+- Opt-in: `--features gpu` at build time and `GB_GPU=1` at run time, Metal through wgpu. Without
+  them nothing changes, the default run stays byte-identical. Sleeping copper and vias of one layer
+  stay on the CPU.
+- Share of the relaxation in the work (core seconds, 2026-10-30): Lichtschnitzel 40 %, with
+  `--geometry-generations 3 --move-parts` 70 %, Arty 54 %, but Corne 1 %, ULX3S 1 %, bga_dense 5 %.
+  On the hard boards topological A* decides the run time, and it does not fit a shader.
+- A way to the GPU and back costs about 1.5 ms, a round of 27000 points about 0.1 ms. So the GPU
+  runs ten rounds at a time, from one resampling to the next, and the vias take one step of ten
+  times the size per batch. In one round per way the GPU only reaches the speed of 4 CPU cores.
+- With everything on the GPU the relaxation needs a tenth of the core seconds, but more
+  violations stay. So the last quarter (clearances only) stays on the CPU. That makes it about
+  2.5 times cheaper, with quality close to the CPU, mixed by board.
+- Lichtschnitzel `--geometry-generations 3 --move-parts`, seeds 1 to 4, 4 threads: 1270 core
+  seconds on the CPU, 736 with the GPU; violations 0, 4, 0, 2 against 5, 0, 0, 8. All 348/348.
+  Worst KiCad DRC finding of the GPU on seed 1: 0.12 mm instead of 0.2 mm. The gain is real, the
+  quality a little behind: for a final run take the CPU, or several seeds on the GPU.
+- The relaxation is chaotic: a change of 1e-12 mm turns 1 short into 16 on `four_signal_layers`.
+  Compare distributions (`relax_bench --ensemble`), not single runs.
+- Results repeat bit by bit on one machine. Metal may compile with fast math, so another GPU or
+  driver can give another result: this path breaks the rule that results do not depend on the
+  machine, which is why it stays opt-in.
+- Next: GPU screening of many finalists (the real gain would be search breadth), and running the
+  relaxation of several candidates in one batch.
 
 ## M5: User documentation
 
