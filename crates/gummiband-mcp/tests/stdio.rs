@@ -137,9 +137,11 @@ fn initialize_list_load_route() {
         names,
         [
             "add_locked_copper",
+            "add_zone",
             "drc",
             "list_nets",
             "load_board",
+            "move_part",
             "part_info",
             "render",
             "route",
@@ -196,8 +198,26 @@ fn initialize_list_load_route() {
     assert_eq!(locked["path"], work.display().to_string());
     let text = std::fs::read_to_string(&work).unwrap();
     assert!(text.contains("(locked yes)"), "{text}");
-    let r = s.call("route", json!({"board": locked["board"], "runs": 1, "generations": 0}));
+    let r = s.call(
+        "route",
+        json!({"board": locked["board"], "runs": 1, "generations": 0, "seed": 7}),
+    );
     assert!(r["routed"].as_u64().unwrap() >= 1, "{r}");
+    assert!(!r["nets"].as_array().unwrap().is_empty(), "{r}");
+
+    // placement and zones go into the same working copy
+    let moved = s.call(
+        "move_part",
+        json!({"board": locked["board"], "reference": "R2", "x": 113.0, "y": 111.0, "rotation": 90}),
+    );
+    let text = std::fs::read_to_string(&work).unwrap();
+    assert!(text.contains("(at 113 111 90)"), "{text}");
+    let zone = s.call(
+        "add_zone",
+        json!({"board": moved["board"], "net": "A", "layer": "B.Cu", "points": [[101, 101], [119, 101], [119, 114], [101, 114]]}),
+    );
+    assert_eq!(zone["items_added"], 1);
+    assert!(std::fs::read_to_string(&work).unwrap().contains("(zone"));
 
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);

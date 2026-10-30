@@ -629,6 +629,7 @@ fn make_track(elems: Vec<Elem>, width: f64, layer: LayerId, net: NetId) -> Track
         neck_w: width,
         origin: None,
         resting: false,
+        fitted: Vec::new(),
     }
 }
 
@@ -1613,6 +1614,7 @@ pub fn route_pairs(
         geometry_generations: 0,
         frames: false,
         progress: None,
+        seed: search.seed,
     };
     // a repaired end that finds no way keeps the two tracks it had: completion comes first
     let split_geo = geo;
@@ -1777,6 +1779,7 @@ mod tests {
             geometry_generations: 0,
             frames: false,
             progress: None,
+            seed: None,
         };
         let (_, res, rep) = route_pairs(
             &b,
@@ -1812,6 +1815,7 @@ mod tests {
             geometry_generations: 0,
             frames: false,
             progress: None,
+            seed: None,
         };
         let (_, res, _) = route_pairs(
             &b,

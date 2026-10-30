@@ -352,6 +352,7 @@ fn main() -> Result<()> {
                 generations,
                 geometry_generations,
                 frames: frames.is_some(),
+                seed: None,
                 progress: progress.then(|| {
                     gummiband_core::ProgressFn(std::sync::Arc::new(move |p: &gummiband_core::Progress| {
                         use std::io::Write;

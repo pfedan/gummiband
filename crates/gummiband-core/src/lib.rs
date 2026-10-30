@@ -156,6 +156,9 @@ pub struct SearchConfig {
     pub frames: bool,
     /// Called with the best candidate after every phase.
     pub progress: Option<ProgressFn>,
+    /// Seed of the evolutionary search (default: GB_EVO_SEED, then a constant). The same seed
+    /// gives the same result.
+    pub seed: Option<u64>,
 }
 
 impl SearchConfig {
@@ -505,9 +508,9 @@ pub fn route_fixed(
     if search.frames {
         frames.push((label(&best, "portfolio"), best.geo.clone(), false));
     }
-    let mut rng = Rng(std::env::var("GB_EVO_SEED")
-        .ok()
-        .and_then(|v| v.parse().ok())
+    let mut rng = Rng(search
+        .seed
+        .or_else(|| std::env::var("GB_EVO_SEED").ok().and_then(|v| v.parse().ok()))
         .unwrap_or(0x5eed));
     for generation in 1..=search.generations {
         if best.failed.is_empty() && generation > 2 {
