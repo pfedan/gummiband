@@ -100,6 +100,10 @@ enum Cmd {
         /// it fills the zones.
         #[arg(long)]
         teardrops: bool,
+        /// Routing priority per net from a JSON file {"net name": priority, ...}; lower routes
+        /// first, unnamed nets keep their class priority.
+        #[arg(long)]
+        net_priorities: Option<PathBuf>,
         /// Print a "progress {json}" line after every phase of the search (best candidate so
         /// far, elapsed seconds), for the KiCad plugin and other front ends.
         #[arg(long)]
@@ -222,6 +226,7 @@ fn main() -> Result<()> {
             progress,
             net_widths,
             teardrops,
+            net_priorities,
         } => {
             let keep = if keep_all {
                 KeepCopper::All
@@ -263,6 +268,15 @@ fn main() -> Result<()> {
                     }
                 }
                 println!("net widths: {n} nets");
+            }
+            if let Some(path) = &net_priorities {
+                let map: std::collections::HashMap<String, i32> =
+                    serde_json::from_str(&std::fs::read_to_string(path)?)?;
+                for n in kb.board.nets.iter_mut() {
+                    if let Some(&p) = map.get(&n.name) {
+                        n.priority = p;
+                    }
+                }
             }
             // debugging: GB_SHIFT="R8:0.3,0;C4:0,-0.2" routes the board with these parts shifted
             let shifted_in;
