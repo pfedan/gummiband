@@ -222,6 +222,71 @@ impl Board {
         b
     }
 
+    /// Kept tracks and vias that touch no pad of their net are pieces of a route in progress:
+    /// each such island becomes a pin of the net, so that the router connects it.
+    pub fn add_island_pins(&mut self) {
+        let kept: Vec<usize> = (0..self.obstacles.len())
+            .filter(|&i| matches!(self.obstacles[i].kind, ObstacleKind::Track | ObstacleKind::Via))
+            .collect();
+        let touches = |a: &Obstacle, b: &Obstacle| {
+            a.net == b.net && a.layers.intersects(b.layers) && a.shape.dist(&b.shape) <= 0.0
+        };
+        let mut seen = vec![false; self.obstacles.len()];
+        let mut islands: Vec<Vec<usize>> = Vec::new();
+        for &start in &kept {
+            if seen[start] {
+                continue;
+            }
+            seen[start] = true;
+            let (mut stack, mut members, mut on_pin) = (vec![start], vec![start], false);
+            while let Some(o) = stack.pop() {
+                let a = &self.obstacles[o];
+                let Some(net) = a.net else { continue };
+                let bb = a.shape.bbox();
+                on_pin |= self.nets[net as usize].pins.iter().any(|&p| {
+                    self.pins[p].obstacles.iter().any(|&q| {
+                        let b = &self.obstacles[q];
+                        b.shape.bbox().overlaps(&bb) && touches(a, b)
+                    })
+                });
+                for &q in &kept {
+                    if !seen[q] && self.obstacles[q].net == a.net {
+                        let b = &self.obstacles[q];
+                        if b.shape.bbox().overlaps(&bb) && touches(a, b) {
+                            seen[q] = true;
+                            stack.push(q);
+                            members.push(q);
+                        }
+                    }
+                }
+            }
+            if !on_pin && self.obstacles[start].net.is_some() {
+                islands.push(members);
+            }
+        }
+        for members in islands {
+            let first = &self.obstacles[members[0]];
+            let net = first.net.unwrap();
+            let bb = first.shape.bbox();
+            let id = self.pins.len();
+            let mut layers = LayerSet::default();
+            for &m in &members {
+                layers.0 |= self.obstacles[m].layers.0;
+                self.obstacles[m].pin = Some(id);
+            }
+            self.pins.push(Pin {
+                name: format!("copper{id}"),
+                footprint: String::new(),
+                net,
+                pos: (bb.min + bb.max) * 0.5,
+                layers,
+                obstacles: members,
+                size: (bb.width().min(bb.height()), bb.width().max(bb.height())),
+            });
+            self.nets[net as usize].pins.push(id);
+        }
+    }
+
     /// Give one net its own track width (a copy of its class with that width; the class's
     /// other nets keep theirs).
     pub fn set_net_width(&mut self, net: NetId, width: f64) {

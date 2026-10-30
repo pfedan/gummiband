@@ -116,6 +116,9 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
     }
     r.finish_outline();
     r.read_groups(&root);
+    if !matches!(opts.keep, KeepCopper::None) {
+        r.b.add_island_pins();
+    }
     if opts.move_parts {
         r.b.movable = std::mem::take(&mut r.movable)
             .into_iter()

@@ -394,7 +394,8 @@ impl<'a> Router<'a> {
                                 }
                             }
                         }
-                    } else if kept(other) && !seen[q] {
+                    }
+                    if kept(other) && !seen[q] {
                         seen[q] = true;
                         stack.push(q);
                     }
