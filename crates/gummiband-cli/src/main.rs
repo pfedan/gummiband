@@ -135,6 +135,51 @@ enum Cmd {
         #[arg(long)]
         progress: bool,
     },
+    /// Place parts from the netlist: locked footprints, connectors, modules, mounting holes,
+    /// buttons and test points stay, everything else gets a new position. Its current position
+    /// does not matter. --only, --outside and --all-unlocked change which parts move. Route the
+    /// result with `route`.
+    Place {
+        board: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Place only these references, comma separated; everything else stays.
+        #[arg(long, value_delimiter = ',', conflicts_with_all = ["outside", "all_unlocked"])]
+        only: Vec<String>,
+        /// Place only the parts outside the board outline.
+        #[arg(long, conflicts_with = "all_unlocked")]
+        outside: bool,
+        /// Place every unlocked part, connectors, modules and mounting holes too.
+        #[arg(long)]
+        all_unlocked: bool,
+        /// References that stay as well, comma separated.
+        #[arg(long, value_delimiter = ',')]
+        fixed: Vec<String>,
+        /// References released although they count as mechanical, comma separated.
+        #[arg(long, value_delimiter = ',')]
+        free: Vec<String>,
+        /// First seed.
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Independent runs in parallel; the one with the fewest crossings is kept.
+        #[arg(long, default_value_t = 4)]
+        starts: usize,
+        /// Annealing moves per run.
+        #[arg(long, default_value_t = 3_000_000)]
+        iters: usize,
+        /// Spacing between courtyards in mm.
+        #[arg(long, default_value_t = 0.3)]
+        gap: f64,
+        /// Courtyards keep this distance from the outline in mm.
+        #[arg(long, default_value_t = 0.5)]
+        margin: f64,
+        /// Extra room around parts with five or more pads in mm, for their escape.
+        #[arg(long, default_value_t = 0.3)]
+        halo: f64,
+        /// Write a machine readable JSON report.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
     /// Remove tracks, vias and outer copper zones (benchmark preparation).
     Strip {
         board: PathBuf,
@@ -698,6 +743,104 @@ fn main() -> Result<()> {
                 });
                 std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
             }
+        }
+        Cmd::Place {
+            board,
+            output,
+            only,
+            outside,
+            all_unlocked,
+            fixed,
+            free,
+            seed,
+            starts,
+            iters,
+            gap,
+            margin,
+            halo,
+            report,
+        } => {
+            use gummiband_place::auto::{PlaceOptions, Scope};
+            let scope = if !only.is_empty() {
+                Scope::Only(only)
+            } else if outside {
+                Scope::Outside
+            } else if all_unlocked {
+                Scope::AllUnlocked
+            } else {
+                Scope::Unlocked
+            };
+            let opts = PlaceOptions {
+                scope,
+                fixed,
+                free,
+                seed,
+                starts,
+                iters,
+                gap,
+                margin,
+                halo,
+                plane_layers: cli.plane_layers.clone(),
+            };
+            let placed = gummiband_place::auto::place_board(&board, &opts)?;
+            let r = &placed.report;
+            println!(
+                "{} parts placed, {} fixed; {:.0} mm2 of courtyards on {:.0} mm2 free",
+                r.moved.len(),
+                r.fixed.len(),
+                r.movable_area,
+                r.free_area
+            );
+            for (s, w, c) in &r.starts {
+                println!("  seed {s}: wire {w:.0}, {c} crossings");
+            }
+            println!(
+                "best: seed {}, wire {:.0}, {} crossings, smallest courtyard distance {:.2} mm",
+                r.seed, r.wire, r.crossings, r.min_separation
+            );
+            if !r.off_plane.is_empty() {
+                println!("pins off their plane: {}", r.off_plane.join(" "));
+            }
+            if r.stale_copper > 0 {
+                println!("{} tracks and vias in the file do not follow the parts", r.stale_copper);
+            }
+            if let Some(dir) = output.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&output, &placed.text)?;
+            for ext in ["kicad_pro", "kicad_dru"] {
+                let src = board.with_extension(ext);
+                if src.exists() {
+                    std::fs::copy(&src, output.with_extension(ext))?;
+                }
+            }
+            if let Some(path) = report {
+                let json = serde_json::json!({
+                    "seed": r.seed,
+                    "wire": r.wire,
+                    "crossings": r.crossings,
+                    "starts": r.starts,
+                    "fixed": r.fixed,
+                    "moved": r.moved,
+                    "poses": r.poses,
+                    "zones": r
+                        .zones
+                        .iter()
+                        .map(|(id, pts)| {
+                            let pts: Vec<[f64; 2]> = pts.iter().map(|p| [p.x, p.y]).collect();
+                            serde_json::json!({ "id": id, "points": pts })
+                        })
+                        .collect::<Vec<_>>(),
+                    "decoupling": r.decoupling,
+                    "off_plane": r.off_plane,
+                    "stale_copper": r.stale_copper,
+                    "free_area": r.free_area,
+                    "movable_area": r.movable_area,
+                    "min_separation": r.min_separation,
+                });
+                std::fs::write(path, serde_json::to_string_pretty(&json)?)?;
+            }
+            println!("wrote {}", output.display());
         }
         Cmd::Strip {
             board,

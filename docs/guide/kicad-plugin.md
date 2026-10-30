@@ -1,4 +1,4 @@
-# Routing in KiCad
+# Placing and routing in KiCad
 
 The plugin adds one action to the PCB editor: *Route with Gummiband*. It exports a copy of the
 open board with its project to a temp folder, runs `gummiband route` on the copy and imports the
@@ -70,6 +70,21 @@ This is the plugin's form of `gummiband route --keep-all --nets A,B --shove --gi
 button is new and not yet tested live in KiCad. Refill the zones (B) before you run the DRC:
 after vias moved, stale plane fills report errors that are not there. Moved vias lose their
 teardrop settings.
+
+## Place with Gummiband
+
+A second step with its own toolbar button, used before routing. In the dialog you pick which parts
+move:
+
+- **Selected parts**, preset when footprints are selected.
+- **Parts outside the board**, for footprints fresh from the schematic.
+- **All unlocked parts**, connectors, modules, holes, buttons and test points stay.
+- **All unlocked parts, those too.**
+
+Locked footprints never move. *Also keep* takes references that should stay in addition. The
+footprints and the keepouts that belong to them move in one undo step. Tracks and vias do not
+follow, so use it before routing. The options are those of
+[`gummiband place`](cli.md#gummiband-place).
 
 ## Without a dialog
 

@@ -1,11 +1,6 @@
 //! `gummiband-place`: alternative placements of the Lichtschnitzel controller (new outline, fixed
 //! mechanical parts on the edge, the rest placed by simulated annealing, inner planes regenerated).
 
-mod anneal;
-mod model;
-mod planes;
-mod variant;
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -16,9 +11,10 @@ use gummiband_kicad::place_write::{self, Patch, kicad_rot};
 use gummiband_kicad::sexpr::Node;
 use gummiband_kicad::{ReadOptions, read_board};
 
-use anneal::{Placer, Problem, Raster, Rng, State};
-use model::{Design, R};
-use variant::{FixedSet, Outline, Quad, Shape, Unit};
+use gummiband_place::anneal::{Placer, Problem, Raster, Rng, State};
+use gummiband_place::model::{Design, R};
+use gummiband_place::planes;
+use gummiband_place::variant::{self, FixedSet, Outline, Quad, Shape, Unit};
 
 #[derive(Clone, Copy, ValueEnum)]
 enum ShapeArg {

@@ -43,6 +43,24 @@
                 "icons/finish-dark-24.png",
                 "icons/finish-dark-48.png"
             ]
+        },
+        {
+            "identifier": "place",
+            "name": "Place with Gummiband",
+            "description": "Place the parts from the netlist; locked parts, connectors, modules, mounting holes, buttons and test points stay",
+            "show-button": true,
+            "scopes": [
+                "pcb"
+            ],
+            "entrypoint": "gummiband_place.py",
+            "icons-light": [
+                "icons/place-light-24.png",
+                "icons/place-light-48.png"
+            ],
+            "icons-dark": [
+                "icons/place-dark-24.png",
+                "icons/place-dark-48.png"
+            ]
         }
     ]
 }

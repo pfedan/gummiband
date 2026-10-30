@@ -199,6 +199,56 @@ pub struct MovePartIn {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlacePartsIn {
+    /// Board id from load_board.
+    pub board: String,
+    /// Place only these references; everything else stays. Takes precedence over `scope`.
+    #[serde(default)]
+    pub only: Vec<String>,
+    /// Without `only`: "unlocked" (default: all but locked parts, connectors, modules, mounting
+    /// holes, buttons and test points), "all_unlocked" (those too, locked parts stay) or
+    /// "outside" (the parts outside the board outline).
+    pub scope: Option<String>,
+    /// References that stay in any case, e.g. the parts you placed yourself with move_part.
+    #[serde(default)]
+    pub fixed: Vec<String>,
+    /// First seed (default 1); another seed gives another placement.
+    pub seed: Option<u64>,
+    /// Independent runs (default 4); the one with the fewest crossings is kept.
+    pub starts: Option<usize>,
+    /// Spacing between courtyards in mm (default 0.3).
+    pub gap: Option<f64>,
+    /// Extra room around parts with five or more pads in mm (default 0.3).
+    pub halo: Option<f64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PartPose {
+    pub reference: String,
+    pub x: f64,
+    pub y: f64,
+    pub rotation: f64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PlacePartsOut {
+    /// Id of the working copy; route this one.
+    pub board: String,
+    /// The working copy (<input>.prerouted.kicad_pcb); the input file stays untouched.
+    pub path: String,
+    pub placed: Vec<PartPose>,
+    /// Decoupling capacitors with the part they were assigned to.
+    pub decoupling: Vec<(String, String)>,
+    /// Crossings between the spanning trees of the nets: a measure of the vias to expect.
+    pub crossings: usize,
+    /// Smallest distance between two courtyards in mm.
+    pub min_separation: f64,
+    /// Pins outside the plane of their net; routing reaches them.
+    pub off_plane: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddZoneIn {
     /// Board id from load_board.
     pub board: String,
@@ -943,6 +993,65 @@ impl Gummiband {
         Ok((format!("moved {} to {}, {}", p.reference, p.x, p.y), out))
     }
 
+    fn do_place_parts(&self, p: PlacePartsIn) -> Result<(String, PlacePartsOut)> {
+        use gummiband_place::auto::{PlaceOptions, Scope, place_board};
+        let scope = if !p.only.is_empty() {
+            Scope::Only(p.only.clone())
+        } else {
+            match p.scope.as_deref() {
+                None | Some("unlocked") => Scope::Unlocked,
+                Some("all_unlocked") => Scope::AllUnlocked,
+                Some("outside") => Scope::Outside,
+                Some(o) => bail!("unknown scope {o:?}: use unlocked, all_unlocked or outside"),
+            }
+        };
+        let defaults = PlaceOptions::default();
+        let opts = PlaceOptions {
+            scope,
+            fixed: p.fixed.clone(),
+            seed: p.seed.unwrap_or(defaults.seed),
+            starts: p.starts.unwrap_or(defaults.starts),
+            gap: p.gap.unwrap_or(defaults.gap),
+            halo: p.halo.unwrap_or(defaults.halo),
+            ..defaults
+        };
+        let path = self.with_entry(&p.board, |e| Ok(e.path.clone()))?;
+        let work = Self::working_copy(&path);
+        let from = if work.is_file() { work } else { path };
+        let mut report = None;
+        let (id, path) = self.edit_copy(&p.board, |_, _| {
+            let placed = place_board(&from, &opts)?;
+            report = Some(placed.report);
+            Ok(placed.text)
+        })?;
+        let r = report.context("placement did not run")?;
+        let mut warnings = Vec::new();
+        if r.stale_copper > 0 {
+            warnings.push(format!("{} tracks and vias do not follow the parts", r.stale_copper));
+        }
+        let text = format!("placed {} parts, {} crossings", r.moved.len(), r.crossings);
+        let out = PlacePartsOut {
+            board: id,
+            path,
+            placed: r
+                .poses
+                .into_iter()
+                .map(|(reference, x, y, rotation)| PartPose {
+                    reference,
+                    x,
+                    y,
+                    rotation,
+                })
+                .collect(),
+            decoupling: r.decoupling,
+            crossings: r.crossings,
+            min_separation: r.min_separation,
+            off_plane: r.off_plane,
+            warnings,
+        };
+        Ok((text, out))
+    }
+
     fn do_add_zone(&self, p: AddZoneIn) -> Result<(String, AddLockedOut)> {
         if p.points.len() < 3 {
             bail!("a zone needs at least three points");
@@ -1385,6 +1494,19 @@ impl Gummiband {
     )]
     async fn part_info(&self, Parameters(p): Parameters<PartInfoIn>) -> Result<CallToolResult, ErrorData> {
         match self.part(p) {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Give parts a position from the netlist in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. By default all parts move except locked ones, connectors, modules, mounting holes, buttons and test points; `only`, `scope` and `fixed` narrow that, so you can place the key parts yourself with move_part and leave the small parts to this tool. Run it before route: tracks do not follow.",
+        output_schema = schema_for_output::<PlacePartsOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn place_parts(&self, Parameters(p): Parameters<PlacePartsIn>) -> Result<CallToolResult, ErrorData> {
+        let me = self.clone();
+        match blocking(move || me.do_place_parts(p)).await {
             Ok((s, out)) => ok(s, &out),
             Err(e) => fail(format!("{e:#}")),
         }

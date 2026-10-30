@@ -60,6 +60,9 @@ Your board file on disk is not touched until you save.
 # what the router sees: layers, planes, nets, net classes, rules
 target/release/gummiband info my_board.kicad_pcb
 
+# optional: place the parts that are not locked or mechanical
+target/release/gummiband place my_board.kicad_pcb -o my_board.kicad_pcb
+
 # route it, keep locked tracks and vias, write a new file next to it
 target/release/gummiband route my_board.kicad_pcb -o my_board.routed.kicad_pcb --keep-locked
 
@@ -75,10 +78,11 @@ automatically. Copy them next to the output before running the DRC on it.
 The user guide lives in [docs/guide](docs/guide/README.md):
 
 - [Installation](docs/guide/installation.md): binary, plugin, optional tools, troubleshooting.
-- [Routing in KiCad](docs/guide/kicad-plugin.md): the plugin dialog and what each option does.
+- [Placing and routing in KiCad](docs/guide/kicad-plugin.md): the plugin dialogs and what each
+  option does.
 - [Command line](docs/guide/cli.md): every command and option, the output and the JSON report.
 - [Workflows](docs/guide/workflows.md): locking power lanes, routing by priority, judging results,
-  movable parts, placement variants, animations.
+  placing parts, movable parts, placement variants, animations.
 - [How Gummiband routes](docs/guide/concepts.md): what the router respects, how it decides, and
   what it does not do yet.
 - [Benchmarks](docs/guide/benchmarks.md): the synthetic suite and the real boards.

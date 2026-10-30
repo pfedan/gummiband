@@ -14,6 +14,7 @@ gpu = ["gummiband-core/gpu"]
 [dependencies]
 gummiband-core.workspace = true
 gummiband-kicad.workspace = true
+gummiband-place.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rayon.workspace = true
