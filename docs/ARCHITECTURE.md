@@ -234,6 +234,13 @@ larger with every branch that failed) that may be worse, gets half of the mutant
 generations and replaces the result if it beats it. A gain means more connections, fewer
 violations or shorts, or 0.2 % less via and length cost.
 
+The open end does not count violations but spots: all violations of one pair of nets within 2 mm
+are one spot (`check::spots`), because the check reports every short piece of track, so that one
+curve around a pad can make twenty out of one problem. A spot weighs 300 and up to 1000 more for
+what is missing, full at 0.03 mm, so a spot that gets better counts before it is gone. A short weighs
+5000 on top. Before every tightening a pass works on the spots: the tracks there stay at their
+neck width for 1 mm around the spot, where the rules allow it, and only those nets move.
+
 `--air` then relaxes the whole board without tension and with a larger margin. Where that leaves
 new violations, the nets involved go back to the normal margin. These passes and the open end
 also let the board edge push vias and keep a via in the plane it reaches (`RelaxConfig::via_edge`).

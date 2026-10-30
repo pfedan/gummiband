@@ -659,7 +659,8 @@ fn main() -> Result<()> {
                 );
             }
             let viol = gummiband_core::check::check(b, &res.geometry);
-            println!("clearance check: {} violations", viol.len());
+            let spots = gummiband_core::check::spots(&viol).len();
+            println!("clearance check: {} violations at {spots} spots", viol.len());
             let mut kinds = std::collections::BTreeMap::new();
             for v in &viol {
                 *kinds

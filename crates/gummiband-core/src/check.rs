@@ -17,6 +17,47 @@ pub struct Violation {
     pub required: f64,
 }
 
+/// One place with a problem. The check reports every short piece of track that comes too close,
+/// so a single curve around a pad can make twenty violations out of one problem.
+#[derive(Debug, Clone)]
+pub struct Spot {
+    /// Where it is worst.
+    pub at: crate::geom::Point,
+    pub nets: (NetId, Option<NetId>),
+    /// How much clearance is missing there.
+    pub missing: f64,
+    pub short: bool,
+}
+
+/// The violations of one pair of nets within 2 mm count as one spot.
+pub fn spots(violations: &[Violation]) -> Vec<Spot> {
+    let mut out: Vec<Spot> = Vec::new();
+    for v in violations {
+        let key = (v.nets.0.min(v.nets.1.unwrap_or(u32::MAX)), v.nets.0.max(v.nets.1.unwrap_or(u32::MAX)));
+        let missing = v.required - v.actual;
+        let same = |s: &&mut Spot| {
+            let k = s.nets.1.unwrap_or(u32::MAX);
+            (s.nets.0.min(k), s.nets.0.max(k)) == key && s.at.dist(v.at) < 2.0
+        };
+        match out.iter_mut().find(|s| same(s)) {
+            Some(s) => {
+                if missing > s.missing {
+                    s.missing = missing;
+                    s.at = v.at;
+                }
+                s.short |= v.actual <= 0.0;
+            }
+            None => out.push(Spot {
+                at: v.at,
+                nets: v.nets,
+                missing,
+                short: v.actual <= 0.0,
+            }),
+        }
+    }
+    out
+}
+
 enum Piece {
     Seg {
         a: crate::geom::Point,
