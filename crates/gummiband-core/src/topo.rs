@@ -848,6 +848,7 @@ pub(crate) mod tests {
             via_drill: 0.3,
             priority: 0,
             min_width: None,
+            target_width: None,
             neck_refs: Vec::new(),
             ..Default::default()
         }];

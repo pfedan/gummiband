@@ -64,7 +64,8 @@ ROUTE_TABS: Tuple = (
         float_field("prefer_width", "Preferred track width (mm):",
                     "Tracks of the default net class push aside what can give way and grow up to "
                     "this width where there is room, with a taper at every change. Routing still "
-                    "works with the class width, so it costs no connections. 0 = off.",
+                    "works with the class width, so it costs no connections. 0 = off. Other "
+                    "classes grow to the opt of a track_width custom rule.",
                     0, 5, 0.05),
         Field("move_parts", "Let parts shift to open channels",
               "The geometry generations may shift parts next to clearance problems, so it needs "

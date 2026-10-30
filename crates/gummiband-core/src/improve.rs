@@ -336,7 +336,8 @@ fn settle(board: &Board, sub: &Substrate, c: &mut Candidate, best: &Candidate, c
     }
 }
 
-/// Make room for wider tracks: the tracks in `wanted` push as if they were `target` wide, and with
+/// Make room for wider tracks: the tracks push as if they were as wide as `target` of their net
+/// (0: the net does not grow), and with
 /// them everything they touch, in chains as far as that goes. No tension, so nothing pulls back.
 /// A spot that has no room for it stays at the old width, the rest of the track does not. Measured
 /// at the old widths nothing may get worse; the wide pieces themselves come later.
@@ -344,14 +345,13 @@ pub(crate) fn make_room(
     board: &Board,
     sub: &Substrate,
     best: &Candidate,
-    target: f64,
+    target: impl Fn(u32) -> f64,
     reserve: f64,
-    wanted: impl Fn(u32) -> bool,
 ) -> Option<Candidate> {
     let mut c = best.clone();
     let plain: Vec<(f64, Vec<crate::geom::Rect>)> =
         c.geo.tracks.iter().map(|t| (t.width, t.necks.clone())).collect();
-    c.geo.tracks.iter_mut().filter(|t| wanted(t.net)).for_each(|t| t.width = t.width.max(target));
+    c.geo.tracks.iter_mut().for_each(|t| t.width = t.width.max(target(t.net)));
     let base = relax::RelaxConfig::default();
     let cfg = relax::RelaxConfig {
         iterations: env("GB_AIR_IT", 120.0) as usize,
@@ -393,7 +393,7 @@ pub(crate) fn make_room(
     settle(board, sub, &mut c, best, &cfg);
     if std::env::var("GB_OPEN_LOG").is_ok() {
         eprintln!(
-            "room for {target}: {} violations, {} shorts, {:.0} mm",
+            "room: {} violations, {} shorts, {:.0} mm",
             c.stats.violations.unwrap_or(0),
             c.stats.shorts.unwrap_or(0),
             c.stats.length
@@ -775,6 +775,43 @@ mod tests {
             widest = ws.iter().fold(widest, |a, &b| a.max(b));
         }
         assert!(widest > 0.39, "{widest}");
+    }
+
+    #[test]
+    fn a_class_grows_to_its_own_target() {
+        let mut b = twisted_board();
+        b.classes.push(NetClass {
+            name: "Power".into(),
+            target_width: Some(0.35),
+            ..b.classes[0].clone()
+        });
+        for (i, n) in b.nets.iter_mut().enumerate() {
+            n.class = (i % 2) as u16;
+        }
+        let search = SearchConfig {
+            population: 2,
+            generations: 0,
+            geometry_generations: 0,
+            frames: false,
+            progress: None,
+            seed: None,
+            open_end: None,
+            air: 0.0,
+            prefer_width: 0.0,
+        };
+        let res = route_board(&b, &SubstrateConfig::default(), &RouterConfig::default(), &search).1;
+        assert!(check::check(&b, &res.geometry).is_empty());
+        let mut widest = [0.0f64; 2];
+        for t in &res.geometry.tracks {
+            let class = b.nets[t.net as usize].class as usize;
+            for e in &t.elems {
+                let (Elem::Line(p, q) | Elem::Arc(p, _, q)) = *e;
+                widest[class] = widest[class].max(t.piece_width(p, q));
+            }
+        }
+        // the default class stays at its width without --prefer-width, Power grows to its target
+        assert!((widest[0] - 0.2).abs() < 1e-9, "{widest:?}");
+        assert!(widest[1] > 0.34 && widest[1] <= 0.35 + 1e-9, "{widest:?}");
     }
 
     #[test]

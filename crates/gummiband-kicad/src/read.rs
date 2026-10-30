@@ -311,6 +311,7 @@ impl Reader {
                 via_drill: f("via_drill", 0.3),
                 priority: prio.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
                 min_width: None,
+                target_width: None,
                 neck_refs: Vec::new(),
                 diff_width: f("diff_pair_width", 0.0),
                 diff_gap: f("diff_pair_gap", 0.0),
@@ -329,6 +330,7 @@ impl Reader {
                     via_drill: 0.3,
                     priority: i32::MAX,
                     min_width: None,
+                    target_width: None,
                     neck_refs: Vec::new(),
                     ..Default::default()
                 },

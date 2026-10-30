@@ -48,10 +48,12 @@ Gummiband honours a subset of KiCad's custom design rules:
   Position dependent parts of the condition (`intersectsCourtyard`, `insideArea`) evaluate to
   false, which keeps a rule like `... && !A.intersectsCourtyard('U1')` in force everywhere. That
   is the safe side.
-- **Minimum track width per net class**: `track_width (min ...)` constraints with an
+- **Minimum and target track width per net class**: `track_width (min ...)` constraints with an
   `A.NetClass == 'X'` condition. They bound how far a track may neck down near fine pitch pins;
   a `!A.intersectsCourtyard('REF')` in the condition exempts that footprint's courtyard, so a
-  fan-out under a QFN can still be narrow.
+  fan-out under a QFN can still be narrow. An `opt` value in the same constraint is the target
+  width of the class: see [Wider tracks where there is room](#wider-tracks-where-there-is-room).
+  The `opt` of a rule that also has a `diff_pair_gap` is the width of the pair, not a target.
 
 Everything else in the `.kicad_dru` is ignored. Run the KiCad DRC on the result to catch what the
 router could not see.
@@ -73,11 +75,32 @@ track can remain just outside a connector.
 
 `--net-widths` overrides the class width per net.
 
-`--prefer-width` goes the other way: the class width is the minimum, and tracks of the default
-class get wider where there is room. It is the last step: the routing does not see it, so it costs
-no connections. Tracks first push their neighbours and vias aside as far as those can go, then
-they grow, with a taper at every change of width. KiCad's teardrops (`--teardrops`) can smooth
-that further, but the taper does not depend on them.
+## Wider tracks where there is room
+
+A net class can have three widths, all set in KiCad:
+
+| Width | Where | What Gummiband does with it |
+|---|---|---|
+| Class width | Board Setup > Net Classes, *Track Width* | The width it routes with. |
+| Target | Custom rule, `track_width (opt ...)` | At the end the tracks grow up to it where there is room. |
+| Minimum | Custom rule, `track_width (min ...)` | The floor for necks at fine pitch pins. |
+
+```
+(rule "Power widths"
+  (condition "A.NetClass == 'Power'")
+  (constraint track_width (min 0.3mm) (opt 0.8mm)))
+```
+
+KiCad's DRC reads the same rule, so the minimum is checked there too. `--prefer-width W` (in the
+plugin *Preferred track width*) gives the default class a target of W when it has no rule of its
+own. Other classes without an `opt` keep their width, and differential pairs always do, because
+their width is their impedance.
+
+Growing is the last step: the routing does not see it, so it costs no connections. Tracks first
+push their neighbours and vias aside as far as those can go, then they grow, with a taper at
+every change of width. A track never gets narrower than its class width this way, and a spot
+without room stays at the old width while the rest of the track is wide. KiCad's teardrops
+(`--teardrops`) can smooth that further, but the taper does not depend on them.
 
 ## Vias
 

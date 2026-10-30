@@ -1477,7 +1477,8 @@ struct Grown {
 const GROW_STEP: f64 = 0.025;
 const GROW_MIN_LEN: f64 = 1.5;
 
-/// Let the tracks of the nets in `wanted` grow up to `target` wherever there is room, keeping
+/// Let the tracks grow up to `target` of their net (0: the net does not grow) wherever there is
+/// room, keeping
 /// `reserve` on top of the clearances; tracks in a bundle share the room. A track never gets
 /// narrower than it is, and it changes width in steps of [`GROW_STEP`] per piece, which gives
 /// a taper that needs no special copper.
@@ -1485,9 +1486,8 @@ pub fn prefer_width(
     board: &Board,
     sub: &Substrate,
     geo: &mut Geometry,
-    target: f64,
+    target: impl Fn(u32) -> f64,
     reserve: f64,
-    wanted: impl Fn(u32) -> bool,
 ) {
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
     let margin = RelaxConfig::default().margin + reserve;
@@ -1495,7 +1495,8 @@ pub fn prefer_width(
     let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
     for (ti, t) in geo.tracks.iter_mut().enumerate() {
         let from = grown.len();
-        let grows = wanted(t.net) && t.width < target;
+        let target = target(t.net);
+        let grows = t.width < target;
         let mut elems = Vec::with_capacity(t.elems.len());
         for e in &t.elems {
             let (w, parts) = match *e {
