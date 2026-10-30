@@ -35,6 +35,7 @@ Standing decisions of the project owner, kept here so that they survive any sess
 ## License
 
 - Unlicensed: proprietary, all rights reserved. No LICENSE file, crates are not published.
+  MIT may follow later, but only as a deliberate step by the owner.
 
 ## Working rules
 
