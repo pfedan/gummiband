@@ -135,7 +135,16 @@ fn initialize_list_load_route() {
     names.sort();
     assert_eq!(
         names,
-        ["drc", "list_nets", "load_board", "render", "route", "set_net_options"]
+        [
+            "add_locked_copper",
+            "drc",
+            "list_nets",
+            "load_board",
+            "part_info",
+            "render",
+            "route",
+            "set_net_options"
+        ]
     );
     for t in tools["tools"].as_array().unwrap() {
         assert_eq!(t["inputSchema"]["type"], "object", "{t}");
@@ -169,6 +178,26 @@ fn initialize_list_load_route() {
     let out = dir.join("tiny.routed.kicad_pcb");
     assert_eq!(r["output"], out.display().to_string());
     assert!(std::fs::read_to_string(&out).unwrap().contains("(segment"));
+
+    // pre-routing: look at a part, lock copper in a working copy, route around it
+    let part = s.call("part_info", json!({"board": "b1", "reference": "R1"}));
+    assert_eq!(part["pads"].as_array().unwrap().len(), 2);
+    let (x, y) = (
+        part["pads"][0]["x"].as_f64().unwrap(),
+        part["pads"][0]["y"].as_f64().unwrap(),
+    );
+    let net = part["pads"][0]["net"].as_str().unwrap().to_string();
+    let locked = s.call(
+        "add_locked_copper",
+        json!({"board": "b1", "tracks": [{"net": net, "layer": "F.Cu", "points": [[x, y], [x, y + 2.0]]}]}),
+    );
+    assert_eq!(locked["items_added"], 1);
+    let work = dir.join("tiny.prerouted.kicad_pcb");
+    assert_eq!(locked["path"], work.display().to_string());
+    let text = std::fs::read_to_string(&work).unwrap();
+    assert!(text.contains("(locked yes)"), "{text}");
+    let r = s.call("route", json!({"board": locked["board"], "runs": 1, "generations": 0}));
+    assert!(r["routed"].as_u64().unwrap() >= 1, "{r}");
 
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);

@@ -335,3 +335,18 @@ pub fn enable_teardrops(text: &str) -> anyhow::Result<String> {
     out.push_str(&text[pos..]);
     Ok(out)
 }
+
+/// Add items to a board as locked copper (a pre-routed layout the router keeps): the board text
+/// with the items appended, each with `(locked yes)`.
+pub fn add_locked(kb: &KicadBoard, items: &[Item]) -> String {
+    let text = patch(kb, &[], items);
+    let close = kb.root.span().end - 1;
+    // patch keeps everything up to the root's closing paren, the new items follow it
+    let start = text[..close.min(text.len())].rfind('\n').unwrap_or(0);
+    let (head, tail) = text.split_at(start);
+    let tail = tail
+        .replace("\t(segment\n", "\t(segment\n\t\t(locked yes)\n")
+        .replace("\t(arc\n", "\t(arc\n\t\t(locked yes)\n")
+        .replace("\t(via\n", "\t(via\n\t\t(locked yes)\n");
+    format!("{head}{tail}")
+}

@@ -26,10 +26,42 @@ KiCad boards. Typical loop: load_board (gives a board id) -> list_nets -> option
 set_net_options (priority: lower routes first; skip: leave a net unrouted) -> route (writes a \
 routed .kicad_pcb and returns stats, unrouted connections and clearance violations) -> drc on \
 the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board coordinates) to \
-look at problems. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
+look at problems. To pre-route a critical part by hand (datasheet layout): part_info -> \
+add_locked_copper -> route the returned board id. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
 Routing is CPU heavy (seconds to minutes); routes run one at a time.";
 
 // ------------------------------------------------------------------------------ session
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PadOut {
+    pub name: String,
+    pub net: String,
+    pub x: f64,
+    pub y: f64,
+    pub width_mm: f64,
+    pub height_mm: f64,
+    /// Copper layers of the pad.
+    pub layers: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PartInfoOut {
+    pub reference: String,
+    /// Courtyard box [x0, y0, x1, y1] in mm, if the footprint has one.
+    pub courtyard: Option<[f64; 4]>,
+    pub pads: Vec<PadOut>,
+    /// Footprints whose courtyard is within 3 mm.
+    pub neighbours: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AddLockedOut {
+    /// Id of the working copy with the locked copper; route this one.
+    pub board: String,
+    /// The working copy (<input>.prerouted.kicad_pcb); the input file stays untouched.
+    pub path: String,
+    pub items_added: usize,
+}
 
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct NetOption {
@@ -107,6 +139,47 @@ pub struct LoadBoardIn {
     /// Keep locked tracks and vias as fixed copper (default false: everything is removed and
     /// routed from scratch, like `gummiband route`). Locked track ends join their net's pins.
     pub keep_locked: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PartInfoIn {
+    /// Board id from load_board.
+    pub board: String,
+    /// Footprint reference, e.g. U6.
+    pub reference: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LockedTrackIn {
+    /// Exact net name.
+    pub net: String,
+    /// Copper layer name, e.g. F.Cu.
+    pub layer: String,
+    /// Track width in mm (default: the net class width).
+    pub width: Option<f64>,
+    /// Polyline as [x, y] points in mm, at least two.
+    pub points: Vec<[f64; 2]>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LockedViaIn {
+    /// Exact net name.
+    pub net: String,
+    pub x: f64,
+    pub y: f64,
+    /// Diameter and drill in mm (default: the net class via).
+    pub diameter: Option<f64>,
+    pub drill: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddLockedIn {
+    /// Board id from load_board.
+    pub board: String,
+    #[serde(default)]
+    pub tracks: Vec<LockedTrackIn>,
+    #[serde(default)]
+    pub vias: Vec<LockedViaIn>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -578,6 +651,116 @@ impl Gummiband {
         })
     }
 
+    fn part(&self, p: PartInfoIn) -> Result<(String, PartInfoOut)> {
+        self.with_entry(&p.board, |e| {
+            let b = &e.kb.board;
+            let pads: Vec<PadOut> = b
+                .pins
+                .iter()
+                .filter(|q| q.footprint == p.reference)
+                .map(|q| PadOut {
+                    name: q.name.clone(),
+                    net: b.nets[q.net as usize].name.clone(),
+                    x: r3(q.pos.x),
+                    y: r3(q.pos.y),
+                    width_mm: r3(q.size.0),
+                    height_mm: r3(q.size.1),
+                    layers: q.layers.iter().map(|l| b.layers[l as usize].name.clone()).collect(),
+                })
+                .collect();
+            let court = b.courtyards.get(&p.reference);
+            if pads.is_empty() && court.is_none() {
+                bail!("no part {:?} with pads or courtyard", p.reference);
+            }
+            let mut neighbours: Vec<String> = match court {
+                Some(c) => {
+                    let g = c.grow(3.0);
+                    b.courtyards
+                        .iter()
+                        .filter(|(r, o)| **r != p.reference && g.overlaps(o))
+                        .map(|(r, _)| r.clone())
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            neighbours.sort();
+            let out = PartInfoOut {
+                reference: p.reference.clone(),
+                courtyard: court.map(|c| [r3(c.min.x), r3(c.min.y), r3(c.max.x), r3(c.max.y)]),
+                pads,
+                neighbours,
+            };
+            Ok((format!("{}: {} pads", out.reference, out.pads.len()), out))
+        })
+    }
+
+    /// Write the locked copper into a working copy and load that one, keeping locked copper.
+    fn add_locked(&self, p: AddLockedIn) -> Result<(String, AddLockedOut)> {
+        let (path, kb, options) =
+            self.with_entry(&p.board, |e| Ok((e.path.clone(), e.kb.clone(), e.options.clone())))?;
+        let b = &kb.board;
+        let net_of = |name: &str| b.net_id(name).with_context(|| format!("no net named {name:?}"));
+        let mut items = Vec::new();
+        for t in &p.tracks {
+            let net = net_of(&t.net)?;
+            let layer = b
+                .layer_id(&t.layer)
+                .with_context(|| format!("no layer {:?}", t.layer))?;
+            if t.points.len() < 2 {
+                bail!("a track needs at least two points");
+            }
+            let width = t.width.unwrap_or(b.class_of(net).track_width);
+            for w in t.points.windows(2) {
+                items.push(write::Item::Track {
+                    a: gummiband_core::geom::pt(w[0][0], w[0][1]),
+                    b: gummiband_core::geom::pt(w[1][0], w[1][1]),
+                    width,
+                    layer,
+                    net,
+                });
+            }
+        }
+        for v in &p.vias {
+            let net = net_of(&v.net)?;
+            let c = b.class_of(net);
+            items.push(write::Item::Via {
+                at: gummiband_core::geom::pt(v.x, v.y),
+                diameter: v.diameter.unwrap_or(c.via_diameter),
+                drill: v.drill.unwrap_or(c.via_drill),
+                net,
+            });
+        }
+        if items.is_empty() {
+            bail!("nothing to add");
+        }
+        // a working copy, so that the input stays as it is; further calls add to the copy
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("board");
+        let work = if stem.ends_with(".prerouted") {
+            path.clone()
+        } else {
+            path.with_file_name(format!("{stem}.prerouted.kicad_pcb"))
+        };
+        std::fs::write(&work, write::add_locked(&kb, &items)).with_context(|| format!("writing {}", work.display()))?;
+        if work != path {
+            external::copy_project_files(&path, &work);
+        }
+        let (_, loaded) = self.load(LoadBoardIn {
+            path: work.display().to_string(),
+            keep_locked: Some(true),
+        })?;
+        let id = loaded.board;
+        self.with_entry(&id, |e| {
+            e.options = options;
+            Ok(())
+        })?;
+        let out = AddLockedOut {
+            board: id,
+            path: work.display().to_string(),
+            items_added: items.len(),
+        };
+        Ok((format!("{} locked items in {}", out.items_added, out.path), out))
+    }
+
     fn set_options(&self, p: SetNetOptionsIn) -> Result<(String, SetNetOptionsOut)> {
         self.with_entry(&p.board, |e| {
             let b = &e.kb.board;
@@ -901,6 +1084,31 @@ impl Gummiband {
     )]
     async fn list_nets(&self, Parameters(p): Parameters<ListNetsIn>) -> Result<CallToolResult, ErrorData> {
         match self.nets(p) {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Pads (name, net, position, size, layers), courtyard and neighbouring parts of one footprint. Use it to plan a pre-routed layout, for example a datasheet recommendation, around a critical part.",
+        output_schema = schema_for_output::<PartInfoOut>(),
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn part_info(&self, Parameters(p): Parameters<PartInfoIn>) -> Result<CallToolResult, ErrorData> {
+        match self.part(p) {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Add pre-routed copper (tracks as polylines, vias) as locked items: the router keeps it and routes around it, and track ends join their net. The input file stays untouched: the copper goes into a working copy <input>.prerouted.kicad_pcb, which is loaded with keep_locked; use the returned board id from now on. Check the result with drc and render.",
+        output_schema = schema_for_output::<AddLockedOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn add_locked_copper(&self, Parameters(p): Parameters<AddLockedIn>) -> Result<CallToolResult, ErrorData> {
+        let me = self.clone();
+        match blocking(move || me.add_locked(p)).await {
             Ok((s, out)) => ok(s, &out),
             Err(e) => fail(format!("{e:#}")),
         }
