@@ -6,7 +6,7 @@
 
 use rayon::prelude::*;
 
-use crate::board::{Board, ObstacleKind};
+use crate::board::{Board, LayerId, ObstacleKind};
 use crate::geom::{Point, Rect, point_seg_dist, pt};
 use crate::index::{GridIndex, PointGrid};
 use crate::realize::{Elem, Geometry, Track};
@@ -44,6 +44,106 @@ struct Piece {
     a: Point,
     b: Point,
     track: u32,
+}
+
+/// Squared distances are compared with this much slack, so that a rejection is certain and
+/// only the rare remaining candidates need the exact test.
+const SURE: f64 = 1.0 + 1e-9;
+
+/// True if the point at offset (dx, dy) is certainly at least `r` away.
+#[inline]
+fn surely_outside(dx: f64, dy: f64, r: f64) -> bool {
+    dx * dx + dy * dy >= r * r * SURE
+}
+
+/// What the point loop needs to know of a piece, kept in grid order for cheap sweeps.
+#[derive(Clone, Copy)]
+struct NearPiece {
+    mid: Point,
+    /// Half the track width plus half the piece length: bounds the piece around `mid`.
+    extent: f32,
+    /// The largest track clearance its net can ask for against any other net.
+    clr: f32,
+    net: u32,
+    id: u32,
+}
+
+/// Pieces in a grid, with the bounds that size a query.
+struct Tier {
+    grid: PointGrid,
+    /// In grid order.
+    near: Vec<NearPiece>,
+    /// Pieces and their keys in id order while building, kept to reuse the buffers.
+    raw: Vec<NearPiece>,
+    mids: Vec<Point>,
+    max_extent: f64,
+    max_clr: f64,
+}
+
+impl Tier {
+    fn new(bounds: Rect, cell: f64) -> Tier {
+        Tier {
+            grid: PointGrid::new(bounds, cell, &[]),
+            near: Vec::new(),
+            raw: Vec::new(),
+            mids: Vec::new(),
+            max_extent: 0.0,
+            max_clr: 0.0,
+        }
+    }
+
+    fn rebuild(&mut self) {
+        self.mids.clear();
+        self.mids.extend(self.raw.iter().map(|r| r.mid));
+        self.grid.rebuild(&self.mids);
+        self.near.clear();
+        let raw = &self.raw;
+        self.near.extend(self.grid.ids().iter().map(|&i| raw[i as usize]));
+        let (e, c) = raw.iter().fold((0.0f32, 0.0f32), |(e, c), r| (e.max(r.extent), c.max(r.clr)));
+        (self.max_extent, self.max_clr) = (e as f64, c as f64);
+    }
+
+    #[inline]
+    fn for_each_near(&self, p: Point, radius: f64, mut f: impl FnMut(&NearPiece)) {
+        self.grid.for_each_run(p, radius, |lo, hi| {
+            for r in &self.near[lo..hi] {
+                f(r);
+            }
+        });
+    }
+}
+
+/// The pieces of one layer. A single wide or high clearance net would size the query of every
+/// point on the board, so the few tracks that reach far sit in a coarse grid of their own.
+/// Pushes must add up in the same order whatever the grids: by the cell of the fine grid and
+/// within a cell by id, see `order_key`.
+struct LayerPieces {
+    fine: Tier,
+    far: Tier,
+}
+
+impl LayerPieces {
+    fn new(bounds: Rect) -> LayerPieces {
+        LayerPieces {
+            fine: Tier::new(bounds, 0.25),
+            far: Tier::new(bounds, 1.0),
+        }
+    }
+
+    fn order_key(&self, r: &NearPiece) -> (u32, u32) {
+        (self.fine.grid.cell_of(r.mid) as u32, r.id)
+    }
+}
+
+/// What the point loop needs to know of an obstacle.
+#[derive(Clone, Copy)]
+struct NearObstacle {
+    bbox: Rect,
+    /// Tracks of this net ignore the obstacle.
+    own_net: u32,
+    /// Clearance it demands; `floor` means at least the clearance of the track's net.
+    clr: f64,
+    floor: bool,
 }
 
 fn resample(pts: &[Point], spacing: f64) -> Vec<Point> {
@@ -107,13 +207,91 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         .max(board.obstacles.iter().map(|o| o.clearance).fold(0.0, f64::max))
         .max(board.rules.hole_clearance);
     let max_w = geo.tracks.iter().map(|t| t.width).fold(0.0, f64::max);
+    let n_layers = geo.tracks.iter().map(|t| t.layer as usize + 1).max().unwrap_or(0);
+    let half_w = |t: &Track| if t.necks.is_empty() { t.width } else { t.width.max(t.neck_w) } / 2.0;
+    // per net the largest clearance it can ask for against any other net
+    let mut net_clr: Vec<f64> = (0..board.nets.len() as u32).map(clr).collect();
+    for (&(a, b), &c) in &board.pair_clearance {
+        net_clr[a as usize] = net_clr[a as usize].max(c);
+        net_clr[b as usize] = net_clr[b as usize].max(c);
+    }
+    // per layer the split that makes the fewest grid cells to visit: a query looks at about
+    // the square of its reach, weighted by the pieces it sweeps
+    let far_track: Vec<bool> = {
+        let reach = |ti: usize| half_w(&geo.tracks[ti]) + net_clr[geo.tracks[ti].net as usize];
+        let mut limit = vec![f64::INFINITY; n_layers];
+        for (l, limit) in limit.iter_mut().enumerate() {
+            let mut by: Vec<(f64, f64, f64, f64)> = (0..geo.tracks.len())
+                .filter(|&ti| geo.tracks[ti].layer as usize == l)
+                .map(|ti| {
+                    let t = &geo.tracks[ti];
+                    (reach(ti), half_w(t), net_clr[t.net as usize], tracks[ti].len() as f64)
+                })
+                .collect();
+            by.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            let span = |part: &[(f64, f64, f64, f64)], cell: f64| {
+                let hw = part.iter().map(|b| b.1).fold(0.0, f64::max);
+                let c = part.iter().map(|b| b.2).fold(0.0, f64::max);
+                let side = 2.0 * (hw + c + hw + 0.1) + cell;
+                part.iter().map(|b| b.3).sum::<f64>() * side * side
+            };
+            let mut best = f64::INFINITY;
+            for i in 0..by.len() {
+                if i + 1 == by.len() || by[i + 1].0 > by[i].0 {
+                    let cost = span(&by[..=i], 0.25) + span(&by[i + 1..], 1.0);
+                    if cost < best {
+                        best = cost;
+                        *limit = by[i].0;
+                    }
+                }
+            }
+        }
+        (0..geo.tracks.len())
+            .map(|ti| reach(ti) > limit[geo.tracks[ti].layer as usize])
+            .collect()
+    };
     let obs_boxes: Vec<Rect> = sub.shared.obs_polys.iter().map(|p| p.bbox()).collect();
     let bounds = board.bbox().grow(5.0);
     // every point query below looks at one cell only: the cell lists hold all obstacles within
     // the largest reach of any point in it, and the edge mask marks cells near the board edge
     let reach_max = max_w + max_clr + cfg.margin + 0.01;
-    let cells = CellLists::new(bounds, 0.5, &obs_boxes, reach_max);
+    let cells = CellLists::new(bounds, 0.5, &obs_boxes, reach_max, |_| true);
+    // the same per layer, without the obstacles tracks there never see
+    let track_obstacle = |o: &crate::board::Obstacle, l: LayerId| {
+        o.layers.has(l) && !matches!(o.kind, ObstacleKind::Keepout { tracks: false, .. })
+    };
+    let layer_cells: Vec<CellLists> = (0..n_layers)
+        .map(|l| {
+            let l = l as LayerId;
+            CellLists::new(bounds, 0.5, &obs_boxes, reach_max, |i| {
+                track_obstacle(&board.obstacles[i], l)
+            })
+        })
+        .collect();
+    let near_obs: Vec<NearObstacle> = board
+        .obstacles
+        .iter()
+        .zip(&obs_boxes)
+        .map(|(o, b)| {
+            let (clr, floor) = match o.kind {
+                ObstacleKind::Keepout { .. } => (crate::board::KEEPOUT_GAP, false),
+                ObstacleKind::Hole => (board.rules.hole_clearance, false),
+                _ => (o.clearance, true),
+            };
+            NearObstacle {
+                bbox: *b,
+                own_net: if o.kind == ObstacleKind::Hole {
+                    u32::MAX
+                } else {
+                    o.net.unwrap_or(u32::MAX)
+                },
+                clr,
+                floor,
+            }
+        })
+        .collect();
     let near_edge: Vec<bool> = (0..cells.len())
+        .into_par_iter()
         .map(|c| {
             let (r, half) = cells.cell_rect(c);
             let mid = (r.min + r.max) * 0.5;
@@ -131,6 +309,8 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         .iter()
         .map(|v| (v.at, v.diameter / 2.0, v.net, clr(v.net)))
         .collect();
+    let max_vr = vias.iter().map(|v| v.1).fold(0.0, f64::max);
+    let max_drill = drills_max(geo);
     let edge_clr = board.rules.edge_clearance;
     let routing = board.routing_layers();
     let drills: Vec<f64> = geo.vias.iter().map(|v| v.drill).collect();
@@ -154,6 +334,10 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
     // while annealing only a few spots still move: cells near the points and vias that moved
     // in the previous round are the only ones worth visiting (None: visit everything)
     let mut dirty: Option<Vec<bool>> = None;
+    let mut grids: Vec<LayerPieces> = (0..n_layers).map(|_| LayerPieces::new(bounds)).collect();
+    let mut via_at: Vec<Point> = Vec::with_capacity(vias.len());
+    let mut via_grid = PointGrid::new(bounds, 1.0, &[]);
+    let mut pieces: Vec<Piece> = Vec::new();
     let annealing = |it: usize| it * 4 >= cfg.iterations * 3;
     for it in 0..cfg.iterations {
         // anneal: the last quarter only resolves clearances
@@ -174,26 +358,43 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 })
                 .collect();
         }
-        let mut pieces = Vec::new();
+        pieces.clear();
+        for g in &mut grids {
+            g.fine.raw.clear();
+            g.far.raw.clear();
+        }
+        // pieces by their midpoints per layer; queries grow by the largest extent
         for (ti, p) in tracks.iter().enumerate() {
+            let t = &geo.tracks[ti];
+            let g = &mut grids[t.layer as usize];
+            let (hw, nc) = (half_w(t), (net_clr[t.net as usize] as f32).next_up());
+            let raw = if far_track[ti] { &mut g.far.raw } else { &mut g.fine.raw };
             for w in p.windows(2) {
+                let id = pieces.len() as u32;
                 pieces.push(Piece {
                     a: w[0],
                     b: w[1],
                     track: ti as u32,
                 });
+                let hl = (w[1] - w[0]).len2().sqrt() * 0.5 * SURE;
+                raw.push(NearPiece {
+                    mid: (w[0] + w[1]) * 0.5,
+                    extent: ((hw + hl) as f32).next_up(),
+                    clr: nc,
+                    net: t.net,
+                    id,
+                });
             }
         }
-        // pieces by their midpoints; queries grow by the longest half piece
-        let mids: Vec<Point> = pieces.iter().map(|pc| (pc.a + pc.b) * 0.5).collect();
-        let half = pieces.iter().map(|pc| pc.a.dist(pc.b)).fold(0.0, f64::max) / 2.0;
-        let idx = PointGrid::new(bounds, 0.25, &mids);
-        let mut via_idx = GridIndex::new(bounds, 1.0);
-        for (i, v) in vias.iter().enumerate() {
-            let mut r = Rect::empty();
-            r.add(v.0);
-            via_idx.insert(i as u32, &r.grow(v.1));
+        for g in &mut grids {
+            g.fine.rebuild();
+            g.far.rebuild();
         }
+        let (pieces, grids) = (&pieces, &grids);
+        via_at.clear();
+        via_at.extend(vias.iter().map(|v| v.0));
+        via_grid.rebuild(&via_at);
+        let via_grid = &via_grid;
         // vias move as well: pushed by obstacles, other vias and tracks of other nets
         let moved: Vec<Point> = vias
             .par_iter()
@@ -235,16 +436,30 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         push = push + dir * (need - d);
                     }
                 }
-                for (vj, &(c2, r2, n2, clr2)) in vias.iter().enumerate() {
-                    if vj == vi {
-                        continue;
+                // sums run in id order: collect the few candidates first
+                let mut hits: Vec<u32> = Vec::new();
+                let via_reach = (vr + max_vr + max_clr).max(drills[vi] / 2.0 + max_drill / 2.0 + board.rules.hole_to_hole)
+                    + cfg.margin
+                    + 0.01;
+                via_grid.for_each_near(vc, via_reach, |vj| {
+                    if vj as usize != vi {
+                        hits.push(vj);
                     }
+                });
+                hits.sort_unstable();
+                for &vj in &hits {
+                    let vj = vj as usize;
+                    let (c2, r2, n2, clr2) = vias[vj];
                     let holes = drills[vi] / 2.0 + drills[vj] / 2.0 + board.rules.hole_to_hole + cfg.margin;
                     let need = if n2 == vn {
                         holes
                     } else {
                         (vr + r2 + vclr.max(clr2) + cfg.margin).max(holes)
                     };
+                    let dv = vc - c2;
+                    if surely_outside(dv.x, dv.y, need) {
+                        continue;
+                    }
                     let d = vc.dist(c2);
                     if d < need {
                         let dir = if d > 1e-9 {
@@ -255,12 +470,24 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         push = push + dir * ((need - d) * 0.5);
                     }
                 }
-                idx.for_each_near(vc, vr + max_clr + max_w / 2.0 + 0.1 + half, |pi| {
+                // candidates of all layers, back in the order of one grid over all of them
+                let mut near: Vec<(u32, u32)> = Vec::new();
+                for g in grids {
+                    for tier in [&g.fine, &g.far] {
+                        let radius = vr + vclr.max(tier.max_clr) + cfg.margin + tier.max_extent;
+                        tier.for_each_near(vc, radius, |r| {
+                            let dm = vc - r.mid;
+                            let lim = vr + vclr.max(r.clr as f64) + cfg.margin + r.extent as f64;
+                            if r.net != vn && !surely_outside(dm.x, dm.y, lim) {
+                                near.push(g.order_key(r));
+                            }
+                        });
+                    }
+                }
+                near.sort_unstable();
+                for &(_, pi) in &near {
                     let pc = &pieces[pi as usize];
                     let o = &geo.tracks[pc.track as usize];
-                    if o.net == vn {
-                        return;
-                    }
                     let need = vr + o.piece_width(pc.a, pc.b) / 2.0 + vclr.max(clr(o.net)) + cfg.margin;
                     let ab = pc.b - pc.a;
                     let l2 = ab.len2();
@@ -275,7 +502,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         let dir = if d > 1e-9 { (vc - q).norm() } else { ab.perp().norm() };
                         push = push + dir * ((need - d) * 0.5);
                     }
-                });
+                }
                 let l = push.len();
                 let mv = if l > cfg.max_step {
                     push * (cfg.max_step / l)
@@ -291,14 +518,15 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             .enumerate()
             .map(|(ti, pts)| {
                 let t = &geo.tracks[ti];
-                let (c, net, layer) = (clr(t.net), t.net, t.layer);
+                let (c, net, nc) = (clr(t.net), t.net, net_clr[t.net as usize]);
+                let (grid, obs_cells) = (&grids[t.layer as usize], &layer_cells[t.layer as usize]);
                 let mut out = pts.clone();
                 let n = pts.len();
                 // points in parallel too: a few long tracks would otherwise keep one core busy
                 let inner: Vec<Point> = (1..n.saturating_sub(1))
                     .into_par_iter()
                     .with_min_len(32)
-                    .map(|i| {
+                    .map_init(Vec::new, |near: &mut Vec<(u32, u32)>, i| {
                         let p = pts[i];
                         if dirty.as_ref().is_some_and(|d| !d[cells.cell_of(p)]) {
                             return p;
@@ -308,27 +536,18 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         let mid = (pts[i - 1] + pts[i + 1]) * 0.5;
                         let mut mv = (mid - p) * tension;
                         let mut push = pt(0.0, 0.0);
-                        let reach = w / 2.0 + max_clr + max_w / 2.0 + cfg.margin + 0.01;
                         // static obstacles
                         let cell = cells.cell_of(p);
-                        for &oi in cells.get(cell) {
-                            let o = &board.obstacles[oi as usize];
-                            if !o.layers.has(layer) || (o.net == Some(net) && o.kind != ObstacleKind::Hole) {
+                        for &oi in obs_cells.get(cell) {
+                            let o = &near_obs[oi as usize];
+                            if o.own_net == net {
                                 continue;
                             }
-                            let need = match o.kind {
-                                ObstacleKind::Keepout { tracks, .. } => {
-                                    if !tracks {
-                                        continue;
-                                    }
-                                    crate::board::KEEPOUT_GAP
-                                }
-                                ObstacleKind::Hole => board.rules.hole_clearance,
-                                _ => o.clearance.max(c),
-                            } + w / 2.0
-                                + cfg.margin;
+                            let need = if o.floor { o.clr.max(c) } else { o.clr } + w / 2.0 + cfg.margin;
                             // cheap reject on the bounding box before the polygon distance
-                            if bbox_dist(&obs_boxes[oi as usize], p) >= need {
+                            let dx = (o.bbox.min.x - p.x).max(0.0).max(p.x - o.bbox.max.x);
+                            let dy = (o.bbox.min.y - p.y).max(0.0).max(p.y - o.bbox.max.y);
+                            if surely_outside(dx, dy, need) || dx.hypot(dy) >= need {
                                 continue;
                             }
                             let poly = &sub.shared.obs_polys[oi as usize];
@@ -353,11 +572,17 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             }
                         }
                         // vias of other nets
-                        for vi in via_idx.query_point(p, reach) {
+                        let mut hits: Vec<u32> = Vec::new();
+                        via_grid.for_each_near(p, w / 2.0 + max_clr + max_vr + cfg.margin + 0.01, |vi| {
                             let (vc, vr, vn, vclr) = vias[vi as usize];
-                            if vn == net {
-                                continue;
+                            let dv = p - vc;
+                            if vn != net && !surely_outside(dv.x, dv.y, vr + vclr.max(c) + w / 2.0 + cfg.margin) {
+                                hits.push(vi);
                             }
+                        });
+                        hits.sort_unstable();
+                        for &vi in &hits {
+                            let (vc, vr, _, vclr) = vias[vi as usize];
                             let need = vr + vclr.max(c) + w / 2.0 + cfg.margin;
                             let d = p.dist(vc);
                             if d < need {
@@ -365,12 +590,22 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             }
                         }
                         // other tracks (they push back from their side, so take half)
-                        idx.for_each_near(p, reach + half, |pi| {
+                        near.clear();
+                        let base = w / 2.0 + cfg.margin;
+                        for tier in [&grid.fine, &grid.far] {
+                            let radius = base + nc.max(tier.max_clr) + tier.max_extent;
+                            tier.for_each_near(p, radius, |r| {
+                                let dm = p - r.mid;
+                                let lim = base + nc.max(r.clr as f64) + r.extent as f64;
+                                if r.net != net && !surely_outside(dm.x, dm.y, lim) {
+                                    near.push(grid.order_key(r));
+                                }
+                            });
+                        }
+                        near.sort_unstable();
+                        for &(_, pi) in near.iter() {
                             let pc = &pieces[pi as usize];
                             let o = &geo.tracks[pc.track as usize];
-                            if pc.track as usize == ti || o.net == net || o.layer != layer {
-                                return;
-                            }
                             let need = w / 2.0
                                 + o.piece_width(pc.a, pc.b) / 2.0
                                 + board.track_clearance(net, o.net)
@@ -388,7 +623,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                                 let dir = if d > 1e-9 { (p - q).norm() } else { ab.perp().norm() };
                                 push = push + dir * ((need - d) * 0.5);
                             }
-                        });
+                        }
                         // constraints win over tension: drop the tension part that points into the push
                         if push.len2() > 0.0 {
                             let pn = push.norm();
@@ -438,7 +673,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     a.iter().chain(b).for_each(|p| mark(*p));
                 } else {
                     for (p, q) in a.iter().zip(b) {
-                        if p.dist(*q) > 1e-9 {
+                        if p != q && p.dist(*q) > 1e-9 {
                             mark(*p);
                             mark(*q);
                         }
@@ -446,7 +681,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 }
             }
             for (p, v) in old_vias.iter().zip(&vias) {
-                if p.dist(v.0) > 1e-9 {
+                if *p != v.0 && p.dist(v.0) > 1e-9 {
                     mark(*p);
                     mark(v.0);
                 }
@@ -546,17 +781,35 @@ fn taut(
                     return false;
                 }
             }
+            // only what lies within reach of the box of a-b can be too close
+            let need = board.rules.edge_clearance + w / 2.0 + m;
+            let edge_box = r.grow(need + 1e-9);
             for o in &board.outline {
+                let near = |(p, q): &(Point, Point)| {
+                    p.x.max(q.x) >= edge_box.min.x
+                        && p.x.min(q.x) <= edge_box.max.x
+                        && p.y.max(q.y) >= edge_box.min.y
+                        && p.y.min(q.y) <= edge_box.max.y
+                };
                 if o.edges()
-                    .map(|(p, q)| crate::geom::seg_seg_dist(a, b, p, q))
-                    .fold(f64::INFINITY, f64::min)
-                    < board.rules.edge_clearance + w / 2.0 + m
+                    .filter(near)
+                    .any(|(p, q)| crate::geom::seg_seg_dist(a, b, p, q) < need)
                 {
                     return false;
                 }
             }
             for &(vc, vr, vn) in &routing_vias {
-                if vn != net && point_seg_dist(vc, a, b) < vr + c.max(clr(vn)) + w / 2.0 + m {
+                if vn == net {
+                    continue;
+                }
+                let need = vr + c.max(clr(vn)) + w / 2.0 + m;
+                let reach = need + 1e-9;
+                if vc.x >= r.min.x - reach
+                    && vc.x <= r.max.x + reach
+                    && vc.y >= r.min.y - reach
+                    && vc.y <= r.max.y + reach
+                    && point_seg_dist(vc, a, b) < need
+                {
                     return false;
                 }
             }
@@ -674,13 +927,6 @@ fn taut(
     result
 }
 
-/// Distance from p to a rectangle (0 inside).
-fn bbox_dist(r: &Rect, p: Point) -> f64 {
-    let dx = (r.min.x - p.x).max(0.0).max(p.x - r.max.x);
-    let dy = (r.min.y - p.y).max(0.0).max(p.y - r.max.y);
-    dx.hypot(dy)
-}
-
 /// Distance from p to the polygon boundary and the nearest boundary point.
 fn nearest_on_poly(poly: &crate::geom::Polygon, p: Point) -> (f64, Point) {
     let mut best = (f64::INFINITY, p);
@@ -701,6 +947,10 @@ fn nearest_on_poly(poly: &crate::geom::Polygon, p: Point) -> (f64, Point) {
     (best.0.sqrt(), best.1)
 }
 
+fn drills_max(geo: &Geometry) -> f64 {
+    geo.vias.iter().map(|v| v.drill).fold(0.0, f64::max)
+}
+
 fn env_usize(k: &str, d: usize) -> usize {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
@@ -717,12 +967,12 @@ struct CellLists {
 }
 
 impl CellLists {
-    fn new(bounds: Rect, cell: f64, boxes: &[Rect], reach: f64) -> CellLists {
+    fn new(bounds: Rect, cell: f64, boxes: &[Rect], reach: f64, keep: impl Fn(usize) -> bool) -> CellLists {
         let nx = ((bounds.width() / cell).ceil() as usize).max(1);
         let ny = ((bounds.height() / cell).ceil() as usize).max(1);
         let mut lists: Vec<Vec<u32>> = vec![Vec::new(); nx * ny];
         let f = |v: f64, o: f64, n: usize| (((v - o) / cell).floor().max(0.0) as usize).min(n - 1);
-        for (i, b) in boxes.iter().enumerate() {
+        for (i, b) in boxes.iter().enumerate().filter(|(i, _)| keep(*i)) {
             let g = b.grow(reach);
             for y in f(g.min.y, bounds.min.y, ny)..=f(g.max.y, bounds.min.y, ny) {
                 for x in f(g.min.x, bounds.min.x, nx)..=f(g.max.x, bounds.min.x, nx) {

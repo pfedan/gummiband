@@ -167,7 +167,7 @@ pub struct Board {
     /// Courtyard bounding boxes by footprint reference.
     pub courtyards: std::collections::HashMap<String, Rect>,
     /// Track to track clearances of custom rules, above the net class clearance (a < b).
-    pub pair_clearance: std::collections::HashMap<(NetId, NetId), f64>,
+    pub pair_clearance: crate::index::FastMap<(NetId, NetId), f64>,
     /// Obstacles (pads, holes, copper graphics) by footprint reference.
     #[serde(default)]
     pub footprint_obstacles: std::collections::HashMap<String, Vec<usize>>,

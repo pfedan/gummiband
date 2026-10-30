@@ -1,6 +1,59 @@
 //! Uniform grid over bounding boxes for proximity queries.
 
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
 use crate::geom::{Point, Rect};
+
+/// Multiplicative hasher for the small integer keys of the inner loops (nothing in this crate
+/// depends on the iteration order of a map, and no key comes from outside).
+#[derive(Default, Clone, Copy)]
+pub struct FastHasher(u64);
+
+impl FastHasher {
+    #[inline]
+    fn add(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl Hasher for FastHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0.rotate_left(26)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.add(b as u64);
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, x: u8) {
+        self.add(x as u64);
+    }
+    #[inline]
+    fn write_u32(&mut self, x: u32) {
+        self.add(x as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, x: u64) {
+        self.add(x);
+    }
+    #[inline]
+    fn write_i32(&mut self, x: i32) {
+        self.add(x as u32 as u64);
+    }
+    #[inline]
+    fn write_i64(&mut self, x: i64) {
+        self.add(x as u64);
+    }
+    #[inline]
+    fn write_usize(&mut self, x: usize) {
+        self.add(x as u64);
+    }
+}
+
+pub type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
 
 pub struct GridIndex {
     origin: Point,
@@ -87,43 +140,72 @@ impl PointGrid {
             nx,
             ny,
             start: vec![0; nx * ny + 1],
-            ids: vec![0; keys.len()],
+            ids: Vec::new(),
         };
-        let cells: Vec<usize> = keys.iter().map(|p| g.cell_of(*p)).collect();
-        for &c in &cells {
-            g.start[c + 1] += 1;
-        }
-        for i in 0..nx * ny {
-            g.start[i + 1] += g.start[i];
-        }
-        let mut fill = g.start.clone();
-        for (i, &c) in cells.iter().enumerate() {
-            g.ids[fill[c] as usize] = i as u32;
-            fill[c] += 1;
-        }
+        g.rebuild(keys);
         g
+    }
+
+    /// New keys on the same grid, without new allocations once the buffers are large enough.
+    pub fn rebuild(&mut self, keys: &[Point]) {
+        self.start.fill(0);
+        // start[c + 1] counts cell c, the prefix sum then makes it the end of cell c
+        for p in keys {
+            let c = self.cell_of(*p);
+            self.start[c + 1] += 1;
+        }
+        let mut sum = 0;
+        for s in &mut self.start {
+            sum += *s;
+            *s = sum;
+        }
+        self.ids.clear();
+        self.ids.resize(keys.len(), 0);
+        // filling from the back keeps the ids of a cell ascending and leaves start[c] at the
+        // begin of cell c
+        for (i, p) in keys.iter().enumerate().rev() {
+            let c = self.cell_of(*p) + 1;
+            self.start[c] -= 1;
+            self.ids[self.start[c] as usize] = i as u32;
+        }
+        // cell c now begins at start[c + 1]: shift back by one
+        self.start.rotate_left(1);
+        *self.start.last_mut().unwrap() = keys.len() as u32;
+    }
+
+    /// The ids by cell, ascending within a cell.
+    pub fn ids(&self) -> &[u32] {
+        &self.ids
     }
 
     fn clamp(&self, v: f64, o: f64, n: usize) -> usize {
         (((v - o) / self.cell).floor().max(0.0) as usize).min(n - 1)
     }
 
-    fn cell_of(&self, p: Point) -> usize {
+    pub fn cell_of(&self, p: Point) -> usize {
         self.clamp(p.y, self.origin.y, self.ny) * self.nx + self.clamp(p.x, self.origin.x, self.nx)
     }
 
     /// Calls `f` once for every item whose key lies within the square of half size `radius`
     /// around `p` (and possibly a few more).
     pub fn for_each_near(&self, p: Point, radius: f64, mut f: impl FnMut(u32)) {
+        self.for_each_run(p, radius, |lo, hi| {
+            for &id in &self.ids[lo..hi] {
+                f(id);
+            }
+        });
+    }
+
+    /// Like `for_each_near`, but hands out runs of positions in `ids()`, for callers that keep
+    /// their items in grid order.
+    pub fn for_each_run(&self, p: Point, radius: f64, mut f: impl FnMut(usize, usize)) {
         let x0 = self.clamp(p.x - radius, self.origin.x, self.nx);
         let x1 = self.clamp(p.x + radius, self.origin.x, self.nx);
         let y0 = self.clamp(p.y - radius, self.origin.y, self.ny);
         let y1 = self.clamp(p.y + radius, self.origin.y, self.ny);
         for y in y0..=y1 {
             let row = y * self.nx;
-            for &id in &self.ids[self.start[row + x0] as usize..self.start[row + x1 + 1] as usize] {
-                f(id);
-            }
+            f(self.start[row + x0] as usize, self.start[row + x1 + 1] as usize);
         }
     }
 }

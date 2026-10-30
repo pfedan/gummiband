@@ -8,10 +8,12 @@
 //! cross those triangles are threaded through the new ones.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
+use std::collections::hash_map::Entry;
 
 use crate::board::{Board, NetId, ObstacleKind};
 use crate::geom::{Point, Rect, orient, point_seg_dist, pt, segs_intersect};
+use crate::index::FastMap;
 use crate::topo::{Mesh, NONE, OUTSIDE, PAD_SITE, STEINER, Substrate};
 
 #[derive(Debug, Clone)]
@@ -141,11 +143,12 @@ pub struct Router<'a> {
     pub cfg: RouterConfig,
     /// [layer][edge] -> segment ids ordered from edges[e][0] to edges[e][1]
     pub cross: Vec<Vec<Vec<u32>>>,
-    chords: Vec<HashMap<u32, Vec<Chord>>>,
+    /// [layer][triangle] -> chords
+    chords: Vec<Vec<Vec<Chord>>>,
     pub segs: Vec<Option<Seg>>,
     /// Placed vias by site id.
-    pub vias: HashMap<u32, ViaInfo>,
-    via_cells: HashMap<(i32, i32), Vec<u32>>,
+    pub vias: FastMap<u32, ViaInfo>,
+    via_cells: FastMap<(i32, i32), Vec<u32>>,
     pub conns: Vec<Conn>,
     /// Segment ids per connection (empty = unrouted).
     pub conn_segs: Vec<Vec<u32>>,
@@ -194,7 +197,21 @@ struct Node {
     pos: Point,
     g: f64,
     parent: u32,
+    /// Bloom filter of the triangles of this node's block: the triangles walked back from a
+    /// node are cut into blocks, so a loop test looks at a few filters, not at a whole path.
+    seen: u64,
+    /// Last node of the block before (none at a via or the start) and the size of this one.
+    block_up: u32,
+    block_len: u8,
+    /// Nearest ancestor that is a via, for the hole spacing within one connection.
+    via_up: u32,
 }
+
+fn tri_bit(t: u32, li: u8) -> u64 {
+    1 << (t.wrapping_add((li as u32) << 28).wrapping_mul(0x9e37_79b1) >> 26)
+}
+
+const BLOCK: u8 = 24;
 
 #[derive(PartialEq)]
 struct Open(f64, u32);
@@ -219,6 +236,35 @@ pub struct Item {
     /// Side of the apex of each adjacent triangle (edge_tris order) the track passes:
     /// 0 = towards edges[e][0], 1 = towards edges[e][1], 2 = unknown or not relevant.
     pub sides: [u8; 2],
+}
+
+/// A crossing already on an edge with all that packing needs from it.
+#[derive(Debug, Clone, Copy)]
+struct Placed {
+    need_u: f64,
+    need_v: f64,
+    bounds: (f64, f64),
+    /// Gap to the next crossing on the edge.
+    gap_next: f64,
+    /// Gap to the searched track on its right and on its left.
+    gap_to_new: f64,
+    gap_from_new: f64,
+}
+
+/// An edge as the search of one connection sees it: a search does not change the routes, and
+/// its track has one net and one width per edge, so all this is computed once per edge and
+/// search; only the sides of the apexes differ from crossing to crossing.
+struct EdgeView {
+    placed: Vec<Placed>,
+    len: f64,
+    /// Extra gap of hot spots.
+    hot: f64,
+    /// End needs of the searched track.
+    need_u: f64,
+    need_v: f64,
+    /// Per adjacent triangle the bounds its apex sets on the searched track when it passes on
+    /// side 0 (upper bound) or side 1 (lower bound).
+    apex: [(f64, f64); 2],
 }
 
 /// An extra obstacle at a triangle apex for capacity checks (a via about to be placed).
@@ -248,10 +294,10 @@ impl<'a> Router<'a> {
             sub: sub.clone(),
             cfg,
             cross: sub.m.iter().map(|m| vec![Vec::new(); m.edges.len()]).collect(),
-            chords: vec![HashMap::new(); sub.m.len()],
+            chords: sub.m.iter().map(|m| vec![Vec::new(); m.tris.len()]).collect(),
             segs: Vec::new(),
-            vias: HashMap::new(),
-            via_cells: HashMap::new(),
+            vias: FastMap::default(),
+            via_cells: FastMap::default(),
             conns: Vec::new(),
             conn_segs: Vec::new(),
             conn_vias: Vec::new(),
@@ -559,8 +605,7 @@ impl<'a> Router<'a> {
 
     /// Side of the apex of t the chord of `seg` in t passes, seen on edge e (see [`Item`]).
     fn chord_side(&self, li: usize, e: u32, t: u32, seg: u32) -> u8 {
-        let Some(list) = self.chords[li].get(&t) else { return 2 };
-        let Some(ch) = list.iter().find(|c| c.seg == seg) else {
+        let Some(ch) = self.chords[li][t as usize].iter().find(|c| c.seg == seg) else {
             return 2;
         };
         let ke = self.m(li).local_edge(t, e) as u8;
@@ -595,6 +640,54 @@ impl<'a> Router<'a> {
         }
     }
 
+    /// What the apex of triangle t (next to edge e) blocks on e: its position relative to the
+    /// edge and the obstacles and via there, or None if it blocks nothing.
+    fn apex_of(
+        &self,
+        li: usize,
+        e: u32,
+        k: usize,
+        t: u32,
+        (pu, dir): (Point, Point),
+        extra: Option<ExtraApex>,
+    ) -> Option<(f64, f64, &[u32], Option<ViaInfo>)> {
+        let m = self.m(li);
+        let [u, v] = m.edges[e as usize];
+        let (pw, obs, via_here) = match extra {
+            Some(x) if x.side == k => (x.p, &[][..], Some(x.via)),
+            _ => {
+                let w = *m.tris[t as usize].iter().find(|&&x| x != u && x != v).unwrap();
+                let obs = m.vert_obs.get(w as usize).map_or(&[][..], |o| &o[..]);
+                (m.verts[w as usize], obs, self.via_at(li, w))
+            }
+        };
+        if obs.is_empty() && via_here.is_none() {
+            return None;
+        }
+        Some(((pw - pu).cross(dir).abs(), (pw - pu).dot(dir), obs, via_here))
+    }
+
+    /// Half the stretch of the edge an apex at height h blocks for item `it`, if any.
+    fn apex_half(&self, h: f64, obs: &[u32], via_here: Option<ViaInfo>, it: &Item) -> Option<f64> {
+        let mut need: f64 = 0.0;
+        for &o in obs {
+            if self.obs_net(o) != Some(it.net) {
+                need = need.max(self.eff_clearance(o, it.c) + it.w / 2.0);
+            }
+        }
+        if let Some(via) = via_here {
+            need = need.max(Self::via_need(&via, it));
+        }
+        if need <= 0.0 {
+            return None;
+        }
+        let need = need + self.cfg.margin;
+        if need <= h {
+            return None;
+        }
+        Some((need * need - h * h).sqrt())
+    }
+
     /// Lower and upper bounds of each item's centre line from the apex obstacles of the two
     /// triangles next to e (an obstacle or via at the apex blocks the middle of the edge).
     fn apex_bounds(&self, li: usize, e: u32, items: &[Item], extra: Option<ExtraApex>) -> Vec<(f64, f64)> {
@@ -608,52 +701,21 @@ impl<'a> Router<'a> {
             return b;
         }
         let dir = (pv - pu) * (1.0 / len);
-        let margin = self.cfg.margin;
         for (k, &t) in m.edge_tris[e as usize].iter().enumerate() {
             if t == NONE || m.status[t as usize] != NONE {
                 continue;
             }
-            let (pw, obs, via_here) = match extra {
-                Some(x) if x.side == k => (x.p, Vec::new(), Some(x.via)),
-                _ => {
-                    let w = *m.tris[t as usize].iter().find(|&&x| x != u && x != v).unwrap();
-                    let mut obs: Vec<u32> = Vec::new();
-                    for &tt in &m.vert_tris[w as usize] {
-                        let o = m.status[tt as usize];
-                        if o != NONE && !obs.contains(&o) {
-                            obs.push(o);
-                        }
-                    }
-                    (m.verts[w as usize], obs, self.via_at(li, w))
-                }
-            };
-            if obs.is_empty() && via_here.is_none() {
+            let Some((h, proj, obs, via_here)) = self.apex_of(li, e, k, t, (pu, dir), extra) else {
                 continue;
-            }
-            let h = (pw - pu).cross(dir).abs();
-            let proj = (pw - pu).dot(dir);
+            };
             for (i, it) in items.iter().enumerate() {
                 let side = it.sides[k];
                 if side > 1 {
                     continue;
                 }
-                let mut need: f64 = 0.0;
-                for &o in &obs {
-                    if self.obs_net(o) != Some(it.net) {
-                        need = need.max(self.eff_clearance(o, it.c) + it.w / 2.0);
-                    }
-                }
-                if let Some(via) = via_here {
-                    need = need.max(Self::via_need(&via, it));
-                }
-                if need <= 0.0 {
+                let Some(half) = self.apex_half(h, obs, via_here, it) else {
                     continue;
-                }
-                let need = need + margin;
-                if need <= h {
-                    continue;
-                }
-                let half = (need * need - h * h).sqrt();
+                };
                 if side == 0 {
                     b[i].1 = b[i].1.min(proj - half);
                 } else {
@@ -773,20 +835,132 @@ impl<'a> Router<'a> {
         )
     }
 
-    /// Interval for a new item at slot j of edge e.
-    fn slot_interval(&self, li: usize, e: u32, j: usize, it: Item) -> Option<(f64, f64)> {
-        let list = &self.cross[li][e as usize];
-        let mut items: Vec<Item> = Vec::with_capacity(list.len() + 1);
-        for (i, &s) in list.iter().enumerate() {
-            if i == j {
-                items.push(it);
+    fn edge_view(&self, li: usize, e: u32, new: &Item) -> EdgeView {
+        let m = self.m(li);
+        let [u, v] = m.edges[e as usize];
+        let (pu, pv) = (m.verts[u as usize], m.verts[v as usize]);
+        let items = self.items_on(li, e);
+        let hot = self.hot_extra(pu, pv);
+        let margin = self.cfg.margin;
+        let mut bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); items.len()];
+        let mut apex = [(f64::INFINITY, f64::NEG_INFINITY); 2];
+        let len = pu.dist(pv);
+        if len > 0.0 {
+            let dir = (pv - pu) * (1.0 / len);
+            for (k, &t) in m.edge_tris[e as usize].iter().enumerate() {
+                if t == NONE || m.status[t as usize] != NONE {
+                    continue;
+                }
+                let Some((h, proj, obs, via_here)) = self.apex_of(li, e, k, t, (pu, dir), None) else {
+                    continue;
+                };
+                for (i, it) in items.iter().enumerate() {
+                    if it.sides[k] <= 1
+                        && let Some(half) = self.apex_half(h, obs, via_here, it)
+                    {
+                        if it.sides[k] == 0 {
+                            bounds[i].1 = bounds[i].1.min(proj - half);
+                        } else {
+                            bounds[i].0 = bounds[i].0.max(proj + half);
+                        }
+                    }
+                }
+                if let Some(half) = self.apex_half(h, obs, via_here, new) {
+                    apex[k] = (proj - half, proj + half);
+                }
             }
-            items.push(self.item_on(li, e, s));
         }
-        if j == list.len() {
-            items.push(it);
+        let placed = items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| Placed {
+                need_u: self.end_need(li, e, 0, it) + margin + hot,
+                need_v: self.end_need(li, e, 1, it) + margin + hot,
+                bounds: bounds[i],
+                gap_next: items.get(i + 1).map_or(0.0, |b| Self::gap(self.board, it, b)),
+                gap_to_new: Self::gap(self.board, it, new),
+                gap_from_new: Self::gap(self.board, new, it),
+            })
+            .collect();
+        EdgeView {
+            placed,
+            len: m.edge_len(e),
+            hot,
+            need_u: self.end_need(li, e, 0, new) + margin + hot,
+            need_v: self.end_need(li, e, 1, new) + margin + hot,
+            apex,
         }
-        self.pack(li, e, &items, None).map(|v| v[j])
+    }
+
+    /// Interval for the searched track at slot j of an edge, with the given apex sides:
+    /// `pack_with` over the placed items with the track inserted at j.
+    fn slot_interval(view: &EdgeView, sides: [u8; 2], j: usize, lo: &mut Vec<f64>) -> Option<(f64, f64)> {
+        let placed = &view.placed[..];
+        let n = placed.len();
+        let extra = view.hot;
+        let mut bounds = (f64::NEG_INFINITY, f64::INFINITY);
+        for k in 0..2 {
+            match sides[k] {
+                0 => bounds.1 = bounds.1.min(view.apex[k].0),
+                1 => bounds.0 = bounds.0.max(view.apex[k].1),
+                _ => {}
+            }
+        }
+        lo.clear();
+        let mut x = f64::NEG_INFINITY;
+        for (i, p) in placed[..j].iter().enumerate() {
+            let mut y = p.need_u.max(p.bounds.0);
+            if i > 0 {
+                y = y.max(x + placed[i - 1].gap_next + extra);
+            }
+            x = y;
+            lo.push(x);
+        }
+        let mut y = view.need_u.max(bounds.0);
+        if j > 0 {
+            y = y.max(x + placed[j - 1].gap_to_new + extra);
+        }
+        x = y;
+        lo.push(x);
+        for (i, p) in placed[j..].iter().enumerate() {
+            let g = if i == 0 { p.gap_from_new } else { placed[j + i - 1].gap_next };
+            x = p.need_u.max(p.bounds.0).max(x + g + extra);
+            lo.push(x);
+        }
+        let mut h = f64::INFINITY;
+        for (i, p) in placed[j..].iter().enumerate().rev() {
+            let mut y = (view.len - p.need_v).min(p.bounds.1);
+            if j + i + 1 < n {
+                y = y.min(h - p.gap_next - extra);
+            }
+            h = y;
+            if lo[j + 1 + i] > h + 1e-9 {
+                return None;
+            }
+        }
+        let mut y = (view.len - view.need_v).min(bounds.1);
+        if j < n {
+            y = y.min(h - placed[j].gap_from_new - extra);
+        }
+        h = y;
+        let a = lo[j];
+        let res = (a, h);
+        if a > h + 1e-9 {
+            return None;
+        }
+        for (i, p) in placed[..j].iter().enumerate().rev() {
+            let g = if i + 1 == j { p.gap_to_new } else { p.gap_next };
+            h = (view.len - p.need_v).min(p.bounds.1).min(h - g - extra);
+            if lo[i] > h + 1e-9 {
+                return None;
+            }
+        }
+        Some(if res.0 > res.1 {
+            let m = (res.0 + res.1) / 2.0;
+            (m, m)
+        } else {
+            res
+        })
     }
 
     // ------------------------------------------------------------------ chords
@@ -834,9 +1008,10 @@ impl<'a> Router<'a> {
     /// Can a chord of `net` from `a` (slot sa) to `b` (slot sb) be added to triangle t?
     #[allow(clippy::too_many_arguments)]
     fn chord_ok(&self, t: u32, li: usize, net: NetId, a: CPos, sa: Option<usize>, b: CPos, sb: Option<usize>) -> bool {
-        let Some(list) = self.chords[li].get(&t) else {
+        let list = &self.chords[li][t as usize];
+        if list.is_empty() {
             return true;
-        };
+        }
         let x = self.coord(t, li, a, None, sa);
         let y = self.coord(t, li, b, None, sb);
         let (lo, hi) = if x < y { (x, y) } else { (y, x) };
@@ -860,9 +1035,10 @@ impl<'a> Router<'a> {
 
     /// Can a half chord from interior point `p` to boundary position `b` be added to t?
     fn half_chord_ok(&self, t: u32, li: usize, net: NetId, p: Point, b: CPos, sb: Option<usize>) -> bool {
-        let Some(list) = self.chords[li].get(&t) else {
+        let list = &self.chords[li][t as usize];
+        if list.is_empty() {
             return true;
-        };
+        }
         let q = self.pos_point(t, li, b, None, sb);
         list.iter().all(|ch| {
             self.segs[ch.seg as usize].as_ref().unwrap().net == net || {
@@ -988,7 +1164,8 @@ impl<'a> Router<'a> {
                 continue;
             }
             let tv = m.tris[t as usize];
-            if let Some(list) = self.chords[li].get(&t) {
+            let list = &self.chords[li][t as usize];
+            if !list.is_empty() {
                 // which new edge (s, v_i) each chord crosses and where
                 let mut per_edge: [Vec<(f64, Item)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
                 for ch in list {
@@ -1029,10 +1206,10 @@ impl<'a> Router<'a> {
                 }
                 let side_idx = m.edge_tris[e as usize].iter().position(|&x| x == t).unwrap();
                 let mut items = self.items_on(li, e);
-                let chords = self.chords[li].get(&t);
+                let chords = &self.chords[li][t as usize];
                 for (it, &sg) in items.iter_mut().zip(&self.cross[li][e as usize]) {
                     it.sides[side_idx] = 2;
-                    let Some(ch) = chords.and_then(|l| l.iter().find(|c| c.seg == sg)) else {
+                    let Some(ch) = chords.iter().find(|c| c.seg == sg) else {
                         continue;
                     };
                     let hits = self.rethread_hits(t, li, ch, p);
@@ -1104,20 +1281,20 @@ impl<'a> Router<'a> {
             }
             // geometry of the old chords, before the mesh changes
             let mut old: Vec<(Chord, Vec<(usize, f64)>, Point)> = Vec::new();
-            if let Some(list) = self.chords[li].remove(&t) {
-                for ch in list {
-                    let hits = self.rethread_hits(t, li, &ch, p);
-                    let a = self.pos_point(t, li, ch.a, Some(ch.seg), None);
-                    let b = self.pos_point(t, li, ch.b, Some(ch.seg), None);
-                    old.push((ch, hits, a.lerp(b, 1e-6)));
-                }
+            for ch in std::mem::take(&mut self.chords[li][t as usize]) {
+                let hits = self.rethread_hits(t, li, &ch, p);
+                let a = self.pos_point(t, li, ch.a, Some(ch.seg), None);
+                let b = self.pos_point(t, li, ch.b, Some(ch.seg), None);
+                old.push((ch, hits, a.lerp(b, 1e-6)));
             }
             let old_tv = self.m(li).tris[t as usize];
             let old_edges = self.m(li).tri_edges[t as usize];
             let (_, x) = self.sub.m[li].split(t, site, p, &shared.sites);
             let ne = self.m(li).edges.len();
             self.cross[li].resize(ne, Vec::new());
-            let mut on_edge: HashMap<u32, Vec<(f64, u32)>> = HashMap::new();
+            let nt = self.m(li).tris.len();
+            self.chords[li].resize(nt, Vec::new());
+            let mut on_edge: FastMap<u32, Vec<(f64, u32)>> = FastMap::default();
             for (ch, hits, start_pt) in old {
                 let m = &self.sub.m[li];
                 let new_edge = |k: usize| -> u32 { m.tri_edges[x[k] as usize][2] }; // E_k = (s, v_k)
@@ -1254,7 +1431,7 @@ impl<'a> Router<'a> {
                     if !seg.chord_tris.contains(&xt) {
                         seg.chord_tris.push(xt);
                     }
-                    self.chords[li].entry(xt).or_default().push(c);
+                    self.chords[li][xt as usize].push(c);
                 }
             }
             // order on the new edges: from v_i (edges[e][0]) towards s
@@ -1329,10 +1506,21 @@ impl<'a> Router<'a> {
             Goal::Plane => Vec::new(),
         };
         let h = |p: Point| -> f64 {
-            if target_pts.is_empty() {
-                0.0
-            } else {
-                target_pts.iter().map(|&q| q.dist(p)).fold(f64::INFINITY, f64::min)
+            match target_pts[..] {
+                [] => 0.0,
+                [q] => q.dist(p),
+                _ => {
+                    // the exact distance only for those that can be the minimum
+                    let d2 = target_pts
+                        .iter()
+                        .map(|&q| (q - p).len2())
+                        .fold(f64::INFINITY, f64::min);
+                    target_pts
+                        .iter()
+                        .filter(|&&q| (q - p).len2() <= d2 * (1.0 + 1e-9))
+                        .map(|&q| q.dist(p))
+                        .fold(f64::INFINITY, f64::min)
+                }
             }
         };
         let is_target = |pin: usize| -> bool {
@@ -1355,9 +1543,9 @@ impl<'a> Router<'a> {
         let nl = self.nl();
 
         let mut nodes: Vec<Node> = Vec::new();
-        let mut best: HashMap<(u8, u32, u32), f64> = HashMap::new();
+        let mut best: FastMap<(u8, u32, u32), f64> = FastMap::default();
         let mut open = BinaryHeap::new();
-        type Best = HashMap<(u8, u32, u32), f64>;
+        type Best = FastMap<(u8, u32, u32), f64>;
         let push = |best: &mut Best,
                     nodes: &mut Vec<Node>,
                     open: &mut BinaryHeap<Open>,
@@ -1365,14 +1553,43 @@ impl<'a> Router<'a> {
                     pos: Point,
                     g: f64,
                     parent: u32| {
-            let k = key(&kind);
-            if let Some(&b) = best.get(&k)
-                && b <= g + 1e-9
-            {
-                return;
+            match best.entry(key(&kind)) {
+                Entry::Occupied(mut b) => {
+                    if *b.get() <= g + 1e-9 {
+                        return;
+                    }
+                    b.insert(g);
+                }
+                Entry::Vacant(b) => {
+                    b.insert(g);
+                }
             }
-            best.insert(k, g);
-            nodes.push(Node { kind, pos, g, parent });
+            let (seen, block_up, block_len) = match (kind, nodes.get(parent as usize)) {
+                (NK::Tri { t, li, .. }, Some(n)) if n.block_len == BLOCK => (tri_bit(t, li), parent, 1),
+                (NK::Tri { t, li, .. }, Some(n)) if n.block_len > 0 => {
+                    (n.seen | tri_bit(t, li), n.block_up, n.block_len + 1)
+                }
+                (NK::Tri { t, li, .. }, _) => (tri_bit(t, li), u32::MAX, 1),
+                _ => (0, u32::MAX, 0),
+            };
+            let via_up = match nodes.get(parent as usize) {
+                Some(Node {
+                    kind: NK::Site { .. } | NK::Vert { .. },
+                    ..
+                }) => parent,
+                Some(n) => n.via_up,
+                None => u32::MAX,
+            };
+            nodes.push(Node {
+                kind,
+                pos,
+                g,
+                parent,
+                seen,
+                block_up,
+                block_len,
+                via_up,
+            });
             open.push(Open(g + h(pos), (nodes.len() - 1) as u32));
         };
 
@@ -1405,9 +1622,11 @@ impl<'a> Router<'a> {
             }
         }
 
+        let mut views: FastMap<(u8, u32), EdgeView> = FastMap::default();
+        let mut scratch: Vec<f64> = Vec::new();
         // crossings out of triangle t (layer lu) through local edge k
         #[allow(clippy::too_many_arguments)]
-        let cross_out = |best: &mut Best,
+        let mut cross_out = |best: &mut Best,
                          nodes: &mut Vec<Node>,
                          open: &mut BinaryHeap<Open>,
                          t: u32,
@@ -1447,20 +1666,23 @@ impl<'a> Router<'a> {
                 return;
             }
             // never enter a triangle this path already passed on this layer (no loops)
-            {
-                let mut p = idx;
-                while p != u32::MAX {
-                    match nodes[p as usize].kind {
-                        NK::Tri { t: tp, li: lp, .. } if lp as usize == lu => {
-                            if tp == t2 {
-                                return;
-                            }
+            let bit = tri_bit(t2, lu as u8);
+            let mut block = idx;
+            while block != u32::MAX {
+                let top = &nodes[block as usize];
+                if top.seen & bit != 0 {
+                    let mut p = block;
+                    while p != top.block_up {
+                        let NK::Tri { t: tp, li: lp, .. } = nodes[p as usize].kind else {
+                            break;
+                        };
+                        if tp == t2 && lp as usize == lu {
+                            return;
                         }
-                        NK::Tri { .. } => {}
-                        _ => break,
+                        p = nodes[p as usize].parent;
                     }
-                    p = nodes[p as usize].parent;
                 }
+                block = top.block_up;
             }
             let mut item = item;
             item.w = self.width_at_edge(lu, e, item.w, &necks, neck_w);
@@ -1476,7 +1698,10 @@ impl<'a> Router<'a> {
                     it_in.w = self.width_at_edge(lu, e_in, cls.track_width, &necks, neck_w);
                     let si = m.edge_tris[e_in as usize].iter().position(|&x| x == t).unwrap();
                     it_in.sides[si] = self.side_of_pos(lu, t, e_in, CPos::Edge(k));
-                    if self.slot_interval(lu, e_in, js, it_in).is_none() {
+                    let view = views
+                        .entry((lu as u8, e_in))
+                        .or_insert_with(|| self.edge_view(lu, e_in, &it_in));
+                    if Self::slot_interval(view, it_in.sides, js, &mut scratch).is_none() {
                         return;
                     }
                 }
@@ -1487,6 +1712,7 @@ impl<'a> Router<'a> {
             let dir = (pv - pu) * (1.0 / len);
             let n = self.cross[lu][e as usize].len();
             let escape = self.escape_penalty(lu, e, net);
+            let view = views.entry((lu as u8, e)).or_insert_with(|| self.edge_view(lu, e, &item));
             for j in 0..=n {
                 if free {
                     if let Some((cp, cs)) = chord_from
@@ -1500,7 +1726,7 @@ impl<'a> Router<'a> {
                         continue;
                     }
                 }
-                let Some((lo, hi)) = self.slot_interval(lu, e, j, item) else {
+                let Some((lo, hi)) = Self::slot_interval(view, item.sides, j, &mut scratch) else {
                     continue;
                 };
                 let q = pu + dir * (node.pos - pu).dot(dir).clamp(lo, hi);
@@ -1521,6 +1747,10 @@ impl<'a> Router<'a> {
             }
         };
 
+        let tracing = self.trace.lock().unwrap().is_some();
+        // via checks depend on the routes and the net only, so one per site and search will do
+        let mut site_ok: FastMap<u32, bool> = FastMap::default();
+        let mut vertex_ok: FastMap<u32, Option<bool>> = FastMap::default();
         let mut expansions = 0;
         while let Some(Open(_, idx)) = open.pop() {
             let node = nodes[idx as usize];
@@ -1531,7 +1761,7 @@ impl<'a> Router<'a> {
             if expansions > self.cfg.max_expansions {
                 return None;
             }
-            if let Some(t) = self.trace.lock().unwrap().as_mut() {
+            if tracing && let Some(t) = self.trace.lock().unwrap().as_mut() {
                 let li = match node.kind {
                     NK::Tri { li, .. } | NK::Vert { li, .. } | NK::Site { li, .. } => li,
                     _ => 0,
@@ -1583,7 +1813,8 @@ impl<'a> Router<'a> {
                     {
                         for &site in list {
                             let q = self.site_point(site);
-                            if !self.sub.site_usable(site) || !self.via_ok_site(site, net) {
+                            let ok = *site_ok.entry(site).or_insert_with(|| self.via_ok_site(site, net));
+                            if !self.sub.site_usable(site) || !ok {
                                 continue;
                             }
                             if conn.goal == Goal::Plane {
@@ -1655,7 +1886,8 @@ impl<'a> Router<'a> {
                         if site == NONE || site == STEINER {
                             continue;
                         }
-                        let Some(existing) = self.via_ok_vertex(site, net) else {
+                        let ok = *vertex_ok.entry(site).or_insert_with(|| self.via_ok_vertex(site, net));
+                        let Some(existing) = ok else {
                             continue;
                         };
                         if let Some((ep, es)) = entry_pos
@@ -1711,12 +1943,12 @@ impl<'a> Router<'a> {
                     // vias of this path so far (hole to hole spacing within one connection)
                     let mut own_vias: Vec<Point> = Vec::new();
                     {
-                        let mut p = idx;
+                        let mut p = node.via_up;
                         while p != u32::MAX {
                             if let NK::Site { site, .. } | NK::Vert { site, .. } = nodes[p as usize].kind {
                                 own_vias.push(self.site_point(site));
                             }
-                            p = nodes[p as usize].parent;
+                            p = nodes[p as usize].via_up;
                         }
                     }
                     let (_, own_drill, _) = self.via_size(net);
@@ -1734,7 +1966,7 @@ impl<'a> Router<'a> {
                         {
                             continue;
                         }
-                        if !self.via_ok_site(site, net) {
+                        if !*site_ok.entry(site).or_insert_with(|| self.via_ok_site(site, net)) {
                             continue;
                         }
                         tried += 1;
@@ -2015,7 +2247,7 @@ impl<'a> Router<'a> {
         }
         for (t, ch) in chords {
             s.chord_tris.push(t);
-            self.chords[li].entry(t).or_default().push(ch);
+            self.chords[li][t as usize].push(ch);
         }
         self.segs.push(Some(s));
         id
@@ -2031,9 +2263,7 @@ impl<'a> Router<'a> {
                 self.cross[li][c.e as usize].retain(|&x| x != sid);
             }
             for t in &s.chord_tris {
-                if let Some(list) = self.chords[li].get_mut(t) {
-                    list.retain(|ch| ch.seg != sid);
-                }
+                self.chords[li][*t as usize].retain(|ch| ch.seg != sid);
             }
         }
         for v in std::mem::take(&mut self.conn_vias[ci]) {
@@ -2216,13 +2446,14 @@ impl<'a> Router<'a> {
         for _ in 0..3 {
             match self.search(ci) {
                 Some(chain) => {
-                    let before = if std::env::var("GB_VALIDATE_EACH").is_ok() {
+                    let validate = std::env::var("GB_VALIDATE_EACH").is_ok();
+                    let before = if validate {
                         self.validate().len()
                     } else {
                         0
                     };
                     if self.commit(ci, &chain) {
-                        if std::env::var("GB_VALIDATE_EACH").is_ok() {
+                        if validate {
                             let v = self.validate();
                             if v.len() > before {
                                 let kinds: Vec<String> = chain.iter().map(|n| format!("{:?}", n.kind)).collect();
@@ -2285,10 +2516,10 @@ impl<'a> Router<'a> {
 
     /// Chords of triangle t (debugging aid).
     pub fn chords_debug(&self, li: usize, t: u32) -> Vec<String> {
-        self.chords[li]
-            .get(&t)
-            .map(|l| l.iter().map(|c| format!("{}:{:?}->{:?}", c.seg, c.a, c.b)).collect())
-            .unwrap_or_default()
+        self.chords[li][t as usize]
+            .iter()
+            .map(|c| format!("{}:{:?}->{:?}", c.seg, c.a, c.b))
+            .collect()
     }
 
     /// Consistency checks of the topological state (debugging aid).

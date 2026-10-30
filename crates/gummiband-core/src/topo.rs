@@ -7,7 +7,6 @@
 //! Every triangle is free or covered by an obstacle; edge ends carry the clearance demands of
 //! the obstacles that meet there.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use rayon::prelude::*;
@@ -16,7 +15,7 @@ use spade::{ConstrainedDelaunayTriangulation, Point2, PositionInTriangulation, T
 
 use crate::board::{Board, LayerId, NetId, ObstacleKind};
 use crate::geom::{Point, Polygon, Rect, orient, pt};
-use crate::index::GridIndex;
+use crate::index::{FastMap, GridIndex};
 
 pub const NONE: u32 = u32::MAX;
 /// Obstacle id used for "outside the board".
@@ -76,7 +75,7 @@ pub struct Shared {
     pub obs_index: GridIndex,
     pub sites: Vec<Site>,
     /// Via-in-pad sites per pin.
-    pub pad_sites: HashMap<u32, Vec<u32>>,
+    pub pad_sites: FastMap<u32, Vec<u32>>,
     pub bounds: Rect,
 }
 
@@ -100,7 +99,9 @@ pub struct Mesh {
     /// Per triangle: NONE (free), OUTSIDE or the covering obstacle.
     pub status: Vec<u32>,
     /// Triangles covered by each obstacle (fixed: vias only split free triangles).
-    pub obs_tris: Arc<HashMap<u32, Vec<u32>>>,
+    pub obs_tris: Arc<FastMap<u32, Vec<u32>>>,
+    /// Obstacles around each original vertex (via vertices have none).
+    pub vert_obs: Arc<Vec<Vec<u32>>>,
     /// Per edge end (2 * edge + end): demands.
     pub demands: Vec<Vec<Demand>>,
     /// Unused via sites inside each triangle.
@@ -108,7 +109,7 @@ pub struct Mesh {
     /// Triangle that holds each unused site (NONE once placed or if not usable).
     pub site_tri: Vec<u32>,
     /// Vertex of each placed site.
-    pub site_vert: HashMap<u32, u32>,
+    pub site_vert: FastMap<u32, u32>,
 }
 
 /// All layer meshes. Cheap to clone (static parts shared); every router run owns one, because
@@ -145,7 +146,7 @@ impl Substrate {
             obs_polys,
             obs_index,
             sites: Vec::new(),
-            pad_sites: HashMap::new(),
+            pad_sites: FastMap::default(),
             bounds,
         };
         shared.sites = build_sites(board, &shared, cfg.via_pitch);
@@ -199,7 +200,7 @@ impl Mesh {
     fn build(board: &Board, shared: &Shared, l: LayerId, steiner_pitch: f64) -> Mesh {
         let bounds = shared.bounds;
         let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> = ConstrainedDelaunayTriangulation::new();
-        let mut handle_of: HashMap<(i64, i64), FixedVertexHandle> = HashMap::new();
+        let mut handle_of: FastMap<(i64, i64), FixedVertexHandle> = FastMap::default();
         let mut constraints: Vec<(FixedVertexHandle, FixedVertexHandle)> = Vec::new();
         // long obstacle sides get extra vertices: a channel between a pin and the long side of
         // an exposed pad (or the board edge) is then measured across, by a short mesh edge,
@@ -322,7 +323,7 @@ impl Mesh {
         }
         let verts: Vec<Point> = cdt.vertices().map(|v| pt(v.position().x, v.position().y)).collect();
         let mut tris = Vec::new();
-        let mut face_to_tri: HashMap<usize, u32> = HashMap::new();
+        let mut face_to_tri: FastMap<usize, u32> = FastMap::default();
         for f in cdt.inner_faces() {
             let vs = f.vertices();
             face_to_tri.insert(f.fix().index(), tris.len() as u32);
@@ -343,11 +344,12 @@ impl Mesh {
             edge_tris: Vec::new(),
             vert_tris: Vec::new(),
             status: Vec::new(),
-            obs_tris: Arc::new(HashMap::new()),
+            obs_tris: Arc::new(FastMap::default()),
+            vert_obs: Default::default(),
             demands: Vec::new(),
             tri_sites: Vec::new(),
             site_tri: vec![NONE; shared.sites.len()],
-            site_vert: HashMap::new(),
+            site_vert: FastMap::default(),
         };
         for h in steiner_handles {
             m.vert_site[h] = STEINER;
@@ -361,13 +363,28 @@ impl Mesh {
                 classify(board, shared, l, c)
             })
             .collect();
-        let mut ot: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut ot: FastMap<u32, Vec<u32>> = FastMap::default();
         for (t, &o) in m.status.iter().enumerate() {
             if o != NONE && o != OUTSIDE {
                 ot.entry(o).or_default().push(t as u32);
             }
         }
         m.obs_tris = Arc::new(ot);
+        m.vert_obs = Arc::new(
+            m.vert_tris
+                .iter()
+                .map(|list| {
+                    let mut obs: Vec<u32> = Vec::new();
+                    for &t in list {
+                        let o = m.status[t as usize];
+                        if o != NONE && !obs.contains(&o) {
+                            obs.push(o);
+                        }
+                    }
+                    obs
+                })
+                .collect(),
+        );
         m.demands = (0..m.edges.len() as u32)
             .flat_map(|e| {
                 let [a, b] = m.edge_demands(e);
@@ -396,7 +413,7 @@ impl Mesh {
     }
 
     fn build_topology(&mut self) {
-        let mut edge_map: HashMap<(u32, u32), u32> = HashMap::with_capacity(self.tris.len() * 2);
+        let mut edge_map: FastMap<(u32, u32), u32> = FastMap::with_capacity_and_hasher(self.tris.len() * 2, Default::default());
         self.edges.clear();
         self.edge_tris.clear();
         self.tri_edges = vec![[0u32; 3]; self.tris.len()];
