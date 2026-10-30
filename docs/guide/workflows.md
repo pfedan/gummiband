@@ -77,6 +77,7 @@ Effort knobs, from cheap to expensive:
 | fewer violations in the drawn tracks | `--geometry-generations 3` (the plugin default) or more |
 | fewer vias | `--via-cost 5` |
 | shorter tracks, more vias | `--via-cost 1.5` |
+| tidier two layer boards, one direction per layer | `--layer-dirs 1` (0 switches the preference off) |
 | finer via placement in tight spots | `--via-pitch 0.25` |
 
 The search is deterministic: the same board, options and `GB_EVO_SEED` give the same result. Set

@@ -74,6 +74,7 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | `--geometry-generations N` | 0 | Rounds that are judged after the tracks were drawn, by the clearance check. Slower (each round draws and checks every candidate) and cleaner. The plugin uses 3. |
 | `--via-pitch MM` | 0.5 | Grid pitch of the candidate via positions. Finer grids allow more via places and cost memory and time. |
 | `--via-cost MM` | 3.0 | Cost of a via in millimetres of track. Lower gives more vias and shorter tracks; the search varies the value around what you give. |
+| `--layer-dirs W` | 0.5 | Weight of preferred directions per layer: the routing layers alternate horizontal and vertical, and running against the grain costs extra. A soft cost, used by every third run of the portfolio, so the search has candidates with and without it. 0 switches it off. |
 
 A good default for a real two layer board with a few hundred connections is the plain
 `--keep-locked`: all cores, 3 generations, no geometry generations, a minute or two. Add

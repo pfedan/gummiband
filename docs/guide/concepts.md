@@ -59,9 +59,10 @@ router could not see.
 ## Track width and necking
 
 A track has the width of its net class. Where the class width does not fit between fine pitch
-pins, the router may neck a track down near the pin: at most down to the pad width, never below
-the board's minimum track width or what a custom minimum width rule allows. The neck covers the
-pin area (the courtyard when a rule exempts one), so a whole fan-out narrows alike.
+pins, the router may neck a track down near the pin: to the pad width, or at fine pitch to the
+pitch minus the clearance, at most 0.4 mm, and never below the board's minimum track width or what
+a custom minimum width rule allows. The neck covers the pin area (the courtyard when a rule exempts
+one), so a whole fan-out narrows alike.
 `--net-widths` overrides the class width per net.
 
 ## Vias
@@ -75,7 +76,9 @@ eagerly the router changes layers; the search also tries values around it.
 ## Priorities and order
 
 Connections are routed in order of their net class priority (lower first); plane fan-outs are
-routed first or last depending on the attempt. When a connection finds no room, nearby
+routed first or last depending on the attempt. Every third attempt gives the layers preferred
+directions (horizontal and vertical in turn, `--layer-dirs`), which keeps bus like boards tidy;
+the other attempts route without that preference, and the best result wins. When a connection finds no room, nearby
 connections are ripped up and rerouted; when that fails, the connection is marked unrouted and
 the next search round moves it forward in the order. Many attempts with different orders run in
 parallel (the portfolio), then an evolutionary search mutates the best order for a few
@@ -106,8 +109,7 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
 - **Partial routing.** Every run replaces all unlocked copper. There is no "route selected nets"
   and no follow-me routing from a half drawn track yet. Lock what you want to keep.
 - **Differential pairs and length matching.** Pairs are routed as two independent nets.
-- **Teardrops and preferred directions per layer.** Teardrops come from KiCad's own feature
-  after routing; layer directions are planned as a dimension of the search.
+- **Teardrops.** Add them with KiCad's own teardrop feature after routing.
 - **Per net options from a file.** Priorities come from net classes; a `gummiband.toml` next to
   the board is planned. The MCP server has per net priority and skip today.
 - **More rule conditions.** Only the clearance and minimum width rules above; no rules by
