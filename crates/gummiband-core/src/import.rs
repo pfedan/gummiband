@@ -111,6 +111,10 @@ impl Board {
                     continue;
                 }
             };
+            // a neck below a minimum width may only be where the rules allow it: it stays
+            if self.class_of(net).min_width.is_some_and(|w| width < w - 1e-9) {
+                continue;
+            }
             if routing.has(layer) && a.dist(b) > 1e-9 {
                 pieces.push(Piece {
                     item: c.source,
@@ -688,14 +692,29 @@ impl Router<'_> {
         }));
     }
 
-    fn mark_frac(&self, li: usize, e: u32, seg: u32) -> Option<f64> {
+    /// Where imported `seg` crosses edge e, for its `nth` place in the list of the edge.
+    fn mark_frac(&self, li: usize, e: u32, seg: u32, nth: usize) -> Option<f64> {
         let s = self.segs[seg as usize].as_ref()?;
         let imp = s.imported.as_ref()?;
-        let k = s.crossings.iter().position(|c| c.e == e)?;
         let m = &self.sub.m[li];
         let [u, v] = m.edges[e as usize];
         let (pu, pv) = (m.verts[u as usize], m.verts[v as usize]);
-        Some(((imp.marks[k].p - pu).dot(pv - pu) / (pv - pu).len2()).clamp(0.0, 1.0))
+        let frac = |k: usize| ((imp.marks[k].p - pu).dot(pv - pu) / (pv - pu).len2()).clamp(0.0, 1.0);
+        let mut on = s.crossings.iter().enumerate().filter(|(_, c)| c.e == e).map(|x| x.0);
+        let first = on.next()?;
+        if nth == 0 && on.next().is_none() {
+            return Some(frac(first));
+        }
+        // the rare track that crosses an edge twice
+        let mut all: Vec<f64> = s
+            .crossings
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.e == e)
+            .map(|x| frac(x.0))
+            .collect();
+        all.sort_by(f64::total_cmp);
+        all.get(nth).copied()
     }
 
     /// Nearest imported crossings around the place `x` in the list of edge e, as (index, fraction
@@ -705,7 +724,10 @@ impl Router<'_> {
         let mut lo = (-1, 0.0);
         let mut hi = (list.len() as isize, 1.0);
         for (i, &s) in list.iter().enumerate() {
-            let Some(f) = self.mark_frac(li, e, s) else { continue };
+            let nth = list[..i].iter().filter(|&&q| q == s).count();
+            let Some(f) = self.mark_frac(li, e, s, nth) else {
+                continue;
+            };
             if (i as f64) < x {
                 lo = (i as isize, f);
             } else if (i as f64) > x {
@@ -722,7 +744,7 @@ impl Router<'_> {
         let x = match (slot, seg) {
             (Some(j), _) => j as f64 - 0.5,
             (None, Some(s)) => {
-                if let Some(f) = self.mark_frac(li, e, s) {
+                if let Some(f) = self.mark_frac(li, e, s, 0) {
                     return f;
                 }
                 self.cross[li][e as usize].iter().position(|&q| q == s).unwrap_or(0) as f64
@@ -773,40 +795,32 @@ impl Router<'_> {
             .filter(|&i| self.segs[i as usize].as_ref().is_some_and(|s| s.imported.is_none()))
             .collect();
         let mut tracks: Vec<Track> = routed.par_iter().flat_map_iter(|&sid| self.seg_tracks(sid)).collect();
+        // a stretch can bend far inside a triangle, or even out of it and back over the edge it
+        // came over, where the chords do not show it: what a routed track really runs into gets
+        // straight, and straight chords do not cross
         let mut flats: FastMap<u32, Vec<bool>> = FastMap::default();
-        for &sid in &routed {
-            let s = self.segs[sid as usize].as_ref().unwrap();
-            let li = s.li as usize;
-            let path = flatten(&self.seg_path(sid));
-            for &t in &s.chord_tris {
-                for ch in &self.chords[li][t as usize] {
-                    let Some(o) = self.segs[ch.seg as usize].as_ref() else {
-                        continue;
-                    };
-                    let Some(imp) = o.imported.as_ref() else { continue };
-                    let n = imp.marks.len();
-                    let k = o.crossings.iter().position(|c| c.from == t).unwrap_or(n);
-                    let (from, to) = (
-                        if k == 0 { 0 } else { imp.marks[k - 1].i as usize },
-                        if k == n {
-                            soft.chains[imp.chain as usize].pts.len() - 2
-                        } else {
-                            imp.marks[k].i as usize
-                        },
-                    );
-                    if imp.flat[k] || from >= to {
-                        continue;
-                    }
-                    let pts = &soft.chains[imp.chain as usize].pts;
-                    let mut sub: Vec<Point> = Vec::new();
-                    sub.push(if k == 0 { pts[0] } else { imp.marks[k - 1].p });
-                    sub.extend_from_slice(&pts[from + 1..=to]);
-                    sub.push(if k == n { *pts.last().unwrap() } else { imp.marks[k].p });
-                    let hit = sub
-                        .windows(2)
-                        .any(|a| path.windows(2).any(|b| segs_intersect(a[0], a[1], b[0], b[1])));
-                    if hit {
-                        flats.entry(ch.seg).or_insert_with(|| imp.flat.clone())[k] = true;
+        let paths: Vec<(usize, Vec<Point>)> = routed
+            .iter()
+            .map(|&sid| {
+                let s = self.segs[sid as usize].as_ref().unwrap();
+                (s.li as usize, flatten(&self.seg_path(sid)))
+            })
+            .collect();
+        for (sid, o) in self.segs.iter().enumerate() {
+            let Some(o) = o else { continue };
+            let Some(imp) = o.imported.as_ref() else { continue };
+            let pts = &soft.chains[imp.chain as usize].pts;
+            for (li, path) in &paths {
+                if *li != o.li as usize {
+                    continue;
+                }
+                for (i, a) in pts.windows(2).enumerate() {
+                    if path.windows(2).any(|b| segs_intersect(a[0], a[1], b[0], b[1])) {
+                        let flat = flats.entry(sid as u32).or_insert_with(|| imp.flat.clone());
+                        for end in [i, i + 1] {
+                            let k = imp.marks.iter().position(|m| m.i as usize >= end);
+                            flat[k.unwrap_or(imp.marks.len())] = true;
+                        }
                     }
                 }
             }
