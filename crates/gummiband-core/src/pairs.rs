@@ -629,6 +629,7 @@ fn make_track(elems: Vec<Elem>, width: f64, layer: LayerId, net: NetId) -> Track
         neck_w: width,
         origin: None,
         resting: false,
+        fitted: Vec::new(),
     }
 }
 

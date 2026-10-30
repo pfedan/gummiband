@@ -380,32 +380,30 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
     let annealing = |it: usize| it * 4 >= cfg.iterations * 3;
     // sleeping copper, vias of one layer and fitted widths stay on the CPU
     #[cfg(feature = "gpu")]
-    let mut on_gpu = (cfg.gpu
-        && !lazy
-        && via_layer.iter().all(Option::is_none)
-        && geo.tracks.iter().all(|t| t.fitted.is_empty()))
-        .then(|| {
-            let half: Vec<f64> = geo.tracks.iter().map(half_w).collect();
-            let clrs: Vec<f64> = (0..board.nets.len() as u32).map(clr).collect();
-            gpu::GpuRelax::new(gpu::Setup {
-                board,
-                geo,
-                cfg,
-                origin: (bounds.min + bounds.max) * 0.5,
-                cells: &cells,
-                layer_cells: &layer_cells,
-                near_obs: &near_obs,
-                obs_polys: &sub.shared.obs_polys,
-                near_edge: &near_edge,
-                net_clr: &net_clr,
-                half_w: &half,
-                clr: &clrs,
-                max_clr,
-                max_vr,
-                via_grid: &via_grid,
+    let mut on_gpu =
+        (cfg.gpu && !lazy && via_layer.iter().all(Option::is_none) && geo.tracks.iter().all(|t| t.fitted.is_empty()))
+            .then(|| {
+                let half: Vec<f64> = geo.tracks.iter().map(half_w).collect();
+                let clrs: Vec<f64> = (0..board.nets.len() as u32).map(clr).collect();
+                gpu::GpuRelax::new(gpu::Setup {
+                    board,
+                    geo,
+                    cfg,
+                    origin: (bounds.min + bounds.max) * 0.5,
+                    cells: &cells,
+                    layer_cells: &layer_cells,
+                    near_obs: &near_obs,
+                    obs_polys: &sub.shared.obs_polys,
+                    near_edge: &near_edge,
+                    net_clr: &net_clr,
+                    half_w: &half,
+                    clr: &clrs,
+                    max_clr,
+                    max_vr,
+                    via_grid: &via_grid,
+                })
             })
-        })
-        .flatten();
+            .flatten();
     // the last quarter resolves clearances on the CPU: there tracks and vias have to answer each
     // other round by round, and f64 and the dirty cells count
     #[cfg(feature = "gpu")]
