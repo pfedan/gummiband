@@ -209,6 +209,7 @@ class ImportPlan:
     keep: List[CopperItem]  # original items that stay (locked, with keep_locked)
     create: List[CopperItem]  # routed items to create
     warnings: List[str]
+    add_only: bool = False  # nothing on the board is removed
 
     def summary(self) -> Dict[str, Counter]:
         return {
@@ -237,6 +238,14 @@ def plan_import(original: BoardCopper, routed: BoardCopper, keep_locked: bool) -
     if missing:
         warnings.append(f"{len(missing)} kept (locked) items are missing in the routed file")
     return ImportPlan(keep_locked, remove, keep, create, warnings)
+
+
+def plan_addition(original: BoardCopper, routed: BoardCopper) -> ImportPlan:
+    """Only what the router added; everything on the board stays."""
+    known = {it.key() for it in original.items}
+    create = [it for it in routed.items if it.key() not in known]
+    return ImportPlan(True, [], list(original.items), create,
+                      list(original.warnings) + list(routed.warnings), add_only=True)
 
 
 def plan_from_texts(original_text: str, routed_text: str, keep_locked: bool) -> ImportPlan:

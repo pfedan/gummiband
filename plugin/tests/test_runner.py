@@ -76,6 +76,13 @@ class CommandTest(unittest.TestCase):
         opts.keep_locked = False
         self.assertNotIn("--keep-locked", runner.build_command("gb", Path("b"), Path("o"), opts))
 
+    def test_finish_nets(self):
+        opts = runner.RouteOptions(geometry_generations=0, finish_nets=["A", "B"])
+        cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
+        self.assertIn("--keep-all", cmd)
+        self.assertEqual(cmd[cmd.index("--nets") + 1], "A,B")
+        self.assertNotIn("--keep-locked", cmd)
+
     def test_quality_and_animation(self):
         opts = runner.RouteOptions(geometry_generations=3, frames_dir="/p/anim")
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)

@@ -108,3 +108,9 @@ venv, e.g. `~/Library/Caches/kicad/10.0/python-environments/gummiband.kicad-plug
 
 Debugging inside KiCad: start KiCad with `KICAD_ALLOC_CONSOLE=1 KICAD_ENABLE_WXTRACE=1
 WXTRACE=KICAD_API` to see the API trace and the plugin's stderr.
+
+## Finish selected nets (follow-me)
+
+The second button, **Finish selected nets with Gummiband**, routes what is missing on the nets of
+the selected tracks, vias or pads. All copper on the board stays; a started track is continued
+from where it ends. The new tracks arrive as one undo step.

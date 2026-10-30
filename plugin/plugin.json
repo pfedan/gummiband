@@ -25,6 +25,24 @@
                 "icons/gummiband-dark-24.png",
                 "icons/gummiband-dark-48.png"
             ]
+        },
+        {
+            "identifier": "finish",
+            "name": "Finish selected nets with Gummiband",
+            "description": "Keep all copper and route what is missing on the nets of the selected tracks, vias or pads",
+            "show-button": true,
+            "scopes": [
+                "pcb"
+            ],
+            "entrypoint": "gummiband_finish.py",
+            "icons-light": [
+                "icons/gummiband-light-24.png",
+                "icons/gummiband-light-48.png"
+            ],
+            "icons-dark": [
+                "icons/gummiband-dark-24.png",
+                "icons/gummiband-dark-48.png"
+            ]
         }
     ]
 }

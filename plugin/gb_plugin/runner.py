@@ -33,6 +33,8 @@ class RouteOptions:
     geometry_generations: int = 3
     # folder for one image per generation and an animated evolution.gif (None = no images)
     frames_dir: Optional[str] = None
+    # finish started tracks: route only these nets and add to the copper that is there
+    finish_nets: Optional[List[str]] = None
 
 
 def load_settings(path: Path = SETTINGS_FILE) -> dict:
@@ -88,7 +90,9 @@ def find_binary(env: Mapping[str, str] = os.environ, settings_path: Path = SETTI
 
 def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) -> List[str]:
     cmd = [binary, "route", str(board), "-o", str(output), "--progress"]
-    if opts.keep_locked:
+    if opts.finish_nets:
+        cmd += ["--keep-all", "--nets", ",".join(opts.finish_nets)]
+    elif opts.keep_locked:
         cmd.append("--keep-locked")
     cmd += ["--runs", str(int(opts.runs)), "--via-cost", repr(float(opts.via_cost))]
     if opts.geometry_generations > 0:

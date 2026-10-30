@@ -117,7 +117,8 @@ def apply_plan(board, plan: bf.ImportPlan) -> ApplyResult:
     new_items = build_items(plan, resolve)
 
     old = list(board.get_tracks()) + list(board.get_vias())
-    remove = [it for it in old if bf.should_remove(bool(it.locked), plan.keep_locked)]
+    remove = [] if plan.add_only else [it for it in old
+                                       if bf.should_remove(bool(it.locked), plan.keep_locked)]
 
     commit = board.begin_commit()
     created: List[object] = []
