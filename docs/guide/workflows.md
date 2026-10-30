@@ -99,6 +99,12 @@ is a command line feature for now; the plugin does not import footprint moves.
 
 Lock a footprint in KiCad (*Locking > Lock* on the part) to keep it from moving.
 
+**Blocks** (preliminary): put the parts of a pre-routed cell, say a converter with its locked
+tracks and vias, into a KiCad group (select them, right click, *Grouping > Group*). Under
+`--move-parts` the group moves as one block, copper included, so the layout inside stays intact.
+A group with a locked or fixed member does not move at all. Zones inside a group are not moved
+yet, and moving blocks on a real board is untested.
+
 ## Keep the designer's track widths
 
 When you re-route an existing board and want the same widths the designer used per net:
@@ -135,7 +141,14 @@ same design. It is specific to that board's part roles today; the scripts and pa
 
 ## Drive the router from an AI agent
 
-The MCP server exposes `load_board`, `list_nets`, `set_net_options`, `route`, `drc` and
-`render` to Claude Code, Claude Desktop and other MCP clients. An agent can load a board, give
-the critical nets priority, route, read the violations with positions, look at a PNG of the
-region and iterate. Setup and tool reference in [MCP.md](../MCP.md).
+The MCP server exposes `load_board`, `list_nets`, `set_net_options`, `part_info`,
+`add_locked_copper`, `route`, `drc` and `render` to Claude Code, Claude Desktop and other MCP
+clients. An agent can load a board, give the critical nets priority, route, read the violations
+with positions, look at a PNG of the region and iterate.
+
+New and preliminary: datasheet guided pre-routing. The agent asks `part_info` for the pads,
+courtyard and neighbours of a critical part, places the copper the datasheet recommends with
+`add_locked_copper` (tracks as polylines, vias; written as locked items into a working copy
+`<input>.prerouted.kicad_pcb`, your input stays untouched), checks it with `render`, and then
+routes the working copy, where the router keeps the pre-routed copper and attaches to it. Setup
+and tool reference in [MCP.md](../MCP.md).

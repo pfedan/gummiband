@@ -81,6 +81,8 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | --- | --- | --- |
 | `load_board` | `path`, `keep_locked?` | board id, layers (plane flag), outline box and size, pins, nets, routable nets, connections, planes, net classes (priority, width, clearance, via), custom rule count, custom clearance net pairs, kept net options |
 | `list_nets` | `board`, `filter?`, `include_single?` | nets with class, pin count, plane flag, effective priority, skip flag |
+| `part_info` | `board`, `reference` | pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
+| `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
 | `route` | `board`, `runs?`, `generations?`, `geometry_generations?`, `keep_locked?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below) |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
@@ -106,6 +108,36 @@ pins are left out unless `include_single` is true.
 ```json
 {"name": "list_nets", "arguments": {"board": "b1", "filter": "gnd"}}
 ```
+
+### part_info
+
+Everything an agent needs to plan copper around one footprint: its pads with name, net,
+position, size and layers, the courtyard box `[x0, y0, x1, y1]` and the references of the
+footprints whose courtyard lies within 3 mm.
+
+```json
+{"name": "part_info", "arguments": {"board": "b1", "reference": "U6"}}
+```
+
+### add_locked_copper
+
+Preliminary (new, lightly tested). Adds pre-routed copper as **locked** tracks and vias: the
+router keeps it, routes around it, and track ends join their net like pins. Tracks are polylines
+of `[x, y]` points in mm on one layer; `width`, `diameter` and `drill` default to the net class.
+The input file stays untouched: the copper goes into a working copy `<input>.prerouted.kicad_pcb`
+next to it, which is loaded with `keep_locked` and gets its own board id. Use that id for
+`route`, `drc` and `render` from then on. Calling it again on the working copy adds more copper.
+
+```json
+{"name": "add_locked_copper", "arguments": {"board": "b1",
+  "tracks": [{"net": "VBUS_IN", "layer": "F.Cu", "width": 0.8,
+              "points": [[150.0, 120.5], [153.2, 120.5], [153.2, 123.0]]}],
+  "vias": [{"net": "GND", "x": 151.0, "y": 122.0}]}}
+```
+
+Typical use, the datasheet layout of an eFuse or a converter: `part_info` for the part and its
+neighbours, `add_locked_copper` for the recommended copper, `render` of the region to check it,
+then `route` with the returned board id.
 
 ### set_net_options
 
@@ -215,5 +247,7 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
 - Incremental routing on top of existing copper (route selected nets and keep the rest) needs
   `KeepCopper::All` plus per net stripping in the writer; today a route replaces all unlocked
   copper, so skipped nets end up without tracks.
+- Pre-routing through `add_locked_copper` has tracks and vias only; locked zones (a copper
+  island from a datasheet) are not there yet.
 - Progress notifications during long routes, and cancellation (the core has no cancel hook).
 - `route` returns Gummiband's own clearance check; KiCad's verdict needs a `drc` call.

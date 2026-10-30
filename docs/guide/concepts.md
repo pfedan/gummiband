@@ -107,7 +107,11 @@ attempts on large boards.
 Things the router does not do yet. The [milestones](../MILESTONES.md) say what comes next.
 
 - **Partial routing.** Every run replaces all unlocked copper. There is no "route selected nets"
-  and no follow-me routing from a half drawn track yet. Lock what you want to keep.
+  and no follow-me routing from a half drawn track yet. Lock what you want to keep; an agent can
+  also add locked copper through the MCP server before routing.
+- **Blocks and pre-routing tools are new.** Groups that move as blocks under `--move-parts` and
+  the MCP tools `part_info` and `add_locked_copper` exist but have not been tried on a real
+  board yet; expect rough edges.
 - **Differential pairs and length matching.** Pairs are routed as two independent nets.
 - **Teardrops.** Gummiband draws none itself. `--teardrops` (experimental, command line only)
   switches on KiCad's own teardrop feature for the vias and pads of the output, and KiCad
