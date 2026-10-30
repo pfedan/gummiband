@@ -45,12 +45,14 @@ pub struct StripOptions {
     pub zone_layers: Vec<String>,
     /// Remove the unlocked tracks, arcs and vias of these nets in any case.
     pub nets: Vec<String>,
+    /// Remove these items, by their place in the file.
+    pub items: Vec<u32>,
 }
 
 /// Byte ranges of root items removed by `opts`.
 pub fn strip_ranges(kb: &KicadBoard, opts: &StripOptions) -> Vec<Range<usize>> {
     let mut out = Vec::new();
-    for n in kb.root.args() {
+    for (i, n) in kb.root.args().iter().enumerate() {
         match n.head() {
             Some("segment") | Some("arc") | Some("via") => {
                 let locked = n.flag("locked");
@@ -63,7 +65,11 @@ pub fn strip_ranges(kb: &KicadBoard, opts: &StripOptions) -> Vec<Range<usize>> {
                     });
                     name.is_some_and(|x| opts.nets.contains(&x))
                 };
-                if (locked && opts.locked) || (!locked && opts.unlocked) || net_listed {
+                if (locked && opts.locked)
+                    || (!locked && opts.unlocked)
+                    || net_listed
+                    || opts.items.contains(&(i as u32))
+                {
                     out.push(n.span());
                 }
             }

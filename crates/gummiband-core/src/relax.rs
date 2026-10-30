@@ -346,6 +346,12 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         .zip(&geo.tracks)
         .map(|(p, t)| (attach(p[0], t.net, &vias), attach(*p.last().unwrap(), t.net, &vias)))
         .collect();
+    // soft copper sleeps until something comes too close: it wakes up with the first contact and
+    // takes its neighbours along, everything else stays as it is
+    let mut awake: Vec<bool> = geo.tracks.iter().map(|t| !t.resting).collect();
+    let mut via_awake: Vec<bool> = geo.vias.iter().map(|v| !v.resting).collect();
+    let lazy = awake.iter().chain(&via_awake).any(|a| !a);
+    let via_layer: Vec<Option<LayerId>> = geo.vias.iter().map(|v| v.layer).collect();
     // per via the layers and widths of the tracks that end on it
     let mut via_tracks: Vec<Vec<(_, f64)>> = vec![Vec::new(); vias.len()];
     for (t, (a, b)) in geo.tracks.iter().zip(&ends) {
@@ -369,7 +375,11 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         if it % 10 == 9 {
             tracks = tracks
                 .par_iter()
-                .map(|p| {
+                .enumerate()
+                .map(|(ti, p)| {
+                    if !awake[ti] {
+                        return p.clone();
+                    }
                     resample(
                         &simplify(p, 0.0005),
                         if it * 4 >= cfg.iterations * 3 {
@@ -418,15 +428,35 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         via_at.extend(vias.iter().map(|v| v.0));
         via_grid.rebuild(&via_at);
         let via_grid = &via_grid;
+        if lazy {
+            wake(
+                board,
+                &geo.tracks,
+                &tracks,
+                pieces,
+                grids,
+                (&vias, &via_layer, via_grid),
+                &ends,
+                (&mut awake, &mut via_awake),
+                (max_clr, max_vr),
+            );
+        }
+        let (awake, via_awake) = (&awake, &via_awake);
         // vias move as well: pushed by obstacles, other vias and tracks of other nets
         let moved: Vec<Point> = vias
             .par_iter()
             .enumerate()
             .map(|(vi, &(vc, vr, vn, vclr))| {
+                if !via_awake[vi] {
+                    return vc;
+                }
                 let mut push = pt(0.0, 0.0);
                 for oi in sub.shared.obs_index.query_point(vc, vr + 1.0) {
                     let o = &board.obstacles[oi as usize];
                     if !o.layers.intersects(routing) && o.hole.is_none() {
+                        continue;
+                    }
+                    if via_layer[vi].is_some_and(|l| !o.layers.has(l)) {
                         continue;
                     }
                     if o.net == Some(vn) && o.kind != ObstacleKind::Hole {
@@ -474,7 +504,14 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 for &vj in &hits {
                     let vj = vj as usize;
                     let (c2, r2, n2, clr2) = vias[vj];
-                    let holes = drills[vi] / 2.0 + drills[vj] / 2.0 + board.rules.hole_to_hole + cfg.margin;
+                    if matches!((via_layer[vi], via_layer[vj]), (Some(a), Some(b)) if a != b) {
+                        continue;
+                    }
+                    let holes = if drills[vi] == 0.0 || drills[vj] == 0.0 {
+                        0.0
+                    } else {
+                        drills[vi] / 2.0 + drills[vj] / 2.0 + board.rules.hole_to_hole + cfg.margin
+                    };
                     let need = if n2 == vn {
                         holes
                     } else {
@@ -496,7 +533,10 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 }
                 // candidates of all layers, back in the order of one grid over all of them
                 let mut near: Vec<(u32, u32)> = Vec::new();
-                for g in grids {
+                for (l, g) in grids.iter().enumerate() {
+                    if via_layer[vi].is_some_and(|x| x as usize != l) {
+                        continue;
+                    }
                     for tier in [&g.fine, &g.far] {
                         let radius = vr + vclr.max(tier.max_clr) + cfg.margin + tier.max_extent;
                         tier.for_each_near(vc, radius, |r| {
@@ -541,6 +581,9 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             .par_iter()
             .enumerate()
             .map(|(ti, pts)| {
+                if !awake[ti] {
+                    return pts.clone();
+                }
                 let t = &geo.tracks[ti];
                 let (c, net, nc) = (clr(t.net), t.net, net_clr[t.net as usize]);
                 let (grid, obs_cells) = (&grids[t.layer as usize], &layer_cells[t.layer as usize]);
@@ -600,7 +643,10 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         via_grid.for_each_near(p, w / 2.0 + max_clr + max_vr + cfg.margin + 0.01, |vi| {
                             let (vc, vr, vn, vclr) = vias[vi as usize];
                             let dv = p - vc;
-                            if vn != net && !surely_outside(dv.x, dv.y, vr + vclr.max(c) + w / 2.0 + cfg.margin) {
+                            if vn != net
+                                && !surely_outside(dv.x, dv.y, vr + vclr.max(c) + w / 2.0 + cfg.margin)
+                                && via_layer[vi as usize].is_none_or(|l| l == t.layer)
+                            {
                                 hits.push(vi);
                             }
                         });
@@ -727,11 +773,12 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             d
         });
     }
-    for (v, (p, ..)) in geo.vias.iter_mut().zip(&vias) {
+    for (i, (v, (p, ..))) in geo.vias.iter_mut().zip(&vias).enumerate() {
         v.at = *p;
+        v.resting = !via_awake[i];
     }
     let t_taut = std::time::Instant::now();
-    let tracks = taut(board, sub, geo, tracks, cfg);
+    let tracks = taut(board, sub, geo, tracks, cfg, &awake);
     if std::env::var("GB_TIMING").is_ok() {
         eprintln!(
             "relax rounds {:.2} s, taut {:.2} s",
@@ -739,7 +786,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             t_taut.elapsed().as_secs_f64()
         );
     }
-    for (t, (pts, elems)) in geo.tracks.iter_mut().zip(tracks) {
+    for (ti, (t, (pts, elems))) in geo.tracks.iter_mut().zip(tracks).enumerate() {
         *t = Track {
             elems,
             pts,
@@ -748,7 +795,110 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             net: t.net,
             necks: std::mem::take(&mut t.necks),
             neck_w: t.neck_w,
+            origin: t.origin,
+            resting: !awake[ti],
         };
+    }
+}
+
+/// Wake the sleeping copper that the waking copper violates. A sleeping track that only has
+/// less than the relaxation's margin to spare stays asleep, or the wave would never end.
+#[allow(clippy::too_many_arguments)]
+fn wake(
+    board: &Board,
+    infos: &[Track],
+    tracks: &[Vec<Point>],
+    pieces: &[Piece],
+    grids: &[LayerPieces],
+    (vias, via_layer, via_grid): (&[(Point, f64, u32, f64)], &[Option<LayerId>], &PointGrid),
+    ends: &[(Option<usize>, Option<usize>)],
+    (awake, via_awake): (&mut [bool], &mut [bool]),
+    (max_clr, max_vr): (f64, f64),
+) {
+    let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
+    let mut woken: Vec<u32> = Vec::new();
+    let mut woken_vias: Vec<u32> = Vec::new();
+    for (ti, pts) in tracks.iter().enumerate() {
+        if !awake[ti] {
+            continue;
+        }
+        let t = &infos[ti];
+        let c = clr(t.net);
+        let hw = t.width.max(t.neck_w) / 2.0;
+        let g = &grids[t.layer as usize];
+        for &p in pts {
+            for tier in [&g.fine, &g.far] {
+                let radius = hw + max_clr + tier.max_extent;
+                tier.for_each_near(p, radius, |r| {
+                    let pc = &pieces[r.id as usize];
+                    if awake[pc.track as usize] || r.net == t.net {
+                        return;
+                    }
+                    let o = &infos[pc.track as usize];
+                    let need =
+                        t.width_at(p) / 2.0 + o.piece_width(pc.a, pc.b) / 2.0 + board.track_clearance(t.net, o.net);
+                    if point_seg_dist(p, pc.a, pc.b) < need {
+                        woken.push(pc.track);
+                    }
+                });
+            }
+            via_grid.for_each_near(p, hw + max_clr + max_vr, |vi| {
+                let (vc, vr, vn, vclr) = vias[vi as usize];
+                if !via_awake[vi as usize]
+                    && vn != t.net
+                    && via_layer[vi as usize].is_none_or(|l| l == t.layer)
+                    && p.dist(vc) < vr + vclr.max(c) + t.width_at(p) / 2.0
+                {
+                    woken_vias.push(vi);
+                }
+            });
+        }
+    }
+    for (vi, &(vc, vr, vn, vclr)) in vias.iter().enumerate() {
+        if !via_awake[vi] {
+            continue;
+        }
+        for (l, g) in grids.iter().enumerate() {
+            if via_layer[vi].is_some_and(|x| x as usize != l) {
+                continue;
+            }
+            for tier in [&g.fine, &g.far] {
+                tier.for_each_near(vc, vr + max_clr + tier.max_extent, |r| {
+                    let pc = &pieces[r.id as usize];
+                    if awake[pc.track as usize] || r.net == vn {
+                        return;
+                    }
+                    let o = &infos[pc.track as usize];
+                    let need = vr + o.piece_width(pc.a, pc.b) / 2.0 + vclr.max(clr(o.net));
+                    if point_seg_dist(vc, pc.a, pc.b) < need {
+                        woken.push(pc.track);
+                    }
+                });
+            }
+        }
+        via_grid.for_each_near(vc, vr + max_vr + max_clr, |vj| {
+            let (c2, r2, n2, clr2) = vias[vj as usize];
+            if !via_awake[vj as usize]
+                && n2 != vn
+                && !matches!((via_layer[vi], via_layer[vj as usize]), (Some(a), Some(b)) if a != b)
+                && vc.dist(c2) < vr + r2 + vclr.max(clr2)
+            {
+                woken_vias.push(vj);
+            }
+        });
+    }
+    for t in woken {
+        awake[t as usize] = true;
+    }
+    if !woken_vias.is_empty() {
+        for &v in &woken_vias {
+            via_awake[v as usize] = true;
+        }
+        for (ti, (a, b)) in ends.iter().enumerate() {
+            if a.is_some_and(|v| via_awake[v]) || b.is_some_and(|v| via_awake[v]) {
+                awake[ti] = true;
+            }
+        }
     }
 }
 
@@ -762,6 +912,7 @@ fn taut(
     geo: &Geometry,
     mut tracks: Vec<Vec<Point>>,
     cfg: &RelaxConfig,
+    awake: &[bool],
 ) -> Vec<(Vec<Point>, Vec<Elem>)> {
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
     let bounds = board.bbox().grow(5.0);
@@ -792,6 +943,10 @@ fn taut(
     let m = cfg.margin * 0.5;
     for ti in 0..tracks.len() {
         let t = &geo.tracks[ti];
+        if !awake[ti] {
+            result.push((t.pts.clone(), t.elems.clone()));
+            continue;
+        }
         let (net, layer, c) = (t.net, t.layer, clr(t.net));
         let clear = |a: Point, b: Point, pieces: &[(Point, Point, u32)], idx: &GridIndex| -> bool {
             let w = t.piece_width(a, b);

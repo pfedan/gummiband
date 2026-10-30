@@ -96,12 +96,12 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
     r.read_classes(pro);
     r.read_net_table(&root);
 
-    for n in root.args() {
+    for (i, n) in root.args().iter().enumerate() {
         match n.head() {
             Some("footprint") | Some("module") => r.read_footprint(n),
             Some("segment") | Some("arc") | Some("via") => {
                 let first = r.b.obstacles.len();
-                r.read_copper(n, opts.keep);
+                r.read_copper(n, opts.keep, i as u32);
                 if let Some(id) = item_id(n) {
                     r.copper_uuids
                         .insert(id.to_string(), (first..r.b.obstacles.len()).collect());
@@ -664,7 +664,7 @@ impl Reader {
         }
     }
 
-    fn read_copper(&mut self, n: &Node, keep: KeepCopper) {
+    fn read_copper(&mut self, n: &Node, keep: KeepCopper, source: u32) {
         let locked = n.flag("locked");
         match keep {
             KeepCopper::None => return,
@@ -674,6 +674,18 @@ impl Reader {
         let net = self.net_of(n);
         let clearance = self.clearance_of(net);
         let me = self.b.rules.max_error;
+        let first = self.b.obstacles.len() as u32;
+        let kept = |r: &mut Self, kind: CopperKind| {
+            let last = r.b.obstacles.len() as u32;
+            r.b.copper.push(CopperItem {
+                kind,
+                net,
+                locked,
+                source,
+                first,
+                last,
+            });
+        };
         match n.head() {
             Some("via") => {
                 let (Some(at), Some(size)) = (child_xy(n, "at"), n.child_f64("size")) else {
@@ -699,6 +711,15 @@ impl Reader {
                     pin: None,
                     locked,
                 });
+                kept(
+                    self,
+                    CopperKind::Via {
+                        at,
+                        diameter: size,
+                        drill,
+                        layers,
+                    },
+                );
             }
             Some(kind) => {
                 let (Some(s), Some(e)) = (child_xy(n, "start"), child_xy(n, "end")) else {
@@ -730,6 +751,25 @@ impl Reader {
                         locked,
                     });
                 }
+                let layer = layers.iter().next().unwrap_or(0);
+                kept(
+                    self,
+                    match (kind, child_xy(n, "mid")) {
+                        ("arc", Some(mid)) => CopperKind::Arc {
+                            a: s,
+                            mid,
+                            b: e,
+                            width: w,
+                            layer,
+                        },
+                        _ => CopperKind::Line {
+                            a: s,
+                            b: e,
+                            width: w,
+                            layer,
+                        },
+                    },
+                );
             }
             None => {}
         }

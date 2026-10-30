@@ -28,6 +28,10 @@ pub struct Track {
     /// Zones where the track narrows to `neck_w`.
     pub necks: Vec<crate::geom::Rect>,
     pub neck_w: f64,
+    /// The soft chain this track comes from.
+    pub origin: Option<u32>,
+    /// Soft copper still exactly as the file has it.
+    pub resting: bool,
 }
 
 impl Track {
@@ -55,8 +59,15 @@ impl Track {
 pub struct Via {
     pub at: Point,
     pub diameter: f64,
+    /// 0: not a via but a point on one layer where soft tracks branch or end.
     pub drill: f64,
     pub net: NetId,
+    /// The layer of such a point.
+    pub layer: Option<LayerId>,
+    /// The soft node this via comes from.
+    pub origin: Option<u32>,
+    /// Soft copper still exactly as the file has it.
+    pub resting: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -104,15 +115,21 @@ impl Router<'_> {
         let (pu, pv) = (m.verts[u as usize], m.verts[v as usize]);
         let len = pu.dist(pv);
         let dir = (pv - pu) * (1.0 / len);
-        let (lo, hi) = match self.pack(li, c.e, &items, None) {
-            Some(iv) => {
+        let packed = if self.soft_on {
+            Err(self.soft_interval(li, c.e, idx, &items))
+        } else {
+            Ok(self.pack(li, c.e, &items, None))
+        };
+        let (lo, hi) = match packed {
+            Err(iv) => iv,
+            Ok(Some(iv)) => {
                 // Split the common slack so that the portals of neighbours are disjoint.
                 let n = iv.len() as f64;
                 let slack = iv.iter().map(|(a, b)| b - a).fold(f64::INFINITY, f64::min).max(0.0);
                 let (a, _) = iv[idx];
                 (a + slack * idx as f64 / n, a + slack * (idx as f64 + 1.0) / n)
             }
-            None => {
+            Ok(None) => {
                 // over capacity: share the edge evenly
                 let f = (idx as f64 + 0.5) / items.len() as f64;
                 (len * f, len * f)
@@ -163,7 +180,8 @@ impl Router<'_> {
             p.dedup_by(|a, b| a.dist(*b) < 1e-9);
             p.windows(2).map(|w| Elem::Line(w[0], w[1])).collect()
         };
-        if std::env::var("GB_NO_ARCS").is_ok() {
+        // arcs around the edge ends know nothing of the imported tracks in the way
+        if std::env::var("GB_NO_ARCS").is_ok() || self.soft_on {
             return polyline();
         }
         // wraps with the portal index they belong to
@@ -272,12 +290,40 @@ impl Router<'_> {
     }
 
     pub fn geometry(&self) -> Geometry {
+        if self.soft_on {
+            return self.soft_geometry();
+        }
         let ids: Vec<u32> = (0..self.segs.len() as u32)
             .filter(|&i| self.segs[i as usize].is_some())
             .collect();
-        let tracks: Vec<Track> = ids
-            .par_iter()
-            .flat_map_iter(|&sid| {
+        let tracks: Vec<Track> = ids.par_iter().flat_map_iter(|&sid| self.seg_tracks(sid)).collect();
+        let mut vias: Vec<Via> = self
+            .vias
+            .iter()
+            .map(|(&v, info)| Via {
+                at: self.site_point(v),
+                diameter: info.r * 2.0,
+                drill: info.drill,
+                net: info.net,
+                layer: None,
+                origin: None,
+                resting: false,
+            })
+            .collect();
+        vias.sort_by(|a, b| a.at.x.total_cmp(&b.at.x).then(a.at.y.total_cmp(&b.at.y)));
+        Geometry { tracks, vias }
+    }
+
+    /// The tracks of a routed segment: its band without the stretches on kept copper.
+    pub(crate) fn seg_tracks(&self, sid: u32) -> Vec<Track> {
+        let mut tracks = self.seg_pieces(sid);
+        tracks.retain(|t| t.pts.len() >= 2);
+        tracks
+    }
+
+    fn seg_pieces(&self, sid: u32) -> Vec<Track> {
+        {
+            {
                 let s = self.segs[sid as usize].as_ref().unwrap();
                 let elems = self.seg_path(sid);
                 let pts = flatten(&elems);
@@ -300,6 +346,8 @@ impl Router<'_> {
                     net: s.net,
                     necks: s.necks.clone(),
                     neck_w: s.neck_w,
+                    origin: None,
+                    resting: false,
                 };
                 let kept: Vec<bool> = if self.has_kept {
                     pts.iter().map(|&p| on_kept(p)).collect()
@@ -331,21 +379,8 @@ impl Router<'_> {
                     out.push(track(run, e));
                 }
                 out
-            })
-            .filter(|t| t.pts.len() >= 2)
-            .collect();
-        let mut vias: Vec<Via> = self
-            .vias
-            .iter()
-            .map(|(&v, info)| Via {
-                at: self.site_point(v),
-                diameter: info.r * 2.0,
-                drill: info.drill,
-                net: info.net,
-            })
-            .collect();
-        vias.sort_by(|a, b| a.at.x.total_cmp(&b.at.x).then(a.at.y.total_cmp(&b.at.y)));
-        Geometry { tracks, vias }
+            }
+        }
     }
 }
 

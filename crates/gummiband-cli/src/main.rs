@@ -50,6 +50,11 @@ enum Cmd {
         /// steps up to this radius. 0: nothing moves.
         #[arg(long, default_value_t = 0.0)]
         give: f64,
+        /// With --keep-all --nets: the unlocked tracks of other nets are threaded into the
+        /// topology, so a connection passes between them and they shift aside. What it does not
+        /// touch stays as it is in the file.
+        #[arg(long)]
+        shove: bool,
         /// Route only these nets, comma separated (the others stay as they are).
         #[arg(long, value_delimiter = ',')]
         nets: Vec<String>,
@@ -215,6 +220,7 @@ fn main() -> Result<()> {
             keep_locked,
             keep_all,
             give,
+            shove,
             nets,
             runs,
             via_pitch,
@@ -334,7 +340,10 @@ fn main() -> Result<()> {
             let mut given: std::collections::BTreeSet<String> = Default::default();
             let mut radius = 0.0;
             let (routed_board, sub, res) = loop {
-                let board = b.only_nets(&nets, &given);
+                let mut board = b.only_nets(&nets, &given);
+                if shove {
+                    board.soften(&nets);
+                }
                 let (sub, res) = gummiband_core::route_board(&board, &sub_cfg, &router_cfg, &search_cfg);
                 if res.stats.unrouted.is_empty() || nets.is_empty() || radius >= give {
                     break (board, sub, res);
@@ -523,8 +532,23 @@ fn main() -> Result<()> {
             if let Some(path) = svg {
                 std::fs::write(&path, svg::render(b, Some(&sub), &res.geometry, &viol, svg_tris))?;
             }
+            let changes = gummiband_core::import::soft_changes(b, &res.geometry);
+            if shove {
+                println!(
+                    "soft copper: {} tracks, {} vias and branch points; moved {} tracks of {} nets, at most {:.3} mm",
+                    b.soft.chains.len(),
+                    b.soft.nodes.len(),
+                    changes.chains.iter().filter(|c| **c).count(),
+                    changes.nets.len(),
+                    changes.shift
+                );
+            }
+            let rests = |origin: Option<u32>, list: &[bool]| origin.is_some_and(|o| !list[o as usize]);
             let mut items = Vec::new();
             for t in &res.geometry.tracks {
+                if rests(t.origin, &changes.chains) {
+                    continue;
+                }
                 for e in &t.elems {
                     items.push(match *e {
                         Elem::Line(a, b) => write::Item::Track {
@@ -546,6 +570,9 @@ fn main() -> Result<()> {
                 }
             }
             for v in &res.geometry.vias {
+                if v.drill == 0.0 || rests(v.origin, &changes.nodes) {
+                    continue;
+                }
                 items.push(write::Item::Via {
                     at: v.at,
                     diameter: v.diameter,
@@ -558,6 +585,7 @@ fn main() -> Result<()> {
                 locked: !keep_locked && !keep_all,
                 zone_layers: vec![],
                 nets: given.iter().cloned().collect(),
+                items: changes.strip.clone(),
             };
             let ranges = write::strip_ranges(&kb, &opts);
             let text = write::patch(&kb, &ranges, &items);
@@ -641,6 +669,7 @@ fn main() -> Result<()> {
                 locked: !keep_locked,
                 zone_layers,
                 nets: Vec::new(),
+                items: Vec::new(),
             };
             let ranges = write::strip_ranges(&kb, &opts);
             let text = write::patch(&kb, &ranges, &[]);

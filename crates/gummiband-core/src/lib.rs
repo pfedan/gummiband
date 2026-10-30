@@ -3,6 +3,7 @@
 pub mod board;
 pub mod check;
 pub mod geom;
+pub mod import;
 pub mod index;
 pub mod realize;
 pub mod relax;
@@ -221,7 +222,7 @@ fn evaluate(
         generation,
         conns: r.conns.len(),
         routed,
-        vias: geo.vias.len(),
+        vias: geo.vias.iter().filter(|v| v.drill > 0.0).count(),
         length,
         unrouted,
         violations: None,

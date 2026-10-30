@@ -1,5 +1,7 @@
 //! Board model: everything the router needs to know, independent of the file format.
 
+use serde::{Deserialize, Serialize};
+
 use crate::geom::{Point, Polygon, Rect, Shape};
 
 /// Distance kept from rule areas: KiCad flags a track that merely touches one.
@@ -177,6 +179,48 @@ pub struct Board {
     /// Groups of parts with their pre-routed copper that move only as a whole.
     #[serde(default)]
     pub blocks: Vec<Block>,
+    /// Kept tracks and vias as the file has them.
+    #[serde(default)]
+    pub copper: Vec<CopperItem>,
+    /// Unlocked copper that is part of the topology instead of an obstacle, see [`Board::soften`].
+    #[serde(skip)]
+    pub soft: crate::import::SoftCopper,
+}
+
+/// One kept track, arc or via of the file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopperItem {
+    pub kind: CopperKind,
+    pub net: Option<NetId>,
+    pub locked: bool,
+    /// Its place among the items of the file, for the writer.
+    pub source: u32,
+    /// Its obstacles.
+    pub first: u32,
+    pub last: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum CopperKind {
+    Line {
+        a: Point,
+        b: Point,
+        width: f64,
+        layer: LayerId,
+    },
+    Arc {
+        a: Point,
+        mid: Point,
+        b: Point,
+        width: f64,
+        layer: LayerId,
+    },
+    Via {
+        at: Point,
+        diameter: f64,
+        drill: f64,
+        layers: LayerSet,
+    },
 }
 
 /// A fixed block: a KiCad group of footprints and copper.
