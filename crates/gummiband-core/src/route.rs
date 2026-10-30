@@ -9,6 +9,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::collections::hash_map::Entry;
 
 use crate::board::{Board, NetId, ObstacleKind};
 use crate::geom::{Point, Rect, orient, point_seg_dist, pt, segs_intersect};
@@ -192,6 +193,12 @@ struct Node {
     pos: Point,
     g: f64,
     parent: u32,
+    /// Bloom filter of the triangles walked back from here up to the last via or start.
+    seen: u128,
+}
+
+fn tri_bit(t: u32, li: u8) -> u128 {
+    1 << (t.wrapping_add((li as u32) << 28).wrapping_mul(0x9e37_79b1) >> 25)
 }
 
 #[derive(PartialEq)]
@@ -808,9 +815,36 @@ impl<'a> Router<'a> {
         let [u, v] = m.edges[e as usize];
         let (pu, pv) = (m.verts[u as usize], m.verts[v as usize]);
         let items = self.items_on(li, e);
-        let bounds = self.apex_bounds(li, e, &items, None);
         let hot = self.hot_extra(pu, pv);
         let margin = self.cfg.margin;
+        let mut bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); items.len()];
+        let mut apex = [(f64::INFINITY, f64::NEG_INFINITY); 2];
+        let len = pu.dist(pv);
+        if len > 0.0 {
+            let dir = (pv - pu) * (1.0 / len);
+            for (k, &t) in m.edge_tris[e as usize].iter().enumerate() {
+                if t == NONE || m.status[t as usize] != NONE {
+                    continue;
+                }
+                let Some((h, proj, obs, via_here)) = self.apex_of(li, e, k, t, (pu, dir), None) else {
+                    continue;
+                };
+                for (i, it) in items.iter().enumerate() {
+                    if it.sides[k] <= 1
+                        && let Some(half) = self.apex_half(h, &obs, via_here, it)
+                    {
+                        if it.sides[k] == 0 {
+                            bounds[i].1 = bounds[i].1.min(proj - half);
+                        } else {
+                            bounds[i].0 = bounds[i].0.max(proj + half);
+                        }
+                    }
+                }
+                if let Some(half) = self.apex_half(h, &obs, via_here, new) {
+                    apex[k] = (proj - half, proj + half);
+                }
+            }
+        }
         let placed = items
             .iter()
             .enumerate()
@@ -823,21 +857,6 @@ impl<'a> Router<'a> {
                 gap_from_new: Self::gap(self.board, new, it),
             })
             .collect();
-        let mut apex = [(f64::INFINITY, f64::NEG_INFINITY); 2];
-        let len = pu.dist(pv);
-        if len > 0.0 {
-            let dir = (pv - pu) * (1.0 / len);
-            for (k, &t) in m.edge_tris[e as usize].iter().enumerate() {
-                if t == NONE || m.status[t as usize] != NONE {
-                    continue;
-                }
-                if let Some((h, proj, obs, via_here)) = self.apex_of(li, e, k, t, (pu, dir), None)
-                    && let Some(half) = self.apex_half(h, &obs, via_here, new)
-                {
-                    apex[k] = (proj - half, proj + half);
-                }
-            }
-        }
         EdgeView {
             placed,
             len: m.edge_len(e),
@@ -1480,14 +1499,30 @@ impl<'a> Router<'a> {
                     pos: Point,
                     g: f64,
                     parent: u32| {
-            let k = key(&kind);
-            if let Some(&b) = best.get(&k)
-                && b <= g + 1e-9
-            {
-                return;
+            match best.entry(key(&kind)) {
+                Entry::Occupied(mut b) => {
+                    if *b.get() <= g + 1e-9 {
+                        return;
+                    }
+                    b.insert(g);
+                }
+                Entry::Vacant(b) => {
+                    b.insert(g);
+                }
             }
-            best.insert(k, g);
-            nodes.push(Node { kind, pos, g, parent });
+            // the triangles of the run this node belongs to: see the loop test in cross_out
+            let seen = match kind {
+                NK::Tri { t, li, .. } if parent != u32::MAX => nodes[parent as usize].seen | tri_bit(t, li),
+                NK::Tri { t, li, .. } => tri_bit(t, li),
+                _ => 0,
+            };
+            nodes.push(Node {
+                kind,
+                pos,
+                g,
+                parent,
+                seen,
+            });
             open.push(Open(g + h(pos), (nodes.len() - 1) as u32));
         };
 
@@ -1564,7 +1599,7 @@ impl<'a> Router<'a> {
                 return;
             }
             // never enter a triangle this path already passed on this layer (no loops)
-            {
+            if node.seen & tri_bit(t2, lu as u8) != 0 {
                 let mut p = idx;
                 while p != u32::MAX {
                     match nodes[p as usize].kind {
@@ -1643,6 +1678,9 @@ impl<'a> Router<'a> {
         };
 
         let tracing = self.trace.lock().unwrap().is_some();
+        // via checks depend on the routes and the net only, so one per site and search will do
+        let mut site_ok: FastMap<u32, bool> = FastMap::default();
+        let mut vertex_ok: FastMap<u32, Option<bool>> = FastMap::default();
         let mut expansions = 0;
         while let Some(Open(_, idx)) = open.pop() {
             let node = nodes[idx as usize];
@@ -1705,7 +1743,8 @@ impl<'a> Router<'a> {
                     {
                         for &site in list {
                             let q = self.site_point(site);
-                            if !self.sub.site_usable(site) || !self.via_ok_site(site, net) {
+                            let ok = *site_ok.entry(site).or_insert_with(|| self.via_ok_site(site, net));
+                            if !self.sub.site_usable(site) || !ok {
                                 continue;
                             }
                             if conn.goal == Goal::Plane {
@@ -1777,7 +1816,8 @@ impl<'a> Router<'a> {
                         if site == NONE || site == STEINER {
                             continue;
                         }
-                        let Some(existing) = self.via_ok_vertex(site, net) else {
+                        let ok = *vertex_ok.entry(site).or_insert_with(|| self.via_ok_vertex(site, net));
+                        let Some(existing) = ok else {
                             continue;
                         };
                         if let Some((ep, es)) = entry_pos
@@ -1856,7 +1896,7 @@ impl<'a> Router<'a> {
                         {
                             continue;
                         }
-                        if !self.via_ok_site(site, net) {
+                        if !*site_ok.entry(site).or_insert_with(|| self.via_ok_site(site, net)) {
                             continue;
                         }
                         tried += 1;
