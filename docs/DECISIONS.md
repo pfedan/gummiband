@@ -50,3 +50,4 @@ Standing decisions of the project owner, kept here so that they survive any sess
   (`docs/MILESTONES.md`), then targeted new benchmarks. Micro-optimisation runs independently,
   also on newly added algorithms, and must preserve results.
 - User documentation lives in the main README and `docs/`, user centred, in English.
+- Jetson Orin is not a test or benchmark board until the owner explicitly says so.
