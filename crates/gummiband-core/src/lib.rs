@@ -29,6 +29,8 @@ pub struct RunStats {
     pub via_cost: f64,
     /// Weight of the layer directions in this run (see [`RouterConfig`]).
     pub layer_dirs: f64,
+    /// Via pass of this run (see [`RouterConfig`]).
+    pub via_pass: f64,
     /// Generation of the evolutionary search (0 = initial portfolio).
     pub generation: usize,
     pub conns: usize,
@@ -218,6 +220,7 @@ fn evaluate(
         fanout_first: cfg.fanout_first,
         via_cost: cfg.via_cost,
         layer_dirs: cfg.layer_dirs,
+        via_pass: cfg.via_pass,
         generation,
         conns: r.conns.len(),
         routed,
@@ -441,6 +444,8 @@ pub fn route_fixed(
             fanout_first: i % 2 == 0,
             // the via cost is part of the search: spread it around the configured value
             via_cost: base.via_cost * [1.0, 1.0, 0.6, 1.6, 0.8, 1.3][(i / 2) % 6],
+            // half of the runs with the via pass: the finished geometry decides if it stays
+            via_pass: if (i / 2) % 2 == 0 { base.via_pass } else { 0.0 },
             // and so are the layer directions: every third run uses them, if there is a
             // choice of layers
             layer_dirs: if (i % 3 == 2 || std::env::var("GB_DIRS_ALL").is_ok())
@@ -509,6 +514,7 @@ pub fn route_fixed(
             fanout_first: best.stats.fanout_first,
             via_cost: best.stats.via_cost,
             layer_dirs: best.stats.layer_dirs,
+            via_pass: best.stats.via_pass,
             ..base.clone()
         };
         let next: Vec<Candidate> = genomes
@@ -644,6 +650,7 @@ pub fn route_fixed(
                     fanout_first: best.stats.fanout_first,
                     via_cost: best.stats.via_cost,
                     layer_dirs: best.stats.layer_dirs,
+                    via_pass: best.stats.via_pass,
                     hotspots: std::sync::Arc::new(hotspots.iter().map(|&(p, x)| (p, x * scale)).collect()),
                     ..base.clone()
                 };
