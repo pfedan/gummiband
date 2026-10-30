@@ -7,8 +7,9 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import MISSING, dataclass, fields
 from pathlib import Path
 from typing import Callable, List, Mapping, Optional
 
@@ -35,6 +36,27 @@ class RouteOptions:
     frames_dir: Optional[str] = None
     # finish started tracks: route only these nets and add to the copper that is there
     finish_nets: Optional[List[str]] = None
+    # whether the dialog asks for the animation; frames_dir is what the router gets
+    animate: bool = False
+    # let the geometry generations shift parts; the plugin takes the moves over
+    move_parts: bool = False
+    fixed: Optional[List[str]] = None  # references that never move
+    # open KiCad's Edit Teardrops after the run: the API cannot set them on vias and pads
+    teardrops: bool = False
+    # the defaults of the advanced options are those of the command line
+    generations: int = 3
+    via_pitch: float = 0.5
+    layer_dirs: float = 0.5
+    via_pass: float = 4.0
+    negotiate: int = 0
+    threads: int = 0  # 0 = all cores
+    plane_layers: Optional[List[str]] = None
+    net_widths: Optional[str] = None  # JSON file
+    net_priorities: Optional[str] = None  # JSON file
+    pairs: bool = False
+    pair_pull: float = 0.0
+    pair_skew: float = 0.1
+    pair_zdiff: float = 0.0  # 0 = keep the track widths of the net class
 
 
 @dataclass
@@ -48,6 +70,28 @@ class PlaceOptions:
     starts: int = 4
     gap: float = 0.3
     halo: float = 0.3
+    # the defaults of the advanced options are those of the command line
+    seed: int = 1
+    iters: int = 3_000_000
+    margin: float = 0.5
+    free: Optional[List[str]] = None  # references released although they count as mechanical
+    threads: int = 0  # 0 = all cores
+    plane_layers: Optional[List[str]] = None
+
+
+# Options the dialogs remember in settings.json. What only makes sense on one board (references,
+# layer names, net files) starts empty every time.
+ROUTE_SAVED = ("keep_locked", "runs", "via_cost", "geometry_generations", "animate", "move_parts",
+               "teardrops", "generations", "via_pitch", "layer_dirs", "via_pass", "negotiate", "threads", "pairs", "pair_pull",
+               "pair_skew", "pair_zdiff")
+PLACE_SAVED = ("starts", "gap", "halo", "seed", "iters", "margin", "threads")
+
+# Options of the command line that are left out at their default value.
+ROUTE_FLAGS = (("generations", "--generations"), ("via_pitch", "--via-pitch"),
+               ("layer_dirs", "--layer-dirs"), ("via_pass", "--via-pass"),
+               ("negotiate", "--negotiate"), ("pair_pull", "--pair-pull"))
+PAIR_FLAGS = (("pair_skew", "--pair-skew"), ("pair_zdiff", "--pair-zdiff"))
+PLACE_FLAGS = (("seed", "--seed"), ("iters", "--iters"), ("margin", "--margin"))
 
 
 def load_settings(path: Path = SETTINGS_FILE) -> dict:
@@ -61,6 +105,51 @@ def load_settings(path: Path = SETTINGS_FILE) -> dict:
     if not isinstance(data, dict):
         raise RunnerError(f"{path}: expected a JSON object")
     return data
+
+
+def _default(cls, name: str):
+    return next(f.default for f in fields(cls) if f.name == name and f.default is not MISSING)
+
+
+def load_options(cls, section: str, saved: tuple, path: Path = SETTINGS_FILE) -> dict:
+    """The values of ``saved`` that the dialog of ``cls`` stored under ``section``, as keyword
+    arguments. Unknown keys, values of another type and an unreadable file are ignored: a
+    bad setting must not keep the dialog from opening."""
+    try:
+        stored = load_settings(path).get(section)
+    except RunnerError:
+        return {}
+    if not isinstance(stored, dict):
+        return {}
+    out = {}
+    for name in saved:
+        value = stored.get(name)
+        kind = type(_default(cls, name))
+        if kind is float and type(value) is int:
+            value = float(value)
+        if type(value) is kind:
+            out[name] = value
+    return out
+
+
+def save_options(section: str, opts, saved: tuple, path: Path = SETTINGS_FILE) -> bool:
+    """Store the values of ``saved`` under ``section`` of the settings file and leave the rest
+    of it alone. A file that cannot be read or written stays as it is: losing the remembered
+    values is no reason to stop a run."""
+    try:
+        data = load_settings(path)
+    except RunnerError:
+        return False
+    data[section] = {name: getattr(opts, name) for name in saved}
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, suffix=".tmp",
+                                         delete=False) as f:
+            json.dump(data, f, indent=4)
+            f.write("\n")
+        os.replace(f.name, path)
+    except OSError:
+        return False
+    return True
 
 
 def _executable(p: str) -> Optional[str]:
@@ -101,6 +190,25 @@ def find_binary(env: Mapping[str, str] = os.environ, settings_path: Path = SETTI
         + "; ".join(tried))
 
 
+def _changed(opts, flags: tuple) -> List[str]:
+    """The flags whose option differs from its default."""
+    cmd: List[str] = []
+    for name, flag in flags:
+        value = getattr(opts, name)
+        if value != _default(type(opts), name):
+            cmd += [flag, repr(value) if isinstance(value, float) else str(value)]
+    return cmd
+
+
+def _global_flags(opts) -> List[str]:
+    cmd: List[str] = []
+    if opts.threads > 0:
+        cmd += ["--threads", str(int(opts.threads))]
+    if opts.plane_layers:
+        cmd += ["--plane-layers", ",".join(opts.plane_layers)]
+    return cmd
+
+
 def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) -> List[str]:
     cmd = [binary, "route", str(board), "-o", str(output), "--progress"]
     if opts.finish_nets:
@@ -110,9 +218,21 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
     cmd += ["--runs", str(int(opts.runs)), "--via-cost", repr(float(opts.via_cost))]
     if opts.geometry_generations > 0:
         cmd += ["--geometry-generations", str(int(opts.geometry_generations))]
+    cmd += _changed(opts, ROUTE_FLAGS)
+    if opts.move_parts:
+        cmd.append("--move-parts")
+        if opts.fixed:
+            cmd += ["--fixed", ",".join(opts.fixed)]
+    if opts.pairs:
+        cmd.append("--pairs")
+        cmd += _changed(opts, PAIR_FLAGS)
+    if opts.net_widths:
+        cmd += ["--net-widths", str(opts.net_widths)]
+    if opts.net_priorities:
+        cmd += ["--net-priorities", str(opts.net_priorities)]
     if opts.frames_dir:
         cmd += ["--frames", str(opts.frames_dir)]
-    return cmd
+    return cmd + _global_flags(opts)
 
 
 def build_place_command(binary: str, board: Path, output: Path, report: Path,
@@ -128,7 +248,9 @@ def build_place_command(binary: str, board: Path, output: Path, report: Path,
         cmd.append("--all-unlocked")
     if opts.fixed:
         cmd += ["--fixed", ",".join(opts.fixed)]
-    return cmd
+    if opts.free:
+        cmd += ["--free", ",".join(opts.free)]
+    return cmd + _changed(opts, PLACE_FLAGS) + _global_flags(opts)
 
 
 def parse_references(text: str) -> List[str]:

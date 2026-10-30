@@ -96,6 +96,8 @@ class ApplyResult:
     removed: Counter
     created: Counter
     unknown_nets: Counter
+    moved: int = 0
+    missing: Sequence[str] = ()
 
 
 def _kind(item) -> str:
@@ -111,9 +113,29 @@ def _chunks(seq: Sequence, n: int):
         yield seq[i:i + n]
 
 
-def apply_plan(board, plan: bf.ImportPlan) -> ApplyResult:
+def move_footprints(board, poses: Sequence) -> tuple:
+    """Set the poses ``(reference, x, y[, rotation])`` on the footprints of the board, which
+    still has to take them with ``update_items``. Returns those footprints and the references
+    not found."""
+    by_ref = {fp.reference_field.text.value: fp for fp in board.get_footprints()}
+    changed = []
+    missing = []
+    for ref, x, y, *rot in poses:
+        fp = by_ref.get(ref)
+        if fp is None:
+            missing.append(ref)
+            continue
+        fp.position = vec((x, y))
+        if rot:
+            fp.orientation = Angle.from_degrees(rot[0])
+        changed.append(fp)
+    return changed, missing
+
+
+def apply_plan(board, plan: bf.ImportPlan, poses: Sequence = ()) -> ApplyResult:
     """Remove the replaced tracks/vias of the open board and create the routed ones, all in one
-    commit (one undo step). ``board`` is a ``kipy.board.Board``."""
+    commit (one undo step), together with the footprints the router moved to ``poses``.
+    ``board`` is a ``kipy.board.Board``."""
     resolve = NetResolver({n.name: n for n in board.get_nets()})
     new_items = build_items(plan, resolve)
 
@@ -124,9 +146,12 @@ def apply_plan(board, plan: bf.ImportPlan) -> ApplyResult:
     else:
         remove = [it for it in old if bf.should_remove(bool(it.locked), plan.keep_locked)]
 
+    moved, missing = move_footprints(board, poses) if poses else ([], [])
     commit = board.begin_commit()
     created: List[object] = []
     try:
+        for chunk in _chunks(moved, CHUNK):
+            board.update_items(list(chunk))
         for chunk in _chunks(remove, CHUNK):
             board.remove_items(list(chunk))
         for chunk in _chunks(new_items, CHUNK):
@@ -142,6 +167,8 @@ def apply_plan(board, plan: bf.ImportPlan) -> ApplyResult:
         removed=Counter(_kind(it) for it in remove),
         created=Counter(_kind(it) for it in created),
         unknown_nets=resolve.unknown,
+        moved=len(moved),
+        missing=missing,
     )
 
 
@@ -168,17 +195,7 @@ def set_outline(zone, points: Sequence[bf.Point]) -> None:
 def apply_placement(board, poses: Sequence, zones: Sequence[dict]) -> PlaceResult:
     """Move footprints to the poses of ``gummiband place`` and the keepouts of moved parts to
     their new outlines, all in one commit (one undo step)."""
-    by_ref = {fp.reference_field.text.value: fp for fp in board.get_footprints()}
-    changed = []
-    missing = []
-    for ref, x, y, rot in poses:
-        fp = by_ref.get(ref)
-        if fp is None:
-            missing.append(ref)
-            continue
-        fp.position = vec((x, y))
-        fp.orientation = Angle.from_degrees(rot)
-        changed.append(fp)
+    changed, missing = move_footprints(board, poses)
     moved = len(changed)
     outlines = {z["id"]: z["points"] for z in zones}
     followers = [z for z in board.get_zones() if z.id.value in outlines] if outlines else []

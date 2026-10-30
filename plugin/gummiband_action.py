@@ -20,7 +20,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gb_plugin import board_file as bf  # noqa: E402
-from gb_plugin import runner  # noqa: E402
+from gb_plugin import fields, runner  # noqa: E402
 
 try:
     import wx
@@ -29,14 +29,15 @@ except ImportError:  # e.g. Linux system Python without wxPython: run with defau
 
 TITLE = "Route with Gummiband"
 API_TIMEOUT_MS = 120_000  # creating thousands of items in one commit takes a while
+TEARDROP_ACTION = "pcbnew.GlobalEdit.editTeardrops"
 
 
 # User interface ----------------------------------------------------------------------------
 
 
 class ConsoleUi:
-    """No wx: defaults, messages on stdout/stderr (KiCad shows plugin output in its status
-    bar since 10.0.1)."""
+    """No wx: the given options, messages on stdout/stderr (KiCad shows plugin output in its
+    status bar since 10.0.1)."""
 
     def ask_options(self, defaults: runner.RouteOptions) -> Optional[runner.RouteOptions]:
         return dataclasses.replace(defaults, frames_dir=None)
@@ -51,6 +52,114 @@ class ConsoleUi:
         print(text, file=sys.stderr)
 
 
+class OptionForm:
+    """The controls of a table from ``fields`` on the tabs of a notebook. ``header(page, box)``
+    can add its own controls on top of the first tab."""
+
+    def __init__(self, dlg, tabs, opts, header=None):
+        self.fields = fields.all_fields(tabs)
+        self.controls = {}
+        self.book = wx.Notebook(dlg)
+        for i, (title, sections) in enumerate(tabs):
+            page = wx.Panel(self.book)
+            box = wx.BoxSizer(wx.VERTICAL)
+            if i == 0 and header is not None:
+                header(page, box)
+            for heading, group in sections:
+                if heading is None:
+                    box.Add(self.grid(page, group), 0, wx.ALL | wx.EXPAND, 12)
+                    continue
+                frame = wx.StaticBoxSizer(wx.VERTICAL, page, heading)
+                frame.Add(self.grid(frame.GetStaticBox(), group), 0, wx.ALL | wx.EXPAND, 8)
+                box.Add(frame, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.EXPAND, 8)
+            box.AddSpacer(8)
+            page.SetSizer(box)
+            self.book.AddPage(page, title)
+        self.set_values(opts)
+
+    def grid(self, parent, group):
+        grid = wx.GridBagSizer(8, 12)
+        for row, f in enumerate(group):
+            ctrl = self.control(parent, f)
+            ctrl.SetToolTip(f.tip)
+            self.controls[f.name] = ctrl
+            if f.kind == "check":
+                grid.Add(ctrl, (row, 0), (1, 2))
+                continue
+            label = wx.StaticText(parent, label=f.label)
+            label.SetToolTip(f.tip)
+            grid.Add(label, (row, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+            grid.Add(ctrl, (row, 1), flag=wx.EXPAND)
+        grid.AddGrowableCol(1)
+        return grid
+
+    def control(self, parent, f: fields.Field):
+        if f.kind == "int":
+            ctrl = wx.SpinCtrl(parent, min=int(f.low), max=int(f.high))
+            ctrl.SetIncrement(int(f.step))
+            return ctrl
+        if f.kind == "float":
+            ctrl = wx.SpinCtrlDouble(parent, min=f.low, max=f.high, inc=f.step)
+            ctrl.SetDigits(f.digits)
+            return ctrl
+        if f.kind == "check":
+            ctrl = wx.CheckBox(parent, label=f.label)
+            ctrl.Bind(wx.EVT_CHECKBOX, lambda _event: self.update_enabled())
+            return ctrl
+        if f.kind == "refs":
+            return wx.TextCtrl(parent, size=(320, -1))
+        return wx.FilePickerCtrl(parent, wildcard="JSON files (*.json)|*.json",
+                                 style=wx.FLP_OPEN | wx.FLP_FILE_MUST_EXIST | wx.FLP_USE_TEXTCTRL)
+
+    def set_values(self, opts):
+        for f in self.fields:
+            ctrl, value = self.controls[f.name], getattr(opts, f.name)
+            if f.kind == "refs":
+                ctrl.SetValue(", ".join(value or []))
+            elif f.kind == "file":
+                ctrl.SetPath(value or "")
+            else:
+                ctrl.SetValue(value)
+        self.update_enabled()
+
+    def values(self) -> dict:
+        out = {}
+        for f in self.fields:
+            ctrl = self.controls[f.name]
+            if f.kind == "refs":
+                out[f.name] = runner.parse_references(ctrl.GetValue()) or None
+            elif f.kind == "file":
+                out[f.name] = ctrl.GetPath() or None
+            else:
+                out[f.name] = ctrl.GetValue()
+        return out
+
+    def update_enabled(self):
+        for f in self.fields:
+            if f.requires is not None:
+                self.controls[f.name].Enable(self.controls[f.requires].GetValue())
+
+
+def options_dialog(title: str, tabs, opts, factory, note: str, header=None):
+    """The dialog and its form. ``factory`` holds the values of the Defaults button."""
+    dlg = wx.Dialog(None, title=title)
+    form = OptionForm(dlg, tabs, opts, header)
+    reset = wx.Button(dlg, label="Defaults")
+    reset.SetToolTip("Back to the values of a fresh installation.")
+    reset.Bind(wx.EVT_BUTTON, lambda _event: form.set_values(factory))
+    buttons = wx.BoxSizer(wx.HORIZONTAL)
+    buttons.Add(reset, 0, wx.ALIGN_CENTER_VERTICAL)
+    buttons.AddStretchSpacer()
+    buttons.Add(dlg.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL), 0, wx.ALIGN_CENTER_VERTICAL)
+    box = wx.BoxSizer(wx.VERTICAL)
+    box.Add(form.book, 0, wx.ALL | wx.EXPAND, 12)
+    box.Add(wx.StaticText(dlg, label=note), 0, wx.LEFT | wx.RIGHT, 12)
+    box.Add(buttons, 0, wx.ALL | wx.EXPAND, 12)
+    dlg.SetSizerAndFit(box)
+    dlg.CentreOnScreen()
+    return dlg, form
+
+
 class WxUi:
     def __init__(self, title: str = TITLE):
         self.app = wx.App(False)
@@ -59,40 +168,17 @@ class WxUi:
     def ask_options(self, defaults: runner.RouteOptions) -> Optional[runner.RouteOptions]:
         """``defaults.frames_dir`` is where the animation would go; the check box decides
         whether it is made."""
-        dlg = wx.Dialog(None, title=TITLE)
-        keep = wx.CheckBox(dlg, label="Keep locked tracks and vias")
-        keep.SetValue(defaults.keep_locked)
-        runs = wx.SpinCtrl(dlg, min=1, max=1024, initial=int(defaults.runs))
-        cost = wx.SpinCtrlDouble(dlg, min=0.0, max=1000.0, initial=float(defaults.via_cost),
-                                 inc=0.1)
-        cost.SetDigits(2)
-        quality = wx.SpinCtrl(dlg, min=0, max=20, initial=int(defaults.geometry_generations))
-        frames = wx.CheckBox(dlg, label="Save an animation of the generations")
-        frames.SetToolTip(f"One image per generation and evolution.gif in {defaults.frames_dir}")
-        note = wx.StaticText(dlg, label=(
+        dlg, form = options_dialog(TITLE, fields.ROUTE_TABS, defaults, runner.RouteOptions(), (
             "All unlocked tracks and vias are replaced by the routed ones.\n"
             "Without \"keep locked\", locked ones are replaced as well."))
-        grid = wx.FlexGridSizer(3, 2, 8, 12)
-        grid.Add(wx.StaticText(dlg, label="Parallel runs:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        grid.Add(runs, 0, wx.EXPAND)
-        grid.Add(wx.StaticText(dlg, label="Via cost (mm of track):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        grid.Add(cost, 0, wx.EXPAND)
-        grid.Add(wx.StaticText(dlg, label="Geometry generations:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        grid.Add(quality, 0, wx.EXPAND)
-        box = wx.BoxSizer(wx.VERTICAL)
-        box.Add(keep, 0, wx.ALL, 12)
-        box.Add(grid, 0, wx.LEFT | wx.RIGHT | wx.EXPAND, 12)
-        box.Add(frames, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
-        box.Add(note, 0, wx.ALL, 12)
-        box.Add(dlg.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL), 0, wx.ALL | wx.EXPAND, 12)
-        dlg.SetSizerAndFit(box)
-        dlg.CentreOnScreen()
+        form.controls["animate"].SetToolTip(
+            f"One image per generation and evolution.gif in {defaults.frames_dir}")
         try:
             if dlg.ShowModal() != wx.ID_OK:
                 return None
-            return runner.RouteOptions(keep.GetValue(), runs.GetValue(), cost.GetValue(),
-                                       quality.GetValue(),
-                                       defaults.frames_dir if frames.GetValue() else None)
+            opts = dataclasses.replace(defaults, **form.values())
+            return dataclasses.replace(opts, frames_dir=defaults.frames_dir if opts.animate
+                                       else None)
         finally:
             dlg.Destroy()
 
@@ -158,11 +244,20 @@ def save_copy(board, folder: Path) -> Path:
     return dst
 
 
-def report(plan: bf.ImportPlan, applied, res: runner.RouteResult) -> str:
+def report(plan: bf.ImportPlan, applied, res: runner.RouteResult,
+           moves: Optional[bf.PartMoves] = None) -> str:
     lines = [
         f"Removed: {bf.format_counts(applied.removed)}",
         f"Created: {bf.format_counts(applied.created)}",
     ]
+    if moves is not None:
+        lines.append(f"Moved parts: {applied.moved}"
+                     + (f" ({' '.join(p[0] for p in moves.poses)})" if moves.poses else ""))
+        if applied.missing:
+            lines.append(f"Not found on the board: {' '.join(applied.missing)}")
+        if moves.stale_copper:
+            lines.append(f"Warning: {moves.stale_copper} kept tracks and vias moved with a "
+                         "footprint group in the router, here they stayed where they were")
     if plan.keep and not plan.add_only:
         lines.append(f"Kept locked: {bf.format_counts(plan.summary()['keep'])}")
     best = res.best_line()
@@ -185,6 +280,14 @@ def report(plan: bf.ImportPlan, applied, res: runner.RouteResult) -> str:
         lines.append(f"Nets not found on the board: {', '.join(sorted(applied.unknown_nets))}")
     lines += [f"Warning: {w}" for w in plan.warnings[:5]]
     return "\n".join(lines)
+
+
+def open_teardrops(kicad) -> None:
+    """Last step: KiCad answers only after its dialog closes, and a timeout then means nothing."""
+    try:
+        kicad.run_action(TEARDROP_ACTION)
+    except Exception as e:
+        print(f"Edit Teardrops: {e}", file=sys.stderr)
 
 
 def main() -> int:
@@ -214,10 +317,13 @@ def main() -> int:
             frames_default = str(Path(proj.path) / "gummiband-evolution")
     except Exception:
         pass
+    saved = runner.load_options(runner.RouteOptions, "route", runner.ROUTE_SAVED)
     opts = ui.ask_options(runner.RouteOptions(
-        frames_dir=frames_default or str(Path(tempfile.gettempdir()) / "gummiband-evolution")))
+        frames_dir=frames_default or str(Path(tempfile.gettempdir()) / "gummiband-evolution"),
+        **saved))
     if opts is None:
         return 0
+    runner.save_options("route", opts, runner.ROUTE_SAVED)
 
     work = Path(tempfile.mkdtemp(prefix="gummiband-"))
     try:
@@ -226,9 +332,10 @@ def main() -> int:
         out = work / f"{src.stem}-routed.kicad_pcb"
         cmd = runner.build_command(binary, src, out, opts)
         res = ui.run_with_progress(lambda keep_going: runner.run_route(cmd, out, work, keep_going))
-        plan = bf.plan_from_texts(src.read_text(encoding="utf-8"),
-                                  out.read_text(encoding="utf-8"), opts.keep_locked)
-        applied = kicad_apply.apply_plan(board, plan)
+        before, after = src.read_text(encoding="utf-8"), out.read_text(encoding="utf-8")
+        plan = bf.plan_from_texts(before, after, opts.keep_locked)
+        moves = bf.plan_moves(before, after) if opts.move_parts else None
+        applied = kicad_apply.apply_plan(board, plan, moves.poses if moves else ())
     except runner.RouteCancelled:
         shutil.rmtree(work, ignore_errors=True)
         return 0
@@ -239,7 +346,9 @@ def main() -> int:
         ui.error(f"Routing failed:\n\n{traceback.format_exc()}\nFiles kept in {work}")
         return 1
     shutil.rmtree(work, ignore_errors=True)
-    ui.info(report(plan, applied, res))
+    ui.info(report(plan, applied, res, moves))
+    if opts.teardrops:
+        open_teardrops(kicad)
     return 0
 
 

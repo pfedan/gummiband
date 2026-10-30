@@ -90,5 +90,31 @@ class PlanTest(unittest.TestCase):
         self.assertFalse(bf.should_remove(True, True))
 
 
+class PartMovesTest(unittest.TestCase):
+    BOARD = """(kicad_pcb (version 20240108)
+  (footprint "R" (at 10 20 90) (property "Reference" "R1" (at 0 0)) (pad "1" smd (at 1 0)))
+  (footprint "U" (at 30 40) (property "Reference" "U1" (at 0 0)))
+  (module "C" (at 50 60) (fp_text reference "C1" (at 0 0)))
+  (segment (start 0 0) (end 1 0) (width 0.2) (layer "F.Cu") (net 0) (uuid "s1"))
+)
+"""
+
+    def test_only_shifted_footprints(self):
+        moved = self.BOARD.replace("(at 30 40)", "(at 30.25 39.5)")
+        moves = bf.plan_moves(self.BOARD, moved)
+        self.assertEqual(moves.poses, [("U1", 30.25, 39.5)])
+        self.assertEqual(moves.stale_copper, 0)
+
+    def test_old_style_reference_and_rotation_stays_out(self):
+        moved = self.BOARD.replace("(at 50 60)", "(at 51 60)").replace("(at 10 20 90)", "(at 11 20 90)")
+        self.assertEqual(bf.plan_moves(self.BOARD, moved).poses,
+                         [("C1", 51.0, 60.0), ("R1", 11.0, 20.0)])
+
+    def test_copper_that_moved_along_is_counted(self):
+        moved = self.BOARD.replace("(start 0 0) (end 1 0)", "(start 1 0) (end 2 0)")
+        self.assertEqual(bf.plan_moves(self.BOARD, moved).stale_copper, 1)
+
+
+
 if __name__ == "__main__":
     unittest.main()

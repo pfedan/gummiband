@@ -22,13 +22,45 @@ Setup is in [Installation](installation.md).
 
 ## The dialog
 
+The dialog has two tabs, and every field explains itself in a tooltip. It remembers its last values
+in the plugin's `settings.json`; references, layer names and net files start empty every time,
+because they fit only one board. *Defaults* brings back the values below.
+
+**Basic**
+
 | Option | Default | What it does |
 | --- | --- | --- |
 | Keep locked tracks and vias | on | Locked copper stays and is routed around. All unlocked tracks and vias are replaced. Off: everything is replaced, locked or not. |
 | Parallel runs | 14 | How many routing attempts with different orders are tried in every phase. The default is a constant, not the core count, so the same board gives the same result on every machine; the core count only changes how long it takes. More runs explore more orders. |
 | Via cost (mm of track) | 3.0 | How much track a via is worth to the router. Lower values give more vias and shorter tracks, higher values fewer vias. The search also tries values around it. |
+| Generations | 3 | Rounds of the order search after the first runs, judged by routed connections, vias and length. |
 | Geometry generations | 3 | Extra search rounds judged by the clearance check of the drawn tracks, not only by the topology. 0 is fastest; each round costs about one full routing pass and removes violations. |
+| Let parts shift to open channels | off | The geometry generations may shift parts next to clearance problems (`--move-parts`), so at least one of them is needed. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay. The moved footprints arrive in the same undo step as the tracks, and the message box lists them. |
+| Parts that never move | | With the option above: references that stay in addition (`--fixed`). |
+| Open Edit Teardrops after routing | off | Opens KiCad's *Edit Teardrops* dialog after the run. Enable the teardrops there: the plugin cannot do it itself, see below. |
 | Save an animation of the generations | off | Writes one image per generation and an `evolution.gif` into `gummiband-evolution/` next to the project. Needs `rsvg-convert` and ImageMagick. |
+
+**Advanced**
+
+| Option | Default | CLI | What it does |
+| --- | --- | --- | --- |
+| Via grid pitch | 0.5 mm | `--via-pitch` | Spacing of the sites where vias may go. Finer finds more ways through tight spots and takes longer. |
+| Layer direction weight | 0.5 | `--layer-dirs` | How strongly every third run prefers horizontal and vertical tracks on alternating layers. |
+| Via removal factor | 4.0 | `--via-pass` | Factor on the via cost in the pass that routes connections with vias again and keeps what has fewer vias. |
+| Negotiation rounds | 0 | `--negotiate` | Experimental second search in which connections compete for room. 20 rounds work well and take about twice the time. |
+| Worker threads | 0 (all) | `--threads` | How many cores the run may use. The result does not depend on it. |
+| Plane layers | | `--plane-layers` | Copper layers to treat as planes, on top of those of KiCad type *power*. |
+| Net widths file | | `--net-widths` | JSON file with a track width per net. |
+| Net priorities file | | `--net-priorities` | JSON file with a routing priority per net; lower routes first. |
+| Route pairs as one wide track | off | `--pairs` | Experimental: routes each differential pair as one wide track and splits it into two. Costs connections on dense boards. |
+| Length difference | 0.1 mm | `--pair-skew` | With pairs: length difference left within a pair. |
+| Differential impedance | 0 (off) | `--pair-zdiff` | With pairs: sets the track width per layer from the stackup. |
+| Pair pull | 0 | `--pair-pull` | How strongly the two nets of a pair attract each other while routing. |
+
+**Teardrops.** KiCad's plugin API has no setting for teardrops on vias and pads, so `--teardrops`
+cannot act on the open board. The check box opens KiCad's own dialog instead. The wedges at track
+width changes are a project setting in *Board Setup*. Footprints in a KiCad group move in the plugin
+too, but tracks and vias kept in such a group stay where they are; the message box warns about it.
 
 Press OK and a progress dialog shows the phase (portfolio, generation n, geometry, geometry
 generation n, polish), the routed connections, vias, track length and the remaining violations of
@@ -85,11 +117,12 @@ move:
 
 Locked footprints never move. *Also keep* takes references that should stay in addition. The
 other fields are *Parallel runs* (independent placements, the one with the fewest crossings
-wins, 4 by default), *Courtyard spacing* (0.3 mm) and *Room around ICs* (0.3 mm extra for parts
-with five or more pads); they are the `--starts`, `--gap` and `--halo` options of
-[`gummiband place`](cli.md#gummiband-place). The button always uses seed 1; placements differ a
-lot from seed to seed, so for another attempt use `--seed` on the command line or the `seed` of the
-MCP tool.
+wins, 4 by default), *Courtyard spacing* (0.3 mm), *Room around ICs* (0.3 mm extra for parts with
+five or more pads) and *Seed* (1); placements differ a lot from seed to seed, so for another attempt
+change it. The *Advanced* tab has *Release* (parts that may move although they count as mechanical),
+*Distance to the outline* (0.5 mm), *Annealing moves per run* (3,000,000), *Worker threads* and
+*Plane layers*. They are the options of [`gummiband place`](cli.md#gummiband-place), and the dialog
+remembers its numbers like the routing dialog does.
 
 The footprints and the keepouts that belong to them move in one undo step, so Ctrl/Cmd+Z takes the
 placement back entirely. Tracks and vias do not follow, so use it before routing. The message box
@@ -105,7 +138,7 @@ could be.
 ## Without a dialog
 
 If the plugin's Python has no wxPython (a Linux system interpreter, for example), the action runs
-with the defaults from the table above and prints its report to the status bar (KiCad 10.0.1 and
+with the saved values or the defaults from the tables above and prints its report to the status bar (KiCad 10.0.1 and
 later). Use the [command line](cli.md) for full control in that case.
 
 ## What the plugin does not do yet

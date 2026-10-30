@@ -44,19 +44,21 @@ Your board file is not written; save it yourself when you like the result.
 ## Use
 
 PCB editor: click the Gummiband button in the plugin toolbar (the action is listed in
-*Preferences > Plugins*, where its toolbar button can be switched on and off). The dialog asks
-for:
+*Preferences > Plugins*, where its toolbar button can be switched on and off). The dialog has a
+*Basic* and an *Advanced* tab; every field explains itself in a tooltip and maps to one option of
+`gummiband route`, see [the plugin guide](../docs/guide/kicad-plugin.md#the-dialog).
 
 - **Keep locked tracks and vias** (default on): locked copper stays as fixed copper the router
   connects to; all unlocked tracks and vias are replaced. Off: every track and via is replaced
   (same as `gummiband route` without `--keep-locked`).
-- **Parallel runs** (default 14): portfolio size, `--runs`.
-- **Via cost** (default 3.0): in mm of track, `--via-cost`.
-- **Geometry generations** (default 3): generations that are judged by the clearance check of
-  the finished geometry, `--geometry-generations` (0 is fastest, more is cleaner).
 - **Save an animation of the generations** (off by default): one image per generation and an
   animated `evolution.gif` in `gummiband-evolution/` next to the project, `--frames`. Needs
   `rsvg-convert` and ImageMagick (`brew install librsvg imagemagick`).
+
+The dialogs remember their last values in `settings.json` (sections `route` and `place`), so keep
+that file when you refresh a copy of the plugin. Fields that only fit one board (references, plane
+layers, net files) start empty every time. *Defaults* brings back the values of a fresh
+installation.
 
 While the router runs, a progress dialog shows the elapsed time; *Cancel* stops the router and
 leaves the board alone. At the end a message box reports what was removed and created, the
@@ -64,8 +66,8 @@ router's summary and unrouted connections. If the router fails, its stdout and s
 and the temp folder is kept (its path is in the message). Undo with Ctrl/Cmd+Z. Zones are not
 refilled; refill (B) and run DRC afterwards.
 
-Without wxPython (for example a Linux system Python), the action runs with the defaults and
-prints its report; KiCad 10.0.1 and later shows plugin output in the status bar.
+Without wxPython (for example a Linux system Python), the action runs with the saved values or
+the defaults and prints its report; KiCad 10.0.1 and later shows plugin output in the status bar.
 
 ## How the import works
 
@@ -86,7 +88,8 @@ and creates the new ones through the IPC API, in batches of 500 items.
 | `gummiband_place.py` | entrypoint of *Place with Gummiband*: scope dialog, CLI run, one commit |
 | `gb_plugin/sexpr.py` | s-expression reader |
 | `gb_plugin/board_file.py` | copper items of a board file, import plan (no KiCad needed) |
-| `gb_plugin/runner.py` | binary lookup, command line, running the router |
+| `gb_plugin/runner.py` | binary lookup, options and their saved values, command line, running the router |
+| `gb_plugin/fields.py` | what the dialogs ask for: tabs, sections, fields with range and tooltip |
 | `gb_plugin/kicad_apply.py` | conversion to `kipy` objects, the commits of routing and placing |
 | `dev_run.py` | headless dry run of the import |
 | `tests/` | unit tests |

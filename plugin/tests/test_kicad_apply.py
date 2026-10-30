@@ -3,6 +3,7 @@
 Needs the kicad-python package (skipped otherwise), but no running KiCad.
 """
 
+import types
 import unittest
 
 from gb_plugin import board_file as bf
@@ -86,9 +87,29 @@ class FakeBoard:
     def drop_commit(self, commit):
         self.calls.append(("drop", commit))
 
+    def get_footprints(self):
+        field = types.SimpleNamespace(text=types.SimpleNamespace(value="U1"))
+        self.footprint = types.SimpleNamespace(reference_field=field, position=None)
+        return [self.footprint]
+
+    def update_items(self, items):
+        self.calls.append(("update", len(items)))
+
 
 @unittest.skipIf(kicad_apply is None, "kicad-python (kipy) not installed")
 class ApplyPlanTest(unittest.TestCase):
+    def test_moved_parts_share_the_commit(self):
+        board = FakeBoard(self.existing())
+        plan = bf.plan_from_texts(fixtures.BOARD_V10, fixtures.routed_v10(True), True)
+        res = kicad_apply.apply_plan(board, plan, [("U1", 1.5, 2.0), ("U9", 0.0, 0.0)])
+        self.assertEqual((res.moved, res.missing), (1, ["U9"]))
+        self.assertEqual((board.footprint.position.x, board.footprint.position.y),
+                         (1_500_000, 2_000_000))
+        kinds = [c[0] for c in board.calls]
+        self.assertEqual(kinds[:2], ["begin", "update"])
+        self.assertEqual(kinds.count("begin"), 1)
+        self.assertEqual(kinds.count("push"), 1)
+
     def existing(self):
         # the live board as KiCad would report it: same items as BOARD_V10
         c = bf.read_copper(fixtures.BOARD_V10)
