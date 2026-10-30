@@ -137,7 +137,11 @@ the violations are the price of the last connections through the pin rows. Origi
   instead of 0.66 s, with more violations on average.
 - Lichtschnitzel `--geometry-generations 3 --move-parts`, seeds 1 to 4, 4 threads: 996 core
   seconds on the CPU, 593 with the GPU, all 348/348; violations 15, 4, 0, 2 against 5, 0, 0, 11.
-  On all 14 cores no clean comparison yet: under load the CPU was about level with the GPU.
+- The same on all 14 cores, alone on the machine: 110 s on the CPU, 71 s with the GPU (1175 and 669
+  core seconds), same violations. One relaxation: 0.52 s against 0.38 s, six in parallel 1.17 s
+  against 0.57 s, with 15 % more violations on Lichtschnitzel and 0.4 % more length. Default run
+  7.3 s against 6.0 s. The search takes different paths, so the seeds do not compare one to one.
+  On the CPU the serial piece grids take 0.49 ms of a round of about 1 ms: the next cheap gain.
 - Atomic counters that all threads touch per point made the relaxation three times slower
   (PR #8, removed in PR #10). Timings from builds with them are worthless.
 - The relaxation is chaotic: a change of 1e-12 mm turns 1 short into 16 on `four_signal_layers`.
