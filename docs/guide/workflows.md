@@ -57,10 +57,26 @@ Nets are routed in order of their net class priority (lower first); within a cla
 decides the order and reorders failed connections forward. The priority field is in the net class
 setup of the `.kicad_pro`. Classes without a priority come last.
 
-On the command line there is no per net override yet. The MCP server has one: `set_net_options`
-with a `priority` per net, and a `skip` flag that leaves a net out of routing. An AI agent or a
-script driving the server can use it to route the critical nets first, judge, then route the rest.
-See [MCP.md](../MCP.md#set_net_options).
+Per net overrides come from a JSON file:
+
+```bash
+gummiband route board.kicad_pcb -o out.kicad_pcb --net-priorities prio.json
+```
+
+```json
+{"USB_D+": -20, "USB_D-": -20, "XTAL_IN": -10, "XTAL_OUT": -10,
+ "COL0": 10, "COL1": 10, "ROW0": 10, "VCC": 20, "GND": 30}
+```
+
+Lower numbers route first; nets not in the file keep their class priority. The MCP server has the
+same through `set_net_options` (`priority` per net, plus a `skip` flag that leaves a net out), so
+an agent can route the critical nets first, judge, then the rest. See
+[MCP.md](../MCP.md#set_net_options).
+
+A hint from one measurement on one board (the Corne keyboard): routing USB and crystal first,
+then the other signals, then the key matrix, and the supply and GND last gave the best result,
+with more connections routed and fewer violations at the cost of a few more vias. Groups like
+that are a sensible starting point; the right order for your board is a matter of trying.
 
 ## Judge a result
 

@@ -121,8 +121,9 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
 - **Teardrops.** Gummiband draws none itself. `--teardrops` (command line only) switches on
   KiCad's own teardrop feature for the vias and pads of the output and for the track ends at
   width changes; fill the zones once (B) after opening the file and KiCad builds the shapes.
-- **Per net options from a file.** Priorities come from net classes; a `gummiband.toml` next to
-  the board is planned. The MCP server has per net priority and skip today.
+- **Per net options in one file.** Priorities (`--net-priorities`) and widths (`--net-widths`)
+  come from separate JSON files; a single `gummiband.toml` next to the board is planned. The MCP
+  server has per net priority and skip.
 - **More rule conditions.** Only the clearance and minimum width rules above; no rules by
   position, footprint or layer.
 - **Clean DRC on dense boards.** Expect a few clearance items and the occasional crossing in
