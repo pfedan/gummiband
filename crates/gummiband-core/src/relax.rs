@@ -797,6 +797,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             neck_w: t.neck_w,
             origin: t.origin,
             resting: !awake[ti],
+            fitted: std::mem::take(&mut t.fitted),
         };
     }
 }
@@ -1210,5 +1211,126 @@ impl CellLists {
 
     fn get(&self, c: usize) -> &[u32] {
         &self.ids[self.start[c] as usize..self.start[c + 1] as usize]
+    }
+}
+
+/// Tracks stay narrow only where they must: a piece inside a neck zone takes the full width if
+/// that keeps all clearances to obstacles, vias and other tracks. The zones shrink to the pieces
+/// that stay narrow. Only for the finished geometry: the track shapes do not change.
+pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
+    let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
+    let bounds = board.bbox().grow(5.0);
+    // a straight piece has one width: long ones are cut, so that one tight spot stays local
+    for t in geo.tracks.iter_mut().filter(|t| !t.necks.is_empty()) {
+        // a minimum width rule allows a narrow piece only if it touches the zone, so a piece
+        // that leaves the zone stays in one
+        let free = board.class_of(t.net).min_width.is_none();
+        let may_cut = |a: Point, b: Point, necks: &[Rect]| {
+            a.dist(b) > 0.5
+                && if free {
+                    necks.iter().any(|r| r.touches_seg(a, b))
+                } else {
+                    necks.iter().any(|r| r.contains(a) && r.contains(b))
+                }
+        };
+        let mut elems = Vec::with_capacity(t.elems.len());
+        for e in &t.elems {
+            match *e {
+                Elem::Line(a, b) if may_cut(a, b, &t.necks) => {
+                    let n = (a.dist(b) / 0.3).ceil() as usize;
+                    let at = |i: usize| a + (b - a) * (i as f64 / n as f64);
+                    elems.extend((0..n).map(|i| Elem::Line(at(i), at(i + 1))));
+                    // all of it was narrow so far, and stays so until it is found to fit
+                    for i in 0..n {
+                        let mut r = Rect::empty();
+                        r.add((at(i) + at(i + 1)) * 0.5);
+                        t.fitted.push((r.grow(1e-6), t.neck_w));
+                    }
+                }
+                e => elems.push(e),
+            }
+        }
+        t.pts = crate::realize::flatten(&elems);
+        t.elems = elems;
+    }
+    let mut idx = GridIndex::new(bounds, 1.0);
+    let mut pieces: Vec<(Point, Point, u32)> = Vec::new();
+    for (ti, t) in geo.tracks.iter().enumerate() {
+        for w in t.pts.windows(2) {
+            let mut r = Rect::empty();
+            r.add(w[0]);
+            r.add(w[1]);
+            idx.insert(pieces.len() as u32, &r);
+            pieces.push((w[0], w[1], ti as u32));
+        }
+    }
+    let margin = RelaxConfig::default().margin;
+    for ti in 0..geo.tracks.len() {
+        if geo.tracks[ti].necks.is_empty() {
+            continue;
+        }
+        let t = &geo.tracks[ti];
+        let (net, layer, c) = (t.net, t.layer, clr(t.net));
+        let fits = |a: Point, b: Point, w: f64| -> bool {
+            let mut r = Rect::empty();
+            r.add(a);
+            r.add(b);
+            let rr = r.grow(w / 2.0 + c + 1.0);
+            for oi in sub.shared.obs_index.query(&rr) {
+                let o = &board.obstacles[oi as usize];
+                if !o.layers.has(layer) || (o.net == Some(net) && o.kind != ObstacleKind::Hole) {
+                    continue;
+                }
+                let need = match o.kind {
+                    ObstacleKind::Keepout { tracks, .. } => {
+                        if !tracks {
+                            continue;
+                        }
+                        crate::board::KEEPOUT_GAP
+                    }
+                    ObstacleKind::Hole => board.rules.hole_clearance,
+                    _ => o.clearance.max(c),
+                };
+                if sub.shared.obs_polys[oi as usize].dist_to_seg(a, b) < need + w / 2.0 + margin {
+                    return false;
+                }
+            }
+            for v in &geo.vias {
+                if v.net != net && point_seg_dist(v.at, a, b) < v.diameter / 2.0 + w / 2.0 + c.max(clr(v.net)) + margin
+                {
+                    return false;
+                }
+            }
+            for pi in idx.query(&rr) {
+                let (p, q, tj) = pieces[pi as usize];
+                let o = &geo.tracks[tj as usize];
+                if o.net == net || o.layer != layer {
+                    continue;
+                }
+                let need = w / 2.0 + o.piece_width(p, q) / 2.0 + board.track_clearance(net, o.net) + margin;
+                if crate::geom::seg_seg_dist(a, b, p, q) < need {
+                    return false;
+                }
+            }
+            true
+        };
+        // the widest step that fits, piece by piece
+        let fitted: Vec<(Rect, f64)> = t
+            .pts
+            .windows(2)
+            .filter(|p| t.piece_width(p[0], p[1]) < t.width)
+            .map(|p| {
+                let neck = t.piece_width(p[0], p[1]);
+                let steps = ((t.width - neck) / 0.05).floor() as usize;
+                let best = (0..=steps)
+                    .map(|i| t.width - i as f64 * 0.05)
+                    .find(|&w| fits(p[0], p[1], w))
+                    .unwrap_or(neck);
+                let mut r = Rect::empty();
+                r.add((p[0] + p[1]) * 0.5);
+                (r.grow(1e-6), best)
+            })
+            .collect();
+        geo.tracks[ti].fitted = fitted;
     }
 }

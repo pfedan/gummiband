@@ -709,6 +709,26 @@ pub fn route_fixed(
             search.report("via pass", &best.stats);
         }
     }
+    // tracks as wide as the surroundings allow; a net that gets a new violation by it falls back
+    let plain = best.geo.clone();
+    let known: std::collections::HashSet<(NetId, Option<NetId>)> =
+        check::check(board, &plain).iter().map(|v| v.nets).collect();
+    relax::widen_necks(board, &sub, &mut best.geo);
+    for _ in 0..4 {
+        let bad: Vec<NetId> = check::check(board, &best.geo)
+            .iter()
+            .filter(|v| !known.contains(&v.nets))
+            .flat_map(|v| [Some(v.nets.0), v.nets.1])
+            .flatten()
+            .collect();
+        if bad.is_empty() {
+            break;
+        }
+        for t in best.geo.tracks.iter_mut().filter(|t| bad.contains(&t.net)) {
+            let neck = t.neck_w;
+            t.fitted.iter_mut().for_each(|f| f.1 = neck);
+        }
+    }
     (
         sub,
         RouteResult {
