@@ -116,6 +116,7 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
             Some("gr_rect") | Some("gr_line") | Some("gr_arc") | Some("gr_circle") | Some("gr_poly") => {
                 r.read_graphic(n, None)
             }
+            Some("gr_text") => r.read_text(n, None),
             _ => {}
         }
     }
@@ -525,6 +526,9 @@ impl Reader {
             {
                 self.read_graphic(g, Some((pos, rot)));
             }
+        }
+        for t in fp.children("fp_text") {
+            self.read_text(t, Some((pos, rot)));
         }
         for z in fp.children("zone") {
             self.read_zone(
@@ -984,6 +988,75 @@ impl Reader {
         }
     }
 
+    /// Text on a copper layer is copper, without a net. The router does not need the letters: a
+    /// box around the text is an obstacle that is a little too large, from the widths of KiCad's
+    /// stroke font, which average about 0.8 of the character size.
+    fn read_text(&mut self, t: &Node, tf: Option<(Point, f64)>) {
+        let Some(layer) = t.child_str("layer").and_then(|l| self.b.layer_id(l)) else {
+            return;
+        };
+        // (gr_text "text" ...), (fp_text user "text" ...)
+        let which = usize::from(t.head() == Some("fp_text"));
+        let Some(text) = t.args().get(which).and_then(|a| a.as_str()) else {
+            return;
+        };
+        let effects = t.child("effects");
+        if t.flag("hide") || effects.is_some_and(|e| e.flag("hide")) {
+            return;
+        }
+        let font = effects.and_then(|e| e.child("font"));
+        let size = font.and_then(|f| f.child_f64s("size")).unwrap_or_default();
+        let (h, w) = (size.first().copied().unwrap_or(1.0), size.get(1).copied().unwrap_or(1.0));
+        let stroke = font.and_then(|f| f.child_f64("thickness")).unwrap_or(0.15);
+        let lines = text.split(['\n', '\r']).filter(|l| !l.is_empty()).count().max(1);
+        let longest = text.split(['\n', '\r']).map(|l| l.chars().count()).max().unwrap_or(0);
+        let (width, height) = (
+            longest as f64 * w * 0.85 + stroke,
+            h + (lines - 1) as f64 * h * 1.6 + stroke,
+        );
+        let justify = effects.and_then(|e| e.child("justify"));
+        let has = |word: &str| justify.is_some_and(|j| j.args().iter().any(|a| a.as_str() == Some(word)));
+        let (left, right) = (has("left") != has("mirror"), has("right") != has("mirror"));
+        let x0 = if left {
+            -stroke / 2.0
+        } else if right {
+            stroke / 2.0 - width
+        } else {
+            -width / 2.0
+        };
+        let y0 = if has("top") {
+            -stroke / 2.0
+        } else if has("bottom") {
+            stroke / 2.0 - height
+        } else {
+            -height / 2.0
+        };
+        let at = t.child_f64s("at").unwrap_or_default();
+        let origin = pt(at.first().copied().unwrap_or(0.0), at.get(1).copied().unwrap_or(0.0));
+        let origin = match tf {
+            Some((pos, rot)) => pos + kicad_rot(origin, rot),
+            None => origin,
+        };
+        let angle = at.get(2).copied().unwrap_or(0.0);
+        let corner = |x: f64, y: f64| origin + kicad_rot(pt(x, y), angle);
+        let clearance = self.clearance_of(None);
+        self.push_obstacle(Obstacle {
+            shape: Shape::Polygon(Polygon::new(vec![
+                corner(x0, y0),
+                corner(x0 + width, y0),
+                corner(x0 + width, y0 + height),
+                corner(x0, y0 + height),
+            ])),
+            layers: LayerSet::single(layer),
+            net: None,
+            kind: ObstacleKind::Graphic,
+            hole: None,
+            clearance,
+            pin: None,
+            locked: true,
+        });
+    }
+
     /// Chain loose Edge.Cuts segments into closed polygons. Exact joints first; chains left
     /// open are then joined at their nearest ends (older files leave gaps of a few 0.1 mm that
     /// KiCad bridges as well). Chains that stay open are dropped.
@@ -1094,6 +1167,25 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Text on copper blocks the router, text elsewhere does not.
+    #[test]
+    fn text_on_copper_is_an_obstacle() {
+        let text = r#"(kicad_pcb (version 20240108) (generator "test")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (37 "F.SilkS" user))
+  (net 0 "")
+  (gr_text "ABCD" (at 10 20 0) (layer "F.Cu")
+    (effects (font (size 1 1) (thickness 0.2)) (justify left)))
+  (gr_text "HIDDEN" (at 10 30 0) (layer "F.Cu") (effects (font (size 1 1)) (hide yes)))
+  (gr_text "SILK" (at 10 40 0) (layer "F.SilkS") (effects (font (size 1 1))))
+)"#;
+        let kb = parse_board(text.to_string(), None, &ReadOptions::default()).unwrap();
+        let shapes: Vec<_> = kb.board.obstacles.iter().filter(|o| o.kind == ObstacleKind::Graphic).collect();
+        assert_eq!(shapes.len(), 1);
+        let bb = shapes[0].shape.bbox();
+        assert!((bb.min.x - 9.9).abs() < 1e-9 && (bb.max.x - (9.9 + 3.6)).abs() < 1e-9, "{bb:?}");
+        assert!((bb.min.y - 19.4).abs() < 1e-9 && (bb.max.y - 20.6).abs() < 1e-9, "{bb:?}");
+    }
 
     /// A pad's angle in the file is absolute, not relative to the footprint, and KiCad leaves it
     /// out when it is 0: the pad of a footprint at -90 degrees whose local angle is 90.
