@@ -204,7 +204,7 @@ with default net classes.
 | --- | --- |
 | `RAYON_NUM_THREADS` | Default for `--threads`. |
 | `GB_EVO_SEED` | Seed of the evolutionary search (default fixed). Same board, same options, same seed give the same result; another seed gives another attempt. |
-| `GB_GPU=1` | Experimental, macOS only. Runs most of the track relaxation as a compute shader on the GPU (Metal). Needs a binary built with `cargo build --release -p gummiband-cli --features gpu`; without the variable such a binary behaves exactly like the normal one. Saves about 40 percent of the core seconds on boards like the Lichtschnitzel controller, nothing on boards where the search dominates (Corne, ULX3S, dense BGAs), and leaves slightly more violations on average. Results repeat on one machine but not across GPUs or drivers, so for a final run use the CPU or try several seeds. |
+| `GB_GPU=1` | Experimental, macOS only. Runs most of the track relaxation as a compute shader on the GPU (Metal). Needs a binary built with `cargo build --release -p gummiband-cli --features gpu`; without the variable such a binary behaves exactly like the normal one. On boards where relaxation is a large share of the work (Lichtschnitzel controller, Arty) it cuts the core seconds by about 40 percent, and by about 60 percent on a quality run with geometry generations and movable parts; on boards where the search dominates (Corne, ULX3S, dense BGAs) it gains nothing, and when all cores are already busy the gain shrinks. Completion is the same; violation counts are comparable but vary more from seed to seed. Results repeat on one machine but not across GPUs or drivers, so for a final run use the CPU or try several seeds. |
 
 ## Exit status
 
