@@ -212,6 +212,7 @@ fn carrier_class(b: &Board, p: NetId, n: NetId) -> crate::board::NetClass {
     c.priority = cp.priority.min(cn.priority);
     // no necks: two tracks and their gap do not get narrower near a pin
     c.min_width = Some(width);
+    c.target_width = None;
     c.neck_refs = Vec::new();
     c
 }

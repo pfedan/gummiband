@@ -158,7 +158,8 @@ enum Cmd {
         air: Option<f64>,
         /// At the end tracks of the default net class push aside what can give way and grow up
         /// to this width in mm wherever there is room, with a taper at every change; routing
-        /// still works with the class width
+        /// still works with the class width. A class with a track width rule in the .kicad_dru
+        /// that has an `opt` value grows to that one, also without this flag
         #[arg(long, default_value_t = 0.0)]
         prefer_width: f64,
     },
@@ -287,11 +288,20 @@ fn main() -> Result<()> {
                     .filter(|n| n.class as usize == i && n.pins.len() > 1)
                     .map(|n| n.name.as_str())
                     .collect();
+                let width = match (c.min_width, c.target_width) {
+                    (None, None) => format!("{}", c.track_width),
+                    (min, target) => format!(
+                        "{} (min {}, target {})",
+                        c.track_width,
+                        min.map_or("-".into(), |w| w.to_string()),
+                        target.map_or("-".into(), |w| w.to_string())
+                    ),
+                };
                 println!(
                     "  {} (prio {}, w {}, clr {}, via {}/{}): {} nets {}",
                     c.name,
                     c.priority,
-                    c.track_width,
+                    width,
                     c.clearance,
                     c.via_diameter,
                     c.via_drill,

@@ -185,7 +185,8 @@ pub struct SearchConfig {
     /// (0 = off, the copper stays at the limit).
     pub air: f64,
     /// Tracks of the default net class push their neighbours aside and grow up to this width in
-    /// mm where there is room (0 = off).
+    /// mm where there is room (0 = off). A class with a target width of its own (`opt` of a
+    /// track width rule) grows to that one instead, also with this off.
     pub prefer_width: f64,
 }
 
@@ -865,11 +866,13 @@ pub fn route_fixed(
             search.report("air", &best.stats);
         }
     }
-    // a class of its own is a decision of the designer, and the width of a pair is its impedance
+    // a class of its own grows only to the target its rules give it, and the width of a pair
+    // is its impedance
     let pairs: Vec<NetId> = board.diff_pairs().into_iter().flat_map(|(a, b)| [a, b]).collect();
-    let may_grow = |n: NetId| board.nets[n as usize].class == 0 && !pairs.contains(&n);
-    if search.prefer_width > 0.0 {
-        if let Some(c) = improve::make_room(board, &sub, &best, search.prefer_width, search.air / 2.0, may_grow) {
+    let target = |n: NetId| board.target_width(n, search.prefer_width, &pairs);
+    let grows = (0..board.nets.len() as NetId).any(|n| target(n) > 0.0);
+    if grows {
+        if let Some(c) = improve::make_room(board, &sub, &best, target, search.air / 2.0) {
             best = c;
             search.report("room", &best.stats);
         }
@@ -898,9 +901,9 @@ pub fn route_fixed(
     if open && check::check(board, &best.geo).len() > check::check(board, &plain).len() {
         best.geo = plain;
     }
-    if search.prefer_width > 0.0 {
+    if grows {
         let plain = best.geo.clone();
-        relax::prefer_width(board, &sub, &mut best.geo, search.prefer_width, search.air / 2.0, may_grow);
+        relax::prefer_width(board, &sub, &mut best.geo, target, search.air / 2.0);
         if check::check(board, &best.geo).len() > check::check(board, &plain).len() {
             best.geo = plain;
         }

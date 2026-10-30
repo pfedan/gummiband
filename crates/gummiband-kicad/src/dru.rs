@@ -77,14 +77,19 @@ pub fn parse_rules(text: &str) -> Vec<ClearanceRule> {
 }
 
 fn constraint_min(c: &Node) -> Option<f64> {
-    let m = c.child("min")?;
+    constraint_value(c, "min")
+}
+
+fn constraint_value(c: &Node, key: &str) -> Option<f64> {
+    let m = c.child(key)?;
     let v = m.args().first()?.as_str()?;
     let v = v.trim_end_matches("mm");
     v.parse().ok()
 }
 
-/// Minimum track widths per net class (`A.NetClass == 'X'` conditions) and the footprints
-/// whose courtyards are exempt (`!A.intersectsCourtyard('REF')`).
+/// Minimum and target track widths per net class (`A.NetClass == 'X'` conditions, the `min` and
+/// the `opt` of a `track_width` constraint) and the footprints whose courtyards are exempt from
+/// the minimum (`!A.intersectsCourtyard('REF')`).
 pub fn apply_width_rules(board: &mut Board, text: &str) {
     let text: String = text
         .lines()
@@ -95,12 +100,21 @@ pub fn apply_width_rules(board: &mut Board, text: &str) {
     let Ok(root) = sexpr::parse(&wrapped) else { return };
     for r in root.children("rule") {
         let Some(cond) = r.child_str("condition") else { continue };
+        // the width of a pair rule is the width of the pair, not a target of the class
+        let pair_rule = r
+            .children("constraint")
+            .any(|c| c.args().first().and_then(|x| x.as_str()) == Some("diff_pair_gap"));
         for c in r.children("constraint") {
             if c.args().first().and_then(|x| x.as_str()) != Some("track_width") {
                 continue;
             }
-            let Some(min) = constraint_min(c) else { continue };
             let classes = quoted_after(cond, "A.NetClass == ");
+            if let Some(opt) = constraint_value(c, "opt").filter(|_| !pair_rule) {
+                for cls in board.classes.iter_mut().filter(|k| classes.contains(&k.name)) {
+                    cls.target_width = Some(opt);
+                }
+            }
+            let Some(min) = constraint_min(c) else { continue };
             let refs = quoted_after(cond, "!A.intersectsCourtyard(");
             for cls in board.classes.iter_mut().filter(|k| classes.contains(&k.name)) {
                 cls.min_width = Some(cls.min_width.map_or(min, |m: f64| m.max(min)));
@@ -512,6 +526,34 @@ mod tests {
         assert_eq!(c.diff_skew, Some(0.5));
         assert_eq!(b.pair_shape(0, 1, 0), (0.16, 0.138, 0.138));
         assert_eq!(b.pair_shape(0, 1, 1), (0.155, 0.144, 0.144));
+    }
+
+    #[test]
+    fn width_rules_give_minimum_and_target() {
+        use gummiband_core::board::NetClass;
+        let mut b = Board::default();
+        b.classes = ["Default", "Power", "USB"]
+            .iter()
+            .map(|n| NetClass {
+                name: n.to_string(),
+                track_width: 0.3,
+                ..Default::default()
+            })
+            .collect();
+        apply_width_rules(
+            &mut b,
+            r#"(version 1)
+(rule p (condition "A.NetClass == 'Power' && !A.intersectsCourtyard('U1')")
+  (constraint track_width (min 0.2mm) (opt 0.8mm)))
+(rule u (condition "A.NetClass == 'USB'")
+  (constraint track_width (opt 0.16mm)) (constraint diff_pair_gap (opt 0.14mm)))"#,
+        );
+        let [d, p, u] = [&b.classes[0], &b.classes[1], &b.classes[2]];
+        assert_eq!((d.min_width, d.target_width), (None, None));
+        assert_eq!((p.min_width, p.target_width), (Some(0.2), Some(0.8)));
+        assert_eq!(p.neck_refs, vec!["U1".to_string()]);
+        // the width of a pair rule is no target of the class
+        assert_eq!((u.min_width, u.target_width), (None, None));
     }
 
     #[test]

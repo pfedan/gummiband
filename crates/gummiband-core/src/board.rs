@@ -58,6 +58,10 @@ pub struct NetClass {
     /// Minimum track width from custom rules (necking below the class width is limited by it).
     #[serde(default)]
     pub min_width: Option<f64>,
+    /// Width the tracks of the class grow to where there is room, from the `opt` of a custom
+    /// track width rule (the class width stays the width they are routed with).
+    #[serde(default)]
+    pub target_width: Option<f64>,
     /// Footprints (references) inside whose courtyard the minimum width does not apply.
     #[serde(default)]
     pub neck_refs: Vec<String>,
@@ -558,6 +562,20 @@ impl Board {
 
     pub fn net_id(&self, name: &str) -> Option<NetId> {
         self.nets.iter().position(|n| n.name == name).map(|i| i as NetId)
+    }
+
+    /// Width a net grows to where there is room, 0 if it does not grow: the target of its
+    /// class, else `default` for the default class. Nets in `pairs` keep their width.
+    pub fn target_width(&self, net: NetId, default: f64, pairs: &[NetId]) -> f64 {
+        if pairs.contains(&net) {
+            return 0.0;
+        }
+        let class = self.nets[net as usize].class;
+        match self.classes.get(class as usize).and_then(|c| c.target_width) {
+            Some(w) => w,
+            None if class == 0 => default,
+            None => 0.0,
+        }
     }
 
     pub fn class_of(&self, net: NetId) -> &NetClass {
