@@ -18,6 +18,9 @@ use crate::topo::{Mesh, NONE, OUTSIDE, PAD_SITE, STEINER, Substrate};
 pub struct RouterConfig {
     /// Cost of a via in mm of track.
     pub via_cost: f64,
+    /// Weight of the preferred directions: routing layers alternate between horizontal and
+    /// vertical, a step costs this much extra per mm across its layer's direction (0 = off).
+    pub layer_dirs: f64,
     /// Route plane fan-outs before signal nets.
     pub fanout_first: bool,
     /// Expansion limit per connection search.
@@ -45,6 +48,7 @@ impl Default for RouterConfig {
         let env = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         RouterConfig {
             via_cost: 3.0,
+            layer_dirs: 0.0,
             fanout_first: true,
             max_expansions: env("GB_MAXEXP", 400_000.0) as usize,
             seed: 0,
@@ -467,6 +471,16 @@ impl<'a> Router<'a> {
             }
         }
         (zones, neck_w)
+    }
+
+    /// Extra cost of the step a-b on routing layer li for leaving the layer's preferred
+    /// direction (even layers horizontal, odd ones vertical).
+    fn across(&self, li: usize, a: Point, b: Point) -> f64 {
+        if self.cfg.layer_dirs <= 0.0 {
+            return 0.0;
+        }
+        let d = b - a;
+        self.cfg.layer_dirs * if li % 2 == 0 { d.y.abs() } else { d.x.abs() }
     }
 
     /// Escape penalty for crossing edge e: an end vertex on a pad of another net that still
@@ -1501,7 +1515,7 @@ impl<'a> Router<'a> {
                         slot: j as u16,
                     },
                     q,
-                    node.g + node.pos.dist(q) + escape,
+                    node.g + node.pos.dist(q) + self.across(lu, node.pos, q) + escape,
                     idx,
                 );
             }

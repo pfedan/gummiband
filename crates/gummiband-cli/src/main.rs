@@ -50,6 +50,10 @@ enum Cmd {
         /// Via cost in mm of track (the search varies it around this value).
         #[arg(long, default_value_t = 3.0)]
         via_cost: f64,
+        /// Weight of the preferred layer directions (horizontal and vertical in turn) for
+        /// every third run of the portfolio; 0 = off.
+        #[arg(long, default_value_t = 0.5)]
+        layer_dirs: f64,
         /// Generations of the evolutionary order search after the portfolio.
         #[arg(long, default_value_t = 3)]
         generations: usize,
@@ -188,6 +192,7 @@ fn main() -> Result<()> {
             runs,
             via_pitch,
             via_cost,
+            layer_dirs,
             generations,
             geometry_generations,
             svg,
@@ -260,6 +265,7 @@ fn main() -> Result<()> {
                 },
                 &RouterConfig {
                     via_cost,
+                    layer_dirs,
                     ..Default::default()
                 },
                 &gummiband_core::SearchConfig {
