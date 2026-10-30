@@ -8,6 +8,9 @@ publish.workspace = true
 name = "gummiband"
 path = "src/main.rs"
 
+[features]
+gpu = ["gummiband-core/gpu"]
+
 [dependencies]
 gummiband-core.workspace = true
 gummiband-kicad.workspace = true

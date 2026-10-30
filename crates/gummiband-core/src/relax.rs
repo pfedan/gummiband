@@ -9,8 +9,13 @@ use rayon::prelude::*;
 use crate::board::{Board, LayerId, ObstacleKind};
 use crate::geom::{Point, Rect, point_seg_dist, pt};
 use crate::index::{GridIndex, PointGrid};
+use crate::prof::{self, Slot};
 use crate::realize::{Elem, Geometry, Track};
 use crate::topo::Substrate;
+
+#[cfg(feature = "gpu")]
+#[path = "relax_gpu.rs"]
+mod gpu;
 
 #[derive(Debug, Clone)]
 pub struct RelaxConfig {
@@ -23,6 +28,8 @@ pub struct RelaxConfig {
     pub margin: f64,
     /// Largest move of a point per round in mm.
     pub max_step: f64,
+    /// Experimental: run the tension rounds on the GPU (needs the `gpu` feature).
+    pub gpu: bool,
 }
 
 impl Default for RelaxConfig {
@@ -36,6 +43,7 @@ impl Default for RelaxConfig {
             tension: 0.25,
             margin: 0.008,
             max_step: 0.03,
+            gpu: std::env::var("GB_GPU").is_ok(),
         }
     }
 }
@@ -363,15 +371,59 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
     // while annealing only a few spots still move: cells near the points and vias that moved
     // in the previous round are the only ones worth visiting (None: visit everything)
     let mut dirty: Option<Vec<bool>> = None;
+    prof::add(Slot::RelaxSetup, t_start.elapsed().as_nanos() as u64);
+    prof::add(Slot::Calls, 1);
     let mut grids: Vec<LayerPieces> = (0..n_layers).map(|_| LayerPieces::new(bounds)).collect();
     let mut via_at: Vec<Point> = Vec::with_capacity(vias.len());
     let mut via_grid = PointGrid::new(bounds, 1.0, &[]);
     let mut pieces: Vec<Piece> = Vec::new();
     let annealing = |it: usize| it * 4 >= cfg.iterations * 3;
+    // sleeping copper, vias of one layer and fitted widths stay on the CPU
+    #[cfg(feature = "gpu")]
+    let mut on_gpu =
+        (cfg.gpu && !lazy && via_layer.iter().all(Option::is_none) && geo.tracks.iter().all(|t| t.fitted.is_empty()))
+            .then(|| {
+                let half: Vec<f64> = geo.tracks.iter().map(half_w).collect();
+                let clrs: Vec<f64> = (0..board.nets.len() as u32).map(clr).collect();
+                gpu::GpuRelax::new(gpu::Setup {
+                    board,
+                    geo,
+                    cfg,
+                    origin: (bounds.min + bounds.max) * 0.5,
+                    cells: &cells,
+                    layer_cells: &layer_cells,
+                    near_obs: &near_obs,
+                    obs_polys: &sub.shared.obs_polys,
+                    near_edge: &near_edge,
+                    net_clr: &net_clr,
+                    half_w: &half,
+                    clr: &clrs,
+                    max_clr,
+                    max_vr,
+                    via_grid: &via_grid,
+                })
+            })
+            .flatten();
+    // the last quarter resolves clearances on the CPU: there tracks and vias have to answer each
+    // other round by round, and f64 and the dirty cells count
+    #[cfg(feature = "gpu")]
+    let gpu_end = if on_gpu.is_some() {
+        (cfg.iterations * 3 / 4 / 10 * 10).saturating_sub(1)
+    } else {
+        0
+    };
+    #[cfg(not(feature = "gpu"))]
+    let gpu_end = 0;
+    // during a batch the tracks do not answer, so a via moves once per batch, but a batch far
+    let via_gain = 10.0;
+    let starts_batch = |it: usize| it == 0 || it % 10 == 9;
     for it in 0..cfg.iterations {
+        let on_gpu_now = it < gpu_end;
         // anneal: the last quarter only resolves clearances
         let tension = if annealing(it) { 0.0 } else { cfg.tension };
-        let before = annealing(it).then(|| (tracks.clone(), vias.iter().map(|v| v.0).collect::<Vec<_>>()));
+        let t_round = std::time::Instant::now();
+        let before =
+            (annealing(it) && !on_gpu_now).then(|| (tracks.clone(), vias.iter().map(|v| v.0).collect::<Vec<_>>()));
         if it % 10 == 9 {
             tracks = tracks
                 .par_iter()
@@ -391,13 +443,16 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 })
                 .collect();
         }
-        pieces.clear();
-        for g in &mut grids {
+        let keep_pieces = on_gpu_now && !starts_batch(it);
+        if !keep_pieces {
+            pieces.clear();
+        }
+        for g in grids.iter_mut().filter(|_| !keep_pieces) {
             g.fine.raw.clear();
             g.far.raw.clear();
         }
         // pieces by their midpoints per layer; queries grow by the largest extent
-        for (ti, p) in tracks.iter().enumerate() {
+        for (ti, p) in tracks.iter().enumerate().filter(|_| !keep_pieces) {
             let t = &geo.tracks[ti];
             let g = &mut grids[t.layer as usize];
             let (hw, nc) = (half_w(t), (net_clr[t.net as usize] as f32).next_up());
@@ -419,7 +474,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 });
             }
         }
-        for g in &mut grids {
+        for g in grids.iter_mut().filter(|_| !keep_pieces) {
             g.fine.rebuild();
             g.far.rebuild();
         }
@@ -442,12 +497,14 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             );
         }
         let (awake, via_awake) = (&awake, &via_awake);
+        prof::add(Slot::RelaxPieces, t_round.elapsed().as_nanos() as u64);
+        let t_vias = std::time::Instant::now();
         // vias move as well: pushed by obstacles, other vias and tracks of other nets
         let moved: Vec<Point> = vias
             .par_iter()
             .enumerate()
             .map(|(vi, &(vc, vr, vn, vclr))| {
-                if !via_awake[vi] {
+                if !via_awake[vi] || (on_gpu_now && !starts_batch(it)) {
                     return vc;
                 }
                 let mut push = pt(0.0, 0.0);
@@ -573,15 +630,43 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 } else {
                     push
                 };
-                vc + mv
+                vc + mv * if on_gpu_now { via_gain } else { 1.0 }
             })
             .collect();
+        prof::add(Slot::RelaxVias, t_vias.elapsed().as_nanos() as u64);
+        let t_tracks = std::time::Instant::now();
+        // the GPU runs from one resampling to the next, the tracks stay as they are until then
+        #[cfg(feature = "gpu")]
+        if let Some(g) = on_gpu.as_mut().filter(|_| on_gpu_now) {
+            if starts_batch(it) {
+                let end = (if it == 0 { 9 } else { it + 10 }).min(gpu_end);
+                g.start(
+                    &gpu::Round {
+                        tracks: &tracks,
+                        grids,
+                        pieces,
+                        vias: &vias,
+                        via_grid,
+                        tension,
+                        rounds: (end - it) as u32,
+                    },
+                    geo,
+                );
+            }
+        }
+        #[cfg(feature = "gpu")]
+        let gpu_moves = on_gpu
+            .as_mut()
+            .filter(|_| on_gpu_now && it % 10 == 8)
+            .map(|g| g.finish());
+        #[cfg(not(feature = "gpu"))]
+        let gpu_moves: Option<Vec<[f32; 2]>> = None;
         let snapshot = &tracks;
         tracks = snapshot
             .par_iter()
             .enumerate()
             .map(|(ti, pts)| {
-                if !awake[ti] {
+                if !awake[ti] || on_gpu_now {
                     return pts.clone();
                 }
                 let t = &geo.tracks[ti];
@@ -596,8 +681,10 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     .map_init(Sweep::default, |sweep: &mut Sweep, i| {
                         let p = pts[i];
                         if dirty.as_ref().is_some_and(|d| !d[cells.cell_of(p)]) {
+                            prof::add(Slot::PointsSkipped, 1);
                             return p;
                         }
+                        prof::add(Slot::Points, 1);
                         let w = t.width_at(p);
                         // tension
                         let mid = (pts[i - 1] + pts[i + 1]) * 0.5;
@@ -687,6 +774,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             }
                         }
                         near.sort_unstable();
+                        prof::add(Slot::Candidates, near.len() as u64);
                         for &(_, pi) in near.iter() {
                             let pc = &pieces[pi as usize];
                             let o = &geo.tracks[pc.track as usize];
@@ -728,6 +816,18 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 out
             })
             .collect();
+        if let Some(moves) = gpu_moves {
+            let mut at = 0;
+            for p in &mut tracks {
+                for (q, m) in p.iter_mut().zip(&moves[at..]) {
+                    *q = pt(q.x + m[0] as f64, q.y + m[1] as f64);
+                }
+                at += p.len();
+            }
+        }
+        prof::add(Slot::RelaxTracks, t_tracks.elapsed().as_nanos() as u64);
+        prof::add(Slot::Rounds, 1);
+        let t_dirty = std::time::Instant::now();
         for (v, p) in vias.iter_mut().zip(moved) {
             v.0 = p;
         }
@@ -772,13 +872,14 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             }
             d
         });
+        prof::add(Slot::RelaxDirty, t_dirty.elapsed().as_nanos() as u64);
     }
     for (i, (v, (p, ..))) in geo.vias.iter_mut().zip(&vias).enumerate() {
         v.at = *p;
         v.resting = !via_awake[i];
     }
     let t_taut = std::time::Instant::now();
-    let tracks = taut(board, sub, geo, tracks, cfg, &awake);
+    let tracks = prof::time(Slot::Taut, || taut(board, sub, geo, tracks, cfg, &awake));
     if std::env::var("GB_TIMING").is_ok() {
         eprintln!(
             "relax rounds {:.2} s, taut {:.2} s",

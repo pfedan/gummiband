@@ -6,6 +6,7 @@ pub mod geom;
 pub mod import;
 pub mod index;
 pub mod pairs;
+pub mod prof;
 pub mod realize;
 pub mod relax;
 pub mod route;
@@ -192,6 +193,18 @@ struct Candidate {
 }
 
 fn evaluate(
+    board: &Board,
+    sub: &Substrate,
+    cfg: RouterConfig,
+    genome: Option<&Genome>,
+    generation: usize,
+) -> Candidate {
+    prof::time(prof::Slot::Evaluate, || {
+        evaluate_inner(board, sub, cfg, genome, generation)
+    })
+}
+
+fn evaluate_inner(
     board: &Board,
     sub: &Substrate,
     cfg: RouterConfig,
@@ -564,7 +577,7 @@ pub fn route_fixed(
     let full_relax = relax::RelaxConfig::default();
     let geo_eval_with = |mut c: Candidate, cfg: &relax::RelaxConfig| -> Candidate {
         relax::relax(board, &sub, &mut c.geo, cfg);
-        let v = check::check(board, &c.geo);
+        let v = prof::time(prof::Slot::Check, || check::check(board, &c.geo));
         let mut nets: Vec<NetId> = v.iter().flat_map(|x| [Some(x.nets.0), x.nets.1]).flatten().collect();
         nets.sort_unstable();
         nets.dedup();
