@@ -196,9 +196,11 @@ same design. It is specific to that board's part roles today; the scripts and pa
 ## Drive the router from an AI agent
 
 The MCP server exposes `load_board`, `list_nets`, `set_net_options`, `part_info`,
-`add_locked_copper`, `route` (with the search options of the CLI), `drc` and `render` to Claude Code, Claude Desktop and other MCP
-clients. An agent can load a board, give the critical nets priority, route, read the violations
-with positions, look at a PNG of the region and iterate.
+`move_part`, `add_zone`, `add_locked_copper`, `route` (with the search options of the CLI,
+including `seed` and `keep_all`), `drc` and `render` to Claude Code, Claude Desktop and other
+MCP clients. An agent can load a board, give the critical nets priority, route, read the
+violations with positions and the nets that block each unrouted connection, look at a PNG of the
+region, nudge a part or add a plane in a working copy, and iterate.
 
 New and preliminary: datasheet guided pre-routing. The agent asks `part_info` for the pads,
 courtyard and neighbours of a critical part, places the copper the datasheet recommends with
