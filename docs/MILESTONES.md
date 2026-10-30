@@ -74,6 +74,14 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
 - Benchmarks against Freerouting on the controller and the injector board.
 - Profiling: incremental capacity checks, cheaper relaxation.
 
+## Open: fine pitch fan-out (Corne)
+
+Measured on 2026-10-30, none of these solved it: straight pin stubs (twice: worse on
+`fine_pitch_mixed`, arty, Lichtschnitzel), a larger router margin, extra gap outside the fine
+pitch parts. A router margin of 0.06 mm brings Corne to 14 violations but only 392/482 routed:
+the violations are the price of the last connections through the pin rows. Original widths
+(0.2032 mm) did not change it either; the original design is clean under the same rules.
+
 ## M4b: GPU experiment
 
 - Relaxation, clearance check and candidate screening fit a compute shader (wgpu): uniform
