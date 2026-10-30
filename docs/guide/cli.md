@@ -76,6 +76,7 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | `--geometry-generations N` | 0 | Rounds that are judged after the tracks were drawn, by the clearance check. Slower (each round draws and checks every candidate) and cleaner. The plugin uses 3. |
 | `--via-pitch MM` | 0.5 | Grid pitch of the candidate via positions. Finer grids allow more via places and cost memory and time. |
 | `--via-cost MM` | 3.0 | Cost of a via in millimetres of track. Lower gives more vias and shorter tracks; the search varies the value around what you give. |
+| `--pair-pull W` | 0 (off) | Experimental. Differential pairs are recognised by net name as KiCad pairs them (`_P`/`_N`, `DP`/`DN`, `+`/`-`). With a weight above 0 the first net of a pair is routed normally and the second gets a cost bonus for staying next to it. The output then reports how much of the pair length runs coupled (same layer, at most 1 mm apart). Limits: the spacing is only roughly kept, there is no impedance control and no length matching, and on small boards the pull can cost many clearance violations. Try 1 on boards with real pairs and compare the DRC. |
 | `--layer-dirs W` | 0.5 | Weight of preferred directions per layer: the routing layers alternate horizontal and vertical, and running against the grain costs extra. A soft cost, used by every third run of the portfolio, so the search has candidates with and without it. 0 switches it off. |
 
 A good default for a real two layer board with a few hundred connections is the plain
@@ -88,7 +89,7 @@ A good default for a real two layer board with a few hundred connections is the 
 | --- | --- | --- |
 | `--move-parts` | off | During the geometry generations, parts next to clearance problems may shift a little to open a channel. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay (by footprint library name and by reference prefix J, P, CN, USB, H, MH, SW, TP). The output file has the moved footprints at their new positions, and the console lists every move. Footprints in a KiCad group form a block that moves as a whole with its kept tracks and vias (zones in the group do not move yet); a block with one fixed member stays put. Blocks are new and untested on a real board. |
 | `--fixed R1,U3` | none | More references that never move under `--move-parts`. |
-| `--teardrops` | off | Switches on KiCad's teardrop setting for every via and every connected pad in the output file. KiCad builds the shapes itself: open the file and fill the zones once (B), then the teardrops appear. Not in the plugin yet. |
+| `--teardrops` | off | Switches on KiCad's teardrops for every via and connected pad in the output file, and the track end teardrops (the wedges where a track changes width, for example at a neck) in the output's project. KiCad builds the shapes itself: open the file and fill the zones once (B), then the teardrops appear. Not in the plugin yet. |
 | `--net-widths widths.json` | none | Track width per net from a JSON file `{"net name": width_mm, ...}`, overriding the net class width. `bench/net_widths.py ORIGINAL.kicad_pcb --json widths.json` extracts the widths a designer used in an existing routing. |
 
 ### Output and reports
@@ -120,6 +121,8 @@ wrote 83 items to routed.kicad_pcb
   length.
 - `unrouted: NET: PAD -> PAD` lines name the connections the router gave up on. Route them by
   hand, or lock the rest and run again.
+- `diff pairs: N, X of Y mm coupled (Z%)` appears when the board has nets paired by name: how
+  much of the pairs' length runs side by side on one layer, at most 1 mm apart.
 - `length lower bound`: an estimate of the shortest possible total signal length (minimum
   spanning trees, Steiner corrected). The percentage says how far the result is above it; plane
   fan-outs are not in the bound, so the real distance is smaller.

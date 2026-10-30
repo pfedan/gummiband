@@ -114,10 +114,13 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
 - **Blocks and pre-routing tools are new.** Groups that move as blocks under `--move-parts` and
   the MCP tools `part_info` and `add_locked_copper` exist but have not been tried on a real
   board yet; expect rough edges.
-- **Differential pairs and length matching.** Pairs are routed as two independent nets.
+- **Differential pairs and length matching.** Pairs are recognised by name, but routed as two
+  nets. `--pair-pull` (experimental, off by default) pulls the second net towards the first and
+  reports the coupled length; spacing is only roughly kept, and there is no impedance control and
+  no length matching yet.
 - **Teardrops.** Gummiband draws none itself. `--teardrops` (command line only) switches on
-  KiCad's own teardrop feature for the vias and pads of the output; fill the zones once (B) after
-  opening the file and KiCad builds the shapes.
+  KiCad's own teardrop feature for the vias and pads of the output and for the track ends at
+  width changes; fill the zones once (B) after opening the file and KiCad builds the shapes.
 - **Per net options from a file.** Priorities come from net classes; a `gummiband.toml` next to
   the board is planned. The MCP server has per net priority and skip today.
 - **More rule conditions.** Only the clearance and minimum width rules above; no rules by
