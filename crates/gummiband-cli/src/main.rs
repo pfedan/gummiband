@@ -62,6 +62,9 @@ enum Cmd {
         /// every third run of the portfolio; 0 = off.
         #[arg(long, default_value_t = 0.5)]
         layer_dirs: f64,
+        /// Weight of the pull between the nets of differential pairs (0 = off).
+        #[arg(long, default_value_t = 0.0)]
+        pair_pull: f64,
         /// Generations of the evolutionary order search after the portfolio.
         #[arg(long, default_value_t = 3)]
         generations: usize,
@@ -207,6 +210,7 @@ fn main() -> Result<()> {
             via_pitch,
             via_cost,
             layer_dirs,
+            pair_pull,
             generations,
             geometry_generations,
             svg,
@@ -293,6 +297,7 @@ fn main() -> Result<()> {
                 &RouterConfig {
                     via_cost,
                     layer_dirs,
+                    pair_pull,
                     ..Default::default()
                 },
                 &gummiband_core::SearchConfig {
@@ -386,6 +391,16 @@ fn main() -> Result<()> {
                         );
                     }
                 }
+            }
+            let pairs = b.diff_pairs().len();
+            if pairs > 0 {
+                let (c, t) = gummiband_core::pair_coupling(b, &res.geometry, 1.0);
+                println!(
+                    "diff pairs: {pairs}, {:.0} of {:.0} mm coupled ({:.0}%)",
+                    c,
+                    t,
+                    100.0 * c / t.max(1e-9)
+                );
             }
             let viol = gummiband_core::check::check(b, &res.geometry);
             println!("clearance check: {} violations", viol.len());

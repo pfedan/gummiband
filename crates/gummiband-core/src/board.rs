@@ -287,6 +287,26 @@ impl Board {
         }
     }
 
+    /// Differential pairs by net name, as KiCad pairs them: the same name with `_P`/`_N`,
+    /// `P`/`N`, `+`/`-` at the end (so `DP`/`DN` as well). Both nets need 2 or more pins.
+    pub fn diff_pairs(&self) -> Vec<(NetId, NetId)> {
+        let mut out = Vec::new();
+        for (i, n) in self.nets.iter().enumerate() {
+            if n.pins.len() < 2 {
+                continue;
+            }
+            for (a, b) in [('P', 'N'), ('+', '-')] {
+                if let Some(stem) = n.name.strip_suffix(a)
+                    && let Some(j) = self.net_id(&format!("{stem}{b}"))
+                    && self.nets[j as usize].pins.len() >= 2
+                {
+                    out.push((i as NetId, j));
+                }
+            }
+        }
+        out
+    }
+
     /// Give one net its own track width (a copy of its class with that width; the class's
     /// other nets keep theirs).
     pub fn set_net_width(&mut self, net: NetId, width: f64) {

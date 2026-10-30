@@ -8,8 +8,8 @@
 //! cross those triangles are threaded through the new ones.
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 use std::collections::hash_map::Entry;
+use std::collections::{BinaryHeap, HashMap};
 
 use crate::board::{Board, NetId, ObstacleKind};
 use crate::geom::{Point, Rect, orient, point_seg_dist, pt, segs_intersect};
@@ -20,6 +20,9 @@ use crate::topo::{Mesh, NONE, OUTSIDE, PAD_SITE, STEINER, Substrate};
 pub struct RouterConfig {
     /// Cost of a via in mm of track.
     pub via_cost: f64,
+    /// Weight of the pull between the nets of a differential pair: a step costs up to this
+    /// factor of its length extra, the farther it is from the partner (0 = off).
+    pub pair_pull: f64,
     /// Weight of the preferred directions: routing layers alternate between horizontal and
     /// vertical, a step costs this much extra per mm across its layer's direction (0 = off).
     pub layer_dirs: f64,
@@ -51,6 +54,7 @@ impl Default for RouterConfig {
         RouterConfig {
             via_cost: 3.0,
             layer_dirs: 0.0,
+            pair_pull: 0.0,
             fanout_first: true,
             max_expansions: env("GB_MAXEXP", 400_000.0) as usize,
             seed: 0,
@@ -155,6 +159,9 @@ pub struct Router<'a> {
     pub conn_vias: Vec<Vec<u32>>,
     /// Pins whose pads overlap (same net) share a group: they are connected already.
     pub pin_group: Vec<u32>,
+    /// Partner net of each differential pair net, and where the nets ran so far.
+    partner: HashMap<NetId, NetId>,
+    guides: HashMap<NetId, Vec<Point>>,
     /// The board has kept tracks or vias.
     pub has_kept: bool,
     /// Per pin: number of unrouted connections that start or end there.
@@ -304,6 +311,15 @@ fn key(k: &NK) -> (u8, u32, u32) {
 
 impl<'a> Router<'a> {
     pub fn new(board: &'a Board, sub: &Substrate, cfg: RouterConfig) -> Router<'a> {
+        let partner = if cfg.pair_pull > 0.0 {
+            board
+                .diff_pairs()
+                .into_iter()
+                .flat_map(|(a, b)| [(a, b), (b, a)])
+                .collect()
+        } else {
+            HashMap::new()
+        };
         Router {
             board,
             sub: sub.clone(),
@@ -319,6 +335,8 @@ impl<'a> Router<'a> {
             search_buf: Default::default(),
             trace: Default::default(),
             pin_group: Self::pin_groups(board, sub),
+            partner,
+            guides: HashMap::new(),
             has_kept: board
                 .obstacles
                 .iter()
@@ -589,6 +607,13 @@ impl<'a> Router<'a> {
                 self.board.obstacles[st as usize].kind,
                 ObstacleKind::Track | ObstacleKind::Via
             )
+    }
+
+    /// Extra cost of a step of length `step` ending at q, away from the pair partner's way.
+    fn pull(&self, guide: Option<&[Point]>, q: Point, step: f64) -> f64 {
+        let Some(g) = guide else { return 0.0 };
+        let d = g.iter().map(|p| (*p - q).len2()).fold(f64::INFINITY, f64::min).sqrt();
+        self.cfg.pair_pull * step * (d / 2.0).min(1.0)
     }
 
     /// Extra cost of the step a-b on routing layer li for leaving the layer's preferred
@@ -1603,6 +1628,11 @@ impl<'a> Router<'a> {
     /// A* for one connection. Returns the node chain from start to goal.
     fn search(&self, ci: usize, buf: &mut SearchBuf) -> Option<Vec<Node>> {
         let conn = &self.conns[ci];
+        let guide = self
+            .partner
+            .get(&conn.net)
+            .and_then(|p| self.guides.get(p))
+            .map(|g| g.as_slice());
         let net = conn.net;
         let cls = self.board.class_of(net);
         let item = Item {
@@ -1877,7 +1907,8 @@ impl<'a> Router<'a> {
                     if self.on_kept(lu, t2) {
                         node.g
                     } else {
-                        node.g + node.pos.dist(q) + self.across(lu, node.pos, q) + escape
+                        let step = node.pos.dist(q);
+                        node.g + step + self.across(lu, node.pos, q) + escape + self.pull(guide, q, step)
                     },
                     idx,
                 );
@@ -2172,6 +2203,9 @@ impl<'a> Router<'a> {
     fn commit(&mut self, ci: usize, chain: &[Node]) -> bool {
         let mut chain = chain.to_vec();
         let net = self.conns[ci].net;
+        if self.partner.contains_key(&net) {
+            self.guides.entry(net).or_default().extend(chain.iter().map(|n| n.pos));
+        }
         // Place new vias first: split their triangles and rewrite the chain to the new mesh.
         let mut split_tris: Vec<(usize, u32)> = Vec::new(); // (layer, old triangle)
         for i in 0..chain.len() {
@@ -2376,6 +2410,8 @@ impl<'a> Router<'a> {
     }
 
     pub fn rip_up(&mut self, ci: usize) {
+        let net = self.conns[ci].net;
+        self.guides.remove(&net);
         for sid in std::mem::take(&mut self.conn_segs[ci]) {
             let Some(s) = self.segs[sid as usize].take() else {
                 continue;
@@ -2478,6 +2514,7 @@ impl<'a> Router<'a> {
             a.0.cmp(&b.0).then(ja.total_cmp(&jb))
         });
         self.conns = conns.into_iter().map(|c| c.2).collect();
+        self.pair_up();
         self.conn_segs = vec![Vec::new(); self.conns.len()];
         self.conn_vias = vec![Vec::new(); self.conns.len()];
     }
@@ -2487,6 +2524,30 @@ impl<'a> Router<'a> {
         let mut idx: Vec<usize> = (0..self.conns.len()).collect();
         idx.sort_by(|&a, &b| key(&self.conns[a]).total_cmp(&key(&self.conns[b])).then(a.cmp(&b)));
         self.conns = idx.iter().map(|&i| self.conns[i].clone()).collect();
+        self.pair_up();
+    }
+
+    /// The nets of a differential pair go one after the other, so that nothing gets between.
+    fn pair_up(&mut self) {
+        if self.partner.is_empty() {
+            return;
+        }
+        let mut out: Vec<Conn> = Vec::with_capacity(self.conns.len());
+        let mut left: Vec<Option<Conn>> = self.conns.drain(..).map(Some).collect();
+        for i in 0..left.len() {
+            let Some(c) = left[i].take() else { continue };
+            let partner = self.partner.get(&c.net).copied();
+            out.push(c);
+            if let Some(p) = partner {
+                for o in left.iter_mut().skip(i + 1) {
+                    if o.as_ref().is_some_and(|x| x.net == p) {
+                        out.push(o.take().unwrap());
+                        break;
+                    }
+                }
+            }
+        }
+        self.conns = out;
     }
 
     /// Route all planned connections. Returns the number routed.

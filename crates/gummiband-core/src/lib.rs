@@ -50,6 +50,31 @@ impl RunStats {
     }
 }
 
+/// Share of the differential pair track length that runs next to its partner on the same
+/// layer, at most `near` mm away: (coupled mm, total mm).
+pub fn pair_coupling(board: &Board, geo: &Geometry, near: f64) -> (f64, f64) {
+    let (mut coupled, mut total) = (0.0, 0.0);
+    for (a, b) in board.diff_pairs() {
+        for (x, y) in [(a, b), (b, a)] {
+            for t in geo.tracks.iter().filter(|t| t.net == x) {
+                for w in t.pts.windows(2) {
+                    let (l, mid) = (w[0].dist(w[1]), (w[0] + w[1]) * 0.5);
+                    total += l;
+                    let close = geo
+                        .tracks
+                        .iter()
+                        .filter(|o| o.net == y && o.layer == t.layer)
+                        .any(|o| o.pts.windows(2).any(|v| geom::point_seg_dist(mid, v[0], v[1]) < near));
+                    if close {
+                        coupled += l;
+                    }
+                }
+            }
+        }
+    }
+    (coupled, total)
+}
+
 /// Lower bound of the total track length: per net without plane the minimum spanning tree of
 /// its pins times sqrt(3)/2 (no Steiner tree is shorter than that). Plane nets count zero.
 pub fn length_lower_bound(board: &Board) -> f64 {
