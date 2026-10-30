@@ -87,7 +87,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
-| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
+| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?` | PNG (image content) and its path, region, pixels per mm |
 
@@ -210,7 +210,8 @@ nets of a differential pair), `pairs` false (experimental: a pair as one wide tr
 in two, see the CLI guide), `pair_skew` 0.1 mm, `pair_zdiff` none. `seed` picks the search seed
 (default fixed): the same seed gives the same result, another one a different try. `keep_all`
 keeps every track and via of the input and adds to it, like `--keep-all` on the command line;
-with `nets` only those nets are routed and everything else stays. `output` defaults to
+with `nets` only those nets are routed and everything else stays. Add `reroute` to replace
+connected nets: the unlocked copper of `nets` goes first, then they are routed anew. `output` defaults to
 `<input>.routed.kicad_pcb` next to the input; the `.kicad_pro` and `.kicad_dru` are copied next
 to the output if missing, so `drc` and `load_board` work on it. `nets` routes only the listed
 nets for this call.

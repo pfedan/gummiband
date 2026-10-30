@@ -237,8 +237,8 @@ impl UuidGen {
     }
 }
 
-/// Shift footprints (by reference) in a board file: only the footprint's own `(at x y [r])`
-/// changes, pads and graphics are relative to it.
+/// Shift footprints (by reference) in a board file: the footprint's own `(at x y [r])` changes,
+/// pads and graphics are relative to it; its zones are in board coordinates and shift as well.
 pub fn move_footprints(
     text: &str,
     offsets: &std::collections::HashMap<String, Point>,
@@ -283,6 +283,22 @@ pub fn move_footprints(
         }
         new.push(')');
         edits.push((at.span(), new));
+        for z in fp.children("zone") {
+            for c in z.args() {
+                match c.head() {
+                    Some("polygon") => {
+                        for xy in c.child("pts").into_iter().flat_map(|p| p.children("xy")) {
+                            let v = xy.args().iter().filter_map(|x| x.as_f64()).collect::<Vec<_>>();
+                            if v.len() >= 2 {
+                                edits.push((xy.span(), format!("(xy {} {})", f(v[0] + d.x), f(v[1] + d.y))));
+                            }
+                        }
+                    }
+                    Some("filled_polygon") | Some("fill_segments") => edits.push((c.span(), String::new())),
+                    _ => {}
+                }
+            }
+        }
     }
     for n in root
         .args()
@@ -451,6 +467,25 @@ mod tests {
         assert!(out.contains("(at -1 0 -90)"), "{out}");
         assert!(out.contains("(at 1 0 -90)"), "{out}");
         assert!(out.contains("(at 0 -1 -90)"), "{out}");
+    }
+
+    const KEEPOUT: &str = r#"(kicad_pcb
+	(footprint "U"
+		(at 10 20)
+		(property "Reference" "U1" (at 0 0 0))
+		(zone (layers "F.Cu") (keepout (tracks not_allowed))
+			(polygon (pts (xy 8 18) (xy 12 18) (xy 12 22)))
+		)
+	)
+)
+"#;
+
+    #[test]
+    fn a_footprint_zone_goes_with_the_footprint() {
+        let out = place_footprint(KEEPOUT, "U1", 15.0, 20.0, None).unwrap();
+        assert!(out.contains("(xy 13 18) (xy 17 18) (xy 17 22)"), "{out}");
+        let offsets = [("U1".to_string(), Point { x: 5.0, y: 0.0 })].into_iter().collect();
+        assert_eq!(move_footprints(KEEPOUT, &offsets, &[]).unwrap(), out);
     }
 
     #[test]

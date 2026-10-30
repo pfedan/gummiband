@@ -361,8 +361,11 @@ fn mutate(best: &Candidate, rng: &mut Rng) -> Genome {
     }
     let shuffles = 1 + (rng.next() % (n as u64 / 20 + 2)) as usize;
     let keys: Vec<(NetId, usize)> = best.order.clone();
+    if keys.is_empty() {
+        return g;
+    }
     for _ in 0..shuffles {
-        let k = keys[(rng.next() % keys.len().max(1) as u64) as usize];
+        let k = keys[(rng.next() % keys.len() as u64) as usize];
         if let Some(v) = g.get_mut(&k) {
             *v += (rng.unit() - 0.5) * n * 0.3;
         }

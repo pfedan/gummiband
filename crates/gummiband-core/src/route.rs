@@ -9,7 +9,7 @@
 
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::board::{Board, NetId, ObstacleKind};
 use crate::geom::{Point, Rect, Shape, orient, point_seg_dist, pt, segs_intersect};
@@ -166,6 +166,8 @@ pub struct Router<'a> {
     pub conn_vias: Vec<Vec<u32>>,
     /// Pins whose pads overlap (same net) share a group: they are connected already.
     pub pin_group: Vec<u32>,
+    /// Pin groups whose kept copper has a via into a plane of the net.
+    plane_groups: HashSet<u32>,
     /// Partner net of each differential pair net, and where the nets ran so far.
     partner: HashMap<NetId, NetId>,
     guides: HashMap<NetId, Vec<Point>>,
@@ -331,6 +333,7 @@ impl<'a> Router<'a> {
         } else {
             HashMap::new()
         };
+        let (pin_group, plane_groups) = Self::pin_groups(board, sub);
         let mut r = Router {
             board,
             sub: sub.clone(),
@@ -345,7 +348,8 @@ impl<'a> Router<'a> {
             conn_vias: Vec::new(),
             search_buf: Default::default(),
             trace: Default::default(),
-            pin_group: Self::pin_groups(board, sub),
+            pin_group,
+            plane_groups,
             partner,
             guides: HashMap::new(),
             has_kept: board
@@ -362,7 +366,7 @@ impl<'a> Router<'a> {
         r
     }
 
-    fn pin_groups(board: &Board, sub: &Substrate) -> Vec<u32> {
+    fn pin_groups(board: &Board, sub: &Substrate) -> (Vec<u32>, HashSet<u32>) {
         let n = board.pins.len();
         let mut parent: Vec<u32> = (0..n as u32).collect();
         fn find(p: &mut [u32], x: u32) -> u32 {
@@ -399,6 +403,16 @@ impl<'a> Router<'a> {
         }
         // kept copper connects pins: everything on one piece of copper is one pin already
         let kept = |o: &crate::board::Obstacle| matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via);
+        let into_plane = |o: &crate::board::Obstacle| {
+            let (ObstacleKind::Via, Shape::Circle { c, .. }) = (o.kind, &o.shape) else {
+                return false;
+            };
+            let on = |pl: &crate::board::Plane| {
+                Some(pl.net) == o.net && o.layers.has(pl.layer) && pl.outline.contains(*c)
+            };
+            board.planes.iter().any(on)
+        };
+        let mut on_plane: Vec<u32> = Vec::new();
         let mut seen = vec![false; board.obstacles.len()];
         for start in 0..board.obstacles.len() {
             if seen[start] || !kept(&board.obstacles[start]) {
@@ -408,7 +422,9 @@ impl<'a> Router<'a> {
             let net = board.obstacles[start].net;
             let mut stack = vec![start];
             let mut first_pin: Option<u32> = None;
+            let mut plane = false;
             while let Some(o) = stack.pop() {
+                plane |= into_plane(&board.obstacles[o]);
                 let poly = &sub.shared.obs_polys[o];
                 for q in sub.shared.obs_index.query(&poly.bbox()) {
                     let q = q as usize;
@@ -436,8 +452,13 @@ impl<'a> Router<'a> {
                     }
                 }
             }
+            if let (true, Some(f)) = (plane, first_pin) {
+                on_plane.push(f);
+            }
         }
-        (0..n as u32).map(|x| find(&mut parent, x)).collect()
+        let groups: Vec<u32> = (0..n as u32).map(|x| find(&mut parent, x)).collect();
+        let on_plane = on_plane.iter().map(|&p| groups[p as usize]).collect();
+        (groups, on_plane)
     }
 
     fn m(&self, li: usize) -> &Mesh {
@@ -2511,12 +2532,13 @@ impl<'a> Router<'a> {
                 }
             }
             let reaches_plane = |p: usize| {
-                n.pins.iter().any(|&q| {
-                    self.pin_group[q] == self.pin_group[p]
-                        && b.planes.iter().any(|pl| {
-                            pl.net == net && b.pins[q].layers.has(pl.layer) && pl.outline.contains(b.pins[q].pos)
-                        })
-                })
+                self.plane_groups.contains(&self.pin_group[p])
+                    || n.pins.iter().any(|&q| {
+                        self.pin_group[q] == self.pin_group[p]
+                            && b.planes.iter().any(|pl| {
+                                pl.net == net && b.pins[q].layers.has(pl.layer) && pl.outline.contains(b.pins[q].pos)
+                            })
+                    })
             };
             if has_plane {
                 for &p in &reps {
@@ -2901,5 +2923,31 @@ mod tests {
         let len: f64 = p.windows(2).map(|w| w[0].dist(w[1])).sum();
         assert!((len - 6.0).abs() < 0.01, "straight track expected: {p:?}");
         assert!(crate::check::check(&b, &geo).is_empty());
+    }
+
+    #[test]
+    fn a_kept_via_into_the_plane_needs_no_fan_out() {
+        let mut b = crate::topo::tests::two_pad_board();
+        b.layers[1].is_plane = true;
+        b.planes.push(crate::board::Plane {
+            net: 0,
+            layer: 1,
+            outline: b.outline[0].clone(),
+        });
+        b.obstacles.push(crate::board::Obstacle {
+            shape: Shape::Circle { c: pt(2., 5.), r: 0.3 },
+            layers: b.all_layers(),
+            net: Some(0),
+            kind: ObstacleKind::Via,
+            hole: Some(0.15),
+            clearance: 0.2,
+            pin: None,
+            locked: false,
+        });
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        assert_eq!(r.conns.len(), 1);
+        assert_eq!(r.conns[0].from, 1);
     }
 }
