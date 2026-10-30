@@ -109,9 +109,8 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
 
 - **Partial routing is experimental.** By default a run replaces all unlocked copper; lock what
   you want to keep. `--keep-all` with `--nets` adds to existing copper, and an agent can add
-  locked copper through the MCP server before routing, but new tracks still keep too little
-  clearance to kept tracks. Follow-me routing from a half drawn track is the plugin action
-  *Finish selected nets*, also experimental.
+  locked copper through the MCP server before routing. Follow-me routing from a half drawn
+  track is the plugin action *Finish selected nets*, not yet tested live in KiCad.
 - **Blocks and pre-routing tools are new.** Groups that move as blocks under `--move-parts` and
   the MCP tools `part_info` and `add_locked_copper` exist but have not been tried on a real
   board yet; expect rough edges.

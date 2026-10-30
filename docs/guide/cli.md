@@ -62,7 +62,7 @@ changes in the file (footprints move only with `--move-parts`).
 | Option | Default | Effect |
 | --- | --- | --- |
 | `--keep-locked` | off | Keep locked tracks and vias as fixed copper and route around them; their ends count as connected. Without it **every** track and via is removed first, locked or not. The plugin passes this flag by default. |
-| `--keep-all` | off | Experimental. Keep every existing track and via, locked or not, and add to them: for completing a partly routed board or finishing a track you started. Pins that sit on one piece of kept copper count as connected, and the search rides along kept copper without drawing a new track there. Known limit: new tracks keep too little clearance to the kept tracks for now, so check the DRC. |
+| `--keep-all` | off | Experimental. Keep every existing track and via, locked or not, and add to them: for completing a partly routed board or finishing a track you started. Pins that sit on one piece of kept copper count as connected, and the search rides along kept copper without drawing a new track there. New, so check the result with the DRC. |
 | `--nets A,B` | all | Experimental. Route only these nets (exact names, comma separated); the other nets stay as they are. Meant together with `--keep-all`. |
 
 Zones are never removed by `route`. Refill them in KiCad afterwards.

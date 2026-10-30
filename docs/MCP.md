@@ -248,7 +248,6 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
   `KeepCopper::All` plus per net stripping in the writer; today a route replaces all unlocked
   copper, so skipped nets end up without tracks.
 - Pre-routing through `add_locked_copper` has tracks and vias only; locked zones (a copper
-  island from a datasheet) are not there yet. New tracks keep too little clearance to the
-  pre-routed tracks for now; check with `drc`.
+  island from a datasheet) are not there yet.
 - Progress notifications during long routes, and cancellation (the core has no cancel hook).
 - `route` returns Gummiband's own clearance check; KiCad's verdict needs a `drc` call.

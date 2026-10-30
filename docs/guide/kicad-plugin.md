@@ -63,9 +63,8 @@ at instead of rerouting the board:
 4. The additions arrive as one undo step. There is no dialog: the action runs with the defaults
    (14 runs, via cost 3.0) and without geometry generations, so it is quick.
 
-This is the plugin's form of `gummiband route --keep-all --nets A,B`. It is new and not yet
-tested live in KiCad, and new tracks keep too little clearance to existing tracks for now, so run
-the DRC on the result.
+This is the plugin's form of `gummiband route --keep-all --nets A,B`. The button is new and not
+yet tested live in KiCad, so run the DRC on the result.
 
 ## Without a dialog
 
