@@ -23,7 +23,7 @@ Setup is in [Installation](installation.md).
 | Option | Default | What it does |
 | --- | --- | --- |
 | Keep locked tracks and vias | on | Locked copper stays and is routed around. All unlocked tracks and vias are replaced. Off: everything is replaced, locked or not. |
-| Parallel runs | number of CPU cores | How many routing attempts with different orders run side by side in every phase. More runs explore more orders; fewer runs leave the machine usable. |
+| Parallel runs | 14 | How many routing attempts with different orders are tried in every phase. The default is a constant, not the core count, so the same board gives the same result on every machine; the core count only changes how long it takes. More runs explore more orders. |
 | Via cost (mm of track) | 3.0 | How much track a via is worth to the router. Lower values give more vias and shorter tracks, higher values fewer vias. The search also tries values around it. |
 | Geometry generations | 3 | Extra search rounds judged by the clearance check of the drawn tracks, not only by the topology. 0 is fastest; each round costs about one full routing pass and removes violations. |
 | Save an animation of the generations | off | Writes one image per generation and an `evolution.gif` into `gummiband-evolution/` next to the project. Needs `rsvg-convert` and ImageMagick. |

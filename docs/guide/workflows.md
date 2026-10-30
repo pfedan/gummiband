@@ -22,6 +22,19 @@ steps, the plugin is installed ([Installation](installation.md)).
 7. Iterate: lock what is good, fix the rest by hand or route again with more effort
    (`--geometry-generations 3`).
 
+## Finish a partly routed board (experimental)
+
+```bash
+gummiband route board.kicad_pcb -o out.kicad_pcb --keep-all --nets /SDA,/SCL
+```
+
+`--keep-all` keeps every existing track and via, locked or not, and `--nets` limits the run to
+the named nets. The router adds to what is there: pins that already sit on one piece of copper
+count as connected, and a connection may ride along existing copper of its net instead of drawing
+a new track beside it. This is new; its known limit is that new tracks keep too little clearance
+to existing tracks for now (the same holds for copper added through the MCP tool
+`add_locked_copper`), so run the DRC afterwards.
+
 ## Pre-route and lock power lanes
 
 The router has no notion of "this lane should be wide and straight": it gives a net the width
@@ -72,7 +85,7 @@ Effort knobs, from cheap to expensive:
 
 | Want | Do |
 | --- | --- |
-| more orders tried per phase | `--runs` higher than the core count (each run then takes a turn) |
+| more orders tried per phase | `--runs 28` (the default 14 is a constant; runs are spread over the threads) |
 | better order | `--generations 6` |
 | fewer violations in the drawn tracks | `--geometry-generations 3` (the plugin default) or more |
 | fewer vias | `--via-cost 5` |
@@ -80,8 +93,9 @@ Effort knobs, from cheap to expensive:
 | tidier two layer boards, one direction per layer | `--layer-dirs 1` (0 switches the preference off) |
 | finer via placement in tight spots | `--via-pitch 0.25` |
 
-The search is deterministic: the same board, options and `GB_EVO_SEED` give the same result. Set
-a different `GB_EVO_SEED` to get another attempt.
+The search is deterministic: the same board, options and `GB_EVO_SEED` give the same result on
+any machine and with any `--threads`; the thread count only changes the run time. Set a different
+`GB_EVO_SEED` to get another attempt.
 
 ## Let parts move
 

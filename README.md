@@ -46,7 +46,7 @@ Then pick how you want to use it:
 
 1. Lock the copper you want to keep (select, right click, *Locking > Lock*).
 2. Click the Gummiband button in the PCB editor's plugin toolbar.
-3. Leave the defaults (keep locked copper, one run per core, via cost 3.0, 3 geometry
+3. Leave the defaults (keep locked copper, 14 runs, via cost 3.0, 3 geometry
    generations) and press OK. A progress dialog shows the phase, the routed connections, vias,
    length and remaining violations.
 4. Look at the result. It arrives as one undo step, so Ctrl/Cmd+Z takes it back entirely.

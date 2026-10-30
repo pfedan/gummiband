@@ -85,7 +85,8 @@ parallel (the portfolio), then an evolutionary search mutates the best order for
 generations. The best candidate wins: fewest unrouted connections, then fewest violations (after
 the geometry step), then fewest vias and shortest length.
 
-Results are deterministic for the same input, options and seed.
+Results are deterministic for the same input, options and seed, on any machine and with any
+thread count: the portfolio size is a constant (14 runs), and threads only change the run time.
 
 ## Judging and violations
 
@@ -106,9 +107,10 @@ attempts on large boards.
 
 Things the router does not do yet. The [milestones](../MILESTONES.md) say what comes next.
 
-- **Partial routing.** Every run replaces all unlocked copper. There is no "route selected nets"
-  and no follow-me routing from a half drawn track yet. Lock what you want to keep; an agent can
-  also add locked copper through the MCP server before routing.
+- **Partial routing is experimental.** By default a run replaces all unlocked copper; lock what
+  you want to keep. `--keep-all` with `--nets` adds to existing copper, and an agent can add
+  locked copper through the MCP server before routing, but new tracks still keep too little
+  clearance to kept tracks. There is no follow-me routing from a half drawn track yet.
 - **Blocks and pre-routing tools are new.** Groups that move as blocks under `--move-parts` and
   the MCP tools `part_info` and `add_locked_copper` exist but have not been tried on a real
   board yet; expect rough edges.

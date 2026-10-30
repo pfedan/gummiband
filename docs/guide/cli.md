@@ -62,6 +62,8 @@ changes in the file (footprints move only with `--move-parts`).
 | Option | Default | Effect |
 | --- | --- | --- |
 | `--keep-locked` | off | Keep locked tracks and vias as fixed copper and route around them; their ends count as connected. Without it **every** track and via is removed first, locked or not. The plugin passes this flag by default. |
+| `--keep-all` | off | Experimental. Keep every existing track and via, locked or not, and add to them: for completing a partly routed board or finishing a track you started. Pins that sit on one piece of kept copper count as connected, and the search rides along kept copper without drawing a new track there. Known limit: new tracks keep too little clearance to the kept tracks for now, so check the DRC. |
+| `--nets A,B` | all | Experimental. Route only these nets (exact names, comma separated); the other nets stay as they are. Meant together with `--keep-all`. |
 
 Zones are never removed by `route`. Refill them in KiCad afterwards.
 
@@ -69,7 +71,7 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `--runs N` | number of threads | Portfolio size: parallel routing attempts with different connection orders (and via costs) in every phase. |
+| `--runs N` | 14 | Portfolio size: routing attempts with different connection orders (and via costs) in every phase, spread over the worker threads. A constant by design, so results do not depend on the machine. |
 | `--generations N` | 3 | Rounds of the evolutionary order search after the portfolio. Each round mutates the best order (failed connections move forward, a few random moves) and tries `--runs` mutants. 0 means portfolio only. The search stops early when everything is routed. |
 | `--geometry-generations N` | 0 | Rounds that are judged after the tracks were drawn, by the clearance check. Slower (each round draws and checks every candidate) and cleaner. The plugin uses 3. |
 | `--via-pitch MM` | 0.5 | Grid pitch of the candidate via positions. Finer grids allow more via places and cost memory and time. |
@@ -77,7 +79,7 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | `--layer-dirs W` | 0.5 | Weight of preferred directions per layer: the routing layers alternate horizontal and vertical, and running against the grain costs extra. A soft cost, used by every third run of the portfolio, so the search has candidates with and without it. 0 switches it off. |
 
 A good default for a real two layer board with a few hundred connections is the plain
-`--keep-locked`: all cores, 3 generations, no geometry generations, a minute or two. Add
+`--keep-locked`: 14 runs on all cores, 3 generations, no geometry generations, a minute or two. Add
 `--geometry-generations 3` for the final pass.
 
 ### Degrees of freedom

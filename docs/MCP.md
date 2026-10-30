@@ -155,7 +155,7 @@ all unlocked copper). `reset: true` drops the net's options before applying the 
 
 Runs `gummiband_core::route_board` on the loaded board with the net options applied and writes
 the routed board (existing unlocked tracks and vias replaced; with `keep_locked` the locked ones
-stay). Defaults match the CLI: `runs` = number of routing threads, `generations` 3,
+stay). Defaults match the CLI: `runs` 14 (a constant, so results do not depend on the machine), `generations` 3,
 `geometry_generations` 0, `via_pitch` 0.5 mm, `via_cost` 1.5. `output` defaults to
 `<input>.routed.kicad_pcb` next to the input; the `.kicad_pro` and `.kicad_dru` are copied next
 to the output if missing, so `drc` and `load_board` work on it. `nets` routes only the listed
@@ -248,6 +248,7 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
   `KeepCopper::All` plus per net stripping in the writer; today a route replaces all unlocked
   copper, so skipped nets end up without tracks.
 - Pre-routing through `add_locked_copper` has tracks and vias only; locked zones (a copper
-  island from a datasheet) are not there yet.
+  island from a datasheet) are not there yet. New tracks keep too little clearance to the
+  pre-routed tracks for now; check with `drc`.
 - Progress notifications during long routes, and cancellation (the core has no cancel hook).
 - `route` returns Gummiband's own clearance check; KiCad's verdict needs a `drc` call.
