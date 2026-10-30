@@ -63,6 +63,14 @@ pins, the router may neck a track down near the pin: to the pad width, or at fin
 pitch minus the clearance, at most 0.4 mm, and never below the board's minimum track width or what
 a custom minimum width rule allows. The neck covers the pin area (the courtyard when a rule exempts
 one), so a whole fan-out narrows alike.
+
+Necks stay narrow only where they must. After the geometry is drawn, every narrow piece is
+widened step by step (0.05 mm) to the widest width that still keeps all clearances to pads, vias
+and other tracks, up to the class width; a net that would gain a violation keeps its old taper.
+One limit: where a minimum width rule allows the narrow width only inside a courtyard, a piece
+that leaves the courtyard stays narrow rather than break the rule, so a short stretch of thinner
+track can remain just outside a connector.
+
 `--net-widths` overrides the class width per net.
 
 ## Vias
