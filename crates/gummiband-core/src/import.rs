@@ -1127,6 +1127,9 @@ mod tests {
             frames: false,
             progress: None,
             seed: None,
+            open_end: None,
+            air: 0.0,
+            prefer_width: 0.0,
         };
         let (_, res) = route_board(&b, &SubstrateConfig::default(), &RouterConfig::default(), &search);
         assert_eq!(res.stats.routed, 1, "{:?}", res.stats.unrouted);

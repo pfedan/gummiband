@@ -4,6 +4,7 @@ pub mod board;
 pub mod check;
 pub mod geom;
 pub mod import;
+mod improve;
 pub mod index;
 pub mod pairs;
 pub mod prof;
@@ -135,6 +136,22 @@ pub struct Progress {
     pub length: f64,
     /// Clearance violations (None before the geometry step).
     pub violations: Option<usize>,
+    /// Where a search with generations stands (see [`Search`]).
+    #[serde(flatten)]
+    pub search: Search,
+}
+
+/// The state of the geometry generations and the open end.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct Search {
+    /// Geometry generation (0 before them).
+    pub generation: usize,
+    /// Generations of the open end since the result last got noticeably better.
+    pub stale: usize,
+    /// Side branches of the open end that failed since then; each one is bolder.
+    pub level: usize,
+    /// The open end has found its level: taking the result now loses little.
+    pub converged: bool,
 }
 
 /// Receives progress reports (from the search thread).
@@ -162,10 +179,28 @@ pub struct SearchConfig {
     /// Seed of the evolutionary search (default: GB_EVO_SEED, then a constant). The same seed
     /// gives the same result.
     pub seed: Option<u64>,
+    /// After the search keep improving the result until this flag is set (`improve.rs`).
+    pub open_end: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Reserve in mm on top of the clearances that the finished copper gets where there is room
+    /// (0 = off, the copper stays at the limit).
+    pub air: f64,
+    /// Tracks of the default net class push their neighbours aside and grow up to this width in
+    /// mm where there is room (0 = off).
+    pub prefer_width: f64,
 }
 
 impl SearchConfig {
+    fn stopped(&self) -> bool {
+        self.open_end
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     fn report(&self, phase: &str, s: &RunStats) {
+        self.report_at(phase, s, Search::default());
+    }
+
+    fn report_at(&self, phase: &str, s: &RunStats, search: Search) {
         if let Some(p) = &self.progress {
             (p.0)(&Progress {
                 phase: phase.to_string(),
@@ -174,6 +209,7 @@ impl SearchConfig {
                 vias: s.vias,
                 length: s.length,
                 violations: s.violations,
+                search,
             });
         }
     }
@@ -225,6 +261,18 @@ fn evaluate_inner(
     let routed = r.run();
     debug_hooks(board, &mut r);
     let geo = r.geometry();
+    candidate(board, &r, geo, routed, cfg_used, generation)
+}
+
+/// What a finished router run is worth, with `geo` as its geometry.
+fn candidate(
+    board: &Board,
+    r: &Router,
+    geo: Geometry,
+    routed: usize,
+    cfg: RouterConfig,
+    generation: usize,
+) -> Candidate {
     let length = geo
         .tracks
         .iter()
@@ -280,7 +328,7 @@ fn evaluate_inner(
             .collect(),
         bad_nets: Vec::new(),
         hot: Vec::new(),
-        cfg: cfg_used,
+        cfg,
     }
 }
 
@@ -402,7 +450,7 @@ pub fn route_board(
     let mut hot = best_score.2.clone();
     let mut rng = Rng(0x91ace);
     for round in 1..=rounds {
-        if hot.is_empty() && best.1.stats.unrouted.is_empty() {
+        if (hot.is_empty() && best.1.stats.unrouted.is_empty()) || search.stopped() {
             break;
         }
         let cur = board.with_offsets(&offsets);
@@ -471,6 +519,12 @@ pub fn route_board(
     best
 }
 
+/// Cost of a relaxed candidate. A short is much worse than a clearance a little too small: it
+/// weighs six violations.
+fn full_cost(c: &Candidate) -> f64 {
+    c.stats.cost() + c.stats.violations.unwrap_or(0) as f64 * 1000.0 + c.stats.shorts.unwrap_or(0) as f64 * 5000.0
+}
+
 /// One full search on a fixed placement ([`route_fixed`]). A negotiation is a second search next
 /// to the plain one and not a replacement: it completes the dense boards, but on a loose board
 /// the routing order alone may leave the geometry more room. The better result counts,
@@ -482,7 +536,7 @@ fn route_search(
     search: &SearchConfig,
 ) -> (Substrate, RouteResult) {
     let negotiated = route_fixed(board, sub_cfg, base, search);
-    if base.negotiate == 0 || std::env::var("GB_NEG_ONLY").is_ok() {
+    if base.negotiate == 0 || std::env::var("GB_NEG_ONLY").is_ok() || search.stopped() {
         return negotiated;
     }
     let plain = RouterConfig {
@@ -652,10 +706,6 @@ pub fn route_fixed(
         c
     };
     let geo_eval = |c: Candidate| geo_eval_with(c, &full_relax);
-    // a short is much worse than a clearance a little too small: it weighs six violations
-    let full_cost = |c: &Candidate| {
-        c.stats.cost() + c.stats.violations.unwrap_or(0) as f64 * 1000.0 + c.stats.shorts.unwrap_or(0) as f64 * 5000.0
-    };
     // successive halving: the topology cost predicts the finished geometry only weakly, so
     // many finalists get a short relaxation first and only the best quarter the full one
     let top = finalists[0].stats.routed;
@@ -700,11 +750,14 @@ pub fn route_fixed(
     if search.frames {
         frames.push((label(&best, "geometry"), best.geo.clone(), true));
     }
+    let open = search.open_end.is_some();
     let mut hotspots: Vec<(geom::Point, f64)> = Vec::new();
+    let mut done = 0;
     for generation in 1..=search.geometry_generations {
-        if best.stats.violations == Some(0) && best.failed.is_empty() {
+        if search.stopped() || (best.stats.violations == Some(0) && best.failed.is_empty()) {
             break;
         }
+        done = generation;
         // hot spots: violation places of the best so far ask for more room; repeated places
         // grow (negotiation in the spirit of PathFinder, driven by the geometry)
         for &p in &best.hot {
@@ -749,7 +802,14 @@ pub fn route_fixed(
                 best = c;
             }
         }
-        search.report(&format!("geometry generation {generation}"), &best.stats);
+        search.report_at(
+            &format!("geometry generation {generation}"),
+            &best.stats,
+            Search {
+                generation,
+                ..Default::default()
+            },
+        );
         if search.frames {
             frames.push((
                 label(&best, &format!("geometry generation {generation}")),
@@ -787,6 +847,33 @@ pub fn route_fixed(
             search.report("via pass", &best.stats);
         }
     }
+    // the open end: from here on the result only changes where a mutant makes it better
+    if open {
+        best = improve::run(board, &sub, search, best, done, &mut rng, &mut |c, generation| {
+            if search.frames {
+                frames.push((
+                    label(c, &format!("generation {generation}")),
+                    c.geo.clone(),
+                    true,
+                ));
+            }
+        });
+    }
+    if search.air > 0.0 {
+        if let Some(c) = improve::give_air(board, &sub, &best, search.air) {
+            best = c;
+            search.report("air", &best.stats);
+        }
+    }
+    // a class of its own is a decision of the designer, and the width of a pair is its impedance
+    let pairs: Vec<NetId> = board.diff_pairs().into_iter().flat_map(|(a, b)| [a, b]).collect();
+    let may_grow = |n: NetId| board.nets[n as usize].class == 0 && !pairs.contains(&n);
+    if search.prefer_width > 0.0 {
+        if let Some(c) = improve::make_room(board, &sub, &best, search.prefer_width, may_grow) {
+            best = c;
+            search.report("room", &best.stats);
+        }
+    }
     // tracks as wide as the surroundings allow; a net that gets a new violation by it falls back
     let plain = best.geo.clone();
     let known: std::collections::HashSet<(NetId, Option<NetId>)> =
@@ -805,6 +892,17 @@ pub fn route_fixed(
         for t in best.geo.tracks.iter_mut().filter(|t| bad.contains(&t.net)) {
             let neck = t.neck_w;
             t.fitted.iter_mut().for_each(|f| f.1 = neck);
+        }
+    }
+    // the known pairs above may have got more spots; the open end does not give back what it won
+    if open && check::check(board, &best.geo).len() > check::check(board, &plain).len() {
+        best.geo = plain;
+    }
+    if search.prefer_width > 0.0 {
+        let plain = best.geo.clone();
+        relax::prefer_width(board, &sub, &mut best.geo, search.prefer_width, search.air / 2.0, may_grow);
+        if check::check(board, &best.geo).len() > check::check(board, &plain).len() {
+            best.geo = plain;
         }
     }
     (

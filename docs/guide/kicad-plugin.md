@@ -35,6 +35,8 @@ because they fit only one board. *Defaults* brings back the values below.
 | Via cost (mm of track) | 3.0 | How much track a via is worth to the router. Lower values give more vias and shorter tracks, higher values fewer vias. The search also tries values around it. |
 | Generations | 3 | Rounds of the order search after the first runs, judged by routed connections, vias and length. |
 | Geometry generations | 3 | Extra search rounds judged by the clearance check of the drawn tracks, not only by the topology. 0 is fastest; each round costs about one full routing pass and removes violations. |
+| Keep improving until I accept the result | on | After the normal search the router keeps working on the result until you press *Accept current result*. Not together with pairs routed as one wide track. |
+| Preferred track width (mm) | 0 (off) | Tracks of the default net class push aside what can give way and grow up to this width where there is room, with a taper at every change of width. |
 | Let parts shift to open channels | off | The geometry generations may shift parts next to clearance problems (`--move-parts`), so at least one of them is needed. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay. The moved footprints arrive in the same undo step as the tracks, and the message box lists them. |
 | Parts that never move | | With the option above: references that stay in addition (`--fixed`). |
 | Open Edit Teardrops after routing | off | Opens KiCad's *Edit Teardrops* dialog after the run. Enable the teardrops there: the plugin cannot do it itself, see below. |
@@ -62,9 +64,16 @@ cannot act on the open board. The check box opens KiCad's own dialog instead. Th
 width changes are a project setting in *Board Setup*. Footprints in a KiCad group move in the plugin
 too, but tracks and vias kept in such a group stay where they are; the message box warns about it.
 
-Press OK and a progress dialog shows the phase (portfolio, generation n, geometry, geometry
-generation n, polish), the routed connections, vias, track length and the remaining violations of
-the best candidate so far. *Cancel* stops the router and leaves the board as it was.
+Press OK and a window shows the phase (portfolio, generation n, geometry, geometry generation n,
+polish), the generation, the routed connections, vias, track length and the remaining violations
+of the best candidate so far, and how they went over time. *Cancel* stops the router and leaves
+the board as it was.
+
+With *Keep improving* on, the result gets better for as long as you let it: fewer vias, fewer
+violations, sometimes the last connections. *Accept current result* takes the best result so far
+at any time after the first geometry generation, and it takes a moment to finish it. Once the
+search has settled, the window recommends to accept. You can also let it go on: side branches
+keep trying bolder changes, and the count of failed ones shows how far it has gone.
 
 ## After the run
 

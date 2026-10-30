@@ -55,13 +55,17 @@ PCB editor: click the Gummiband button in the plugin toolbar (the action is list
   animated `evolution.gif` in `gummiband-evolution/` next to the project, `--frames`. Needs
   `rsvg-convert` and ImageMagick (`brew install librsvg imagemagick`).
 
+- **Keep improving until I accept the result** (on by default): after the search the router keeps
+  working on the result, `--until-stop`, until you press *Accept current result*.
+
 The dialogs remember their last values in `settings.json` (sections `route` and `place`), so keep
 that file when you refresh a copy of the plugin. Fields that only fit one board (references, plane
 layers, net files) start empty every time. *Defaults* brings back the values of a fresh
 installation.
 
-While the router runs, a progress dialog shows the elapsed time; *Cancel* stops the router and
-leaves the board alone. At the end a message box reports what was removed and created, the
+While the router runs, a window shows the search with its metrics and how they went so far, and
+recommends to accept once the search has settled; *Cancel* stops the router and leaves the board
+alone. At the end a message box reports what was removed and created, the
 router's summary and unrouted connections. If the router fails, its stdout and stderr are shown
 and the temp folder is kept (its path is in the message). Undo with Ctrl/Cmd+Z. Zones are not
 refilled; refill (B) and run DRC afterwards.

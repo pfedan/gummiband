@@ -32,7 +32,18 @@ Standing decisions of the project owner, kept here so that they survive any sess
   rules allow; current paths must stay electrically sensible.
 - Completion comes first: the geometry stage never trades a connection for cleaner geometry.
 - Results are deterministic: the same input and seed give the same output on every machine, at
-  any thread count (fixed default portfolio, no decisions by the clock).
+  any thread count (fixed default portfolio, no decisions by the clock). An open ended run
+  (`--until-stop`) ends when the user says so, the same seed and last generation repeat.
+- Late search works on the result, not on the routing order. Moving a connection in the order
+  routes the whole board again and loses what is good, so an open ended run takes out a few
+  connections around one spot, lays them again and relaxes what they touch. Bolder side branches
+  may first get worse; a connection is never given up, and one more counts only if it does not
+  bring two shorts.
+- Wider tracks are a step after the routing (`--prefer-width`), not a higher class width: the
+  topology keeps the narrow capacity, so the search is not harder, and a track only grows where
+  the finished copper leaves room. Classes other than the default are left alone.
+- Copper does not have to lie at the limit: `--air` gives it a reserve where there is room. On by
+  default only in open ended runs, so that plain runs stay as they are.
 - A block is a group of parts with its locked copper that moves only as a whole.
 - Layer preferred directions are a portfolio dimension, not only an option.
 - Teardrops come from KiCad's built-in feature.

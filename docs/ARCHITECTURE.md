@@ -221,6 +221,30 @@ an evolutionary search improves the routing order: each generation mutates the b
 The best few candidates go through the geometry step and the one with the fewest violations
 wins.
 
+`--until-stop` adds an open end (`improve.rs`). It starts from the router state of the winner,
+which it gets by repeating that run, and keeps the relaxed geometry next to it, with the segment of
+each track and the site of each via. A mutant clones the router, rips up a few connections around
+one spot (with those that share a via), routes them in a random order at a varied via cost, and
+takes over from the parent what is still there, asleep; only the new copper starts awake, with
+its ends on the vias where they are now, and the relaxation wakes what it touches. This costs
+about 1/20 of a full evaluation, so far more mutants fit in. Every 24 generations the whole board
+is relaxed again, tension first, which also tightens what has been asleep. After 24 generations
+without a noticeable gain a side branch starts from the result with a bold change (a whole area,
+larger with every branch that failed) that may be worse, gets half of the mutants for 32
+generations and replaces the result if it beats it. A gain means more connections, fewer
+violations or shorts, or 0.2 % less via and length cost.
+
+`--air` then relaxes the whole board without tension and with a larger margin. Where that leaves
+new violations, the nets involved go back to the normal margin. These passes and the open end
+also let the board edge push vias (`RelaxConfig::via_edge`).
+
+`--prefer-width` runs at the very end, on the best result, because the topology keeps counting
+with the narrow tracks. First the tracks push as if they had the target width, without tension,
+so that neighbours and vias give way in chains; then, at the old widths again, the nets in
+trouble settle. After that `relax::prefer_width` lets every piece of track grow in steps of
+0.025 mm, round by round so that a bundle shares its room, drops wider stretches under 1.5 mm and
+ramps every change of width by one step per piece.
+
 ## Parallelism
 
 - Portfolio: N independent router runs (different orders and seeds), one per core.

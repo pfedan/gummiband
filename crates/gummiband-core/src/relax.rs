@@ -30,6 +30,9 @@ pub struct RelaxConfig {
     pub max_step: f64,
     /// Experimental: run the tension rounds on the GPU (needs the `gpu` feature).
     pub gpu: bool,
+    /// The board edge pushes vias as well. Off for the search itself, where vias stay near the
+    /// place the router gave them; passes that push hard can shove a via over the edge rule.
+    pub via_edge: bool,
 }
 
 impl Default for RelaxConfig {
@@ -44,6 +47,7 @@ impl Default for RelaxConfig {
             margin: 0.008,
             max_step: 0.03,
             gpu: std::env::var("GB_GPU").is_ok(),
+            via_edge: false,
         }
     }
 }
@@ -544,6 +548,18 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     if d < need {
                         let dir = if inside { (q - vc).norm() } else { (vc - q).norm() };
                         push = push + dir * (need - d);
+                    }
+                }
+                if cfg.via_edge {
+                    let inside_board = board.inside(vc);
+                    for o in &board.outline {
+                        let (d, q) = nearest_on_poly(o, vc);
+                        let need = edge_clr + vr + cfg.margin;
+                        if d < need || !inside_board {
+                            let dir = if inside_board { (vc - q).norm() } else { (q - vc).norm() };
+                            let d = if inside_board { d } else { -d };
+                            push = push + dir * (need - d);
+                        }
                     }
                 }
                 // sums run in id order: collect the few candidates first
@@ -1430,5 +1446,197 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
             })
             .collect();
         geo.tracks[ti].fitted = fitted;
+    }
+}
+
+/// A piece of track of one width while tracks grow: an element of the track.
+struct Grown {
+    track: u32,
+    chords: Vec<(Point, Point)>,
+    len: f64,
+    w: f64,
+    max: f64,
+}
+
+/// Width steps of [`prefer_width`] in mm, and how short a wider stretch may be: a little more
+/// width over a fraction of a mm is only a bump in the track.
+const GROW_STEP: f64 = 0.025;
+const GROW_MIN_LEN: f64 = 1.5;
+
+/// Let the tracks of the nets in `wanted` grow up to `target` wherever there is room, keeping
+/// `reserve` on top of the clearances; tracks in a bundle share the room. A track never gets
+/// narrower than it is, and it changes width in steps of [`GROW_STEP`] per piece, which gives
+/// a taper that needs no special copper.
+pub fn prefer_width(
+    board: &Board,
+    sub: &Substrate,
+    geo: &mut Geometry,
+    target: f64,
+    reserve: f64,
+    wanted: impl Fn(u32) -> bool,
+) {
+    let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
+    let margin = RelaxConfig::default().margin + reserve;
+    let mut grown: Vec<Grown> = Vec::new();
+    let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
+    for (ti, t) in geo.tracks.iter_mut().enumerate() {
+        let from = grown.len();
+        let grows = wanted(t.net) && t.width < target;
+        let mut elems = Vec::with_capacity(t.elems.len());
+        for e in &t.elems {
+            let (w, parts) = match *e {
+                Elem::Line(a, b) => {
+                    let n = if grows { (a.dist(b) / 0.3).ceil().max(1.0) as usize } else { 1 };
+                    let at = |i: usize| a + (b - a) * (i as f64 / n as f64);
+                    (t.piece_width(a, b), (0..n).map(|i| Elem::Line(at(i), at(i + 1))).collect())
+                }
+                Elem::Arc(a, _, b) => {
+                    let pts = crate::realize::flatten(std::slice::from_ref(e));
+                    let w = pts
+                        .windows(2)
+                        .map(|c| t.piece_width(c[0], c[1]))
+                        .fold(t.piece_width(a, b), f64::min);
+                    (w, vec![*e])
+                }
+            };
+            for part in parts {
+                let pts = crate::realize::flatten(std::slice::from_ref(&part));
+                let chords: Vec<(Point, Point)> = pts.windows(2).map(|c| (c[0], c[1])).collect();
+                grown.push(Grown {
+                    track: ti as u32,
+                    len: chords.iter().map(|c| c.0.dist(c.1)).sum(),
+                    chords,
+                    w,
+                    max: if grows { target.max(w) } else { w },
+                });
+                elems.push(part);
+            }
+        }
+        t.pts = crate::realize::flatten(&elems);
+        t.elems = elems;
+        spans.push(from..grown.len());
+    }
+    let mut idx = GridIndex::new(board.bbox().grow(5.0), 1.0);
+    let mut pieces: Vec<(Point, Point, u32)> = Vec::new();
+    for (ui, u) in grown.iter().enumerate() {
+        for &(a, b) in &u.chords {
+            let mut r = Rect::empty();
+            r.add(a);
+            r.add(b);
+            idx.insert(pieces.len() as u32, &r);
+            pieces.push((a, b, ui as u32));
+        }
+    }
+    let fits = |grown: &[Grown], ui: usize, w: f64| -> bool {
+        let u = &grown[ui];
+        let t = &geo.tracks[u.track as usize];
+        let (net, layer, c) = (t.net, t.layer, clr(t.net));
+        u.chords.iter().all(|&(a, b)| {
+            let mut r = Rect::empty();
+            r.add(a);
+            r.add(b);
+            let rr = r.grow(w / 2.0 + c + 1.0);
+            let on_board = board.outline.iter().all(|o| {
+                o.edges()
+                    .map(|(p, q)| crate::geom::seg_seg_dist(a, b, p, q))
+                    .fold(f64::INFINITY, f64::min)
+                    >= board.rules.edge_clearance + w / 2.0 + margin
+            });
+            on_board
+                && sub.shared.obs_index.query(&rr).into_iter().all(|oi| {
+                    let o = &board.obstacles[oi as usize];
+                    if !o.layers.has(layer) || (o.net == Some(net) && o.kind != ObstacleKind::Hole) {
+                        return true;
+                    }
+                    let need = match o.kind {
+                        ObstacleKind::Keepout { tracks, .. } => {
+                            if !tracks {
+                                return true;
+                            }
+                            crate::board::KEEPOUT_GAP
+                        }
+                        ObstacleKind::Hole => board.rules.hole_clearance,
+                        _ => o.clearance.max(c),
+                    };
+                    sub.shared.obs_polys[oi as usize].dist_to_seg(a, b) >= need + w / 2.0 + margin
+                })
+                && geo.vias.iter().all(|v| {
+                    v.net == net
+                        || v.layer.is_some_and(|l| l != layer)
+                        || point_seg_dist(v.at, a, b) >= v.diameter / 2.0 + w / 2.0 + c.max(clr(v.net)) + margin
+                })
+                && idx.query(&rr).into_iter().all(|pi| {
+                    let (p, q, uj) = pieces[pi as usize];
+                    let o = &geo.tracks[grown[uj as usize].track as usize];
+                    o.net == net
+                        || o.layer != layer
+                        || crate::geom::seg_seg_dist(a, b, p, q)
+                            >= w / 2.0 + grown[uj as usize].w / 2.0 + board.track_clearance(net, o.net) + margin
+                })
+        })
+    };
+    // round by round, so that neighbours share what is between them
+    loop {
+        let mut any = false;
+        for ui in 0..grown.len() {
+            let w = (grown[ui].w + GROW_STEP).min(grown[ui].max);
+            if w > grown[ui].w && fits(&grown, ui, w) {
+                grown[ui].w = w;
+                any = true;
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+    for span in spans {
+        let units = &mut grown[span];
+        // short wide stretches go back to their neighbours
+        loop {
+            let mut changed = false;
+            let mut i = 0;
+            while i < units.len() {
+                let mut j = i + 1;
+                while j < units.len() && units[j].w == units[i].w {
+                    j += 1;
+                }
+                let before = i.checked_sub(1).map(|k| units[k].w);
+                let after = units.get(j).map(|u| u.w);
+                let edge = before.into_iter().chain(after).fold(f64::NEG_INFINITY, f64::max);
+                let len: f64 = units[i..j].iter().map(|u| u.len).sum();
+                if edge.is_finite() && units[i].w > edge && len < GROW_MIN_LEN {
+                    units[i..j].iter_mut().for_each(|u| u.w = edge);
+                    changed = true;
+                }
+                i = j;
+            }
+            if !changed {
+                break;
+            }
+        }
+        // and every change of width gets a taper
+        for i in 1..units.len() {
+            units[i].w = units[i].w.min(units[i - 1].w + GROW_STEP);
+        }
+        for i in (1..units.len()).rev() {
+            units[i - 1].w = units[i - 1].w.min(units[i].w + GROW_STEP);
+        }
+    }
+    for t in geo.tracks.iter_mut() {
+        t.fitted.clear();
+    }
+    for u in &grown {
+        // the class width stays the width of the track: anything not listed here is at it
+        let t = &mut geo.tracks[u.track as usize];
+        let mids = u
+            .chords
+            .iter()
+            .map(|c| (c.0 + c.1) * 0.5)
+            .chain([(u.chords[0].0 + u.chords[u.chords.len() - 1].1) * 0.5]);
+        for m in mids {
+            let mut r = Rect::empty();
+            r.add(m);
+            t.fitted.push((r.grow(1e-6), u.w));
+        }
     }
 }

@@ -138,6 +138,21 @@ enum Cmd {
         /// far, elapsed seconds), for the KiCad plugin and other front ends.
         #[arg(long)]
         progress: bool,
+        /// Keep improving after the normal search until a line arrives on stdin or stdin closes,
+        /// then finish the best result. Mutants take a few connections around one spot out and
+        /// lay them again, the rest of the result stays; when that stops helping, bolder side
+        /// branches take over. No placement rounds, and no plain search next to --negotiate.
+        #[arg(long)]
+        until_stop: bool,
+        /// Give the finished copper this reserve in mm on top of the clearances where there is
+        /// room, instead of leaving it at the limit [default: 0.03 with --until-stop, else 0]
+        #[arg(long)]
+        air: Option<f64>,
+        /// At the end tracks of the default net class push aside what can give way and grow up
+        /// to this width in mm wherever there is room, with a taper at every change; routing
+        /// still works with the class width
+        #[arg(long, default_value_t = 0.0)]
+        prefer_width: f64,
     },
     /// Place parts from the netlist: locked footprints, connectors, modules, mounting holes,
     /// buttons and test points stay, everything else gets a new position. Its current position
@@ -306,10 +321,16 @@ fn main() -> Result<()> {
             move_parts,
             fixed,
             progress,
+            until_stop,
+            air,
+            prefer_width,
             net_widths,
             teardrops,
             net_priorities,
         } => {
+            if until_stop && (shove || give > 0.0 || pairs) {
+                anyhow::bail!("--until-stop does not work with --shove, --give or --pairs");
+            }
             if shove && (!keep_all || nets.is_empty() || move_parts) {
                 anyhow::bail!("--shove needs --keep-all and --nets, and fixed parts");
             }
@@ -398,12 +419,25 @@ fn main() -> Result<()> {
                 negotiate,
                 ..Default::default()
             };
+            // a line on stdin ends the run; so does a closed stdin, nothing can come any more
+            let open_end = until_stop.then(|| {
+                let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let set = flag.clone();
+                std::thread::spawn(move || {
+                    let _ = std::io::stdin().read_line(&mut String::new());
+                    set.store(true, std::sync::atomic::Ordering::Relaxed);
+                });
+                flag
+            });
             let search_cfg = gummiband_core::SearchConfig {
                 population: runs,
                 generations,
                 geometry_generations,
                 frames: frames.is_some(),
                 seed: None,
+                open_end: open_end.clone(),
+                air: air.unwrap_or(if until_stop { 0.03 } else { 0.0 }),
+                prefer_width,
                 progress: progress.then(|| {
                     gummiband_core::ProgressFn(std::sync::Arc::new(move |p: &gummiband_core::Progress| {
                         use std::io::Write;

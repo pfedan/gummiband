@@ -56,6 +56,16 @@ ROUTE_TABS: Tuple = (
         int_field("geometry_generations", "Geometry generations:",
                   "Search rounds judged by the clearance check of the drawn tracks. 0 is fastest, "
                   "more is cleaner; each costs about one routing pass.", 0, 20),
+        Field("until_stop", "Keep improving until I accept the result",
+              "After the search the router keeps working on the result: fewer vias, fewer "
+              "violations, sometimes the last connections. A window shows how it goes and "
+              "recommends when to accept. Not together with routing pairs as one wide track.",
+              "check"),
+        float_field("prefer_width", "Preferred track width (mm):",
+                    "Tracks of the default net class push aside what can give way and grow up to "
+                    "this width where there is room, with a taper at every change. Routing still "
+                    "works with the class width, so it costs no connections. 0 = off.",
+                    0, 5, 0.05),
         Field("move_parts", "Let parts shift to open channels",
               "The geometry generations may shift parts next to clearance problems, so it needs "
               "at least one of them. Locked footprints, connectors, modules, mounting holes, "

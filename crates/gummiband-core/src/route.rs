@@ -3191,6 +3191,20 @@ impl<'a> Router<'a> {
         out
     }
 
+    /// Where connection `ci` runs: its pin and the middle of every mesh edge it crosses.
+    pub(crate) fn conn_points(&self, ci: usize) -> Vec<Point> {
+        let mut out = vec![self.board.pins[self.conns[ci].from].pos];
+        for &sid in &self.conn_segs[ci] {
+            let s = self.segs[sid as usize].as_ref().unwrap();
+            let m = self.m(s.li as usize);
+            out.extend(s.crossings.iter().map(|cr| {
+                let [u, v] = m.edges[cr.e as usize];
+                (m.verts[u as usize] + m.verts[v as usize]) * 0.5
+            }));
+        }
+        out
+    }
+
     pub fn unrouted(&self) -> Vec<usize> {
         (0..self.conns.len())
             .filter(|&ci| self.conn_segs[ci].is_empty())
