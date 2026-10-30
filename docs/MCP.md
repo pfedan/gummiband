@@ -156,7 +156,7 @@ all unlocked copper). `reset: true` drops the net's options before applying the 
 Runs `gummiband_core::route_board` on the loaded board with the net options applied and writes
 the routed board (existing unlocked tracks and vias replaced; with `keep_locked` the locked ones
 stay). Defaults match the CLI: `runs` 14 (a constant, so results do not depend on the machine), `generations` 3,
-`geometry_generations` 0, `via_pitch` 0.5 mm, `via_cost` 1.5. `output` defaults to
+`geometry_generations` 0, `via_pitch` 0.5 mm, `via_cost` 3.0. `output` defaults to
 `<input>.routed.kicad_pcb` next to the input; the `.kicad_pro` and `.kicad_dru` are copied next
 to the output if missing, so `drc` and `load_board` work on it. `nets` routes only the listed
 nets for this call.
