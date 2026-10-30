@@ -3191,6 +3191,57 @@ impl<'a> Router<'a> {
         out
     }
 
+    /// In how many pieces the routed copper holds the pins of `net` together. A connection may
+    /// end on any via of its net, so one that is laid again can end on its own side of the net
+    /// and leave it in two pieces, although every connection counts as routed.
+    pub(crate) fn net_pieces(&self, net: NetId) -> usize {
+        // a node is a group of pins, a via site or the plane of the net
+        const PLANE: u64 = u64::MAX;
+        let pin = |p: usize| self.pin_group[p] as u64;
+        let site = |v: u32| (1 << 32) | v as u64;
+        fn find(parent: &mut FastMap<u64, u64>, x: u64) -> u64 {
+            let up = *parent.entry(x).or_insert(x);
+            if up == x {
+                return x;
+            }
+            let root = find(parent, up);
+            parent.insert(x, root);
+            root
+        }
+        let mut parent: FastMap<u64, u64> = FastMap::default();
+        let mut join = |a: u64, b: u64| {
+            let (a, b) = (find(&mut parent, a), find(&mut parent, b));
+            parent.insert(a, b);
+        };
+        for (ci, c) in self.conns.iter().enumerate() {
+            if c.net != net {
+                continue;
+            }
+            for &sid in &self.conn_segs[ci] {
+                let s = self.segs[sid as usize].as_ref().unwrap();
+                let nodes = [s.start, s.end].map(|e| match e {
+                    End::Pin(p) => Some(pin(p)),
+                    End::Via(v) => Some(site(v)),
+                    End::Point(_) => None,
+                });
+                if let [Some(a), Some(b)] = nodes {
+                    join(a, b);
+                }
+                if c.goal == Goal::Plane {
+                    join(nodes[0].unwrap_or(pin(c.from)), PLANE);
+                }
+            }
+        }
+        let mut roots: Vec<u64> = self.board.nets[net as usize]
+            .pins
+            .iter()
+            .map(|&p| find(&mut parent, pin(p)))
+            .collect();
+        roots.sort_unstable();
+        roots.dedup();
+        roots.len()
+    }
+
     /// Where connection `ci` runs: its pin and the middle of every mesh edge it crosses.
     pub(crate) fn conn_points(&self, ci: usize) -> Vec<Point> {
         let mut out = vec![self.board.pins[self.conns[ci].from].pos];

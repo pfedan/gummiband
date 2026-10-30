@@ -36,7 +36,8 @@ than 45 degree stairs.
 | Board rules (`.kicad_pro`) | minimum clearance, minimum track width, edge clearance, hole to hole and hole clearance, minimum via diameter. |
 | Custom rules (`.kicad_dru`) | see below. |
 
-Graphics on copper layers (logos, text) are obstacles too.
+Graphics on copper layers (logos, text) are obstacles too. Text counts as a box around it, a little
+larger than the letters.
 
 ## Rules
 

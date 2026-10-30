@@ -236,7 +236,7 @@ violations or shorts, or 0.2 % less via and length cost.
 
 `--air` then relaxes the whole board without tension and with a larger margin. Where that leaves
 new violations, the nets involved go back to the normal margin. These passes and the open end
-also let the board edge push vias (`RelaxConfig::via_edge`).
+also let the board edge push vias and keep a via in the plane it reaches (`RelaxConfig::via_edge`).
 
 `--prefer-width` runs at the very end, on the best result, because the topology keeps counting
 with the narrow tracks. First the tracks push as if they had the target width, without tension,

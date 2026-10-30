@@ -30,8 +30,9 @@ pub struct RelaxConfig {
     pub max_step: f64,
     /// Experimental: run the tension rounds on the GPU (needs the `gpu` feature).
     pub gpu: bool,
-    /// The board edge pushes vias as well. Off for the search itself, where vias stay near the
-    /// place the router gave them; passes that push hard can shove a via over the edge rule.
+    /// The board edge pushes vias as well and a via stays in the plane it reaches. Off for the
+    /// search itself, where vias stay near the place the router gave them; passes that push hard
+    /// can shove a via over the edge rule, or out of the zone it hangs on.
     pub via_edge: bool,
     /// Finish with the shortcuts of [`taut`]. Off, the tracks stay chains of short pieces where
     /// the rounds left them, and a clearance check can say where it hurts.
@@ -353,6 +354,19 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
     let edge_clr = board.rules.edge_clearance;
     let routing = board.routing_layers();
     let drills: Vec<f64> = geo.vias.iter().map(|v| v.drill).collect();
+    // the planes each via reaches, and how near to their border it may come
+    let via_planes: Vec<Vec<(&crate::geom::Polygon, f64)>> = geo
+        .vias
+        .iter()
+        .map(|v| {
+            board
+                .planes
+                .iter()
+                .filter(|p| cfg.via_edge && p.net == v.net && p.outline.contains(v.at))
+                .map(|p| (&p.outline, nearest_on_poly(&p.outline, v.at).0.min(v.diameter / 2.0)))
+                .collect()
+        })
+        .collect();
     // track ends that sit on a via of their net follow the via
     let attach = |p: Point, net: u32, vias: &[(Point, f64, u32, f64)]| {
         vias.iter().position(|v| v.2 == net && v.0.dist(p) < 1e-6)
@@ -650,7 +664,15 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 } else {
                     push
                 };
-                vc + mv * if on_gpu_now { via_gain } else { 1.0 }
+                let to = vc + mv * if on_gpu_now { via_gain } else { 1.0 };
+                let stays = |&(o, floor): &(&crate::geom::Polygon, f64)| {
+                    o.contains(to) && nearest_on_poly(o, to).0 >= floor
+                };
+                if via_planes[vi].is_empty() || via_planes[vi].iter().any(stays) {
+                    to
+                } else {
+                    vc
+                }
             })
             .collect();
         prof::add(Slot::RelaxVias, t_vias.elapsed().as_nanos() as u64);
