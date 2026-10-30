@@ -77,6 +77,10 @@ enum Cmd {
         /// References that never move under --move-parts, comma separated.
         #[arg(long, value_delimiter = ',')]
         fixed: Vec<String>,
+        /// Track width per net from a JSON file {"net name": width_mm, ...} (e.g. the widths
+        /// of an existing routing, see bench/net_widths.py).
+        #[arg(long)]
+        net_widths: Option<PathBuf>,
         /// Print a "progress {json}" line after every phase of the search (best candidate so
         /// far, elapsed seconds), for the KiCad plugin and other front ends.
         #[arg(long)]
@@ -193,6 +197,7 @@ fn main() -> Result<()> {
             move_parts,
             fixed,
             progress,
+            net_widths,
         } => {
             let keep = if keep_locked {
                 KeepCopper::Locked
@@ -209,6 +214,19 @@ fn main() -> Result<()> {
                     ..Default::default()
                 },
             )?;
+            let mut kb = kb;
+            if let Some(path) = &net_widths {
+                let map: std::collections::HashMap<String, f64> =
+                    serde_json::from_str(&std::fs::read_to_string(path)?)?;
+                let mut n = 0;
+                for (name, w) in map {
+                    if let Some(net) = kb.board.net_id(&name) {
+                        kb.board.set_net_width(net, w);
+                        n += 1;
+                    }
+                }
+                println!("net widths: {n} nets");
+            }
             // debugging: GB_SHIFT="R8:0.3,0;C4:0,-0.2" routes the board with these parts shifted
             let shifted_in;
             let b = match std::env::var("GB_SHIFT") {

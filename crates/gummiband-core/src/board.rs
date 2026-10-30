@@ -200,6 +200,24 @@ impl Board {
         b
     }
 
+    /// Give one net its own track width (a copy of its class with that width; the class's
+    /// other nets keep theirs).
+    pub fn set_net_width(&mut self, net: NetId, width: f64) {
+        let ci = self.nets[net as usize].class as usize;
+        if (self.classes[ci].track_width - width).abs() < 1e-9 {
+            return;
+        }
+        let mut c = self.classes[ci].clone();
+        c.name = format!("{}@{width}", c.name);
+        c.track_width = width;
+        if let Some(i) = self.classes.iter().position(|k| k.name == c.name) {
+            self.nets[net as usize].class = i as ClassId;
+        } else {
+            self.classes.push(c);
+            self.nets[net as usize].class = (self.classes.len() - 1) as ClassId;
+        }
+    }
+
     pub fn layer_id(&self, name: &str) -> Option<LayerId> {
         self.layers.iter().position(|l| l.name == name).map(|i| i as LayerId)
     }
