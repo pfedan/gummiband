@@ -48,8 +48,9 @@ enum Cmd {
         /// Route only these nets, comma separated (the others stay as they are).
         #[arg(long, value_delimiter = ',')]
         nets: Vec<String>,
-        /// Portfolio size (parallel router runs with different orders).
-        #[arg(long, default_value_t = 0)]
+        /// Portfolio size (router runs with different orders). A constant, so that results do
+        /// not depend on the machine.
+        #[arg(long, default_value_t = gummiband_core::DEFAULT_RUNS)]
         runs: usize,
         /// Via site grid pitch in mm.
         #[arg(long, default_value_t = 0.5)]
@@ -282,7 +283,6 @@ fn main() -> Result<()> {
             if move_parts {
                 println!("movable parts: {}", b.movable.len());
             }
-            let runs = if runs == 0 { rayon::current_num_threads() } else { runs };
             let t0 = std::time::Instant::now();
             let (sub, res) = gummiband_core::route_board(
                 b,

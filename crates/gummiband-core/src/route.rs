@@ -159,6 +159,8 @@ pub struct Router<'a> {
     pub has_kept: bool,
     /// Per pin: number of unrouted connections that start or end there.
     pending: Vec<u32>,
+    /// Buffers of the search, kept to avoid growing them again for every connection.
+    search_buf: SearchBuf,
     /// Debugging: positions expanded by the last search of a traced connection.
     pub trace: std::sync::Arc<std::sync::Mutex<Option<Vec<(Point, u8)>>>>,
 }
@@ -209,13 +211,24 @@ struct Node {
     via_up: u32,
 }
 
+/// Two bits of the filter for a triangle.
 fn tri_bit(t: u32, li: u8) -> u64 {
-    1 << (t.wrapping_add((li as u32) << 28).wrapping_mul(0x9e37_79b1) >> 26)
+    let h = t.wrapping_add((li as u32) << 28).wrapping_mul(0x9e37_79b1);
+    1 << (h >> 26) | 1 << ((h >> 20) & 63)
 }
 
 const BLOCK: u8 = 24;
 
-#[derive(PartialEq)]
+type Best = FastMap<(u8, u32, u32), f64>;
+
+#[derive(Clone, Default)]
+struct SearchBuf {
+    nodes: Vec<Node>,
+    best: Best,
+    open: BinaryHeap<Open>,
+}
+
+#[derive(PartialEq, Clone)]
 struct Open(f64, u32);
 impl Eq for Open {}
 impl PartialOrd for Open {
@@ -303,6 +316,7 @@ impl<'a> Router<'a> {
             conns: Vec::new(),
             conn_segs: Vec::new(),
             conn_vias: Vec::new(),
+            search_buf: Default::default(),
             trace: Default::default(),
             pin_group: Self::pin_groups(board, sub),
             has_kept: board
@@ -1094,6 +1108,42 @@ impl<'a> Router<'a> {
         true
     }
 
+    /// The chords of other nets in t by their boundary coordinates, for `chord_fits`.
+    fn chord_coords(&self, t: u32, li: usize, net: NetId, out: &mut Vec<(f64, f64)>) {
+        out.clear();
+        for ch in &self.chords[li][t as usize] {
+            if self.segs[ch.seg as usize].as_ref().unwrap().net != net {
+                out.push((
+                    self.coord(t, li, ch.a, Some(ch.seg), None),
+                    self.coord(t, li, ch.b, Some(ch.seg), None),
+                ));
+            }
+        }
+    }
+
+    /// `chord_ok` for a chord between boundary coordinates x and y.
+    fn chord_fits(coords: &[(f64, f64)], x: f64, y: f64) -> bool {
+        let (lo, hi) = if x < y { (x, y) } else { (y, x) };
+        coords.iter().all(|&(c, d)| {
+            let inside = |z: f64| z > lo + 1e-12 && z < hi - 1e-12;
+            let on = |z: f64| (z - lo).abs() < 1e-12 || (z - hi).abs() < 1e-12;
+            on(c) || on(d) || inside(c) == inside(d)
+        })
+    }
+
+    /// The chords of other nets in t as point pairs, for `half_chord_fits`.
+    fn chord_points(&self, t: u32, li: usize, net: NetId, out: &mut Vec<(Point, Point)>) {
+        out.clear();
+        for ch in &self.chords[li][t as usize] {
+            if self.segs[ch.seg as usize].as_ref().unwrap().net != net {
+                out.push((
+                    self.pos_point(t, li, ch.a, Some(ch.seg), None),
+                    self.pos_point(t, li, ch.b, Some(ch.seg), None),
+                ));
+            }
+        }
+    }
+
     /// Can a half chord from interior point `p` to boundary position `b` be added to t?
     fn half_chord_ok(&self, t: u32, li: usize, net: NetId, p: Point, b: CPos, sb: Option<usize>) -> bool {
         let list = &self.chords[li][t as usize];
@@ -1550,7 +1600,7 @@ impl<'a> Router<'a> {
     }
 
     /// A* for one connection. Returns the node chain from start to goal.
-    fn search(&self, ci: usize) -> Option<Vec<Node>> {
+    fn search(&self, ci: usize, buf: &mut SearchBuf) -> Option<Vec<Node>> {
         let conn = &self.conns[ci];
         let net = conn.net;
         let cls = self.board.class_of(net);
@@ -1600,10 +1650,15 @@ impl<'a> Router<'a> {
         };
         let nl = self.nl();
 
-        let mut nodes: Vec<Node> = Vec::new();
-        let mut best: FastMap<(u8, u32, u32), f64> = FastMap::default();
-        let mut open = BinaryHeap::new();
-        type Best = FastMap<(u8, u32, u32), f64>;
+        // a search that reaches its limit leaves a large table: clearing that for every small
+        // search would cost more than growing a new one now and then
+        if buf.best.capacity() > 1 << 20 {
+            buf.best = Best::default();
+        }
+        buf.best.clear();
+        buf.nodes.clear();
+        buf.open.clear();
+        let SearchBuf { nodes, best, open } = buf;
         let push = |best: &mut Best,
                     nodes: &mut Vec<Node>,
                     open: &mut BinaryHeap<Open>,
@@ -1663,9 +1718,9 @@ impl<'a> Router<'a> {
             for &o in &starts {
                 for &t in m.obs_tris.get(&(o as u32)).map(|v| v.as_slice()).unwrap_or(&[]) {
                     push(
-                        &mut best,
-                        &mut nodes,
-                        &mut open,
+                        best,
+                        nodes,
+                        open,
                         NK::Tri {
                             t,
                             li: li as u8,
@@ -1682,6 +1737,7 @@ impl<'a> Router<'a> {
 
         let mut views: FastMap<(u8, u32), EdgeView> = FastMap::default();
         let mut scratch: Vec<f64> = Vec::new();
+        let (mut coords, mut points): (Vec<(f64, f64)>, Vec<(Point, Point)>) = (Vec::new(), Vec::new());
         // crossings out of triangle t (layer lu) through local edge k
         #[allow(clippy::too_many_arguments)]
         let mut cross_out = |best: &mut Best,
@@ -1728,7 +1784,7 @@ impl<'a> Router<'a> {
             let mut block = idx;
             while block != u32::MAX {
                 let top = &nodes[block as usize];
-                if top.seen & bit != 0 {
+                if top.seen & bit == bit {
                     let mut p = block;
                     while p != top.block_up {
                         let NK::Tri { t: tp, li: lp, .. } = nodes[p as usize].kind else {
@@ -1773,17 +1829,26 @@ impl<'a> Router<'a> {
             let view = views
                 .entry((lu as u8, e))
                 .or_insert_with(|| self.edge_view(lu, e, &item));
+            // the chords in t stay the same from slot to slot
+            if free && chord_from.is_some() {
+                self.chord_coords(t, lu, net, &mut coords);
+            }
+            if free && interior.is_some() {
+                self.chord_points(t, lu, net, &mut points);
+            }
+            let from_coord = chord_from.map(|(cp, cs)| self.coord(t, lu, cp, None, cs));
             for j in 0..=n {
                 if free {
-                    if let Some((cp, cs)) = chord_from
-                        && !self.chord_ok(t, lu, net, cp, cs, CPos::Edge(k), Some(j))
+                    if let Some(x) = from_coord
+                        && !Self::chord_fits(&coords, x, self.coord(t, lu, CPos::Edge(k), None, Some(j)))
                     {
                         continue;
                     }
-                    if let Some(p) = interior
-                        && !self.half_chord_ok(t, lu, net, p, CPos::Edge(k), Some(j))
-                    {
-                        continue;
+                    if let Some(p) = interior {
+                        let q = self.pos_point(t, lu, CPos::Edge(k), None, Some(j));
+                        if points.iter().any(|&(c, d)| segs_intersect(p, q, c, d)) {
+                            continue;
+                        }
                     }
                 }
                 let Some((lo, hi)) = Self::slot_interval(view, item.sides, j, &mut scratch) else {
@@ -1859,9 +1924,9 @@ impl<'a> Router<'a> {
                     {
                         let q = self.board.pins[pin].pos;
                         push(
-                            &mut best,
-                            &mut nodes,
-                            &mut open,
+                            best,
+                            nodes,
+                            open,
                             NK::GoalPin { pin },
                             q,
                             node.g + node.pos.dist(q),
@@ -1885,9 +1950,9 @@ impl<'a> Router<'a> {
                             if conn.goal == Goal::Plane {
                                 if self.in_plane(q, net) {
                                     push(
-                                        &mut best,
-                                        &mut nodes,
-                                        &mut open,
+                                        best,
+                                        nodes,
+                                        open,
                                         NK::GoalSite { site },
                                         q,
                                         node.g + node.pos.dist(q) + self.cfg.via_cost,
@@ -1899,9 +1964,9 @@ impl<'a> Router<'a> {
                                 for l2 in 0..nl {
                                     if l2 != lu && self.m(l2).site_tri[site as usize] != PAD_SITE {
                                         push(
-                                            &mut best,
-                                            &mut nodes,
-                                            &mut open,
+                                            best,
+                                            nodes,
+                                            open,
                                             NK::Site { site, li: l2 as u8 },
                                             q,
                                             node.g + node.pos.dist(q) + self.cfg.via_cost * 2.0,
@@ -1920,9 +1985,9 @@ impl<'a> Router<'a> {
                             }
                             for &t2 in self.m(l2).obs_tris.get(&status).map(|v| v.as_slice()).unwrap_or(&[]) {
                                 push(
-                                    &mut best,
-                                    &mut nodes,
-                                    &mut open,
+                                    best,
+                                    nodes,
+                                    open,
                                     NK::Tri {
                                         t: t2,
                                         li: l2 as u8,
@@ -1938,7 +2003,7 @@ impl<'a> Router<'a> {
                     }
                     for k in 0..3u8 {
                         if k != entry {
-                            cross_out(&mut best, &mut nodes, &mut open, t, lu, k, entry_pos, None, &node, idx);
+                            cross_out(best, nodes, open, t, lu, k, entry_pos, None, &node, idx);
                         }
                     }
                     if !free {
@@ -1964,23 +2029,15 @@ impl<'a> Router<'a> {
                         let d = node.pos.dist(q);
                         let vc = if existing { 0.1 } else { self.cfg.via_cost };
                         if conn.goal == Goal::Plane && self.in_plane(q, net) {
-                            push(
-                                &mut best,
-                                &mut nodes,
-                                &mut open,
-                                NK::GoalVia { site },
-                                q,
-                                node.g + d + vc * 0.5,
-                                idx,
-                            );
+                            push(best, nodes, open, NK::GoalVia { site }, q, node.g + d + vc * 0.5, idx);
                             continue;
                         }
                         for l2 in 0..nl {
                             if l2 != lu && self.m(l2).site_vert.contains_key(&site) {
                                 push(
-                                    &mut best,
-                                    &mut nodes,
-                                    &mut open,
+                                    best,
+                                    nodes,
+                                    open,
                                     NK::Vert { site, li: l2 as u8 },
                                     q,
                                     node.g + d + vc,
@@ -2039,9 +2096,9 @@ impl<'a> Router<'a> {
                             || (conn.goal == Goal::Plane && self.in_plane(q, net))
                         {
                             push(
-                                &mut best,
-                                &mut nodes,
-                                &mut open,
+                                best,
+                                nodes,
+                                open,
                                 NK::GoalSite { site },
                                 q,
                                 node.g + d + self.cfg.via_cost * 0.5,
@@ -2052,9 +2109,9 @@ impl<'a> Router<'a> {
                         for l2 in 0..nl {
                             if l2 != lu {
                                 push(
-                                    &mut best,
-                                    &mut nodes,
-                                    &mut open,
+                                    best,
+                                    nodes,
+                                    open,
                                     NK::Site { site, li: l2 as u8 },
                                     q,
                                     node.g + d + self.cfg.via_cost,
@@ -2076,9 +2133,9 @@ impl<'a> Router<'a> {
                         let i = m.tris[t as usize].iter().position(|&x| x == v).unwrap() as u8;
                         let k = (i + 1) % 3;
                         cross_out(
-                            &mut best,
-                            &mut nodes,
-                            &mut open,
+                            best,
+                            nodes,
+                            open,
                             t,
                             lu,
                             k,
@@ -2093,18 +2150,7 @@ impl<'a> Router<'a> {
                     let lu = li as usize;
                     let t = self.m(lu).site_tri[site as usize];
                     for k in 0..3u8 {
-                        cross_out(
-                            &mut best,
-                            &mut nodes,
-                            &mut open,
-                            t,
-                            lu,
-                            k,
-                            None,
-                            Some(node.pos),
-                            &node,
-                            idx,
-                        );
+                        cross_out(best, nodes, open, t, lu, k, None, Some(node.pos), &node, idx);
                     }
                 }
             }
@@ -2509,7 +2555,10 @@ impl<'a> Router<'a> {
 
     pub fn route_one(&mut self, ci: usize) -> bool {
         for _ in 0..3 {
-            match self.search(ci) {
+            let mut buf = std::mem::take(&mut self.search_buf);
+            let found = self.search(ci, &mut buf);
+            self.search_buf = buf;
+            match found {
                 Some(chain) => {
                     let validate = std::env::var("GB_VALIDATE_EACH").is_ok();
                     let before = if validate { self.validate().len() } else { 0 };

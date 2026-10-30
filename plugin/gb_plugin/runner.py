@@ -27,7 +27,7 @@ class RunnerError(RuntimeError):
 @dataclass
 class RouteOptions:
     keep_locked: bool = True
-    runs: int = os.cpu_count() or 1
+    runs: int = 14  # fixed, so that results do not depend on the machine
     via_cost: float = 3.0
     # generations that select by the clearance check after the geometry step (0 = fastest)
     geometry_generations: int = 3

@@ -18,6 +18,10 @@ use realize::Geometry;
 use route::{Router, RouterConfig};
 use topo::{Substrate, SubstrateConfig};
 
+/// Default portfolio size. Fixed and not the core count: the same input gives the same result
+/// on every machine.
+pub const DEFAULT_RUNS: usize = 14;
+
 #[derive(Debug, Clone, Default)]
 pub struct RunStats {
     pub seed: u64,
@@ -312,9 +316,7 @@ pub fn route_board(
         let cost = r.stats.cost() + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0;
         (r.stats.routed, cost, v.iter().map(|x| x.at).collect())
     };
-    let t0 = std::time::Instant::now();
     let (sub, res) = route_fixed(board, sub_cfg, base, search);
-    let search_time = t0.elapsed().as_secs_f64();
     if board.movable.is_empty() || search.geometry_generations == 0 {
         return (sub, res);
     }
@@ -367,9 +369,10 @@ pub fn route_board(
             search.report(&format!("placement round {round}"), &st);
             continue;
         }
-        // a full new search pays off only for a handful of local problems, and only if a
-        // search is not expensive; otherwise the fast path above is all there is
-        if hot.len() > 20 || search_time > 120.0 {
+        // a full new search pays off only for a handful of local problems, and only on boards
+        // where a search is not expensive; otherwise the fast path above is all there is.
+        // By board size and not by the clock: the result must not depend on the machine.
+        if hot.len() > 20 || best.1.stats.conns > 400 {
             continue;
         }
         let (sub, mut res) = route_fixed(&moved, sub_cfg, base, search);

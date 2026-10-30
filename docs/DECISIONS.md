@@ -28,6 +28,8 @@ Standing decisions of the project owner, kept here so that they survive any sess
 - Necking goes down to the pad width at most, never below the board minimum or what custom
   rules allow; current paths must stay electrically sensible.
 - Completion comes first: the geometry stage never trades a connection for cleaner geometry.
+- Results are deterministic: the same input and seed give the same output on every machine, at
+  any thread count (fixed default portfolio, no decisions by the clock).
 - A block is a group of parts with its locked copper that moves only as a whole.
 - Layer preferred directions are a portfolio dimension, not only an option.
 - Teardrops come from KiCad's built-in feature.

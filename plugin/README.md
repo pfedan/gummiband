@@ -50,7 +50,7 @@ for:
 - **Keep locked tracks and vias** (default on): locked copper stays as fixed copper the router
   connects to; all unlocked tracks and vias are replaced. Off: every track and via is replaced
   (same as `gummiband route` without `--keep-locked`).
-- **Parallel runs** (default: CPU count): portfolio size, `--runs`.
+- **Parallel runs** (default 14): portfolio size, `--runs`.
 - **Via cost** (default 3.0): in mm of track, `--via-cost`.
 - **Geometry generations** (default 3): generations that are judged by the clearance check of
   the finished geometry, `--geometry-generations` (0 is fastest, more is cleaner).

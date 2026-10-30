@@ -210,8 +210,8 @@ pub struct SetNetOptionsIn {
 pub struct RouteIn {
     /// Board id from load_board.
     pub board: String,
-    /// Portfolio size: parallel router runs with different orders (default: number of
-    /// routing threads).
+    /// Portfolio size: router runs with different orders (default 14, fixed so that results
+    /// do not depend on the machine).
     pub runs: Option<usize>,
     /// Generations of the evolutionary order search after the portfolio (default 3).
     pub generations: Option<usize>,
@@ -842,7 +842,7 @@ fn route_blocking(
     }
     let (board, skipped) = apply_options(&kb.board, &options, &only);
     let b = &board;
-    let runs = p.runs.filter(|&r| r > 0).unwrap_or_else(rayon::current_num_threads);
+    let runs = p.runs.filter(|&r| r > 0).unwrap_or(gummiband_core::DEFAULT_RUNS);
     let t0 = std::time::Instant::now();
     let (_sub, res) = gummiband_core::route_board(
         b,

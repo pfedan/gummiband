@@ -102,7 +102,7 @@ class CommandTest(unittest.TestCase):
     def test_defaults(self):
         o = runner.RouteOptions()
         self.assertTrue(o.keep_locked)
-        self.assertEqual(o.runs, os.cpu_count() or 1)
+        self.assertEqual(o.runs, 14)
         self.assertEqual(o.via_cost, 3.0)
         self.assertEqual(o.geometry_generations, 3)
         self.assertIsNone(o.frames_dir)
