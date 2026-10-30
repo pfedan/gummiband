@@ -513,6 +513,9 @@ fn main() -> Result<()> {
                 text
             };
             std::fs::write(&output, text)?;
+            if teardrops {
+                track_end_teardrops(&board, &output)?;
+            }
             println!("wrote {} items to {}", items.len(), output.display());
             if let Some(path) = report {
                 let st = &res.stats;
@@ -583,6 +586,41 @@ fn main() -> Result<()> {
             let text = write::patch(&kb, &ranges, &[]);
             std::fs::write(&output, text)?;
             println!("removed {} items, wrote {}", ranges.len(), output.display());
+        }
+    }
+    Ok(())
+}
+
+/// Teardrops at track width changes are a project setting: the output's .kicad_pro (a copy of
+/// the input's if it has none yet) switches them on. The input's project stays as it is.
+fn track_end_teardrops(input: &std::path::Path, output: &std::path::Path) -> Result<()> {
+    let target = output.with_extension("kicad_pro");
+    let source = if target.exists() {
+        target.clone()
+    } else {
+        input.with_extension("kicad_pro")
+    };
+    if target == input.with_extension("kicad_pro") {
+        return Ok(());
+    }
+    let Ok(text) = std::fs::read_to_string(&source) else {
+        return Ok(());
+    };
+    let mut pro: serde_json::Value = serde_json::from_str(&text)?;
+    let design = &mut pro["board"]["design_settings"];
+    if let Some(o) = design["teardrop_options"].as_array_mut().and_then(|a| a.first_mut()) {
+        o["td_ontrackend"] = serde_json::json!(true);
+    }
+    if let Some(list) = design["teardrop_parameters"].as_array_mut() {
+        for p in list.iter_mut().filter(|p| p["td_target_name"] == "td_track_end") {
+            p["td_enabled"] = serde_json::json!(true);
+        }
+    }
+    std::fs::write(&target, serde_json::to_string_pretty(&pro)?)?;
+    if let Ok(dru) = std::fs::read(input.with_extension("kicad_dru")) {
+        let d = output.with_extension("kicad_dru");
+        if !d.exists() {
+            std::fs::write(d, dru)?;
         }
     }
     Ok(())
