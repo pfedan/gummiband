@@ -76,6 +76,8 @@ pub struct Shared {
     pub sites: Vec<Site>,
     /// Via-in-pad sites per pin.
     pub pad_sites: FastMap<u32, Vec<u32>>,
+    /// The sites from here on are the nodes of the board's soft copper.
+    pub soft_base: usize,
     pub bounds: Rect,
 }
 
@@ -110,6 +112,8 @@ pub struct Mesh {
     pub site_tri: Vec<u32>,
     /// Vertex of each placed site.
     pub site_vert: FastMap<u32, u32>,
+    /// Where a site's vertex lies if not on the site: a soft node right on a mesh edge.
+    pub site_p: FastMap<u32, Point>,
 }
 
 /// All layer meshes. Cheap to clone (static parts shared); every router run owns one, because
@@ -147,6 +151,7 @@ impl Substrate {
             obs_index,
             sites: Vec::new(),
             pad_sites: FastMap::default(),
+            soft_base: 0,
             bounds,
         };
         shared.sites = build_sites(board, &shared, cfg.via_pitch);
@@ -156,6 +161,12 @@ impl Substrate {
                 shared.pad_sites.entry(pin).or_default().push(i as u32);
             }
         }
+        shared.soft_base = shared.sites.len();
+        shared.sites.extend(board.soft.nodes.iter().map(|n| Site {
+            p: n.at,
+            nbrs: Vec::new(),
+            pad: None,
+        }));
         let nsites = shared.sites.len();
         let mut meshes: Vec<Mesh> = layers
             .par_iter()
@@ -350,6 +361,7 @@ impl Mesh {
             tri_sites: Vec::new(),
             site_tri: vec![NONE; shared.sites.len()],
             site_vert: FastMap::default(),
+            site_p: FastMap::default(),
         };
         for h in steiner_handles {
             m.vert_site[h] = STEINER;
@@ -392,7 +404,7 @@ impl Mesh {
             })
             .collect();
         m.tri_sites = vec![Vec::new(); m.tris.len()];
-        for (i, site) in shared.sites.iter().enumerate() {
+        for (i, site) in shared.sites.iter().enumerate().take(shared.soft_base) {
             let face = match cdt.locate(Point2::new(site.p.x, site.p.y)) {
                 PositionInTriangulation::OnFace(f) => f.index(),
                 _ => continue,
@@ -407,6 +419,32 @@ impl Mesh {
                 && board.obstacles[st as usize].pin == Some(pin as usize)
             {
                 m.site_tri[i] = PAD_SITE;
+            }
+        }
+        // soft nodes: a vertex where the node has free room on this layer, nothing on other
+        // copper of the net or on other layers than a branch point's own
+        for (k, n) in board.soft.nodes.iter().enumerate() {
+            let i = shared.soft_base + k;
+            m.site_tri[i] = PAD_SITE;
+            if n.layer.is_some_and(|x| x != l) {
+                continue;
+            }
+            for d in [0.0, 2e-5, 4e-5, 8e-5] {
+                let p = pt(n.at.x + d, n.at.y + d * 0.7);
+                let PositionInTriangulation::OnFace(f) = cdt.locate(Point2::new(p.x, p.y)) else {
+                    continue;
+                };
+                if let Some(&t) = face_to_tri.get(&f.index())
+                    && m.status[t as usize] == NONE
+                {
+                    // (in the list so that a split passes it on; all are placed before any search)
+                    m.site_tri[i] = t;
+                    m.tri_sites[t as usize].push(i as u32);
+                    if d > 0.0 {
+                        m.site_p.insert(i as u32, p);
+                    }
+                }
+                break;
             }
         }
         m

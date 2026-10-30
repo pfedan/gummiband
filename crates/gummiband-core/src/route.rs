@@ -119,20 +119,22 @@ pub struct Seg {
     /// Zones around the connection's pins where the track may neck down, and the neck width.
     pub necks: Vec<Rect>,
     pub neck_w: f64,
+    /// Set if this is copper of the board imported into the topology.
+    pub imported: Option<Box<crate::import::Imported>>,
 }
 
 /// Position on a triangle boundary: local edge or local vertex.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum CPos {
+pub(crate) enum CPos {
     Edge(u8),
     Vertex(u8),
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Chord {
-    seg: u32,
-    a: CPos,
-    b: CPos,
+pub(crate) struct Chord {
+    pub(crate) seg: u32,
+    pub(crate) a: CPos,
+    pub(crate) b: CPos,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -153,7 +155,7 @@ pub struct Router<'a> {
     /// [layer][edge] -> segment ids ordered from edges[e][0] to edges[e][1]
     pub cross: Vec<Vec<Vec<u32>>>,
     /// [layer][triangle] -> chords
-    chords: Vec<Vec<Vec<Chord>>>,
+    pub(crate) chords: Vec<Vec<Vec<Chord>>>,
     pub segs: Vec<Option<Seg>>,
     /// Placed vias by site id.
     pub vias: FastMap<u32, ViaInfo>,
@@ -169,6 +171,10 @@ pub struct Router<'a> {
     guides: HashMap<NetId, Vec<Point>>,
     /// The board has kept tracks or vias.
     pub has_kept: bool,
+    /// Soft copper of the board is in the topology, see [`crate::import`].
+    pub soft_on: bool,
+    /// Chains of the soft copper that could not be traced: they stay as they are.
+    pub soft_lost: Vec<u32>,
     /// Per pin: number of unrouted connections that start or end there.
     pending: Vec<u32>,
     /// Buffers of the search, kept to avoid growing them again for every connection.
@@ -325,7 +331,7 @@ impl<'a> Router<'a> {
         } else {
             HashMap::new()
         };
-        Router {
+        let mut r = Router {
             board,
             sub: sub.clone(),
             cfg,
@@ -347,7 +353,13 @@ impl<'a> Router<'a> {
                 .iter()
                 .any(|o| matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via)),
             pending: vec![0; board.pins.len()],
+            soft_on: false,
+            soft_lost: Vec::new(),
+        };
+        if !board.soft.chains.is_empty() {
+            r.import_soft();
         }
+        r
     }
 
     fn pin_groups(board: &Board, sub: &Substrate) -> Vec<u32> {
@@ -493,7 +505,7 @@ impl<'a> Router<'a> {
     }
 
     /// Distance from the edge end vertex to the centre line of a track of `it`.
-    fn end_need(&self, li: usize, e: u32, end: usize, it: &Item) -> f64 {
+    pub(crate) fn end_need(&self, li: usize, e: u32, end: usize, it: &Item) -> f64 {
         let m = self.m(li);
         let mut need: f64 = 0.0;
         for d in m.demands(e, end) {
@@ -828,7 +840,7 @@ impl<'a> Router<'a> {
         b
     }
 
-    fn gap(board: &Board, a: &Item, b: &Item) -> f64 {
+    pub(crate) fn gap(board: &Board, a: &Item, b: &Item) -> f64 {
         if a.net == b.net {
             return 0.0;
         }
@@ -1074,6 +1086,9 @@ impl<'a> Router<'a> {
     /// Fraction along edge e (from edges[e][0]) of a crossing: the slot of a new crossing, or
     /// the position of `seg` in the list.
     fn edge_frac(&self, li: usize, e: u32, seg: Option<u32>, slot: Option<usize>) -> f64 {
+        if self.soft_on {
+            return self.soft_frac(li, e, seg, slot);
+        }
         let list = &self.cross[li][e as usize];
         let n = list.len() as f64;
         match (slot, seg) {
@@ -1249,6 +1264,10 @@ impl<'a> Router<'a> {
                         }
                         let o = &self.vias[&w];
                         let d = p.dist(self.site_point(w));
+                        if o.drill == 0.0 {
+                            // a branch point of a track: the tracks check it
+                            continue;
+                        }
                         let holes = drill / 2.0 + o.drill / 2.0 + self.board.rules.hole_to_hole;
                         let need = if o.net == net {
                             holes
@@ -1409,8 +1428,7 @@ impl<'a> Router<'a> {
     /// Place a via vertex at `site` in every layer mesh: split the triangle that holds it and
     /// thread the existing chords through the new triangles. Returns per layer the old triangle
     /// and the new ones X_k (X_k holds old edge k).
-    fn split_at(&mut self, site: u32) -> Vec<(u32, [u32; 3])> {
-        let p = self.site_point(site);
+    pub(crate) fn split_at(&mut self, site: u32) -> Vec<(u32, [u32; 3])> {
         let shared = self.sub.shared.clone();
         let mut res = Vec::new();
         for li in 0..self.nl() {
@@ -1421,6 +1439,7 @@ impl<'a> Router<'a> {
                 res.push((NONE, [NONE; 3]));
                 continue;
             }
+            let p = self.m(li).site_p.get(&site).copied().unwrap_or(self.site_point(site));
             // geometry of the old chords, before the mesh changes
             let mut old: Vec<(Chord, Vec<(usize, f64)>, Point)> = Vec::new();
             for ch in std::mem::take(&mut self.chords[li][t as usize]) {
@@ -1513,8 +1532,10 @@ impl<'a> Router<'a> {
                 }
                 let mut new_cross: Vec<Crossing> = Vec::new();
                 let mut new_chords: Vec<(u32, Chord)> = Vec::new();
+                let mut new_pts: Vec<Point> = Vec::new();
                 for (i, u) in hits {
                     let e = new_edge(i);
+                    new_pts.push(p.lerp(m.verts[old_tv[i] as usize], u));
                     let k_out = m.local_edge(cur, e) as u8;
                     new_chords.push((
                         cur,
@@ -1544,6 +1565,10 @@ impl<'a> Router<'a> {
                 ));
                 // splice the crossings into the segment
                 let seg = self.segs[ch.seg as usize].as_mut().unwrap();
+                let chain_pts = seg
+                    .imported
+                    .as_ref()
+                    .map_or(0, |imp| self.board.soft.chains[imp.chain as usize].pts.len() as u32);
                 let exit = match ch.b {
                     CPos::Edge(k) => seg
                         .crossings
@@ -1551,6 +1576,9 @@ impl<'a> Router<'a> {
                         .position(|c| c.e == old_edges[k as usize] && c.from == t),
                     CPos::Vertex(_) => None,
                 };
+                if let Some(imp) = seg.imported.as_mut() {
+                    imp.thread(exit.unwrap_or(seg.crossings.len()), &new_pts, chain_pts - 2);
+                }
                 match exit {
                     Some(ix) => {
                         seg.crossings[ix].from = cur;
@@ -1592,6 +1620,21 @@ impl<'a> Router<'a> {
             .planes
             .iter()
             .any(|pl| pl.net == net && pl.outline.contains(p) && pl.outline.boundary_dist(p) >= r + 0.3)
+    }
+
+    /// A via or branch point of the soft copper: it stays for good.
+    pub(crate) fn place_soft_via(&mut self, site: u32, n: &crate::import::SoftNode) {
+        self.vias.insert(
+            site,
+            ViaInfo {
+                net: n.net,
+                r: n.r,
+                drill: n.drill,
+                clearance: n.clearance,
+                users: 1,
+            },
+        );
+        self.via_cells.entry(Self::via_cell(n.at)).or_default().push(site);
     }
 
     fn add_via(&mut self, site: u32, net: NetId) {
@@ -2342,6 +2385,7 @@ impl<'a> Router<'a> {
                 chord_tris: Vec::new(),
                 necks: necks.clone(),
                 neck_w,
+                imported: None,
             };
             seg_ids.push(self.insert_seg(seg, &run));
             start = end;

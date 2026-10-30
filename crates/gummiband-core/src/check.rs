@@ -46,7 +46,8 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
             });
         }
     }
-    for v in &geo.vias {
+    // (a branch point of soft tracks has no copper of its own)
+    for v in geo.vias.iter().filter(|v| v.drill > 0.0) {
         pieces.push(Piece::Via {
             c: v.at,
             r: v.diameter / 2.0,
