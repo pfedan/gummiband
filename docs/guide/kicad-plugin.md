@@ -60,7 +60,8 @@ at instead of rerouting the board:
 3. All copper on the board stays, locked or not. The router adds only what is missing on the
    selected nets, continuing a started track from where it ends: copper that touches no pad of its
    net counts as a pin, so the new track starts right there.
-4. The additions arrive as one undo step.
+4. The additions arrive as one undo step. There is no dialog: the action runs with the defaults
+   (14 runs, via cost 3.0) and without geometry generations, so it is quick.
 
 This is the plugin's form of `gummiband route --keep-all --nets A,B`. It is new and not yet
 tested live in KiCad, and new tracks keep too little clearance to existing tracks for now, so run
