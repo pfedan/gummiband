@@ -59,14 +59,17 @@ at instead of rerouting the board:
 2. Click the button. Without a selection the plugin asks for one.
 3. The router adds what is missing on the selected nets, continuing a started track from where
    it ends: copper that touches no pad of its net counts as a pin, so the new track starts right
-   there. Existing copper stays, with one exception: where a connection finds no way, unlocked
-   tracks of other nets within 8 mm of its pin may be rerouted to make room. Locked copper and
-   plane nets such as GND never move.
+   there. Unlocked tracks of other nets shift aside a little where the new connection needs the
+   room; what the new track does not touch stays exactly as it was. If there is still no way,
+   unlocked tracks of other nets within 8 mm of the pin are rerouted. Locked copper and plane
+   nets such as GND never move.
 4. The additions arrive as one undo step. There is no dialog: the action runs with the defaults
    (14 runs, via cost 3.0) and without geometry generations, so it is quick.
 
-This is the plugin's form of `gummiband route --keep-all --nets A,B --give 8`. The button is new and not
-yet tested live in KiCad, so run the DRC on the result.
+This is the plugin's form of `gummiband route --keep-all --nets A,B --shove --give 8`. The
+button is new and not yet tested live in KiCad. Refill the zones (B) before you run the DRC:
+after vias moved, stale plane fills report errors that are not there. Moved vias lose their
+teardrop settings.
 
 ## Without a dialog
 
