@@ -8,6 +8,7 @@ move. Route afterwards with "Route with Gummiband".
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import shutil
 import sys
@@ -19,7 +20,7 @@ from typing import List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import gummiband_action as action  # noqa: E402
-from gb_plugin import runner  # noqa: E402
+from gb_plugin import fields, runner  # noqa: E402
 
 TITLE = "Place with Gummiband"
 
@@ -41,43 +42,27 @@ def ask_options(defaults: runner.PlaceOptions) -> Optional[runner.PlaceOptions]:
     wx = action.wx
     if wx is None:
         return defaults
-    dlg = wx.Dialog(None, title=TITLE)
     count = len(defaults.only or [])
     buttons = {}
-    box = wx.BoxSizer(wx.VERTICAL)
-    for i, (key, label) in enumerate(SCOPES):
-        if key == "selected":
-            label = f"{label} ({count})"
-        buttons[key] = wx.RadioButton(dlg, label=label, style=wx.RB_GROUP if i == 0 else 0)
-        box.Add(buttons[key], 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
-    buttons["selected"].Enable(count > 0)
-    buttons[defaults.scope].SetValue(True)
-    fixed = wx.TextCtrl(dlg, value=", ".join(defaults.fixed or []), size=(320, -1))
-    starts = wx.SpinCtrl(dlg, min=1, max=64, initial=int(defaults.starts))
-    gap = wx.SpinCtrlDouble(dlg, min=0.0, max=5.0, initial=float(defaults.gap), inc=0.05)
-    gap.SetDigits(2)
-    halo = wx.SpinCtrlDouble(dlg, min=0.0, max=5.0, initial=float(defaults.halo), inc=0.05)
-    halo.SetDigits(2)
-    note = wx.StaticText(dlg, label=(
+
+    def scope_buttons(page, box):
+        for i, (key, label) in enumerate(SCOPES):
+            if key == "selected":
+                label = f"{label} ({count})"
+            buttons[key] = wx.RadioButton(page, label=label, style=wx.RB_GROUP if i == 0 else 0)
+            box.Add(buttons[key], 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        buttons["selected"].Enable(count > 0)
+        buttons[defaults.scope].SetValue(True)
+
+    dlg, form = action.options_dialog(
+        TITLE, fields.PLACE_TABS, defaults, runner.PlaceOptions(),
         "Locked footprints never move. The current position of a moving part does not matter.\n"
-        "Tracks and vias do not follow: use this before routing."))
-    grid = wx.FlexGridSizer(4, 2, 8, 12)
-    grid.AddGrowableCol(1)
-    for label, ctrl in (("Also keep (references):", fixed), ("Parallel runs:", starts),
-                        ("Courtyard spacing (mm):", gap), ("Room around ICs (mm):", halo)):
-        grid.Add(wx.StaticText(dlg, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
-        grid.Add(ctrl, 0, wx.EXPAND)
-    box.Add(grid, 0, wx.ALL | wx.EXPAND, 12)
-    box.Add(note, 0, wx.LEFT | wx.RIGHT, 12)
-    box.Add(dlg.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL), 0, wx.ALL | wx.EXPAND, 12)
-    dlg.SetSizerAndFit(box)
-    dlg.CentreOnScreen()
+        "Tracks and vias do not follow: use this before routing.", scope_buttons)
     try:
         if dlg.ShowModal() != wx.ID_OK:
             return None
         scope = next(k for k, b in buttons.items() if b.GetValue())
-        return runner.PlaceOptions(scope, defaults.only, runner.parse_references(fixed.GetValue()),
-                                   starts.GetValue(), gap.GetValue(), halo.GetValue())
+        return dataclasses.replace(defaults, scope=scope, **form.values())
     finally:
         dlg.Destroy()
 
@@ -121,9 +106,11 @@ def main() -> int:
     except Exception as e:
         ui.error(f"Cannot reach the open board through the KiCad API: {e}")
         return 1
-    opts = ask_options(runner.PlaceOptions(default_scope(selected), selected))
+    saved = runner.load_options(runner.PlaceOptions, "place", runner.PLACE_SAVED)
+    opts = ask_options(runner.PlaceOptions(default_scope(selected), selected, **saved))
     if opts is None:
         return 0
+    runner.save_options("place", opts, runner.PLACE_SAVED)
     work = Path(tempfile.mkdtemp(prefix="gummiband-"))
     try:
         src = action.save_copy(board, work)

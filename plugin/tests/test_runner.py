@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gb_plugin import runner
+from gb_plugin import fields, runner
 
 STDOUT = """substrate: 1 vertices, 2 triangles, 3 via sites
   run seed  0 fanout_first  true: 9/10 routed, 4 vias, 120 mm
@@ -204,6 +204,102 @@ class TailTest(unittest.TestCase):
         self.assertEqual(runner.tail(""), "(empty)")
         self.assertEqual(runner.tail("a\nb\n", 5), "a\nb")
         self.assertEqual(runner.tail("1\n2\n3\n4", 2), "...\n3\n4")
+
+
+class AdvancedCommandTest(unittest.TestCase):
+    def test_defaults_add_nothing(self):
+        cmd = runner.build_command("gb", Path("b"), Path("o"),
+                                   runner.RouteOptions(geometry_generations=0, keep_locked=False))
+        self.assertEqual(cmd, ["gb", "route", "b", "-o", "o", "--progress",
+                               "--runs", "14", "--via-cost", "3.0"])
+
+    def test_changed_values_reach_the_router(self):
+        opts = runner.RouteOptions(generations=5, via_pitch=0.25, negotiate=20, threads=4,
+                                   plane_layers=["In1.Cu", "In2.Cu"], net_widths="/p/w.json",
+                                   net_priorities="/p/p.json")
+        cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
+        for flag, value in (("--generations", "5"), ("--via-pitch", "0.25"), ("--negotiate", "20"),
+                            ("--threads", "4"), ("--plane-layers", "In1.Cu,In2.Cu"),
+                            ("--net-widths", "/p/w.json"), ("--net-priorities", "/p/p.json")):
+            self.assertEqual(cmd[cmd.index(flag) + 1], value)
+
+    def test_pair_options_need_pairs(self):
+        opts = runner.RouteOptions(pair_skew=0.2, pair_zdiff=90.0, pair_pull=1.0)
+        cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
+        self.assertNotIn("--pairs", cmd)
+        self.assertNotIn("--pair-skew", cmd)
+        self.assertNotIn("--pair-zdiff", cmd)
+        self.assertIn("--pair-pull", cmd)
+        opts.pairs = True
+        cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
+        self.assertIn("--pairs", cmd)
+        self.assertEqual(cmd[cmd.index("--pair-zdiff") + 1], "90.0")
+
+    def test_place(self):
+        opts = runner.PlaceOptions(seed=7, iters=1_000_000, margin=1.0, free=["TP1", "SW1"],
+                                   threads=2, plane_layers=["In1.Cu"])
+        cmd = runner.build_place_command("gb", Path("a"), Path("b"), Path("r"), opts)
+        for flag, value in (("--seed", "7"), ("--iters", "1000000"), ("--margin", "1.0"),
+                            ("--free", "TP1,SW1"), ("--threads", "2"),
+                            ("--plane-layers", "In1.Cu")):
+            self.assertEqual(cmd[cmd.index(flag) + 1], value)
+
+
+class SavedOptionsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "settings.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def load(self):
+        return runner.load_options(runner.RouteOptions, "route", runner.ROUTE_SAVED, self.path)
+
+    def test_round_trip_keeps_the_binary_path(self):
+        self.path.write_text('{"gummiband_bin": "/x/gb"}')
+        opts = runner.RouteOptions(runs=8, via_cost=2.5, pairs=True, plane_layers=["In1.Cu"])
+        self.assertTrue(runner.save_options("route", opts, runner.ROUTE_SAVED, self.path))
+        stored = runner.load_settings(self.path)
+        self.assertEqual(stored["gummiband_bin"], "/x/gb")
+        self.assertNotIn("plane_layers", stored["route"])
+        loaded = runner.RouteOptions(**self.load())
+        self.assertEqual((loaded.runs, loaded.via_cost, loaded.pairs), (8, 2.5, True))
+        self.assertIsNone(loaded.plane_layers)
+
+    def test_no_file(self):
+        self.assertEqual(self.load(), {})
+
+    def test_bad_values_are_ignored(self):
+        self.path.write_text(json.dumps({"route": {
+            "runs": "many", "pairs": 1, "via_cost": 2, "keep_locked": False, "gone": 1}}))
+        self.assertEqual(self.load(), {"via_cost": 2.0, "keep_locked": False})
+
+    def test_broken_file_stays(self):
+        self.path.write_text("{not json")
+        self.assertEqual(self.load(), {})
+        self.assertFalse(runner.save_options("route", runner.RouteOptions(),
+                                             runner.ROUTE_SAVED, self.path))
+        self.assertEqual(self.path.read_text(), "{not json")
+
+
+class FieldTableTest(unittest.TestCase):
+    def test_fields_match_the_options(self):
+        for cls, tabs, saved in ((runner.RouteOptions, fields.ROUTE_TABS, runner.ROUTE_SAVED),
+                                 (runner.PlaceOptions, fields.PLACE_TABS, runner.PLACE_SAVED)):
+            table = fields.all_fields(tabs)
+            names = [f.name for f in table]
+            self.assertEqual(len(names), len(set(names)))
+            self.assertLessEqual(set(saved), set(names))
+            opts = cls()
+            for f in table:
+                self.assertTrue(f.tip, f.name)
+                if f.kind in ("int", "float"):
+                    self.assertTrue(f.low <= getattr(opts, f.name) <= f.high, f.name)
+                if f.requires is not None:
+                    self.assertIn(f.requires, names)
+                if f.kind in ("refs", "file"):
+                    self.assertNotIn(f.name, saved)
 
 
 class PlaceCommandTest(unittest.TestCase):
