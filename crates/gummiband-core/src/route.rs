@@ -12,7 +12,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
 
 use crate::board::{Board, NetId, ObstacleKind};
-use crate::geom::{Point, Rect, orient, point_seg_dist, pt, segs_intersect};
+use crate::geom::{Point, Rect, Shape, orient, point_seg_dist, pt, segs_intersect};
 use crate::index::FastMap;
 use crate::topo::{Mesh, NONE, OUTSIDE, PAD_SITE, STEINER, Substrate};
 
@@ -2019,6 +2019,13 @@ impl<'a> Router<'a> {
                     }
                     // through hole copper of the net: switch layers for free
                     if !free && status != OUTSIDE && self.board.obstacles[status as usize].hole.is_some() {
+                        // a kept via: the other layer starts at its centre
+                        let o = &self.board.obstacles[status as usize];
+                        let at = if let (ObstacleKind::Via, Shape::Circle { c, .. }) = (o.kind, &o.shape) {
+                            *c
+                        } else {
+                            node.pos
+                        };
                         for l2 in 0..nl {
                             if l2 == lu {
                                 continue;
@@ -2034,7 +2041,7 @@ impl<'a> Router<'a> {
                                         entry: 3,
                                         slot: 0,
                                     },
-                                    node.pos,
+                                    at,
                                     node.g,
                                     idx,
                                 );
@@ -2315,7 +2322,7 @@ impl<'a> Router<'a> {
                 // or at a kept via of the net
                 _ => match self.tri_pin(li as usize, last_t) {
                     Some(p) => End::Pin(p),
-                    None if self.has_kept => End::Point(chain[j - 1].pos),
+                    None if self.has_kept => End::Point(chain.get(j).map_or(chain[j - 1].pos, |n| n.pos)),
                     None => End::Pin(conn.from),
                 },
             };
