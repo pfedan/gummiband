@@ -364,6 +364,9 @@ fn main() -> Result<()> {
             } else {
                 KeepCopper::None
             };
+            if std::env::var_os("GB_GPU").is_some() && !cfg!(feature = "gpu") {
+                println!("warning: GB_GPU has no effect, this binary is built without the gpu feature");
+            }
             let t0 = std::time::Instant::now();
             let sub_cfg = SubstrateConfig {
                 via_pitch,

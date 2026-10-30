@@ -400,6 +400,9 @@ def report(plan: bf.ImportPlan, applied, res: runner.RouteResult,
         lines += [f"  {u}" for u in unrouted[:10]]
         if len(unrouted) > 10:
             lines.append("  ...")
+    if res.gpu_missing():
+        lines.append("GPU: this gummiband binary has no GPU support, the run stayed on the CPU. "
+                     "Build it with --features gpu.")
     gif = res.animation()
     if gif:
         lines.append(f"Animation of the generations: {gif}")
@@ -461,7 +464,7 @@ def main() -> int:
         cmd = runner.build_command(binary, src, out, dataclasses.replace(
             opts, report=str(report_file) if opts.placements else None))
         res = ui.run_with_metrics(lambda keep_going, accept: runner.run_route(
-            cmd, out, work, keep_going, accept), runner.open_ended(opts))
+            cmd, out, work, keep_going, accept, gpu=opts.gpu), runner.open_ended(opts))
         before, after = src.read_text(encoding="utf-8"), out.read_text(encoding="utf-8")
         plan = bf.plan_from_texts(before, after, opts.keep_locked)
         moves = bf.plan_moves(before, after) if opts.move_parts or opts.placements else None

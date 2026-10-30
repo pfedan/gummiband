@@ -64,6 +64,7 @@ class RouteOptions:
     # keep improving after the normal search until the user accepts the result
     until_stop: bool = True
     prefer_width: float = 0.0  # tracks of the default class grow up to this where there is room
+    gpu: bool = False  # sets GB_GPU for the router, needs a binary built with the gpu feature
 
 
 @dataclass
@@ -90,7 +91,7 @@ class PlaceOptions:
 # layer names, net files) starts empty every time.
 ROUTE_SAVED = ("keep_locked", "runs", "via_cost", "geometry_generations", "animate", "move_parts", "placements",
                "teardrops", "generations", "via_pitch", "layer_dirs", "via_pass", "negotiate", "threads", "pairs", "pair_pull",
-               "pair_skew", "pair_zdiff", "until_stop", "prefer_width")
+               "pair_skew", "pair_zdiff", "until_stop", "prefer_width", "gpu")
 PLACE_SAVED = ("starts", "gap", "halo", "seed", "iters", "margin", "threads")
 
 # Options of the command line that are left out at their default value.
@@ -304,6 +305,9 @@ class RouteResult:
     def unrouted(self) -> List[str]:
         return re.findall(r"^\s*unrouted: (.*)$", self.stdout, re.M)
 
+    def gpu_missing(self) -> bool:
+        return re.search(r"^warning: GB_GPU", self.stdout, re.M) is not None
+
     def animation(self) -> Optional[str]:
         m = re.search(r"^frames: \d+ images, animation (.*)$", self.stdout, re.M)
         return m.group(1).strip() if m else None
@@ -343,15 +347,15 @@ def converged(p: Optional[dict]) -> bool:
 
 def run_route(cmd: List[str], output: Path, cwd: Optional[Path] = None,
               keep_going: Optional[Callable[[Optional[dict]], bool]] = None,
-              accept: Optional[Callable[[], bool]] = None) -> RouteResult:
+              accept: Optional[Callable[[], bool]] = None, gpu: bool = False) -> RouteResult:
     """Run the router and wait for it. ``keep_going(progress)`` is polled about ten times a
     second while the router runs, with the latest progress report (see ``parse_progress``);
     returning False kills the router. With ``--until-stop`` the router runs until ``accept()``
-    returns True, then it finishes its best result."""
+    returns True, then it finishes its best result. ``gpu`` sets ``GB_GPU`` for the router."""
     try:
         proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, errors="replace",
-                                env=tool_env())
+                                env=dict(tool_env(), GB_GPU="1") if gpu else tool_env())
     except OSError as e:
         raise RunnerError(f"cannot start {cmd[0]}: {e}") from e
     out: dict = {"stdout": [], "progress": None}

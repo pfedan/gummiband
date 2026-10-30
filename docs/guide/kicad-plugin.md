@@ -52,6 +52,7 @@ because they fit only one board. *Defaults* brings back the values below.
 | Via removal factor | 4.0 | `--via-pass` | Factor on the via cost in the pass that routes connections with vias again and keeps what has fewer vias. |
 | Negotiation rounds | 0 | `--negotiate` | Experimental second search in which connections compete for room. 20 rounds work well and take about twice the time. |
 | Worker threads | 0 (all) | `--threads` | How many cores the run may use. The result does not depend on it. |
+| Relax on the GPU | off | `GB_GPU=1` | Experimental, macOS only: runs most of the track relaxation as a compute shader. Needs a binary built with `--features gpu`; with a normal binary the run stays on the CPU and the message box says so. Results differ between GPUs, so use the CPU for a final run. |
 | Plane layers | | `--plane-layers` | Copper layers to treat as planes, on top of those of KiCad type *power*. |
 | Net widths file | | `--net-widths` | JSON file with a track width per net. |
 | Net priorities file | | `--net-priorities` | JSON file with a routing priority per net; lower routes first. |

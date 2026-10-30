@@ -103,6 +103,11 @@ ROUTE_TABS: Tuple = (
                       "rising price. 20 rounds work well and take about twice the time. 0 = off.",
                       0, 200),
             THREADS,
+            Field("gpu", "Relax on the GPU (experimental, macOS)",
+                  "Runs most of the track relaxation as a compute shader. Needs a gummiband binary "
+                  "built with the gpu feature. Saves time where the relaxation dominates, not on "
+                  "boards where the search does. Results differ between GPUs, so use the CPU for a "
+                  "final run.", "check"),
         )),
         ("Board", (
             PLANE_LAYERS,
