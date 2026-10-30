@@ -207,8 +207,10 @@ struct Node {
     via_up: u32,
 }
 
+/// Two bits of the filter for a triangle.
 fn tri_bit(t: u32, li: u8) -> u64 {
-    1 << (t.wrapping_add((li as u32) << 28).wrapping_mul(0x9e37_79b1) >> 26)
+    let h = t.wrapping_add((li as u32) << 28).wrapping_mul(0x9e37_79b1);
+    1 << (h >> 26) | 1 << ((h >> 20) & 63)
 }
 
 const BLOCK: u8 = 24;
@@ -1033,6 +1035,42 @@ impl<'a> Router<'a> {
         true
     }
 
+    /// The chords of other nets in t by their boundary coordinates, for `chord_fits`.
+    fn chord_coords(&self, t: u32, li: usize, net: NetId, out: &mut Vec<(f64, f64)>) {
+        out.clear();
+        for ch in &self.chords[li][t as usize] {
+            if self.segs[ch.seg as usize].as_ref().unwrap().net != net {
+                out.push((
+                    self.coord(t, li, ch.a, Some(ch.seg), None),
+                    self.coord(t, li, ch.b, Some(ch.seg), None),
+                ));
+            }
+        }
+    }
+
+    /// `chord_ok` for a chord between boundary coordinates x and y.
+    fn chord_fits(coords: &[(f64, f64)], x: f64, y: f64) -> bool {
+        let (lo, hi) = if x < y { (x, y) } else { (y, x) };
+        coords.iter().all(|&(c, d)| {
+            let inside = |z: f64| z > lo + 1e-12 && z < hi - 1e-12;
+            let on = |z: f64| (z - lo).abs() < 1e-12 || (z - hi).abs() < 1e-12;
+            on(c) || on(d) || inside(c) == inside(d)
+        })
+    }
+
+    /// The chords of other nets in t as point pairs, for `half_chord_fits`.
+    fn chord_points(&self, t: u32, li: usize, net: NetId, out: &mut Vec<(Point, Point)>) {
+        out.clear();
+        for ch in &self.chords[li][t as usize] {
+            if self.segs[ch.seg as usize].as_ref().unwrap().net != net {
+                out.push((
+                    self.pos_point(t, li, ch.a, Some(ch.seg), None),
+                    self.pos_point(t, li, ch.b, Some(ch.seg), None),
+                ));
+            }
+        }
+    }
+
     /// Can a half chord from interior point `p` to boundary position `b` be added to t?
     fn half_chord_ok(&self, t: u32, li: usize, net: NetId, p: Point, b: CPos, sb: Option<usize>) -> bool {
         let list = &self.chords[li][t as usize];
@@ -1624,6 +1662,7 @@ impl<'a> Router<'a> {
 
         let mut views: FastMap<(u8, u32), EdgeView> = FastMap::default();
         let mut scratch: Vec<f64> = Vec::new();
+        let (mut coords, mut points): (Vec<(f64, f64)>, Vec<(Point, Point)>) = (Vec::new(), Vec::new());
         // crossings out of triangle t (layer lu) through local edge k
         #[allow(clippy::too_many_arguments)]
         let mut cross_out = |best: &mut Best,
@@ -1670,7 +1709,7 @@ impl<'a> Router<'a> {
             let mut block = idx;
             while block != u32::MAX {
                 let top = &nodes[block as usize];
-                if top.seen & bit != 0 {
+                if top.seen & bit == bit {
                     let mut p = block;
                     while p != top.block_up {
                         let NK::Tri { t: tp, li: lp, .. } = nodes[p as usize].kind else {
@@ -1713,17 +1752,26 @@ impl<'a> Router<'a> {
             let n = self.cross[lu][e as usize].len();
             let escape = self.escape_penalty(lu, e, net);
             let view = views.entry((lu as u8, e)).or_insert_with(|| self.edge_view(lu, e, &item));
+            // the chords in t stay the same from slot to slot
+            if free && chord_from.is_some() {
+                self.chord_coords(t, lu, net, &mut coords);
+            }
+            if free && interior.is_some() {
+                self.chord_points(t, lu, net, &mut points);
+            }
+            let from_coord = chord_from.map(|(cp, cs)| self.coord(t, lu, cp, None, cs));
             for j in 0..=n {
                 if free {
-                    if let Some((cp, cs)) = chord_from
-                        && !self.chord_ok(t, lu, net, cp, cs, CPos::Edge(k), Some(j))
+                    if let Some(x) = from_coord
+                        && !Self::chord_fits(&coords, x, self.coord(t, lu, CPos::Edge(k), None, Some(j)))
                     {
                         continue;
                     }
-                    if let Some(p) = interior
-                        && !self.half_chord_ok(t, lu, net, p, CPos::Edge(k), Some(j))
-                    {
-                        continue;
+                    if let Some(p) = interior {
+                        let q = self.pos_point(t, lu, CPos::Edge(k), None, Some(j));
+                        if points.iter().any(|&(c, d)| segs_intersect(p, q, c, d)) {
+                            continue;
+                        }
                     }
                 }
                 let Some((lo, hi)) = Self::slot_interval(view, item.sides, j, &mut scratch) else {
