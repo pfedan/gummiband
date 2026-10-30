@@ -132,10 +132,11 @@ def move_footprints(board, poses: Sequence) -> tuple:
     return changed, missing
 
 
-def apply_plan(board, plan: bf.ImportPlan, poses: Sequence = ()) -> ApplyResult:
+def apply_plan(board, plan: bf.ImportPlan, poses: Sequence = (),
+               zones: Sequence[dict] = ()) -> ApplyResult:
     """Remove the replaced tracks/vias of the open board and create the routed ones, all in one
-    commit (one undo step), together with the footprints the router moved to ``poses``.
-    ``board`` is a ``kipy.board.Board``."""
+    commit (one undo step), together with the footprints the router moved to ``poses`` and the
+    keepouts that followed them (``zones``). ``board`` is a ``kipy.board.Board``."""
     resolve = NetResolver({n.name: n for n in board.get_nets()})
     new_items = build_items(plan, resolve)
 
@@ -147,10 +148,11 @@ def apply_plan(board, plan: bf.ImportPlan, poses: Sequence = ()) -> ApplyResult:
         remove = [it for it in old if bf.should_remove(bool(it.locked), plan.keep_locked)]
 
     moved, missing = move_footprints(board, poses) if poses else ([], [])
+    followers = reshape_zones(board, zones)
     commit = board.begin_commit()
     created: List[object] = []
     try:
-        for chunk in _chunks(moved, CHUNK):
+        for chunk in _chunks(moved + followers, CHUNK):
             board.update_items(list(chunk))
         for chunk in _chunks(remove, CHUNK):
             board.remove_items(list(chunk))
@@ -192,15 +194,22 @@ def set_outline(zone, points: Sequence[bf.Point]) -> None:
     zone.outline.polygons.append(poly)
 
 
+def reshape_zones(board, zones: Sequence[dict]) -> List[object]:
+    """Set the outlines of ``zones`` on the zones of the board, which still has to take them with
+    ``update_items``. Returns those zones."""
+    outlines = {z["id"]: z["points"] for z in zones}
+    followers = [z for z in board.get_zones() if z.id.value in outlines] if outlines else []
+    for z in followers:
+        set_outline(z, outlines[z.id.value])
+    return followers
+
+
 def apply_placement(board, poses: Sequence, zones: Sequence[dict]) -> PlaceResult:
     """Move footprints to the poses of ``gummiband place`` and the keepouts of moved parts to
     their new outlines, all in one commit (one undo step)."""
     changed, missing = move_footprints(board, poses)
     moved = len(changed)
-    outlines = {z["id"]: z["points"] for z in zones}
-    followers = [z for z in board.get_zones() if z.id.value in outlines] if outlines else []
-    for z in followers:
-        set_outline(z, outlines[z.id.value])
+    followers = reshape_zones(board, zones)
     commit = board.begin_commit()
     try:
         for chunk in _chunks(changed + followers, CHUNK):

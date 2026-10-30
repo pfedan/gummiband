@@ -110,6 +110,11 @@ class PartMovesTest(unittest.TestCase):
         self.assertEqual(bf.plan_moves(self.BOARD, moved).poses,
                          [("C1", 51.0, 60.0), ("R1", 11.0, 20.0)])
 
+    def test_a_turned_footprint_brings_its_rotation(self):
+        moved = self.BOARD.replace("(at 30 40)", "(at 30 40 270)").replace("(at 10 20 90)", "(at 12 20 -270)")
+        self.assertEqual(bf.plan_moves(self.BOARD, moved).poses,
+                         [("R1", 12.0, 20.0), ("U1", 30.0, 40.0, 270.0)])
+
     def test_copper_that_moved_along_is_counted(self):
         moved = self.BOARD.replace("(start 0 0) (end 1 0)", "(start 1 0) (end 2 0)")
         self.assertEqual(bf.plan_moves(self.BOARD, moved).stale_copper, 1)

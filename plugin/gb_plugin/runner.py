@@ -41,6 +41,10 @@ class RouteOptions:
     # let the geometry generations shift parts; the plugin takes the moves over
     move_parts: bool = False
     fixed: Optional[List[str]] = None  # references that never move
+    # try this many placements from the netlist, each routed; the best one is kept
+    placements: int = 0
+    # the router's JSON report; the plugin reads the placement from it
+    report: Optional[str] = None
     # open KiCad's Edit Teardrops after the run: the API cannot set them on vias and pads
     teardrops: bool = False
     # the defaults of the advanced options are those of the command line
@@ -81,7 +85,7 @@ class PlaceOptions:
 
 # Options the dialogs remember in settings.json. What only makes sense on one board (references,
 # layer names, net files) starts empty every time.
-ROUTE_SAVED = ("keep_locked", "runs", "via_cost", "geometry_generations", "animate", "move_parts",
+ROUTE_SAVED = ("keep_locked", "runs", "via_cost", "geometry_generations", "animate", "move_parts", "placements",
                "teardrops", "generations", "via_pitch", "layer_dirs", "via_pass", "negotiate", "threads", "pairs", "pair_pull",
                "pair_skew", "pair_zdiff")
 PLACE_SAVED = ("starts", "gap", "halo", "seed", "iters", "margin", "threads")
@@ -89,7 +93,8 @@ PLACE_SAVED = ("starts", "gap", "halo", "seed", "iters", "margin", "threads")
 # Options of the command line that are left out at their default value.
 ROUTE_FLAGS = (("generations", "--generations"), ("via_pitch", "--via-pitch"),
                ("layer_dirs", "--layer-dirs"), ("via_pass", "--via-pass"),
-               ("negotiate", "--negotiate"), ("pair_pull", "--pair-pull"))
+               ("negotiate", "--negotiate"), ("pair_pull", "--pair-pull"),
+               ("placements", "--placements"))
 PAIR_FLAGS = (("pair_skew", "--pair-skew"), ("pair_zdiff", "--pair-zdiff"))
 PLACE_FLAGS = (("seed", "--seed"), ("iters", "--iters"), ("margin", "--margin"))
 
@@ -221,8 +226,8 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
     cmd += _changed(opts, ROUTE_FLAGS)
     if opts.move_parts:
         cmd.append("--move-parts")
-        if opts.fixed:
-            cmd += ["--fixed", ",".join(opts.fixed)]
+    if (opts.move_parts or opts.placements) and opts.fixed:
+        cmd += ["--fixed", ",".join(opts.fixed)]
     if opts.pairs:
         cmd.append("--pairs")
         cmd += _changed(opts, PAIR_FLAGS)
@@ -232,6 +237,8 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
         cmd += ["--net-priorities", str(opts.net_priorities)]
     if opts.frames_dir:
         cmd += ["--frames", str(opts.frames_dir)]
+    if opts.report:
+        cmd += ["--report", str(opts.report)]
     return cmd + _global_flags(opts)
 
 

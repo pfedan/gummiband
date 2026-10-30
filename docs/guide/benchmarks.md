@@ -126,6 +126,12 @@ Fewer vias and shorter tracks than the hand placement, but the seeds differ, so 
 placer knows no datasheet layouts: switch nodes come out 3.4 to 7.4 mm long against 3.0 mm in the
 original. Place a power stage by hand or lock it when that matters.
 
+Twelve seeds on a later version, 4 threads: the quality run takes 39 s on average, 9 of 12 are clean
+in the KiCad DRC, one more has only a sliver, the best has 208 vias. A short run (`--runs 4
+--generations 1`, about 5 s) ranks the placements only weakly like the quality run (rank correlation
+0.52 for the overall result, 0.53 for vias, 0.03 for length), and the crossing count of `place` not
+at all (-0.01). So `--placements` judges with the settings of the route itself.
+
 ## Placement variants
 
 `bench/place/make-variants.sh` and `route-variants.sh` build and route the Lichtschnitzel

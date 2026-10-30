@@ -57,6 +57,8 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   connectors and the ESP32 module fixed), see `crates/gummiband-place`.
 - Placement from the netlist as a step of its own (`gummiband place`, plugin button, MCP
   `place_parts`): all unlocked, selected, or outside the board, with fixed parts respected.
+- Placements as a search around routing (`route --placements N`), judged by full routes. Open: a
+  local placement mutator that re-places parts around problem spots inside the generations.
 - Synthetic benchmark suite of increasing difficulty (`bench/gen_boards.py`).
 
 ## M3b: Interface for AI agents
