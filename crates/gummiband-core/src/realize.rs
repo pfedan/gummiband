@@ -32,6 +32,9 @@ pub struct Track {
     pub origin: Option<u32>,
     /// Soft copper still exactly as the file has it.
     pub resting: bool,
+    /// Widths fitted to the surroundings after the geometry step: (zone, width). A piece takes
+    /// the smallest of those it touches, instead of the neck width.
+    pub fitted: Vec<(crate::geom::Rect, f64)>,
 }
 
 impl Track {
@@ -47,6 +50,15 @@ impl Track {
     /// as narrow only if the whole edge lies in a zone, so every piece that crosses such an edge
     /// touches the zone and is narrow as well.
     pub fn piece_width(&self, a: Point, b: Point) -> f64 {
+        let fitted = self
+            .fitted
+            .iter()
+            .filter(|(r, _)| r.touches_seg(a, b))
+            .map(|(_, w)| *w)
+            .fold(f64::INFINITY, f64::min);
+        if fitted.is_finite() {
+            return fitted;
+        }
         if self.necks.iter().any(|r| r.touches_seg(a, b)) {
             self.neck_w
         } else {
@@ -348,6 +360,7 @@ impl Router<'_> {
                     neck_w: s.neck_w,
                     origin: None,
                     resting: false,
+                    fitted: Vec::new(),
                 };
                 let kept: Vec<bool> = if self.has_kept {
                     pts.iter().map(|&p| on_kept(p)).collect()

@@ -33,6 +33,7 @@ Standing decisions of the project owner, kept here so that they survive any sess
 - A block is a group of parts with its locked copper that moves only as a whole.
 - Layer preferred directions are a portfolio dimension, not only an option.
 - Teardrops come from KiCad's built-in feature.
+- Follow-me stays "route the selected nets" for now; no live completion while drawing a track.
 
 ## License
 
