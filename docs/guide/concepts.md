@@ -116,9 +116,9 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
   the MCP tools `part_info` and `add_locked_copper` exist but have not been tried on a real
   board yet; expect rough edges.
 - **Differential pairs and length matching.** Pairs are routed as two independent nets.
-- **Teardrops.** Gummiband draws none itself. `--teardrops` (experimental, command line only)
-  switches on KiCad's own teardrop feature for the vias and pads of the output, and KiCad
-  builds the shapes when it fills the zones.
+- **Teardrops.** Gummiband draws none itself. `--teardrops` (command line only) switches on
+  KiCad's own teardrop feature for the vias and pads of the output; fill the zones once (B) after
+  opening the file and KiCad builds the shapes.
 - **Per net options from a file.** Priorities come from net classes; a `gummiband.toml` next to
   the board is planned. The MCP server has per net priority and skip today.
 - **More rule conditions.** Only the clearance and minimum width rules above; no rules by
