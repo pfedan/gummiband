@@ -10,7 +10,7 @@ You need `kicad-cli` on `PATH` and Python 3.
 
 ## Synthetic suite
 
-Nine generated boards (`bench/boards/`), from a few 0603 connections to a 10x10 BGA whose inner
+Twelve generated boards (`bench/boards/`), from a few 0603 connections to a 10x10 BGA whose inner
 ring needs vias on two signal layers. They are committed with their `.kicad_pro`, so they work
 out of the box:
 
@@ -37,6 +37,9 @@ per board in `bench/boards/out/<board>.route.log`.
 | `four_signal_layers` | 4 signal | dense random netlist around two QFN-32 and two SOIC-14 |
 | `bga_escape` | 4 (2 planes) | 8x8 BGA at 0.8 mm, 48 signals to four edge connectors, 0.1/0.1 mm rules |
 | `bga_dense` | 4 (2 planes) | 10x10 BGA at 0.8 mm, 84 signals, inner ring needs vias on 2 signal layers |
+| `fine_pitch` | 2 | QFN-56 at 0.4 mm with 0.2/0.19 mm rules, nets in pin order: a clean straight fan-out |
+| `fine_pitch_mixed` | 2 | the same part with shuffled nets: vias and crossings right at the pins |
+| `diff_pairs` | 2 | 8 differential pairs with a ground between them, 0.5 mm connectors at an angle, parts in the way |
 
 `bench/gen_boards.py` regenerates the boards deterministically; commit the boards together with
 a change to the generator.

@@ -82,9 +82,9 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `load_board` | `path`, `keep_locked?` | board id, layers (plane flag), outline box and size, pins, nets, routable nets, connections, planes, net classes (priority, width, clearance, via), custom rule count, custom clearance net pairs, kept net options |
 | `list_nets` | `board`, `filter?`, `include_single?` | nets with class, pin count, plane flag, effective priority, skip flag |
 | `part_info` | `board`, `reference` | pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
-| `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items |
+| `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
-| `route` | `board`, `runs?`, `generations?`, `geometry_generations?`, `keep_locked?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below) |
+| `route` | `board`, `runs?`, `generations?`, `geometry_generations?`, `keep_locked?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below) |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?` | PNG (image content) and its path, region, pixels per mm |
 
@@ -123,10 +123,17 @@ footprints whose courtyard lies within 3 mm.
 
 Preliminary (new, lightly tested). Adds pre-routed copper as **locked** tracks and vias: the
 router keeps it, routes around it, and track ends join their net like pins. Tracks are polylines
-of `[x, y]` points in mm on one layer; `width`, `diameter` and `drill` default to the net class.
-The input file stays untouched: the copper goes into a working copy `<input>.prerouted.kicad_pcb`
-next to it, which is loaded with `keep_locked` and gets its own board id. Use that id for
-`route`, `drc` and `render` from then on. Calling it again on the working copy adds more copper.
+of `[x, y]` points in mm on one layer; `width`, `diameter` and `drill` default to the net class,
+and a `width` of 0 or less is an error. The input file stays untouched: the copper goes into a
+working copy `<input>.prerouted.kicad_pcb` next to it, which is loaded with `keep_locked` and
+gets its own board id. Use that id for `route`, `drc` and `render` from then on. Every call adds
+to the working copy, whether you pass the input's id or the copy's, so earlier additions are never
+lost.
+
+The result has `items_added` and `warnings`: problems found at the given points of the new
+copper, such as a point off the board, a point touching copper of another net, or a track on a
+plane layer. Only the points are checked, not the track between them, so a `render` of the
+region and a `drc` after routing remain the real check.
 
 ```json
 {"name": "add_locked_copper", "arguments": {"board": "b1",
@@ -156,7 +163,9 @@ all unlocked copper). `reset: true` drops the net's options before applying the 
 Runs `gummiband_core::route_board` on the loaded board with the net options applied and writes
 the routed board (existing unlocked tracks and vias replaced; with `keep_locked` the locked ones
 stay). Defaults match the CLI: `runs` 14 (a constant, so results do not depend on the machine), `generations` 3,
-`geometry_generations` 0, `via_pitch` 0.5 mm, `via_cost` 3.0. `output` defaults to
+`geometry_generations` 0, `via_pitch` 0.5 mm, `via_cost` 3.0, `layer_dirs` 0.5 (preferred
+directions per layer for every third run, 0 = off), `pair_pull` 0 (experimental pull between the
+nets of a differential pair, see the CLI guide). `output` defaults to
 `<input>.routed.kicad_pcb` next to the input; the `.kicad_pro` and `.kicad_dru` are copied next
 to the output if missing, so `drc` and `load_board` work on it. `nets` routes only the listed
 nets for this call.
@@ -249,5 +258,8 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
   copper, so skipped nets end up without tracks.
 - Pre-routing through `add_locked_copper` has tracks and vias only; locked zones (a copper
   island from a datasheet) are not there yet.
+- Not reachable through MCP yet: creating a board, placement (`--move-parts`, `gummiband-place`),
+  zones, the search seed (`GB_EVO_SEED`), `--keep-all` (adding to all existing copper) and per net
+  numbers such as track widths (`--net-widths`).
 - Progress notifications during long routes, and cancellation (the core has no cancel hook).
 - `route` returns Gummiband's own clearance check; KiCad's verdict needs a `drc` call.
