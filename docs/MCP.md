@@ -165,7 +165,8 @@ the routed board (existing unlocked tracks and vias replaced; with `keep_locked`
 stay). Defaults match the CLI: `runs` 14 (a constant, so results do not depend on the machine), `generations` 3,
 `geometry_generations` 0, `via_pitch` 0.5 mm, `via_cost` 3.0, `layer_dirs` 0.5 (preferred
 directions per layer for every third run, 0 = off), `pair_pull` 0 (experimental pull between the
-nets of a differential pair, see the CLI guide). `output` defaults to
+nets of a differential pair), `pairs` false (experimental: a pair as one wide track that is split
+in two, see the CLI guide), `pair_skew` 0.1 mm, `pair_zdiff` none. `output` defaults to
 `<input>.routed.kicad_pcb` next to the input; the `.kicad_pro` and `.kicad_dru` are copied next
 to the output if missing, so `drc` and `load_board` work on it. `nets` routes only the listed
 nets for this call.

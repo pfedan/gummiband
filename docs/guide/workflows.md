@@ -80,6 +80,28 @@ then the other signals, then the key matrix, and the supply and GND last gave th
 with more connections routed and fewer violations at the cost of a few more vias. Groups like
 that are a sensible starting point; the right order for your board is a matter of trying.
 
+## Route differential pairs (experimental)
+
+Name the nets as KiCad pairs them (`USB_D_P`/`USB_D_N`, `CLK+`/`CLK-`, `DP`/`DN`), give them a
+net class with the single track width, and set the pair rules in the `.kicad_dru` if you have
+them: `diff_pair_gap` and `track_width` constraints, also per `(layer inner)` or `(layer outer)`,
+and a `skew` constraint. Then:
+
+```bash
+gummiband route board.kicad_pcb -o out.kicad_pcb --keep-locked --pairs
+# with an impedance target: width per layer from the stackup, the gap stays
+gummiband route board.kicad_pcb -o out.kicad_pcb --keep-locked --pairs --pair-zdiff 90
+```
+
+Each pair is routed as one wide track and split into two parallel tracks afterwards; the shorter
+track gets bumps until the length difference is below `--pair-skew` (0.1 mm by default) or the
+`skew` rule. The console and the JSON report list every pair with width, gap, estimated
+impedance, lengths, skew and vias. Where a pair could not be routed wide, the line says why and
+the pair is routed as two single nets.
+
+This is new. It costs connections on dense boards and can leave clearance errors or shorts next
+to pads and vias, so compare the KiCad DRC with and without `--pairs` before you keep the result.
+
 ## Judge a result
 
 Three sources tell you how good a routing is:
