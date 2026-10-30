@@ -43,11 +43,12 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   crossing in the capacity model; the geometry already supports per piece widths).
 - **Movable parts:** parts that are not locked may shift a little when that frees a channel
   (search over small placement offsets, evaluated by the router).
-- Differential pairs: done as an option (`route --pairs`, see `docs/ARCHITECTURE.md`). Width and gap
+- Differential pairs: experimental option (`route --pairs`, see `docs/ARCHITECTURE.md`). Width and gap
   from net classes and custom rules per layer, skew tuning inside a pair, impedance estimate and
   `--pair-zdiff`. Measured on 2026-10-30: `diff_pairs` 99% coupled and clean in the KiCad DRC, Jetson
   93% coupled instead of 30%, but 81 instead of 51 connections open and 1954 instead of 493
-  violations, Lichtschnitzel 347/348 instead of 348/348. Open: more than one wide track per pair
+  violations, Lichtschnitzel 347/348 instead of 348/348. Open: the KiCad DRC is not clean yet (`diff_pairs` 1 short at a via, Lichtschnitzel near J1), the
+  lost connections on dense boards, more than one wide track per pair
   (branches, USB-C with both connector rows), necks for fine pitch, a crossover without a via,
   matching between pairs (`length` rules), the router knowing about polarity.
 - Rule engine: more custom rule conditions (positions, footprints, layers).

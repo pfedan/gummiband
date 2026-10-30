@@ -79,7 +79,8 @@ enum Cmd {
         /// Weight of the pull between the nets of differential pairs (0 = off).
         #[arg(long, default_value_t = 0.0)]
         pair_pull: f64,
-        /// Route differential pairs as one wide track and split it into two parallel tracks.
+        /// Experimental: route differential pairs as one wide track and split it into two parallel
+        /// tracks. Check the result with the KiCad DRC; on dense boards it costs connections.
         #[arg(long)]
         pairs: bool,
         /// With --pairs: length difference left within a pair in mm; the shorter track gets

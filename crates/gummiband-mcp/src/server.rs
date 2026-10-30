@@ -219,8 +219,9 @@ pub struct RouteIn {
     /// Weight of the pull between the nets of differential pairs (default 0: off; 1 is a good
     /// start, it can cost clearance on tight boards).
     pub pair_pull: Option<f64>,
-    /// Route differential pairs as one wide track and split it into two parallel tracks, width
-    /// and gap from net classes and custom rules (default false).
+    /// Experimental: route differential pairs as one wide track and split it into two parallel
+    /// tracks, width and gap from net classes and custom rules (default false). Check the result
+    /// with drc; on dense boards it costs connections.
     pub pairs: Option<bool>,
     /// With pairs: length difference left within a pair in mm (default 0.1).
     pub pair_skew: Option<f64>,

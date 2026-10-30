@@ -149,7 +149,8 @@ vias of the other nets are no obstacles but part of the topology (`gummiband-cor
 
 ## Differential pairs
 
-With `--pairs` (`gummiband_core::pairs`) a pair is routed as one wide track and split afterwards.
+With `--pairs` (`gummiband_core::pairs`, experimental, off by default) a pair is routed as one wide
+track and split afterwards.
 
 1. Merge: the two nets become one net whose track is as wide as both tracks and their gap, with a
    via that holds both vias of the pair. The pads of an end merge into one pin (their hull, if it

@@ -115,7 +115,7 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
   the MCP tools `part_info` and `add_locked_copper` exist but have not been tried on a real
   board yet; expect rough edges.
 - **Differential pairs and length matching.** Pairs are recognised by name, but routed as two
-  nets. `--pairs` routes a pair as one wide track and splits it into two parallel tracks. `--pair-pull` (experimental, off by default) pulls the second net towards the first and
+  nets. `--pairs` (experimental, off by default) routes a pair as one wide track and splits it into two parallel tracks. `--pair-pull` (experimental, off by default) pulls the second net towards the first and
   reports the coupled length; spacing is only roughly kept, and there is no impedance control and
   no length matching yet.
 - **Teardrops.** Gummiband draws none itself. `--teardrops` (command line only) switches on
