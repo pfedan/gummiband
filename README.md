@@ -44,13 +44,16 @@ Then pick how you want to use it:
 
 ### In KiCad
 
-1. Lock the copper you want to keep (select, right click, *Locking > Lock*).
-2. Click the Gummiband button in the PCB editor's plugin toolbar.
-3. Leave the defaults (keep locked copper, 14 runs, via cost 3.0, 3 geometry
+1. Optional, for a board whose parts are not placed yet: lock the connectors and whatever else
+   has its spot, click *Place with Gummiband* and pick which parts move (new, not yet tested
+   live in KiCad).
+2. Lock the copper you want to keep (select, right click, *Locking > Lock*).
+3. Click *Route with Gummiband* in the PCB editor's plugin toolbar.
+4. Leave the defaults (keep locked copper, 14 runs, via cost 3.0, 3 geometry
    generations) and press OK. A progress dialog shows the phase, the routed connections, vias,
    length and remaining violations.
-4. Look at the result. It arrives as one undo step, so Ctrl/Cmd+Z takes it back entirely.
-5. Refill zones (B) and run the DRC. Fix or reroute what is left by hand, then save.
+5. Look at the result. It arrives as one undo step, so Ctrl/Cmd+Z takes it back entirely.
+6. Refill zones (B) and run the DRC. Fix or reroute what is left by hand, then save.
 
 Your board file on disk is not touched until you save.
 
@@ -60,10 +63,10 @@ Your board file on disk is not touched until you save.
 # what the router sees: layers, planes, nets, net classes, rules
 target/release/gummiband info my_board.kicad_pcb
 
-# optional: place the parts that are not locked or mechanical
-target/release/gummiband place my_board.kicad_pcb -o my_board.kicad_pcb
+# optional: place the parts that are not locked or mechanical, into a new file
+target/release/gummiband place my_board.kicad_pcb -o my_board.placed.kicad_pcb
 
-# route it, keep locked tracks and vias, write a new file next to it
+# route it (or the placed file), keep locked tracks and vias, write a new file next to it
 target/release/gummiband route my_board.kicad_pcb -o my_board.routed.kicad_pcb --keep-locked
 
 # judge the result with KiCad

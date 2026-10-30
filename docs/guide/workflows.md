@@ -196,6 +196,12 @@ Before routing, in KiCad with the *Place with Gummiband* button, or on the comma
 3. Look at the result, move what you want by hand, lock it and place the rest again if you like.
 4. Route.
 
+Two things to know: the placer has no datasheet knowledge, so the layout of a converter or a
+crystal is yours to make and lock first, and the seeds differ a lot, so `--seed 2`, `--seed 3`
+and a look at the routed results is worth the minutes (the plugin button always uses seed 1).
+Both sides of the board share the same space, so a two sided board comes out less dense than it
+could be.
+
 An agent does the same over MCP: `move_part` for the parts it has a plan for, `place_parts` with
 `fixed` or `only` for the rest, then `route`.
 
@@ -214,7 +220,10 @@ The MCP server exposes `load_board`, `list_nets`, `set_net_options`, `part_info`
 including `seed` and `keep_all`), `drc` and `render` to Claude Code, Claude Desktop and other
 MCP clients. An agent can load a board, give the critical nets priority, route, read the
 violations with positions and the nets that block each unrouted connection, look at a PNG of the
-region, nudge a part or add a plane in a working copy, and iterate.
+region, nudge a part or add a plane in a working copy, and iterate. On a finished board it can
+re-lay single nets: `route` with `keep_all`, `nets` and `reroute` removes the unlocked copper of
+those nets and routes them anew while everything else stays. There is no shove over MCP yet, so
+this can fail where the kept tracks leave no room.
 
 New and preliminary: datasheet guided pre-routing. The agent asks `part_info` for the pads,
 courtyard and neighbours of a critical part, places the copper the datasheet recommends with

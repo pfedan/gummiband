@@ -8,9 +8,9 @@ detail.
 | Chapter | Read it when |
 | --- | --- |
 | [Installation](installation.md) | you set up the binary, the KiCad plugin or the optional tools |
-| [Routing in KiCad](kicad-plugin.md) | you route from the PCB editor and want to know what the dialog options do |
+| [Placing and routing in KiCad](kicad-plugin.md) | you place or route from the PCB editor and want to know what the dialog options do |
 | [Command line](cli.md) | you route from a shell or a script, or need the JSON report |
-| [Workflows](workflows.md) | you want recipes: locking power lanes, priorities, judging results, movable parts, animations |
+| [Workflows](workflows.md) | you want recipes: locking power lanes, priorities, judging results, placing parts, movable parts, animations |
 | [How Gummiband routes](concepts.md) | you want to understand what the router respects, how it decides, and its current limits |
 | [Benchmarks](benchmarks.md) | you want to measure a change or compare against other routers |
 

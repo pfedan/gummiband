@@ -122,9 +122,16 @@ default. See the [environment variables](cli.md#environment-variables).
 Things the router does not do yet. The [milestones](../MILESTONES.md) say what comes next.
 
 - **Partial routing is experimental.** By default a run replaces all unlocked copper; lock what
-  you want to keep. `--keep-all` with `--nets` adds to existing copper, and an agent can add
-  locked copper through the MCP server before routing. Follow-me routing from a half drawn
+  you want to keep. `--keep-all` with `--nets` adds to existing copper, the MCP `route` with
+  `reroute` re-lays named nets on a finished board, and an agent can add locked copper through
+  the MCP server before routing. Follow-me routing from a half drawn
   track is the plugin action *Finish selected nets*, not yet tested live in KiCad.
+- **Automatic placement is new.** `gummiband place`, the plugin button and the MCP tool
+  `place_parts` place parts from the netlist, the outline, the planes and the fixed parts; the
+  router is not involved. The placer knows no datasheet layouts, so place and lock a power stage
+  yourself; parts on both sides share the same space; tracks and vias do not follow, so place
+  before you route; and the seeds differ a lot, so try a few. The button is not yet tested live
+  in KiCad. Measured on one board only, see [benchmarks](benchmarks.md#placement-from-the-netlist).
 - **Blocks and pre-routing tools are new.** Groups that move as blocks under `--move-parts` and
   the MCP tools `part_info` and `add_locked_copper` exist but have not been tried on a real
   board yet; expect rough edges.
