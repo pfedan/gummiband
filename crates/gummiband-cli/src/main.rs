@@ -186,7 +186,7 @@ enum Cmd {
         /// References released although they count as mechanical, comma separated.
         #[arg(long, value_delimiter = ',')]
         free: Vec<String>,
-        /// First seed.
+        /// Another seed gives another set of starts.
         #[arg(long, default_value_t = 1)]
         seed: u64,
         /// Independent runs in parallel; the one with the fewest crossings is kept.
@@ -456,9 +456,6 @@ fn main() -> Result<()> {
                 };
                 let found = try_placements(&input, &placed_dir, placements, &opts, &|path, seed, i| {
                     let kb = load(path)?;
-                    if !kb.board.copper.is_empty() {
-                        anyhow::bail!("--placements needs a board without kept copper, tracks do not follow the parts");
-                    }
                     let search = gummiband_core::SearchConfig {
                         frames: false,
                         // only the winner runs open ended
@@ -895,12 +892,15 @@ fn main() -> Result<()> {
                 r.free_area
             );
             for (s, w, c) in &r.starts {
-                println!("  seed {s}: wire {w:.0}, {c} crossings");
+                println!("  start {s}: wire {w:.0}, {c} crossings");
             }
             println!(
-                "best: seed {}, wire {:.0}, {} crossings, smallest courtyard distance {:.2} mm",
-                r.seed, r.wire, r.crossings, r.min_separation
+                "best: seed {} start {}, wire {:.0}, {} crossings, smallest courtyard distance {:.2} mm",
+                r.seed, r.start, r.wire, r.crossings, r.min_separation
             );
+            if !r.anchored.is_empty() {
+                println!("stayed for their kept copper: {}", r.anchored.join(" "));
+            }
             if !r.off_plane.is_empty() {
                 println!("pins off their plane: {}", r.off_plane.join(" "));
             }
@@ -920,6 +920,8 @@ fn main() -> Result<()> {
             if let Some(path) = report {
                 let json = serde_json::json!({
                     "seed": r.seed,
+                    "start": r.start,
+                    "anchored": r.anchored,
                     "wire": r.wire,
                     "crossings": r.crossings,
                     "starts": r.starts,

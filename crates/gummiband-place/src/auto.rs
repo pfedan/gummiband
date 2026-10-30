@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use gummiband_core::board::Board;
+use gummiband_core::board::{Board, LayerSet};
 use gummiband_core::geom::{Point, Polygon, pt};
 use gummiband_kicad::place_write::{self, Patch, kicad_rot};
 use gummiband_kicad::sexpr::Node;
@@ -24,6 +24,8 @@ const PLANE_INSET: f64 = 0.4;
 const PLANE_WEIGHT: f64 = 1.5;
 /// Grid of the written positions.
 const GRID: f64 = 0.05;
+/// Annealing seeds per placement seed, more than anyone starts.
+const SEED_STEP: u64 = 1000;
 
 /// Which parts get a new position. Locked footprints stay in every case.
 #[derive(Debug, Clone, Default)]
@@ -46,7 +48,7 @@ pub struct PlaceOptions {
     pub fixed: Vec<String>,
     /// References released on top of the scope (a test point, a button).
     pub free: Vec<String>,
-    /// First seed; the starts use `seed .. seed + starts`.
+    /// Another seed gives another set of starts, none shared with a neighbouring seed.
     pub seed: u64,
     /// Independent annealing runs, the best one is kept.
     pub starts: usize,
@@ -82,6 +84,8 @@ impl Default for PlaceOptions {
 pub struct PlaceReport {
     pub fixed: Vec<String>,
     pub moved: Vec<String>,
+    /// Parts that stayed because kept copper ends on one of their pads.
+    pub anchored: Vec<String>,
     /// New pose of every moved part: reference, x, y, rotation in degrees.
     pub poses: Vec<(String, f64, f64, f64)>,
     /// New outline of every keepout that followed its part: zone id, points.
@@ -93,12 +97,14 @@ pub struct PlaceReport {
     /// Tracks and vias in the input: they do not follow the parts.
     pub stale_copper: usize,
     pub seed: u64,
+    /// The start that won, counted from 1.
+    pub start: usize,
     /// Weighted wire length of the placement.
     pub wire: f64,
     /// Crossings between the spanning trees of the nets, a measure of the vias to expect.
     pub crossings: usize,
-    /// Result of every start: seed, wire, crossings; a start without a legal placement is left out.
-    pub starts: Vec<(u64, f64, usize)>,
+    /// Result of every start: its number, wire, crossings; a start without a legal placement is left out.
+    pub starts: Vec<(usize, f64, usize)>,
     pub free_area: f64,
     pub movable_area: f64,
     pub min_separation: f64,
@@ -110,7 +116,12 @@ pub struct Placed {
 }
 
 /// Parts that stay, as flags per part of `d`.
-fn fixed_parts(d: &Design, kb: &KicadBoard, opts: &PlaceOptions, outer: &Polygon) -> Result<Vec<bool>> {
+fn fixed_parts(
+    d: &Design,
+    kb: &KicadBoard,
+    opts: &PlaceOptions,
+    outer: &Polygon,
+) -> Result<(Vec<bool>, Vec<usize>)> {
     let only: &[String] = match &opts.scope {
         Scope::Only(refs) => refs,
         _ => &[],
@@ -141,6 +152,11 @@ fn fixed_parts(d: &Design, kb: &KicadBoard, opts: &PlaceOptions, outer: &Polygon
             !chosen || p.locked || opts.fixed.contains(&p.reference) || p.court.is_empty()
         })
         .collect();
+    // copper that ends on a pad keeps the part where it is: tracks do not follow
+    let anchored = anchored_parts(d, &kb.board, &fixed);
+    for &i in &anchored {
+        fixed[i] = true;
+    }
     // a block with its copper stays, the writer cannot turn tracks yet
     for b in &kb.board.blocks {
         if !b.uuids.is_empty() {
@@ -158,7 +174,89 @@ fn fixed_parts(d: &Design, kb: &KicadBoard, opts: &PlaceOptions, outer: &Polygon
             ids.iter().for_each(|&i| fixed[i] = true);
         }
     }
-    Ok(fixed)
+    Ok((fixed, anchored))
+}
+
+/// Parts with kept copper of their net on a pad, among those not fixed yet.
+fn anchored_parts(d: &Design, board: &Board, fixed: &[bool]) -> Vec<usize> {
+    let on_pad = |pin: &gummiband_core::board::Pin| -> bool {
+        let reach = pin.size.0.max(pin.size.1) * 0.5;
+        board.copper.iter().filter(|c| c.net == Some(pin.net)).any(|c| {
+            board.obstacles[c.first as usize..c.last as usize]
+                .iter()
+                .any(|o| o.shape.dist_to_point(pin.pos) <= reach)
+        })
+    };
+    (0..d.parts.len())
+        .filter(|&i| !fixed[i])
+        .filter(|&i| {
+            board
+                .pins
+                .iter()
+                .any(|p| p.footprint == d.parts[i].reference && on_pad(p))
+        })
+        .collect()
+}
+
+/// Kept copper on the layers of the moving parts, to look up by position.
+struct CopperGrid<'a> {
+    board: &'a Board,
+    bbox: R,
+    cols: usize,
+    cells: Vec<Vec<usize>>,
+    reach: f64,
+}
+
+impl<'a> CopperGrid<'a> {
+    const CELL: f64 = 2.0;
+
+    fn new(board: &'a Board, d: &Design, fixed: &[bool], bbox: R, reach: f64) -> CopperGrid<'a> {
+        let mut layers = LayerSet::default();
+        for p in &board.pins {
+            if d.by_ref.get(&p.footprint).is_some_and(|&i| !fixed[i]) {
+                for l in p.layers.iter() {
+                    layers.insert(l);
+                }
+            }
+        }
+        let cols = (bbox.w() / Self::CELL).ceil() as usize + 1;
+        let rows = (bbox.h() / Self::CELL).ceil() as usize + 1;
+        let mut cells = vec![Vec::new(); cols * rows];
+        let column = |x: f64| (((x - bbox.x0) / Self::CELL).max(0.0) as usize).min(cols - 1);
+        let row = |y: f64| (((y - bbox.y0) / Self::CELL).max(0.0) as usize).min(rows - 1);
+        for c in &board.copper {
+            for o in c.first as usize..c.last as usize {
+                let ob = &board.obstacles[o];
+                if !ob.layers.intersects(layers) {
+                    continue;
+                }
+                let b = ob.shape.bbox().grow(reach);
+                for j in row(b.min.y)..=row(b.max.y) {
+                    for i in column(b.min.x)..=column(b.max.x) {
+                        cells[j * cols + i].push(o);
+                    }
+                }
+            }
+        }
+        CopperGrid {
+            board,
+            bbox,
+            cols,
+            cells,
+            reach,
+        }
+    }
+
+    fn near(&self, p: Point) -> bool {
+        if p.x < self.bbox.x0 || p.y < self.bbox.y0 || p.x > self.bbox.x1 || p.y > self.bbox.y1 {
+            return false;
+        }
+        let i = ((p.x - self.bbox.x0) / Self::CELL) as usize;
+        let j = ((p.y - self.bbox.y0) / Self::CELL) as usize;
+        self.cells[j * self.cols + i]
+            .iter()
+            .any(|&o| self.board.obstacles[o].shape.dist_to_point(p) < self.reach)
+    }
 }
 
 fn movable_units(d: &Design, kb: &KicadBoard, fixed: &[bool]) -> Vec<Unit> {
@@ -535,7 +633,7 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         v
     };
     let (outer, cutouts) = outlines.split_first().context("the board has no outline")?;
-    let fixed = fixed_parts(&d, &kb, opts, outer)?;
+    let (fixed, anchored) = fixed_parts(&d, &kb, opts, outer)?;
     for p in &mut d.parts {
         if p.pads.len() >= 5 {
             for r in &mut p.court {
@@ -599,11 +697,13 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
     let cell = 0.1;
     let half_diag = cell * std::f64::consts::FRAC_1_SQRT_2 + 1e-6;
     let edge = opts.margin + half_diag;
+    let copper = CopperGrid::new(&kb.board, &d, &fixed, bbox, opts.gap + half_diag);
     let inside = |c: Point| -> bool {
         outer.contains(c)
             && outer.boundary_dist(c) >= edge
             && !cutouts.iter().any(|h| h.contains(c) || h.boundary_dist(c) < edge)
             && !barred.iter().any(|z| z.contains(c) || z.boundary_dist(c) < half_diag)
+            && !copper.near(c)
     };
     let raster = Raster::over(bbox, &inside, &fixed_quads, opts.gap, cell);
     let free_area = bbox.area() - raster.blocked(&bbox);
@@ -660,18 +760,19 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
     }
 
     // ---- the starts, in parallel; the fewest crossings win, then the shortest wires
-    let seeds: Vec<u64> = (0..opts.starts.max(1) as u64).map(|i| opts.seed + i).collect();
-    let mut results: Vec<(u64, State, f64, usize)> = seeds
+    let starts: Vec<usize> = (1..=opts.starts.max(1)).collect();
+    let mut results: Vec<(usize, State, f64, usize)> = starts
         .par_iter()
-        .filter_map(|&seed| {
+        .filter_map(|&start| {
+            let seed = opts.seed.wrapping_sub(1).wrapping_mul(SEED_STEP) + start as u64;
             let (s, wire) = run(&prob, &bbox, seed, opts.iters)?;
             let c = crossings(&d, &unit_poses(&d, &units, &s), &terms.weight);
-            Some((seed, s, wire, c))
+            Some((start, s, wire, c))
         })
         .collect();
     results.sort_by(|a, b| (a.3, a.2).partial_cmp(&(b.3, b.2)).unwrap());
-    let starts: Vec<(u64, f64, usize)> = results.iter().map(|r| (r.0, r.2, r.3)).collect();
-    let Some((seed, state, wire, crossed)) = results.into_iter().next() else {
+    let starts: Vec<(usize, f64, usize)> = results.iter().map(|r| (r.0, r.2, r.3)).collect();
+    let Some((start, state, wire, crossed)) = results.into_iter().next() else {
         bail!(
             "no legal placement: movable courtyards {movable_area:.0} mm2 on {free_area:.0} mm2 free, \
              try a smaller --gap or --halo"
@@ -786,6 +887,7 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         report: PlaceReport {
             fixed: names(true),
             moved: names(false),
+            anchored: anchored.iter().map(|&i| d.parts[i].reference.clone()).collect(),
             poses: (0..d.parts.len())
                 .filter(|&i| !fixed[i])
                 .map(|i| (d.parts[i].reference.clone(), pose[i].0.x, pose[i].0.y, pose[i].1))
@@ -797,7 +899,8 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
                 .collect(),
             off_plane,
             stale_copper,
-            seed,
+            seed: opts.seed,
+            start,
             wire,
             crossings: crossed,
             starts,
@@ -861,6 +964,21 @@ mod tests {
         s += &fp("Lib:R", "R1", spot(3), false, &[("1", "A"), ("2", "B")]);
         s.push_str(")\n");
         s
+    }
+
+    /// A locked track, inserted before the end of the board.
+    fn with_track(board: &str, a: (f64, f64), b: (f64, f64), layer: &str, net: &str) -> String {
+        let end = board.rfind(')').unwrap();
+        format!(
+            "{}\t(segment (start {} {}) (end {} {}) (width 0.3) (layer \"{layer}\") (net \"{net}\") \
+             (locked yes) (uuid \"00000000-0000-0000-0000-000000000001\"))\n{}",
+            &board[..end],
+            a.0,
+            a.1,
+            b.0,
+            b.1,
+            &board[end..]
+        )
     }
 
     fn place(text: &str, name: &str, opts: &PlaceOptions) -> Result<Placed> {
@@ -966,6 +1084,41 @@ mod tests {
             ..quick()
         };
         assert!(place(&board(|_| (160.0, 160.0)), "unknown", &opts).is_err());
+    }
+
+    #[test]
+    fn neighbouring_seeds_share_no_start() {
+        let spot = |i: usize| (110.0 + i as f64 * 4.0, 110.0);
+        let opts = |seed| PlaceOptions { seed, ..quick() };
+        let one = place(&board(spot), "seed1", &opts(1)).unwrap();
+        let two = place(&board(spot), "seed2", &opts(2)).unwrap();
+        assert_eq!(one.report.starts.len(), 2);
+        assert_ne!(one.report.poses, two.report.poses);
+        assert_eq!(two.report.seed, 2);
+    }
+
+    #[test]
+    fn parts_stay_off_locked_copper() {
+        // a wall across the board, on the parts' side
+        let text = with_track(&board(|_| (160.0, 160.0)), (112.0, 100.0), (112.0, 120.0), "F.Cu", "B");
+        let p = place(&text, "wall", &quick()).unwrap();
+        for (r, x, _, _) in &p.report.poses {
+            assert!((x - 112.0).abs() > 1.3, "{r} sits on the track at {x}");
+        }
+    }
+
+    #[test]
+    fn copper_on_the_other_side_does_not_block() {
+        let text = with_track(&board(|_| (160.0, 160.0)), (112.0, 100.0), (112.0, 120.0), "B.Cu", "B");
+        assert!(place(&text, "other", &quick()).is_ok());
+    }
+
+    #[test]
+    fn a_part_with_copper_on_its_pad_stays() {
+        let text = with_track(&board(|_| (116.0, 110.0)), (115.4, 110.0), (112.0, 112.0), "F.Cu", "B");
+        let p = place(&text, "anchor", &quick()).unwrap();
+        assert_eq!(p.report.anchored, vec!["U2"]);
+        assert!(p.report.fixed.contains(&"U2".to_string()));
     }
 
     #[test]

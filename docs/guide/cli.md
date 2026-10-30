@@ -99,7 +99,7 @@ A good default for a real two layer board with a few hundred connections is the 
 | --- | --- | --- |
 | `--move-parts` | off | During the geometry generations, parts next to clearance problems may shift a little to open a channel. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay (by footprint library name and by reference prefix J, P, CN, USB, H, MH, SW, TP). The output file has the moved footprints at their new positions, with the footprint's own zones (a keepout drawn inside the footprint) moved along, and the console lists every move. Footprints in a KiCad group form a block that moves as a whole with its kept tracks and vias (zones in the group do not move yet); a block with one fixed member stays put. Blocks are new and untested on a real board. |
 | `--fixed R1,U3` | none | More references that never move under `--move-parts` and `--placements`. |
-| `--placements N` | 0 | Place the board N times from the netlist (see [`gummiband place`](#gummiband-place), default scope), route each result with the settings of this command and keep the best: fewest open connections, then clearance violations, vias and length. Takes N + 1 routes, the last one writes the winner; `--until-stop` applies to that last one only. Not with `--keep-all`, `--nets` or `--pairs`, nor on a board with kept copper, since tracks do not follow the parts. The JSON report gets a `placement` block with every try. |
+| `--placements N` | 0 | Place the board N times from the netlist (see [`gummiband place`](#gummiband-place), default scope), route each result with the settings of this command and keep the best: fewest open connections, then clearance violations, vias and length. Takes N + 1 routes, the last one writes the winner; `--until-stop` applies to that last one only. Not with `--keep-all`, `--nets` or `--pairs`. The JSON report gets a `placement` block with every try. |
 | `--placement-seed S` | 1 | First seed of `--placements`. |
 | `--teardrops` | off | Switches on KiCad's teardrops for every via and connected pad in the output file, and the track end teardrops (the wedges where a track changes width, for example at a neck) in the output's project. KiCad builds the shapes itself: open the file and fill the zones once (B), then the teardrops appear. The plugin cannot set them through KiCad's API and opens *Edit Teardrops* instead. |
 | `--net-priorities prio.json` | none | Routing order per net from a JSON file `{"net name": priority, ...}`; lower numbers route first. Nets not in the file keep their net class priority. The MCP server does the same with `set_net_options`. |
@@ -201,7 +201,7 @@ gummiband route placed.kicad_pcb -o routed.kicad_pcb
 | `--all-unlocked` | | place every unlocked part, connectors, modules and mounting holes too |
 | `--fixed U1,U2` | | these stay in any case |
 | `--free TP1` | | move these on top of the above (a test point, a button) |
-| `--seed N` | 1 | first seed |
+| `--seed N` | 1 | another seed gives another set of starts, none shared with a neighbouring seed |
 | `--starts N` | 4 | independent runs in parallel, the one with the fewest crossings is kept |
 | `--iters N` | 3000000 | annealing moves per run |
 | `--gap MM` | 0.3 | spacing between courtyards |
@@ -213,7 +213,10 @@ Without a scope option, all parts move except locked footprints, connectors, mod
 holes, buttons and test points. Locked footprints never move. A KiCad group moves as a whole; a
 group with tracks stays, since tracks do not turn yet.
 
-Tracks and vias of the input do not follow; the console says how many there are. Keepouts of a
+Locked tracks and vias stay: parts keep the `--gap` distance from them on the layers the moving
+parts use, and a part with locked copper of its net on a pad stays where it is (the console and the
+report name it). Copper added after placing is not known to the placer, so lock your pre-routed
+copper first. Unlocked tracks and vias do not follow; the console says how many there are. Keepouts of a
 moved part follow it (a keepout counts as the part's if its courtyard covers at least half of it),
 other keepouts that forbid footprints or pads stay free of parts. All parts share one side as far
 as spacing goes, so a two sided board comes out less dense than it could be.

@@ -214,7 +214,7 @@ pub struct PlacePartsIn {
     /// References that stay in any case, e.g. the parts you placed yourself with move_part.
     #[serde(default)]
     pub fixed: Vec<String>,
-    /// First seed (default 1); another seed gives another placement.
+    /// Default 1; another seed gives another set of starts, none shared with a neighbouring seed.
     pub seed: Option<u64>,
     /// Independent runs (default 4); the one with the fewest crossings is kept.
     pub starts: Option<usize>,
@@ -247,6 +247,8 @@ pub struct PlacePartsOut {
     pub min_separation: f64,
     /// Pins outside the plane of their net; routing reaches them.
     pub off_plane: Vec<String>,
+    /// Parts that stayed because locked copper ends on one of their pads.
+    pub anchored: Vec<String>,
     pub warnings: Vec<String>,
 }
 
@@ -1030,10 +1032,7 @@ impl Gummiband {
             Ok(placed.text)
         })?;
         let r = report.context("placement did not run")?;
-        let mut warnings = Vec::new();
-        if r.stale_copper > 0 {
-            warnings.push(format!("{} tracks and vias do not follow the parts", r.stale_copper));
-        }
+        let warnings = Vec::new();
         let text = format!("placed {} parts, {} crossings", r.moved.len(), r.crossings);
         let out = PlacePartsOut {
             board: id,
@@ -1052,6 +1051,7 @@ impl Gummiband {
             crossings: r.crossings,
             min_separation: r.min_separation,
             off_plane: r.off_plane,
+            anchored: r.anchored,
             warnings,
         };
         Ok((text, out))
