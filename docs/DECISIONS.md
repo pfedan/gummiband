@@ -32,6 +32,10 @@ Standing decisions of the project owner, kept here so that they survive any sess
 - Layer preferred directions are a portfolio dimension, not only an option.
 - Teardrops come from KiCad's built-in feature.
 
+## License
+
+- Unlicensed: proprietary, all rights reserved. No LICENSE file, crates are not published.
+
 ## Working rules
 
 - All repository content is in English.
