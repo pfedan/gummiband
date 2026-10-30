@@ -115,6 +115,43 @@ each layer stays planar by construction.
 - Rip-up and reroute of connections near a failed one, via-in-pad as a last resort for
   fan-outs.
 
+### Negotiated routing
+
+With `--negotiate N` (off by default) the router does not reserve its space firmly at first, in
+the spirit of PathFinder (`Router::negotiate`). In the negotiation phase capacity and planarity
+are soft: the search may overfill an edge or cross a track of another net, and pays for it in mm
+of track. Cross lists and chords stay as they are, a route with a conflict is an ordinary route
+in the state, so the search, the via splits and the rip-up need no second data structure.
+
+- First pass: every connection takes its way in the plain order.
+- Then up to N rounds: the connections in a conflict (on an edge that does not pack, or crossing
+  another net in a triangle) are ripped up and routed again, one at a time and seeing all the
+  others, the worst first. A connection whose conflict has gone by then stays. The prices of a
+  conflict rise from round to round, and every edge in a conflict also gets a history price that
+  stays, so that the connection with the fewest alternatives ends up keeping the place.
+- Any illegal step costs at least the price of a crossing, whatever the overflow: otherwise a
+  connection sits on a 0.01 mm overflow for ever instead of taking up the conflict with a
+  neighbour.
+- A phase ends when no conflict is left, after N rounds, or after five rounds without progress
+  (a connection without any legal way, or a board with more connections than room on its layers,
+  which no price can settle). What is still in a conflict is then ripped up, worst first, which
+  leaves a legal topology. From there on `Router::run` goes on
+  as always (via in pad, plane fallback, rip-up passes), with the history as a guide.
+- In a conflict only the cheapest slot of an edge goes into the search: its many ways through a
+  bundle would use up the expansion limit.
+- A crossing that leaves an edge little room pays a small price throughout (`tight`, up to
+  3 mm; free from 0.05 mm per gap): tracks take a tight gap only if they must. This is the soft
+  form of a larger router margin, which forbids such gaps and loses the connections that need
+  them.
+
+A negotiation is a second search next to the plain one (`route_search`), not a replacement: it
+completes the dense boards, but on a loose board a lucky order may leave the geometry more room,
+and the better result counts, completion first. So the option costs the time of both searches.
+
+Vias that a ripped connection leaves behind stay in the mesh as phantom vertices, and the wraps of
+the rubber band must keep to their portals after a negotiation: its routes leave more slack in
+the portals, where a wrap around a far pivot could swing past a neighbour.
+
 ## Importing existing copper
 
 For finishing nets on a routed board (`--keep-all --nets ... --shove`) the unlocked tracks and

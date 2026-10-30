@@ -36,6 +36,9 @@ pub struct RouterConfig {
     pub seed: u64,
     /// Rip-up and reroute passes for failed connections.
     pub ripup_passes: usize,
+    /// Rounds of the negotiation phase before the rip-up passes (0 = off), see
+    /// [`Router::negotiate`].
+    pub negotiate: usize,
     /// Via sites tried per triangle and expansion.
     pub sites_per_tri: usize,
     /// Extra clearance in mm kept in the capacity model (room for the geometry step).
@@ -62,6 +65,7 @@ impl Default for RouterConfig {
             max_expansions: env("GB_MAXEXP", 400_000.0) as usize,
             seed: 0,
             ripup_passes: env("GB_RIPUP", 3.0) as usize,
+            negotiate: 0,
             sites_per_tri: 3,
             margin: 0.01,
             via_in_pad: false,
@@ -146,6 +150,25 @@ pub struct ViaInfo {
     pub users: u32,
 }
 
+/// Prices of the negotiation phase in mm of track, see [`Router::negotiate`].
+#[derive(Clone)]
+struct Prices {
+    /// Capacity and planarity are soft: a track that does not fit, or crosses a track of
+    /// another net, pays instead of being refused. Off at the end, only the history stays.
+    soft: bool,
+    /// Per mm of overflow of an edge.
+    overflow: f64,
+    /// Per track of another net crossed, and for a via where it does not fit.
+    crossing: f64,
+    /// [layer][edge] -> price of a crossing, grows wherever the conflicts stay.
+    history: Vec<Vec<f64>>,
+    /// Price of a crossing that leaves an edge no room at all, and the room per gap on an
+    /// edge from which on a crossing is free: tracks take a tight gap only if they must, which
+    /// leaves the geometry step its room.
+    tight: f64,
+    reserve: f64,
+}
+
 /// Mutable routing state. Owns its copy of the meshes, because vias split triangles.
 #[derive(Clone)]
 pub struct Router<'a> {
@@ -179,6 +202,8 @@ pub struct Router<'a> {
     pub soft_lost: Vec<u32>,
     /// Per pin: number of unrouted connections that start or end there.
     pending: Vec<u32>,
+    /// Prices while a negotiation runs and in the passes after it.
+    prices: Option<Prices>,
     /// Buffers of the search, kept to avoid growing them again for every connection.
     search_buf: SearchBuf,
     /// Debugging: positions expanded by the last search of a traced connection.
@@ -238,6 +263,12 @@ fn tri_bit(t: u32, li: u8) -> u64 {
 }
 
 const BLOCK: u8 = 24;
+
+/// An edge counts as over capacity from this overflow in mm on.
+const OVER_TOL: f64 = 1e-6;
+
+/// A negotiation ends after this many rounds without fewer conflicts.
+const MAX_STALE: usize = 5;
 
 type Best = FastMap<(u8, u32, u32), f64>;
 
@@ -357,6 +388,7 @@ impl<'a> Router<'a> {
                 .iter()
                 .any(|o| matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via)),
             pending: vec![0; board.pins.len()],
+            prices: None,
             soft_on: false,
             soft_lost: Vec::new(),
         };
@@ -1102,6 +1134,86 @@ impl<'a> Router<'a> {
         })
     }
 
+    /// For a slot without an interval (see `slot_interval`), in a negotiation: by how many mm
+    /// the items overflow the edge with the track at slot j, and a position for the track.
+    fn slot_overflow(view: &EdgeView, sides: [u8; 2], j: usize, lo: &mut Vec<f64>) -> (f64, f64) {
+        let placed = &view.placed[..];
+        let n = placed.len();
+        let extra = view.hot;
+        let mut bounds = (f64::NEG_INFINITY, f64::INFINITY);
+        for k in 0..2 {
+            match sides[k] {
+                0 => bounds.1 = bounds.1.min(view.apex[k].0),
+                1 => bounds.0 = bounds.0.max(view.apex[k].1),
+                _ => {}
+            }
+        }
+        // positions 0..=n with the track at j; the gap between i and i + 1
+        let gap = |i: usize| {
+            extra
+                + match i.cmp(&j) {
+                    Ordering::Less if i + 1 == j => placed[i].gap_to_new,
+                    Ordering::Less => placed[i].gap_next,
+                    Ordering::Equal => placed[j].gap_from_new,
+                    Ordering::Greater => placed[i - 1].gap_next,
+                }
+        };
+        let item = |i: usize| if i < j { &placed[i] } else { &placed[i - 1] };
+        lo.clear();
+        for i in 0..=n {
+            let own = if i == j {
+                view.need_u.max(bounds.0)
+            } else {
+                item(i).need_u.max(item(i).bounds.0)
+            };
+            lo.push(if i > 0 { own.max(lo[i - 1] + gap(i - 1)) } else { own });
+        }
+        let (mut hi, mut over, mut at) = (f64::INFINITY, 0.0_f64, 0.0);
+        for i in (0..=n).rev() {
+            let own = if i == j {
+                (view.len - view.need_v).min(bounds.1)
+            } else {
+                (view.len - item(i).need_v).min(item(i).bounds.1)
+            };
+            hi = if i < n { own.min(hi - gap(i)) } else { own };
+            over = over.max(lo[i] - hi);
+            if i == j {
+                at = (lo[i] + hi) / 2.0;
+            }
+        }
+        (over, at.clamp(0.0, view.len))
+    }
+
+    /// By how many mm the crossings of edge e overflow it (0 = they fit).
+    fn edge_overflow(&self, li: usize, e: u32) -> f64 {
+        let items = self.items_on(li, e);
+        let m = self.m(li);
+        let [u, v] = m.edges[e as usize];
+        let len = m.edge_len(e);
+        let margin = self.cfg.margin;
+        let bounds = self.apex_bounds(li, e, &items, None);
+        let hot = self.hot_extra(m.verts[u as usize], m.verts[v as usize]);
+        let n = items.len();
+        let mut lo = vec![0.0; n];
+        for i in 0..n {
+            let mut x = (self.end_need(li, e, 0, &items[i]) + margin + hot).max(bounds[i].0);
+            if i > 0 {
+                x = x.max(lo[i - 1] + Self::gap(self.board, &items[i - 1], &items[i]) + hot);
+            }
+            lo[i] = x;
+        }
+        let (mut hi, mut over) = (f64::INFINITY, 0.0_f64);
+        for i in (0..n).rev() {
+            let mut y = (len - (self.end_need(li, e, 1, &items[i]) + margin + hot)).min(bounds[i].1);
+            if i + 1 < n {
+                y = y.min(hi - Self::gap(self.board, &items[i], &items[i + 1]) - hot);
+            }
+            hi = y;
+            over = over.max(lo[i] - hi);
+        }
+        over
+    }
+
     // ------------------------------------------------------------------ chords
 
     /// Fraction along edge e (from edges[e][0]) of a crossing: the slot of a new crossing, or
@@ -1196,6 +1308,38 @@ impl<'a> Router<'a> {
             let on = |z: f64| (z - lo).abs() < 1e-12 || (z - hi).abs() < 1e-12;
             on(c) || on(d) || inside(c) == inside(d)
         })
+    }
+
+    /// How many of the chords a chord between boundary coordinates x and y crosses.
+    fn chord_hits(coords: &[(f64, f64)], x: f64, y: f64) -> usize {
+        let (lo, hi) = if x < y { (x, y) } else { (y, x) };
+        coords
+            .iter()
+            .filter(|&&(c, d)| {
+                let inside = |z: f64| z > lo + 1e-12 && z < hi - 1e-12;
+                let on = |z: f64| (z - lo).abs() < 1e-12 || (z - hi).abs() < 1e-12;
+                !(on(c) || on(d)) && inside(c) != inside(d)
+            })
+            .count()
+    }
+
+    /// Chords of other nets in t that a new chord from `a` (slot sa) to `b` crosses.
+    fn chords_crossed(&self, t: u32, li: usize, net: NetId, a: CPos, sa: Option<usize>, b: CPos) -> usize {
+        let mut coords = Vec::new();
+        self.chord_coords(t, li, net, &mut coords);
+        Self::chord_hits(
+            &coords,
+            self.coord(t, li, a, None, sa),
+            self.coord(t, li, b, None, None),
+        )
+    }
+
+    /// Chords of other nets in t that a half chord from interior point `p` to `b` crosses.
+    fn half_chords_crossed(&self, t: u32, li: usize, net: NetId, p: Point, b: CPos, sb: Option<usize>) -> usize {
+        let mut points = Vec::new();
+        self.chord_points(t, li, net, &mut points);
+        let q = self.pos_point(t, li, b, None, sb);
+        points.iter().filter(|&&(c, d)| segs_intersect(p, q, c, d)).count()
     }
 
     /// The chords of other nets in t as point pairs, for `half_chord_fits`.
@@ -1314,6 +1458,14 @@ impl<'a> Router<'a> {
         if !self.site_clear(site, net) {
             return None;
         }
+        if self.soft() {
+            return Some(false);
+        }
+        self.vertex_fits(site, net).then_some(false)
+    }
+
+    /// Do the tracks around an unused via vertex keep their room with a via of `net`?
+    fn vertex_fits(&self, site: u32, net: NetId) -> bool {
         let info = self.via_info(net);
         for li in 0..self.nl() {
             let m = self.m(li);
@@ -1325,11 +1477,13 @@ impl<'a> Router<'a> {
                         continue;
                     }
                     let items = self.items_on(li, e);
-                    self.pack(li, e, &items, Some((site, &info)))?;
+                    if self.pack(li, e, &items, Some((site, &info))).is_none() {
+                        return false;
+                    }
                 }
             }
         }
-        Some(false)
+        true
     }
 
     /// Can a via of `net` be placed at the unused `site` (splitting its triangles)?
@@ -1337,6 +1491,11 @@ impl<'a> Router<'a> {
         if !self.sub.site_usable(site) || !self.site_clear(site, net) {
             return false;
         }
+        self.soft() || self.site_fits(site, net)
+    }
+
+    /// Do the tracks around the unused `site` keep their room with a via of `net`?
+    fn site_fits(&self, site: u32, net: NetId) -> bool {
         let p = self.site_point(site);
         let via = self.via_info(net);
         for li in 0..self.nl() {
@@ -1694,6 +1853,11 @@ impl<'a> Router<'a> {
         self.board.obstacles[s as usize].pin
     }
 
+    /// A negotiation is on and capacity and planarity are soft.
+    fn soft(&self) -> bool {
+        self.prices.as_ref().is_some_and(|p| p.soft)
+    }
+
     /// A* for one connection. Returns the node chain from start to goal.
     fn search(&self, ci: usize, buf: &mut SearchBuf) -> Option<Vec<Node>> {
         let conn = &self.conns[ci];
@@ -1843,6 +2007,8 @@ impl<'a> Router<'a> {
 
         let mut views: FastMap<(u8, u32), EdgeView> = FastMap::default();
         let mut scratch: Vec<f64> = Vec::new();
+        let prices = self.prices.as_ref();
+        let soft = prices.filter(|p| p.soft);
         let (mut coords, mut points): (Vec<(f64, f64)>, Vec<(Point, Point)>) = (Vec::new(), Vec::new());
         // crossings out of triangle t (layer lu) through local edge k
         #[allow(clippy::too_many_arguments)]
@@ -1906,6 +2072,7 @@ impl<'a> Router<'a> {
             }
             let mut item = item;
             item.w = self.width_at_edge(lu, e, item.w, &necks, neck_w);
+            let mut price = prices.map_or(0.0, |p| p.history[lu].get(e as usize).copied().unwrap_or(0.0));
             if free && let Some((cp, cs)) = chord_from {
                 // the chord in t fixes the side of t's apex on the exit edge ...
                 let side_idx = m.edge_tris[e as usize].iter().position(|&x| x == t).unwrap();
@@ -1922,7 +2089,8 @@ impl<'a> Router<'a> {
                         .entry((lu as u8, e_in))
                         .or_insert_with(|| self.edge_view(lu, e_in, &it_in));
                     if Self::slot_interval(view, it_in.sides, js, &mut scratch).is_none() {
-                        return;
+                        let Some(p) = soft else { return };
+                        price += p.crossing + p.overflow * Self::slot_overflow(view, it_in.sides, js, &mut scratch).0;
                     }
                 }
             }
@@ -1943,44 +2111,84 @@ impl<'a> Router<'a> {
                 self.chord_points(t, lu, net, &mut points);
             }
             let from_coord = chord_from.map(|(cp, cs)| self.coord(t, lu, cp, None, cs));
+            let node_at = |j: usize, lo: f64, hi: f64, price: f64| {
+                let q = pu + dir * (node.pos - pu).dot(dir).clamp(lo, hi);
+                // on kept copper of the net the way is already there
+                let g = if self.on_kept(lu, t2) {
+                    node.g
+                } else {
+                    let step = node.pos.dist(q);
+                    node.g + step + self.across(lu, node.pos, q) + escape + self.pull(guide, q, step) + price
+                };
+                let kind = NK::Tri {
+                    t: t2,
+                    li: lu as u8,
+                    entry: k2,
+                    slot: j as u16,
+                };
+                (kind, q, g)
+            };
+            // in a negotiation only the cheapest slot with a conflict counts: the search would
+            // lose itself in the many ways through a bundle
+            let mut cheapest: Option<(f64, usize, f64, f64)> = None;
             for j in 0..=n {
+                let mut price = price;
+                let mut conflict = false;
                 if free {
-                    if let Some(x) = from_coord
-                        && !Self::chord_fits(&coords, x, self.coord(t, lu, CPos::Edge(k), None, Some(j)))
-                    {
-                        continue;
+                    if let Some(x) = from_coord {
+                        let y = self.coord(t, lu, CPos::Edge(k), None, Some(j));
+                        match soft {
+                            Some(s) => {
+                                let hits = Self::chord_hits(&coords, x, y);
+                                price += s.crossing * hits as f64;
+                                conflict = hits > 0;
+                            }
+                            None if !Self::chord_fits(&coords, x, y) => continue,
+                            None => {}
+                        }
                     }
                     if let Some(p) = interior {
                         let q = self.pos_point(t, lu, CPos::Edge(k), None, Some(j));
-                        if points.iter().any(|&(c, d)| segs_intersect(p, q, c, d)) {
-                            continue;
+                        let hit = |&&(c, d): &&(Point, Point)| segs_intersect(p, q, c, d);
+                        match soft {
+                            Some(s) => {
+                                let hits = points.iter().filter(hit).count();
+                                price += s.crossing * hits as f64;
+                                conflict |= hits > 0;
+                            }
+                            None if points.iter().any(|x| hit(&x)) => continue,
+                            None => {}
                         }
                     }
                 }
-                let Some((lo, hi)) = Self::slot_interval(view, item.sides, j, &mut scratch) else {
-                    continue;
+                let (lo, hi) = match (Self::slot_interval(view, item.sides, j, &mut scratch), soft) {
+                    (Some(i), _) => i,
+                    (None, Some(s)) => {
+                        let (over, at) = Self::slot_overflow(view, item.sides, j, &mut scratch);
+                        price += s.crossing + s.overflow * over;
+                        conflict = true;
+                        (at, at)
+                    }
+                    (None, None) => continue,
                 };
-                let q = pu + dir * (node.pos - pu).dot(dir).clamp(lo, hi);
-                push(
-                    best,
-                    nodes,
-                    open,
-                    NK::Tri {
-                        t: t2,
-                        li: lu as u8,
-                        entry: k2,
-                        slot: j as u16,
-                    },
-                    q,
-                    // on kept copper of the net the way is already there
-                    if self.on_kept(lu, t2) {
-                        node.g
-                    } else {
-                        let step = node.pos.dist(q);
-                        node.g + step + self.across(lu, node.pos, q) + escape + self.pull(guide, q, step)
-                    },
-                    idx,
-                );
+                if let Some(p) = prices {
+                    let room = p.reserve * (n + 2) as f64;
+                    if hi - lo < room {
+                        price += p.tight * (1.0 - (hi - lo) / room);
+                    }
+                }
+                if conflict {
+                    if cheapest.is_none_or(|c| price < c.0) {
+                        cheapest = Some((price, j, lo, hi));
+                    }
+                    continue;
+                }
+                let (kind, q, g) = node_at(j, lo, hi, price);
+                push(best, nodes, open, kind, q, g, idx);
+            }
+            if let Some((price, j, lo, hi)) = cheapest {
+                let (kind, q, g) = node_at(j, lo, hi, price);
+                push(best, nodes, open, kind, q, g, idx);
             }
         };
 
@@ -1988,6 +2196,7 @@ impl<'a> Router<'a> {
         // via checks depend on the routes and the net only, so one per site and search will do
         let mut site_ok: FastMap<u32, bool> = FastMap::default();
         let mut vertex_ok: FastMap<u32, Option<bool>> = FastMap::default();
+        let mut via_fits: FastMap<u32, bool> = FastMap::default();
         let mut expansions = 0;
         while let Some(Open(_, idx)) = open.pop() {
             let node = nodes[idx as usize];
@@ -2134,14 +2343,21 @@ impl<'a> Router<'a> {
                         let Some(existing) = ok else {
                             continue;
                         };
-                        if let Some((ep, es)) = entry_pos
+                        let mut vc = if existing { 0.1 } else { self.cfg.via_cost };
+                        if let Some(s) = soft {
+                            if let Some((ep, es)) = entry_pos {
+                                vc += s.crossing * self.chords_crossed(t, lu, net, ep, es, CPos::Vertex(i)) as f64;
+                            }
+                            if !existing && !*via_fits.entry(site).or_insert_with(|| self.vertex_fits(site, net)) {
+                                vc += s.crossing;
+                            }
+                        } else if let Some((ep, es)) = entry_pos
                             && !self.chord_ok(t, lu, net, ep, es, CPos::Vertex(i), None)
                         {
                             continue;
                         }
                         let q = m.verts[v as usize];
                         let d = node.pos.dist(q);
-                        let vc = if existing { 0.1 } else { self.cfg.via_cost };
                         if conn.goal == Goal::Plane && self.in_plane(q, net) {
                             push(best, nodes, open, NK::GoalVia { site }, q, node.g + d + vc * 0.5, idx);
                             continue;
@@ -2197,13 +2413,23 @@ impl<'a> Router<'a> {
                         if own_vias.iter().any(|v| v.dist(q) < hole_gap) {
                             continue;
                         }
-                        if let Some((ep, es)) = entry_pos
+                        let mut vc = self.cfg.via_cost;
+                        if let Some(s) = soft {
+                            if let Some((ep, es)) = entry_pos {
+                                vc += s.crossing * self.half_chords_crossed(t, lu, net, q, ep, es) as f64;
+                            }
+                        } else if let Some((ep, es)) = entry_pos
                             && !self.half_chord_ok(t, lu, net, q, ep, es)
                         {
                             continue;
                         }
                         if !*site_ok.entry(site).or_insert_with(|| self.via_ok_site(site, net)) {
                             continue;
+                        }
+                        if let Some(s) = soft
+                            && !*via_fits.entry(site).or_insert_with(|| self.site_fits(site, net))
+                        {
+                            vc += s.crossing;
                         }
                         tried += 1;
                         if self.sub.shared.sites[site as usize].pad.is_some()
@@ -2215,7 +2441,7 @@ impl<'a> Router<'a> {
                                 open,
                                 NK::GoalSite { site },
                                 q,
-                                node.g + d + self.cfg.via_cost * 0.5,
+                                node.g + d + vc - self.cfg.via_cost * 0.5,
                                 idx,
                             );
                             continue;
@@ -2228,7 +2454,7 @@ impl<'a> Router<'a> {
                                     open,
                                     NK::Site { site, li: l2 as u8 },
                                     q,
-                                    node.g + d + self.cfg.via_cost,
+                                    node.g + d + vc,
                                     idx,
                                 );
                             }
@@ -2653,13 +2879,19 @@ impl<'a> Router<'a> {
                 self.pending[p] += 1;
             }
         }
-        for ci in 0..self.conns.len() {
-            let ok = self.route_one(ci);
-            for p in self.conn_pins(ci) {
-                self.pending[p] -= 1;
-            }
-            if !ok {
-                failed.push(ci);
+        if self.cfg.negotiate > 0 && !self.soft_on {
+            self.negotiate();
+            self.pending.fill(0);
+            failed = self.unrouted();
+        } else {
+            for ci in 0..self.conns.len() {
+                let ok = self.route_one(ci);
+                for p in self.conn_pins(ci) {
+                    self.pending[p] -= 1;
+                }
+                if !ok {
+                    failed.push(ci);
+                }
             }
         }
         // Fan-outs that found no plane: try a via in the pad, then connect to the nearest pin of
@@ -2710,6 +2942,162 @@ impl<'a> Router<'a> {
         }
         self.reduce_vias();
         self.conn_segs.iter().filter(|s| !s.is_empty()).count()
+    }
+
+    /// PathFinder on the topology. In a first pass every connection takes its way and may
+    /// overfill edges and cross tracks of other nets, for a price. Then, round after round, the
+    /// connections in a conflict are routed again, one at a time and seeing all the others: the
+    /// price of a conflict rises from round to round, and where conflicts stay the history
+    /// makes the edges dear for good, so that the connection with the fewest alternatives keeps
+    /// the place. What is still in a conflict after the last round is ripped up, which leaves a
+    /// legal topology; the rip-up passes of [`Router::run`] take over from there, with the
+    /// history as a guide.
+    pub fn negotiate(&mut self) {
+        let env = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let log = std::env::var("GB_NEG_LOG").is_ok();
+        let growth = env("GB_NEG_GROWTH", 1.5);
+        let history = env("GB_NEG_HISTORY", 1.0);
+        self.prices = Some(Prices {
+            soft: true,
+            overflow: env("GB_NEG_OVERFLOW", 2.0),
+            crossing: env("GB_NEG_CROSSING", 1.5),
+            history: self.cross.iter().map(|l| vec![0.0; l.len()]).collect(),
+            tight: env("GB_NEG_TIGHT", 3.0),
+            reserve: env("GB_NEG_RESERVE", 0.05),
+        });
+        for ci in 0..self.conns.len() {
+            self.route_one(ci);
+        }
+        let t0 = std::time::Instant::now();
+        let (mut least, mut stale) = (usize::MAX, 0);
+        for round in 1..=self.cfg.negotiate {
+            let (conflicts, edges, crossings) = self.conflicts(history);
+            let mut todo: Vec<usize> = (0..self.conns.len())
+                .filter(|&ci| conflicts[ci] > 0 || self.conn_segs[ci].is_empty())
+                .collect();
+            if log {
+                eprintln!(
+                    "negotiation seed {} round {round}: {} connections to route, {edges} edges over, {crossings} crossings, {} unrouted, {:.1} s",
+                    self.cfg.seed,
+                    todo.len(),
+                    self.unrouted().len(),
+                    t0.elapsed().as_secs_f64()
+                );
+            }
+            // conflicts that no price settles: a connection without any legal way, or a board
+            // with more connections than room on its layers
+            let total = edges + crossings;
+            stale = if (total as f64) < least as f64 * 0.97 {
+                0
+            } else {
+                stale + 1
+            };
+            least = least.min(total);
+            if todo.is_empty() || round == self.cfg.negotiate || stale == MAX_STALE {
+                break;
+            }
+            if let Some(p) = &mut self.prices {
+                p.overflow *= growth;
+                p.crossing *= growth;
+            }
+            todo.sort_by_key(|&ci| std::cmp::Reverse(conflicts[ci]));
+            for ci in todo {
+                if self.conn_segs[ci].is_empty() || self.conn_in_conflict(ci) {
+                    self.rip_up(ci);
+                    self.route_one(ci);
+                }
+            }
+        }
+        // the worst offenders go first, which may settle the conflicts of others
+        let (conflicts, _, _) = self.conflicts(0.0);
+        let mut order: Vec<usize> = (0..self.conns.len()).filter(|&ci| conflicts[ci] > 0).collect();
+        order.sort_by_key(|&ci| std::cmp::Reverse(conflicts[ci]));
+        if let Some(p) = &mut self.prices {
+            p.soft = false;
+        }
+        for ci in order {
+            if self.conn_in_conflict(ci) {
+                self.rip_up(ci);
+            }
+        }
+    }
+
+    /// Conflicts of the current state, per connection: the edges over capacity it crosses and
+    /// the tracks of other nets it crosses. Adds to the history of the edges in a conflict and
+    /// returns the conflicts per connection, the edges over capacity and the crossings.
+    fn conflicts(&mut self, history: f64) -> (Vec<u32>, usize, usize) {
+        let mut per_conn = vec![0; self.conns.len()];
+        let (mut edges, mut crossings) = (0, 0);
+        let mut hist = self.prices.as_mut().map(|p| std::mem::take(&mut p.history));
+        for li in 0..self.nl() {
+            for e in 0..self.cross[li].len() {
+                if self.cross[li][e].is_empty() {
+                    continue;
+                }
+                let over = self.edge_overflow(li, e as u32);
+                if over <= OVER_TOL {
+                    continue;
+                }
+                edges += 1;
+                for &s in &self.cross[li][e] {
+                    per_conn[self.segs[s as usize].as_ref().unwrap().conn as usize] += 1;
+                }
+                if let Some(h) = &mut hist {
+                    h[li].resize(self.cross[li].len(), 0.0);
+                    h[li][e] += history * over.max(0.1);
+                }
+            }
+            for t in 0..self.chords[li].len() {
+                for (a, b) in self.tri_crossings(li, t as u32) {
+                    crossings += 1;
+                    per_conn[a] += 1;
+                    per_conn[b] += 1;
+                    if let Some(h) = &mut hist {
+                        h[li].resize(self.cross[li].len(), 0.0);
+                        for &e in &self.m(li).tri_edges[t] {
+                            h[li][e as usize] += history * 0.1;
+                        }
+                    }
+                }
+            }
+        }
+        if let (Some(p), Some(h)) = (self.prices.as_mut(), hist) {
+            p.history = h;
+        }
+        (per_conn, edges, crossings)
+    }
+
+    /// Pairs of connections with chords of different nets that cross in triangle t.
+    fn tri_crossings(&self, li: usize, t: u32) -> Vec<(usize, usize)> {
+        let list = &self.chords[li][t as usize];
+        let mut out = Vec::new();
+        if list.len() < 2 {
+            return out;
+        }
+        let seg = |ch: &Chord| self.segs[ch.seg as usize].as_ref().unwrap();
+        let at = |ch: &Chord, p: CPos| self.coord(t, li, p, Some(ch.seg), None);
+        for (i, a) in list.iter().enumerate() {
+            let (x, y) = (at(a, a.a), at(a, a.b));
+            for b in &list[i + 1..] {
+                let (sa, sb) = (seg(a), seg(b));
+                if sa.net != sb.net && Self::chord_hits(&[(at(b, b.a), at(b, b.b))], x, y) > 0 {
+                    out.push((sa.conn as usize, sb.conn as usize));
+                }
+            }
+        }
+        out
+    }
+
+    /// Is connection ci on an edge over capacity, or does it cross a track of another net?
+    fn conn_in_conflict(&self, ci: usize) -> bool {
+        self.conn_segs[ci].iter().any(|&sid| {
+            let s = self.segs[sid as usize].as_ref().unwrap();
+            let li = s.li as usize;
+            s.crossings.iter().any(|c| self.edge_overflow(li, c.e) > OVER_TOL)
+                || s.chord_tris
+                    .iter()
+                    .any(|&t| self.tri_crossings(li, t).iter().any(|&(a, b)| a == ci || b == ci))
+        })
     }
 
     /// Connections with vias are routed again at a high via price. A connection keeps the
@@ -2949,5 +3337,98 @@ mod tests {
         r.plan();
         assert_eq!(r.conns.len(), 1);
         assert_eq!(r.conns[0].from, 1);
+    }
+
+    #[test]
+    fn slot_overflow_tells_how_much_is_missing() {
+        let p = Placed {
+            need_u: 0.1,
+            need_v: 0.1,
+            bounds: (f64::NEG_INFINITY, f64::INFINITY),
+            gap_next: 0.4,
+            gap_to_new: 0.4,
+            gap_from_new: 0.4,
+        };
+        let view = |len| EdgeView {
+            placed: vec![p, p],
+            len,
+            hot: 0.0,
+            need_u: 0.1,
+            need_v: 0.1,
+            apex: [(f64::INFINITY, f64::NEG_INFINITY); 2],
+        };
+        let mut lo = Vec::new();
+        // three tracks need 0.1 + 0.4 + 0.4 + 0.1 mm
+        let tight = view(0.9);
+        for j in 0..3 {
+            assert!(Router::slot_interval(&tight, [2, 2], j, &mut lo).is_none());
+            let (over, at) = Router::slot_overflow(&tight, [2, 2], j, &mut lo);
+            assert!((over - 0.1).abs() < 1e-9, "slot {j}: {over}");
+            assert!((0.0..=0.9).contains(&at));
+        }
+        let wide = view(1.0);
+        assert!(Router::slot_interval(&wide, [2, 2], 1, &mut lo).is_some());
+        assert!(Router::slot_overflow(&wide, [2, 2], 1, &mut lo).0.abs() < 1e-9);
+    }
+
+    /// Two nets that cross on the pad layer: a board where A runs left to right and B top to
+    /// bottom.
+    fn crossing_board() -> Board {
+        let mut b = crate::topo::tests::two_pad_board();
+        let mut net = b.nets[0].clone();
+        net.name = "B".into();
+        net.pins = vec![2, 3];
+        b.nets.push(net);
+        for (i, y) in [2.0, 8.0].into_iter().enumerate() {
+            let mut o = b.obstacles[0].clone();
+            o.shape = Shape::Polygon(crate::geom::roundrect_polygon(pt(5., y), 1.0, 1.0, 0.0, 0.0, 0.005));
+            o.net = Some(1);
+            o.pin = Some(2 + i);
+            b.obstacles.push(o);
+            let mut p = b.pins[0].clone();
+            p.name = format!("Q{i}");
+            p.footprint = p.name.clone();
+            p.net = 1;
+            p.pos = pt(5., y);
+            p.obstacles = vec![2 + i];
+            b.pins.push(p);
+        }
+        b
+    }
+
+    #[test]
+    fn a_negotiation_ends_legal() {
+        let b = crossing_board();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        for rounds in [1, 8] {
+            let cfg = RouterConfig {
+                negotiate: rounds,
+                ..Default::default()
+            };
+            let mut r = Router::new(&b, &sub, cfg);
+            r.plan();
+            assert_eq!(r.run(), 2, "{rounds} rounds");
+            let (_, edges, crossings) = r.conflicts(0.0);
+            assert_eq!((edges, crossings), (0, 0), "{rounds} rounds");
+            assert!(crate::check::check(&b, &r.geometry()).is_empty());
+        }
+    }
+
+    #[test]
+    fn the_first_pass_of_a_negotiation_may_cross() {
+        let b = crossing_board();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        r.prices = Some(Prices {
+            soft: true,
+            overflow: 2.0,
+            crossing: 0.5,
+            history: r.cross.iter().map(|l| vec![0.0; l.len()]).collect(),
+            tight: 0.0,
+            reserve: 0.05,
+        });
+        assert!(r.route_one(0) && r.route_one(1));
+        assert_eq!(r.conflicts(0.0).2, 1);
     }
 }

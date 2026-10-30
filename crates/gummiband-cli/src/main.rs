@@ -91,6 +91,10 @@ enum Cmd {
         /// from the board's stackup; the gap stays.
         #[arg(long)]
         pair_zdiff: Option<f64>,
+        /// Experimental: rounds of negotiated routing before the rip-up passes (0 = off).
+        /// Connections may overfill edges and cross for a rising price, see docs/ARCHITECTURE.md.
+        #[arg(long, default_value_t = 0)]
+        negotiate: usize,
         /// Generations of the evolutionary order search after the portfolio.
         #[arg(long, default_value_t = 3)]
         generations: usize,
@@ -289,6 +293,7 @@ fn main() -> Result<()> {
             layer_dirs,
             pair_pull,
             via_pass,
+            negotiate,
             pairs,
             pair_skew,
             pair_zdiff,
@@ -390,6 +395,7 @@ fn main() -> Result<()> {
                 layer_dirs,
                 pair_pull,
                 via_pass,
+                negotiate,
                 ..Default::default()
             };
             let search_cfg = gummiband_core::SearchConfig {
