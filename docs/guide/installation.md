@@ -23,6 +23,11 @@ target/release/gummiband --help
 
 To update, `git pull` and build again. The plugin picks up the new binary on its next run.
 
+Optional, macOS only: `cargo build --release -p gummiband-cli --features gpu` builds a binary that
+can run the track relaxation on the GPU when started with `GB_GPU=1`. It is experimental and
+behaves exactly like the normal binary without the variable, see the
+[command line](cli.md#environment-variables).
+
 The MCP server for AI agents is a separate binary, built with
 `cargo build --release -p gummiband-mcp`. Its setup is in [MCP.md](../MCP.md).
 
