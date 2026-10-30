@@ -11,7 +11,7 @@ use crate::geom::{Point, arc_polyline, orient, point_seg_dist, segs_intersect};
 use crate::index::{FastMap, GridIndex};
 use crate::realize::{Elem, Geometry, Track, Via, flatten};
 use crate::route::{CPos, Chord, Crossing, End, Item, Router, Seg};
-use crate::topo::{Mesh, NONE};
+use crate::topo::{Mesh, NONE, PAD_SITE};
 
 /// The soft copper of a board.
 #[derive(Debug, Clone, Default)]
@@ -33,6 +33,8 @@ pub struct SoftNode {
     pub clearance: f64,
     /// File items of the via.
     pub items: Vec<u32>,
+    /// A change of track width: it stays where it is, a neck may be allowed only there.
+    pub fixed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -271,6 +273,46 @@ impl Board {
         let mut soft = SoftCopper::default();
         let mut soft_node: Vec<Option<u32>> = vec![None; raw.len()];
         let mut done = vec![false; pieces.len()];
+        let node_for = |k: usize, raw: &[RawNode], soft: &mut SoftCopper, soft_node: &mut Vec<Option<u32>>| -> u32 {
+            let r = &raw[k];
+            if let Some(n) = soft_node[k] {
+                return n;
+            }
+            let clearance = self.class_of(r.net).clearance.max(self.rules.min_clearance);
+            soft_node[k] = Some(soft.nodes.len() as u32);
+            soft.nodes.push(match r.via {
+                Some(i) => {
+                    let c = &self.copper[i];
+                    let CopperKind::Via { diameter, drill, .. } = c.kind else {
+                        unreachable!()
+                    };
+                    SoftNode {
+                        at: r.at,
+                        net: r.net,
+                        layer: None,
+                        r: diameter / 2.0,
+                        drill,
+                        clearance,
+                        items: vec![c.source],
+                        fixed: false,
+                    }
+                }
+                None => SoftNode {
+                    at: r.at,
+                    net: r.net,
+                    layer: Some(r.layer),
+                    r: r.ends
+                        .iter()
+                        .map(|e| pieces[e.0 as usize].width / 2.0)
+                        .fold(0.0, f64::max),
+                    drill: 0.0,
+                    clearance,
+                    items: Vec::new(),
+                    fixed: r.ends.len() == 2,
+                },
+            });
+            soft_node[k].unwrap()
+        };
         let walk = |n0: usize,
                     e0: (u32, u8),
                     raw: &[RawNode],
@@ -320,44 +362,12 @@ impl Board {
             }
             let (net, layer) = (pieces[e0.0 as usize].net, pieces[e0.0 as usize].layer);
             let clearance = self.class_of(net).clearance.max(self.rules.min_clearance);
-            let mut end_of = |k: usize, soft: &mut SoftCopper| -> SoftEnd {
-                let r = &raw[k];
-                if r.via.is_none() && r.pad {
-                    return SoftEnd::Fixed;
+            let mut end_of = |k: usize, soft: &mut SoftCopper| {
+                if raw[k].via.is_none() && raw[k].pad {
+                    SoftEnd::Fixed
+                } else {
+                    SoftEnd::Node(node_for(k, raw, soft, soft_node))
                 }
-                if soft_node[k].is_none() {
-                    soft_node[k] = Some(soft.nodes.len() as u32);
-                    soft.nodes.push(match r.via {
-                        Some(i) => {
-                            let c = &self.copper[i];
-                            let CopperKind::Via { diameter, drill, .. } = c.kind else {
-                                unreachable!()
-                            };
-                            SoftNode {
-                                at: r.at,
-                                net: r.net,
-                                layer: None,
-                                r: diameter / 2.0,
-                                drill,
-                                clearance,
-                                items: vec![c.source],
-                            }
-                        }
-                        None => SoftNode {
-                            at: r.at,
-                            net: r.net,
-                            layer: Some(r.layer),
-                            r: r.ends
-                                .iter()
-                                .map(|e| pieces[e.0 as usize].width / 2.0)
-                                .fold(0.0, f64::max),
-                            drill: 0.0,
-                            clearance,
-                            items: Vec::new(),
-                        },
-                    });
-                }
-                SoftEnd::Node(soft_node[k].unwrap())
             };
             let (start, end) = (end_of(n0, soft), end_of(n, soft));
             soft.chains.push(SoftChain {
@@ -380,6 +390,12 @@ impl Board {
                 if !done[e.0 as usize] {
                     walk(n, e, &raw, &is_break, &mut soft, &mut soft_node, &mut done);
                 }
+            }
+        }
+        // vias without tracks
+        for (n, r) in raw.iter().enumerate() {
+            if r.via.is_some() && r.ends.is_empty() {
+                node_for(n, &raw, &mut soft, &mut soft_node);
             }
         }
         // closed rings have no break yet
@@ -553,6 +569,12 @@ impl Router<'_> {
         let base = self.sub.shared.soft_base as u32;
         for (i, n) in soft.nodes.iter().enumerate() {
             let site = base + i as u32;
+            // right on the border of a triangle that was split for another node: no vertex
+            for m in &mut self.sub.m {
+                if m.site_tri[site as usize] == NONE {
+                    m.site_tri[site as usize] = PAD_SITE;
+                }
+            }
             self.split_at(site);
             self.place_soft_via(site, n);
         }
@@ -595,7 +617,7 @@ impl Router<'_> {
             *pts.last_mut().unwrap() = m.verts[v as usize];
         }
         let Some(tr) = trace(m, &pts, vs, index) else {
-            self.soft_lost += 1;
+            self.soft_lost.push(ci);
             return;
         };
         let id = self.segs.len() as u32;
@@ -755,7 +777,6 @@ impl Router<'_> {
         for &sid in &routed {
             let s = self.segs[sid as usize].as_ref().unwrap();
             let li = s.li as usize;
-            let m = &self.sub.m[li];
             let path = flatten(&self.seg_path(sid));
             for &t in &s.chord_tris {
                 for ch in &self.chords[li][t as usize] {
@@ -789,7 +810,6 @@ impl Router<'_> {
                     }
                 }
             }
-            let _ = m;
         }
         for (sid, s) in self.segs.iter().enumerate() {
             let Some(s) = s else { continue };
@@ -816,10 +836,26 @@ impl Router<'_> {
                 resting: !bent,
             });
         }
+        // what could not be traced is still there
+        for &c in &self.soft_lost {
+            let ch = &soft.chains[c as usize];
+            tracks.push(Track {
+                pts: ch.pts.clone(),
+                elems: ch.elems.clone(),
+                width: ch.width,
+                layer: ch.layer,
+                net: ch.net,
+                necks: Vec::new(),
+                neck_w: ch.width,
+                origin: Some(c),
+                resting: true,
+            });
+        }
         let base = self.sub.shared.soft_base as u32;
         let mut vias: Vec<Via> = self
             .vias
             .iter()
+            .filter(|(v, _)| v.checked_sub(base).is_none_or(|n| !soft.nodes[n as usize].fixed))
             .map(|(&v, info)| {
                 let node = v.checked_sub(base);
                 Via {
@@ -952,4 +988,135 @@ fn trace(m: &Mesh, pts: &[Point], from: Option<u32>, index: &GridIndex) -> Optio
         last: t,
         first,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::*;
+    use crate::geom::{Polygon, Shape, pt};
+    use crate::route::RouterConfig;
+    use crate::topo::{Substrate, SubstrateConfig};
+    use crate::{SearchConfig, route_board};
+
+    /// Net A runs from (2, 5) to (8, 5) as an unlocked track through a channel that ends at
+    /// y = 4.4 and 5.6 at x = 5; net B has to pass the same channel from below.
+    fn channel_board() -> Board {
+        let mut b = crate::topo::tests::two_pad_board();
+        b.layers.truncate(1);
+        b.nets.push(Net {
+            name: "B".into(),
+            class: 0,
+            pins: vec![2, 3],
+            planes: LayerSet::default(),
+            priority: 0,
+        });
+        for (i, x) in [3.5, 6.5].into_iter().enumerate() {
+            let at = b.obstacles.len();
+            b.obstacles.push(Obstacle {
+                shape: Shape::Polygon(crate::geom::roundrect_polygon(pt(x, 3.0), 0.6, 0.6, 0.0, 0.0, 0.005)),
+                layers: LayerSet::single(0),
+                net: Some(1),
+                kind: ObstacleKind::Pad,
+                hole: None,
+                clearance: 0.2,
+                pin: Some(2 + i),
+                locked: true,
+            });
+            b.pins.push(Pin {
+                name: format!("Q{i}"),
+                footprint: format!("Q{i}"),
+                net: 1,
+                pos: pt(x, 3.0),
+                layers: LayerSet::single(0),
+                obstacles: vec![at],
+                size: (0.6, 0.6),
+            });
+        }
+        for (y0, y1) in [(-1.0, 4.4), (5.6, 11.0)] {
+            b.obstacles.push(Obstacle {
+                shape: Shape::Polygon(Polygon::new(vec![pt(4.6, y0), pt(5.4, y0), pt(5.4, y1), pt(4.6, y1)])),
+                layers: LayerSet::single(0),
+                net: None,
+                kind: ObstacleKind::Graphic,
+                hole: None,
+                clearance: 0.2,
+                pin: None,
+                locked: true,
+            });
+        }
+        let first = b.obstacles.len() as u32;
+        let (a, z) = (pt(2.0, 5.0), pt(8.0, 5.0));
+        b.obstacles.push(Obstacle {
+            shape: Shape::Capsule { a, b: z, r: 0.1 },
+            layers: LayerSet::single(0),
+            net: Some(0),
+            kind: ObstacleKind::Track,
+            hole: None,
+            clearance: 0.2,
+            pin: None,
+            locked: false,
+        });
+        b.copper.push(CopperItem {
+            kind: CopperKind::Line {
+                a,
+                b: z,
+                width: 0.2,
+                layer: 0,
+            },
+            net: Some(0),
+            locked: false,
+            source: 7,
+            first,
+            last: first + 1,
+        });
+        b
+    }
+
+    #[test]
+    fn a_track_becomes_a_chain_between_its_pads() {
+        let mut b = channel_board();
+        b.soften(&["B".to_string()]);
+        assert_eq!(b.soft.chains.len(), 1);
+        let c = &b.soft.chains[0];
+        assert_eq!((c.start, c.end), (SoftEnd::Fixed, SoftEnd::Fixed));
+        assert_eq!(c.items, vec![7]);
+        assert!(b.obstacles.last().unwrap().layers.is_empty());
+    }
+
+    #[test]
+    fn a_resting_track_keeps_its_geometry_and_crosses_in_order() {
+        let mut b = channel_board();
+        b.soften(&["B".to_string()]);
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let r = Router::new(&b, &sub, RouterConfig::default());
+        assert!(r.soft_lost.is_empty());
+        let s = r.segs[0].as_ref().unwrap();
+        assert!(!s.crossings.is_empty());
+        assert!(r.validate().iter().all(|l| !l.contains("does not cross")));
+        let g = r.geometry();
+        assert!(g.tracks[0].resting);
+        assert_eq!(g.tracks[0].pts, vec![pt(2.0, 5.0), pt(8.0, 5.0)]);
+    }
+
+    #[test]
+    fn a_new_connection_threads_in_and_pushes_the_track_aside() {
+        let mut b = channel_board();
+        b.nets[0].pins.clear();
+        b.soften(&["B".to_string()]);
+        let search = SearchConfig {
+            population: 2,
+            generations: 0,
+            geometry_generations: 0,
+            frames: false,
+            progress: None,
+        };
+        let (_, res) = route_board(&b, &SubstrateConfig::default(), &RouterConfig::default(), &search);
+        assert_eq!(res.stats.routed, 1, "{:?}", res.stats.unrouted);
+        assert!(crate::check::check(&b, &res.geometry).is_empty());
+        let c = soft_changes(&b, &res.geometry);
+        assert_eq!(c.strip, vec![7]);
+        assert_eq!(c.chains, vec![true]);
+        assert!(c.shift >= 0.09 && c.shift < 0.6, "shift {}", c.shift);
+    }
 }

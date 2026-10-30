@@ -437,7 +437,9 @@ impl Mesh {
                 if let Some(&t) = face_to_tri.get(&f.index())
                     && m.status[t as usize] == NONE
                 {
+                    // (in the list so that a split passes it on; all are placed before any search)
                     m.site_tri[i] = t;
+                    m.tri_sites[t as usize].push(i as u32);
                     if d > 0.0 {
                         m.site_p.insert(i as u32, p);
                     }

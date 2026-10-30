@@ -170,8 +170,8 @@ pub struct Router<'a> {
     pub has_kept: bool,
     /// Soft copper of the board is in the topology, see [`crate::import`].
     pub soft_on: bool,
-    /// Tracks of the soft copper that could not be traced.
-    pub soft_lost: usize,
+    /// Chains of the soft copper that could not be traced: they stay as they are.
+    pub soft_lost: Vec<u32>,
     /// Per pin: number of unrouted connections that start or end there.
     pending: Vec<u32>,
     /// Buffers of the search, kept to avoid growing them again for every connection.
@@ -351,7 +351,7 @@ impl<'a> Router<'a> {
                 .any(|o| matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via)),
             pending: vec![0; board.pins.len()],
             soft_on: false,
-            soft_lost: 0,
+            soft_lost: Vec::new(),
         };
         if !board.soft.chains.is_empty() {
             r.import_soft();

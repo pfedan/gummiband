@@ -80,6 +80,7 @@ class CommandTest(unittest.TestCase):
         opts = runner.RouteOptions(geometry_generations=0, finish_nets=["A", "B"])
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
         self.assertIn("--keep-all", cmd)
+        self.assertIn("--shove", cmd)
         self.assertEqual(cmd[cmd.index("--nets") + 1], "A,B")
         self.assertNotIn("--keep-locked", cmd)
 

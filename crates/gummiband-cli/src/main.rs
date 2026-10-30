@@ -240,6 +240,9 @@ fn main() -> Result<()> {
             teardrops,
             net_priorities,
         } => {
+            if shove && (!keep_all || nets.is_empty() || move_parts) {
+                anyhow::bail!("--shove needs --keep-all and --nets, and fixed parts");
+            }
             let keep = if keep_all {
                 KeepCopper::All
             } else if keep_locked {

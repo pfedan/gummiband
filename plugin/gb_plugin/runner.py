@@ -91,7 +91,7 @@ def find_binary(env: Mapping[str, str] = os.environ, settings_path: Path = SETTI
 def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) -> List[str]:
     cmd = [binary, "route", str(board), "-o", str(output), "--progress"]
     if opts.finish_nets:
-        cmd += ["--keep-all", "--nets", ",".join(opts.finish_nets), "--give", "8"]
+        cmd += ["--keep-all", "--nets", ",".join(opts.finish_nets), "--shove", "--give", "8"]
     elif opts.keep_locked:
         cmd.append("--keep-locked")
     cmd += ["--runs", str(int(opts.runs)), "--via-cost", repr(float(opts.via_cost))]
