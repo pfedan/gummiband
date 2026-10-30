@@ -88,10 +88,17 @@ the violations are the price of the last connections through the pin rows. Origi
 - A post pass that removes via pairs when the hop also fits on the other layer (found in the MCP
   test: 23 short B.Cu hops, via cost 5 gives 175 instead of 208 vias without DRC errors).
 - Via count per net in the route result.
-- Follow-me with give: existing unlocked tracks should yield. Soft guides (a cost pull towards
-  the old route) failed on 2026-10-30: at most 65% of the length stays near the old way, and vias
-  grow from 278 to 755 at high weight. The right way is to import the tracks into the topology
-  (trace each one through the mesh into crossings) and let relaxation push them.
+- Follow-me with give: existing unlocked tracks yield. Soft guides (a cost pull towards the old
+  route) failed on 2026-10-30: at most 65% of the length stays near the old way, and vias grow
+  from 278 to 755 at high weight. Done instead: `route --keep-all --nets ... --shove` imports the
+  tracks into the topology (`gummiband-core::import`, see ARCHITECTURE), the new connection
+  threads in and relaxation pushes aside only what it touches. On the Lichtschnitzel follow-me
+  test LED_D3 goes from 0/1 to 1/1 with 0 clearance errors, 18 tracks moved by at most 0.32 mm,
+  the other copper unchanged in the file. 11 of 12 other nets, stripped and finished one by one,
+  are clean as well. Open: in the tightest spots the relaxation can still pull a track over a
+  neighbour (USB_DN at the USB-C pins, Arty /~{MR}: the clearance check reports it); a dense
+  board with no room in the topology stays unrouted (ULX3S, `--give` is the fallback there); a
+  new connection may leave kept copper a little before its open end, which leaves a stub.
 - Adaptive track width: as wide as the surroundings allow, instead of one neck width per zone.
 
 ## M4b: GPU experiment

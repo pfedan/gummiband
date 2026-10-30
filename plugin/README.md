@@ -112,5 +112,8 @@ WXTRACE=KICAD_API` to see the API trace and the plugin's stderr.
 ## Finish selected nets (follow-me)
 
 The second button, **Finish selected nets with Gummiband**, routes what is missing on the nets of
-the selected tracks, vias or pads. All copper on the board stays; a started track is continued
-from where it ends. The new tracks arrive as one undo step.
+the selected tracks, vias or pads. A started track is continued from its copper. Unlocked tracks
+of other nets shift aside where the new connection needs the room (`--shove`); locked ones stay,
+and what the new track does not touch stays exactly as it is. If there is no way even so, the
+tracks of nearby nets are routed again (`--give`). Everything arrives as one undo step. After
+vias moved, refill the zones before you run the DRC.

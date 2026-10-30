@@ -114,6 +114,27 @@ each layer stays planar by construction.
 - Rip-up and reroute of connections near a failed one, via-in-pad as a last resort for
   fan-outs.
 
+## Importing existing copper
+
+For finishing nets on a routed board (`--keep-all --nets ... --shove`) the unlocked tracks and
+vias of the other nets are no obstacles but part of the topology (`gummiband-core::import`).
+
+- Board side: `Board::soften` builds chains from the file's items: a chain is a run of one width
+  between two nodes. Nodes are vias, branches, open ends and changes of width; ends in a pad stay
+  fixed. Necks below a minimum width rule stay obstacles, a neck may be allowed only where it is.
+- Mesh side: every node becomes a vertex (a via in all layer meshes, a branch point in its own
+  layer) with the same splits as a placed via. Each chain is walked through its layer mesh into
+  crossings and chords, in the order the tracks really have on each edge, and keeps the real
+  crossing points. The router sees ordinary segments: capacity, chords and via threading work as
+  always, and a new connection threads in between them.
+- Geometry: imported tracks start exactly where they are, a routed track goes through portals
+  between its real neighbours. Only where it runs into a bend of an imported track (or a new via
+  splits a triangle) that stretch becomes the straight chord the topology assumes.
+- Relaxation: imported copper sleeps. It wakes when copper that is awake violates its clearance
+  and takes its neighbours along in the same way, so the wave ends where there is room. Sleeping
+  copper is not written: the file keeps those items byte for byte, and changed ones are replaced
+  (`import::soft_changes`).
+
 ## Geometry
 
 1. Portals on every crossed edge (room for the neighbours and the edge end clearances) and the
