@@ -1711,11 +1711,17 @@ impl<'a> Router<'a> {
                 continue;
             }
             let group = self.pin_group[conn.from];
-            let starts: Vec<usize> = (0..self.board.pins.len())
+            // any pin of the group can start: overlapping pads, or pins on one piece of kept
+            // copper
+            let starts: Vec<(usize, Point)> = (0..self.board.pins.len())
                 .filter(|&q| self.pin_group[q] == group && self.board.pins[q].layers.has(m.layer))
-                .flat_map(|q| self.board.pins[q].obstacles.iter().copied())
+                .flat_map(|q| {
+                    let pin = &self.board.pins[q];
+                    let pos = if self.has_kept { pin.pos } else { src.pos };
+                    pin.obstacles.iter().map(move |&o| (o, pos))
+                })
                 .collect();
-            for &o in &starts {
+            for &(o, pos) in &starts {
                 for &t in m.obs_tris.get(&(o as u32)).map(|v| v.as_slice()).unwrap_or(&[]) {
                     push(
                         best,
@@ -1727,7 +1733,7 @@ impl<'a> Router<'a> {
                             entry: 3,
                             slot: 0,
                         },
-                        src.pos,
+                        pos,
                         0.0,
                         u32::MAX,
                     );
@@ -2235,7 +2241,11 @@ impl<'a> Router<'a> {
 
         // Split the chain into runs of triangle nodes on one layer.
         let mut i = 0;
-        let mut start = End::Pin(conn.from);
+        // the search may have started at another pin of the group
+        let mut start = match chain.first().map(|n| n.kind) {
+            Some(NK::Tri { t, li, .. }) if self.has_kept => End::Pin(self.tri_pin(li as usize, t).unwrap_or(conn.from)),
+            _ => End::Pin(conn.from),
+        };
         while i < chain.len() {
             let NK::Tri { li, .. } = chain[i].kind else {
                 if let NK::Vert { site, .. } = chain[i].kind {
