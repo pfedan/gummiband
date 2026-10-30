@@ -411,18 +411,27 @@ impl<'a> Router<'a> {
         if let Goal::Pins(p) = &c.goal {
             pins.extend(p.iter().copied());
         }
-        // near pins the track may narrow to the pad width (fine pitch parts), never below the
-        // board minimum
+        // near pins the track may narrow to what fits there: the pad width, and at fine pitch
+        // the pitch to the next foreign pin of the part minus the clearance. As wide as
+        // possible, this copper carries the net's current, but at most 0.4 mm (wider necks ask
+        // more of the topology than it can keep near the zone border; measured over the
+        // boards). Never below the board minimum.
+        let clr = cls.clearance.max(self.board.rules.min_clearance);
         let pad_w = pins
             .iter()
-            .map(|&p| self.board.pins[p].size.0.min(self.board.pins[p].size.1))
+            .map(|&p| {
+                let pin = &self.board.pins[p];
+                let pitch = self
+                    .board
+                    .pins
+                    .iter()
+                    .filter(|q| q.footprint == pin.footprint && q.net != pin.net)
+                    .map(|q| q.pos.dist(pin.pos))
+                    .fold(f64::INFINITY, f64::min);
+                pin.size.0.min(pin.size.1).min(pitch - clr - 0.02).min(0.4)
+            })
             .fold(f64::INFINITY, f64::min);
-        let neck_w = self
-            .board
-            .rules
-            .min_track_width
-            .max(pad_w)
-            .min(cls.track_width);
+        let neck_w = self.board.rules.min_track_width.max(pad_w).min(cls.track_width);
         if neck_w >= cls.track_width - 1e-9 {
             return (Vec::new(), cls.track_width);
         }
@@ -1142,14 +1151,32 @@ impl<'a> Router<'a> {
                 if hits.len() == 2 && !m.tri_edges[cur as usize].contains(&new_edge(hits[0].0)) {
                     hits.swap(0, 1);
                 }
-                if hits
-                    .iter()
-                    .any(|h| !(0..3).any(|k| m.tri_edges[x[k] as usize].contains(&new_edge(h.0))))
-                    || hits
-                        .first()
-                        .is_some_and(|h| !m.tri_edges[cur as usize].contains(&new_edge(h.0)))
-                {
-                    hits.clear();
+                // the walk must end in a triangle that holds the chord's end; if the geometric
+                // side test was degenerate, take the direct way (any two of the new triangles
+                // are neighbours)
+                let holds_end = |xt: u32| match ch.b {
+                    CPos::Edge(k) => xt == x[k as usize],
+                    CPos::Vertex(i) => m.tris[xt as usize].contains(&old_tv[i as usize]),
+                };
+                let mut walk = Some(cur);
+                for h in &hits {
+                    walk = walk.and_then(|c| {
+                        let e = new_edge(h.0);
+                        m.tri_edges[c as usize].contains(&e).then(|| m.other_tri(e, c))
+                    });
+                }
+                if !walk.is_some_and(holds_end) {
+                    hits = if holds_end(cur) {
+                        Vec::new()
+                    } else {
+                        (0..3)
+                            .find(|&i| {
+                                let e = new_edge(i);
+                                m.tri_edges[cur as usize].contains(&e) && holds_end(m.other_tri(e, cur))
+                            })
+                            .map(|i| vec![(i, 0.5)])
+                            .unwrap_or_default()
+                    };
                 }
                 let mut new_cross: Vec<Crossing> = Vec::new();
                 let mut new_chords: Vec<(u32, Chord)> = Vec::new();
