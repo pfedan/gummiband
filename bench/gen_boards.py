@@ -685,8 +685,83 @@ def board_bga_dense():
                       "4 layers, 10x10 BGA 0.8 mm with 3 signal rings (84 signals) to four edge connectors")
 
 
+def board_fine_pitch():
+    """The fan-out of an RP2040 like part: 0.4 mm pitch, 0.2 mm pads, 0.19 mm clearance on two
+    layers, so that a 0.2 mm track only fits straight between the pins."""
+    b = Board("fine_pitch", 42, 42, title="2 layers, QFN-56 0.4 mm, 0.2/0.19 mm rules, no planes")
+    b.net_class("Fine", 0.2, 0.19, 0.6, 0.3, ["F*", "GND"])
+    cx = cy = 21.0
+    u = b.add(qfn("U1", 14, 0.4, 3.4375, 0.875, 0.2, 3.2), cx, cy)
+    u.pad(57).net = "GND"
+    sides = {0: [], 1: [], 2: [], 3: []}
+    for i in range(56):
+        side, k = divmod(i, 14)
+        sides[side].append((u, u.pad(i + 1)))
+    k = 0
+    for side in range(4):
+        rs = []
+        for i in range(14):
+            t = -10.4 + i * 1.6
+            k += 1
+            x, y, r = ((cx - 15.0, cy + t, 180), (cx + t, cy + 15.0, 270),
+                       (cx + 15.0, cy + t, 0), (cx + t, cy - 15.0, 90))[side]
+            res = b.add(two_terminal("R", f"R{k}"), x, y, r)
+            res.pad(2).net = "GND"
+            rs.append((res, res.pad(1)))
+        axis = 1 if side in (0, 2) else 0
+        match_sorted(sides[side], rs, lambda it: it[0].world(it[1])[axis], lambda it: it[0].world(it[1])[axis],
+                     [f"F{side * 14 + i + 1}" for i in range(14)])
+    return b
+
+
+def board_fine_pitch_mixed():
+    """The same part with the nets shuffled: the fan-out needs vias and crossings right at the
+    pins, as on a keyboard controller."""
+    b = Board("fine_pitch_mixed", 42, 42, title="2 layers, QFN-56 0.4 mm with shuffled nets")
+    b.net_class("Fine", 0.2, 0.19, 0.6, 0.3, ["F*", "GND"])
+    cx = cy = 21.0
+    u = b.add(qfn("U1", 14, 0.4, 3.4375, 0.875, 0.2, 3.2), cx, cy)
+    u.pad(57).net = "GND"
+    rng = random.Random(56)
+    order = list(range(1, 57))
+    rng.shuffle(order)
+    k = 0
+    for side in range(4):
+        for i in range(14):
+            t = -10.4 + i * 1.6
+            k += 1
+            x, y, r = ((cx - 15.0, cy + t, 180), (cx + t, cy + 15.0, 270),
+                       (cx + 15.0, cy + t, 0), (cx + t, cy - 15.0, 90))[side]
+            res = b.add(two_terminal("R", f"R{k}"), x, y, r)
+            res.pad(2).net = "GND"
+            res.pad(1).net = u.pad(order[k - 1]).net = f"F{k}"
+    return b
+
+
+def board_diff_pairs():
+    """Eight differential pairs between two connectors that sit at an angle, around parts."""
+    b = Board("diff_pairs", 50, 36, title="2 layers, 8 differential pairs (_P, _N) between 0.5 mm connectors")
+    j1 = b.add(fpc("J1", 26, 0.5), 5.5, 18, 90)
+    j2 = b.add(fpc("J2", 26, 0.5), 36, 4.5, 0)
+    names = []
+    for i in range(8):
+        names += [f"L{i}_P", f"L{i}_N", f"G{i}"]
+    sig1 = [(j1, p) for p in j1.pads if p.num.isdigit() and 2 <= int(p.num) <= 25]
+    sig2 = [(j2, p) for p in j2.pads if p.num.isdigit() and 2 <= int(p.num) <= 25]
+    match_sorted(sig1, sig2, lambda it: j1.world(it[1])[1], lambda it: j2.world(it[1])[0], names)
+    for j in (j1, j2):
+        j.pad(1).net = j.pad(26).net = "GND"
+    for i, (x, y) in enumerate(((20, 14), (26, 22), (32, 16), (16, 26))):
+        r = b.add(two_terminal("R", f"R{i + 1}"), x, y, 45 * (i % 2))
+        r.pad(1).net = f"P{i + 1}"
+        q = b.add(two_terminal("R", f"R{i + 5}"), 42 - i * 6, 31)
+        q.pad(1).net = f"P{i + 1}"
+    return b
+
+
 BOARDS = [board_easy, board_medium, board_bus, board_power_mix, board_crossing, board_qfn_fanout,
-          board_four_signal_layers, board_bga_escape, board_bga_dense]
+          board_four_signal_layers, board_bga_escape, board_bga_dense, board_fine_pitch, board_fine_pitch_mixed,
+          board_diff_pairs]
 
 
 def main():
