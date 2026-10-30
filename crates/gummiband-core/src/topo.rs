@@ -849,6 +849,7 @@ pub(crate) mod tests {
             priority: 0,
             min_width: None,
             neck_refs: Vec::new(),
+            ..Default::default()
         }];
         b.nets = vec![Net {
             name: "A".into(),
