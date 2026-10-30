@@ -368,7 +368,8 @@ pub fn add_locked(kb: &KicadBoard, items: &[Item]) -> String {
     format!("{head}{tail}")
 }
 
-/// Set a footprint's position (and rotation, if given) in a board file.
+/// Set a footprint's position (and rotation, if given) in a board file. Pads, texts and the
+/// footprint's zones follow, see `place_write::Patch::move_footprint`.
 pub fn place_footprint(text: &str, reference: &str, x: f64, y: f64, rotation: Option<f64>) -> anyhow::Result<String> {
     let root = crate::sexpr::parse(text).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
     for fp in root
@@ -389,14 +390,10 @@ pub fn place_footprint(text: &str, reference: &str, x: f64, y: f64, rotation: Op
             continue;
         }
         let Some(at) = fp.child("at") else { continue };
-        let old = at.args().iter().filter_map(|x| x.as_f64()).nth(2);
-        let mut new = format!("(at {} {}", f(x), f(y));
-        if let Some(r) = rotation.or(old) {
-            new.push_str(&format!(" {}", f(r)));
-        }
-        new.push(')');
-        let span = at.span();
-        return Ok(format!("{}{}{}", &text[..span.start], new, &text[span.end..]));
+        let old = at.args().iter().filter_map(|x| x.as_f64()).nth(2).unwrap_or(0.0);
+        let mut patch = crate::place_write::Patch::new(0);
+        patch.move_footprint(fp, Point { x, y }, rotation.unwrap_or(old));
+        return Ok(patch.apply(text, &root));
     }
     anyhow::bail!("no footprint {reference:?}")
 }
@@ -431,4 +428,39 @@ pub fn add_zone(
     );
     let end = text.rfind(')').unwrap_or(text.len());
     format!("{}{}{}", &text[..end], zone, &text[end..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BOARD: &str = r#"(kicad_pcb
+	(footprint "R"
+		(at 10 20 90)
+		(property "Reference" "R1" (at 0 -1 90))
+		(pad "1" smd rect (at -1 0 90) (size 1 2) (layers "F.Cu"))
+		(pad "2" smd rect (at 1 0 90) (size 1 2) (layers "F.Cu"))
+	)
+)
+"#;
+
+    #[test]
+    fn rotating_a_footprint_turns_its_pads() {
+        let out = place_footprint(BOARD, "R1", 12.5, 20.0, Some(-90.0)).unwrap();
+        assert!(out.contains("(at 12.5 20 -90)"), "{out}");
+        assert!(out.contains("(at -1 0 -90)"), "{out}");
+        assert!(out.contains("(at 1 0 -90)"), "{out}");
+        assert!(out.contains("(at 0 -1 -90)"), "{out}");
+    }
+
+    #[test]
+    fn moving_without_rotation_keeps_all_angles() {
+        let out = place_footprint(BOARD, "R1", 12.5, 20.0, None).unwrap();
+        assert_eq!(out, BOARD.replace("(at 10 20 90)", "(at 12.5 20 90)"));
+    }
+
+    #[test]
+    fn an_unknown_reference_is_an_error() {
+        assert!(place_footprint(BOARD, "R2", 0.0, 0.0, None).is_err());
+    }
 }
