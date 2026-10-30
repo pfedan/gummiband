@@ -130,6 +130,10 @@ wrote 83 items to routed.kicad_pcb
   hand, or lock the rest and run again.
 - `diff pairs: N, X of Y mm coupled (Z%)` appears when the board has nets paired by name: how
   much of the pairs' length runs side by side on one layer, at most 1 mm apart.
+- With `--pairs`, one `pair P / N: wide ...` line per pair follows: `wide` or `single` (routed
+  as two separate nets, with the reason), width and gap, the estimated differential impedance
+  from the stackup (0 if the stackup is unknown), both track lengths, the remaining skew, vias
+  and polarity swaps through the pair's vias.
 - `length lower bound`: an estimate of the shortest possible total signal length (minimum
   spanning trees, Steiner corrected). The percentage says how far the result is above it; plane
   fan-outs are not in the bound, so the real distance is smaller.
@@ -164,6 +168,10 @@ wrote 83 items to routed.kicad_pcb
   ]
 }
 ```
+
+With `--pairs` the report also has `pairs`: one entry per differential pair with `p`, `n`,
+`wide`, `note` (why a pair was not routed wide, if so), `width`, `gap`, `length_p`, `length_n`,
+`skew`, `vias`, `swaps` and `zdiff`.
 
 `violations[].nets` is the routed net and the other net (or null for an obstacle without a net,
 such as the board edge or a hole). Positions are board millimetres as KiCad shows them. Scripts
