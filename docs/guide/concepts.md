@@ -59,9 +59,10 @@ router could not see.
 ## Track width and necking
 
 A track has the width of its net class. Where the class width does not fit between fine pitch
-pins, the router may neck a track down near the pin, as far as the minimum width rules allow. The
-neck covers the pin area (the courtyard when a rule exempts one), so a whole fan-out narrows
-alike. `--net-widths` overrides the class width per net.
+pins, the router may neck a track down near the pin: at most down to the pad width, never below
+the board's minimum track width or what a custom minimum width rule allows. The neck covers the
+pin area (the courtyard when a rule exempts one), so a whole fan-out narrows alike.
+`--net-widths` overrides the class width per net.
 
 ## Vias
 
@@ -105,6 +106,8 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
 - **Partial routing.** Every run replaces all unlocked copper. There is no "route selected nets"
   and no follow-me routing from a half drawn track yet. Lock what you want to keep.
 - **Differential pairs and length matching.** Pairs are routed as two independent nets.
+- **Teardrops and preferred directions per layer.** Teardrops come from KiCad's own feature
+  after routing; layer directions are planned as a dimension of the search.
 - **Per net options from a file.** Priorities come from net classes; a `gummiband.toml` next to
   the board is planned. The MCP server has per net priority and skip today.
 - **More rule conditions.** Only the clearance and minimum width rules above; no rules by

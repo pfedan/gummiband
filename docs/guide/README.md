@@ -16,7 +16,8 @@ detail.
 
 For AI agents the router also speaks the Model Context Protocol, see [MCP.md](../MCP.md). The
 internals are in [ARCHITECTURE.md](../ARCHITECTURE.md), the roadmap in
-[MILESTONES.md](../MILESTONES.md).
+[MILESTONES.md](../MILESTONES.md), the standing decisions of the project in
+[DECISIONS.md](../DECISIONS.md).
 
 ## Vocabulary
 

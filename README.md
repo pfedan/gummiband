@@ -88,6 +88,7 @@ Reference and development:
 - [docs/MCP.md](docs/MCP.md): the MCP server for AI agents, tools and client setup.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): crates, data model, algorithms.
 - [docs/MILESTONES.md](docs/MILESTONES.md): what is done and what comes next.
+- [docs/DECISIONS.md](docs/DECISIONS.md): standing decisions and working rules of the project.
 - [plugin/README.md](plugin/README.md): plugin internals, dry runs and tests.
 - [bench/README.md](bench/README.md): the benchmark scripts.
 

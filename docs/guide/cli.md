@@ -181,11 +181,7 @@ with default net classes.
 | Variable | Effect |
 | --- | --- |
 | `RAYON_NUM_THREADS` | Default for `--threads`. |
-| `GB_EVO_SEED` | Seed of the evolutionary search (default fixed). Same board, same options, same seed give the same result. |
-| `GB_SHIFT="R8:0.3,0;C4:0,-0.2"` | Route with these footprints shifted by x,y millimetres (debugging placement ideas without editing the board). |
-
-More `GB_*` variables exist for debugging the core (timing, validation, drawing why a connection
-failed); they are listed in the source and may change without notice.
+| `GB_EVO_SEED` | Seed of the evolutionary search (default fixed). Same board, same options, same seed give the same result; another seed gives another attempt. |
 
 ## Exit status
 
