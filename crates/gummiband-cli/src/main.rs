@@ -483,7 +483,7 @@ fn main() -> Result<()> {
             let text = if res.offsets.is_empty() {
                 text
             } else {
-                write::move_footprints(&text, &res.offsets)?
+                write::move_footprints(&text, &res.offsets, &kb.board.blocks)?
             };
             let text = if teardrops {
                 write::enable_teardrops(&text)?

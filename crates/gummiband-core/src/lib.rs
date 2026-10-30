@@ -769,7 +769,15 @@ fn shift_parts(
             // the part shoves the movable parts in its way along (a chain, as far as needed)
             let mut trial_off = offsets.clone();
             let mut trial_cy = courtyards.clone();
-            if shove(board, fp, step * scale, &mut trial_cy, &mut trial_off, 0) {
+            if shove(
+                board,
+                fp,
+                step * scale,
+                &mut trial_cy,
+                &mut trial_off,
+                &mut Vec::new(),
+                0,
+            ) {
                 offsets = trial_off;
                 courtyards = trial_cy;
                 changed = true;
@@ -780,17 +788,22 @@ fn shift_parts(
     changed.then_some(offsets)
 }
 
-/// Shift footprint `fp` by `d`; movable parts whose courtyards it would run into are shifted
-/// by the same amount first (up to a chain of four). False if a fixed part or the board edge is
-/// in the way.
+/// Shift footprint `fp` by `d`, and with it the rest of its block; movable parts whose
+/// courtyards it would run into are shifted by the same amount first (up to a chain of four).
+/// False if a fixed part or the board edge is in the way.
 fn shove(
     board: &Board,
     fp: &str,
     d: geom::Point,
     courtyards: &mut HashMap<String, geom::Rect>,
     offsets: &mut HashMap<String, geom::Point>,
+    done: &mut Vec<String>,
     depth: usize,
 ) -> bool {
+    if done.iter().any(|x| x == fp) {
+        return true;
+    }
+    done.push(fp.to_string());
     let Some(r) = courtyards.get(fp).copied() else {
         return false;
     };
@@ -810,6 +823,22 @@ fn shove(
         return false;
     }
     courtyards.insert(fp.to_string(), moved);
+    let e = offsets.entry(fp.to_string()).or_insert(geom::pt(0.0, 0.0));
+    *e = *e + d;
+    // the block moves as a whole (a member without courtyard only takes the offset)
+    for block in board.blocks.iter().filter(|b| b.refs.iter().any(|x| x == fp)) {
+        for other in &block.refs {
+            if !courtyards.contains_key(other) {
+                if !done.contains(other) {
+                    done.push(other.clone());
+                    let e = offsets.entry(other.clone()).or_insert(geom::pt(0.0, 0.0));
+                    *e = *e + d;
+                }
+            } else if !shove(board, other, d, courtyards, offsets, done, depth) {
+                return false;
+            }
+        }
+    }
     // parts that already overlapped may keep overlapping as much as before
     let hit: Vec<String> = courtyards
         .iter()
@@ -817,12 +846,16 @@ fn shove(
         .map(|(other, _)| other.clone())
         .collect();
     for other in hit {
-        if depth >= 4 || !board.movable.contains(&other) || !shove(board, &other, d, courtyards, offsets, depth + 1) {
+        if done.contains(&other) {
+            continue;
+        }
+        if depth >= 4
+            || !board.movable.contains(&other)
+            || !shove(board, &other, d, courtyards, offsets, done, depth + 1)
+        {
             return false;
         }
     }
-    let e = offsets.entry(fp.to_string()).or_insert(geom::pt(0.0, 0.0));
-    *e = *e + d;
     true
 }
 
@@ -845,4 +878,58 @@ fn mutate_geo(best: &Candidate, rng: &mut Rng) -> Genome {
         }
     }
     g
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::Block;
+    use crate::geom::{Polygon, Rect, pt};
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect {
+            min: pt(x, y),
+            max: pt(x + w, y + h),
+        }
+    }
+
+    fn board() -> Board {
+        let mut b = Board::default();
+        b.outline.push(Polygon::new(vec![
+            pt(0.0, 0.0),
+            pt(50.0, 0.0),
+            pt(50.0, 50.0),
+            pt(0.0, 50.0),
+        ]));
+        b.courtyards.insert("A".into(), rect(10.0, 10.0, 2.0, 2.0));
+        b.courtyards.insert("B".into(), rect(13.0, 10.0, 2.0, 2.0));
+        b.courtyards.insert("C".into(), rect(20.0, 20.0, 2.0, 2.0));
+        b.movable = vec!["A".into(), "B".into(), "C".into()];
+        b
+    }
+
+    #[test]
+    fn a_block_moves_as_a_whole() {
+        let mut b = board();
+        b.blocks.push(Block {
+            refs: vec!["A".into(), "C".into()],
+            ..Default::default()
+        });
+        let (mut cy, mut off) = (b.courtyards.clone(), HashMap::new());
+        assert!(shove(&b, "A", pt(0.5, 0.0), &mut cy, &mut off, &mut Vec::new(), 0));
+        assert_eq!(off.len(), 2);
+        assert_eq!(off["C"].x, 0.5);
+        assert_eq!(cy["C"].min.x, 20.5);
+    }
+
+    #[test]
+    fn shoving_pushes_movable_neighbours_and_stops_at_fixed_ones() {
+        let mut b = board();
+        let (mut cy, mut off) = (b.courtyards.clone(), HashMap::new());
+        assert!(shove(&b, "A", pt(1.5, 0.0), &mut cy, &mut off, &mut Vec::new(), 0));
+        assert_eq!(off["B"].x, 1.5);
+        b.movable.retain(|f| f != "B");
+        let (mut cy, mut off) = (b.courtyards.clone(), HashMap::new());
+        assert!(!shove(&b, "A", pt(1.5, 0.0), &mut cy, &mut off, &mut Vec::new(), 0));
+    }
 }

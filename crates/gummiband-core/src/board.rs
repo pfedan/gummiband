@@ -174,6 +174,21 @@ pub struct Board {
     /// Footprints the router may shift a little (empty: placement is fixed).
     #[serde(default)]
     pub movable: Vec<String>,
+    /// Groups of parts with their pre-routed copper that move only as a whole.
+    #[serde(default)]
+    pub blocks: Vec<Block>,
+}
+
+/// A fixed block: a KiCad group of footprints and copper.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Block {
+    pub name: String,
+    /// Footprint references.
+    pub refs: Vec<String>,
+    /// Obstacles of the group's kept tracks and vias.
+    pub copper: Vec<usize>,
+    /// File ids of the group's tracks, arcs and vias, for the writer.
+    pub uuids: Vec<String>,
 }
 
 impl Board {
@@ -181,6 +196,13 @@ impl Board {
     /// courtyards move together).
     pub fn with_offsets(&self, offsets: &std::collections::HashMap<String, Point>) -> Board {
         let mut b = self.clone();
+        for block in &self.blocks {
+            if let Some(&d) = block.refs.iter().find_map(|r| offsets.get(r)) {
+                for &i in &block.copper {
+                    b.obstacles[i].shape = b.obstacles[i].shape.translated(d);
+                }
+            }
+        }
         for (fp, &d) in offsets {
             if let Some(obs) = self.footprint_obstacles.get(fp) {
                 for &i in obs {

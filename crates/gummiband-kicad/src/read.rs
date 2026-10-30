@@ -87,6 +87,8 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
         copper: Vec::new(),
         edges: Vec::new(),
         movable: Vec::new(),
+        fp_uuids: HashMap::new(),
+        copper_uuids: HashMap::new(),
     };
 
     r.read_layers(&root, opts);
@@ -97,7 +99,14 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
     for n in root.args() {
         match n.head() {
             Some("footprint") | Some("module") => r.read_footprint(n),
-            Some("segment") | Some("arc") | Some("via") => r.read_copper(n, opts.keep),
+            Some("segment") | Some("arc") | Some("via") => {
+                let first = r.b.obstacles.len();
+                r.read_copper(n, opts.keep);
+                if let Some(id) = item_id(n) {
+                    r.copper_uuids
+                        .insert(id.to_string(), (first..r.b.obstacles.len()).collect());
+                }
+            }
             Some("zone") => r.read_zone(n, opts),
             Some("gr_rect") | Some("gr_line") | Some("gr_arc") | Some("gr_circle") | Some("gr_poly") => {
                 r.read_graphic(n, None)
@@ -106,11 +115,18 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
         }
     }
     r.finish_outline();
+    r.read_groups(&root);
     if opts.move_parts {
         r.b.movable = std::mem::take(&mut r.movable)
             .into_iter()
             .filter(|f| !opts.fixed.contains(f) && r.b.courtyards.contains_key(f))
             .collect();
+        // a block with one fixed member stays where it is
+        for block in &r.b.blocks {
+            if block.refs.iter().any(|f| !r.b.movable.contains(f)) {
+                r.b.movable.retain(|f| !block.refs.contains(f));
+            }
+        }
     }
 
     Ok(KicadBoard {
@@ -134,6 +150,14 @@ struct Reader {
     edges: Vec<(Point, Point)>,
     /// Footprints that may move under `move_parts` (unlocked, no connector, module or hole).
     movable: Vec<String>,
+    /// File ids of footprints and of copper with its obstacles, to resolve groups.
+    fp_uuids: HashMap<String, String>,
+    copper_uuids: HashMap<String, Vec<usize>>,
+}
+
+/// The file id of an item: `uuid` since KiCad 8, `tstamp` before.
+fn item_id(n: &Node) -> Option<&str> {
+    n.child_str("uuid").or_else(|| n.child_str("tstamp"))
 }
 
 fn xy(n: &Node) -> Option<Point> {
@@ -406,6 +430,9 @@ impl Reader {
             })
             .unwrap_or("?")
             .to_string();
+        if let Some(id) = item_id(fp) {
+            self.fp_uuids.insert(id.to_string(), reference.clone());
+        }
         let first_obstacle = self.b.obstacles.len();
         // parts with an outside interface or a mechanical role stay where they are
         let lib = fp.args().first().and_then(|x| x.as_str()).unwrap_or("");
@@ -750,6 +777,28 @@ impl Reader {
                     pin: None,
                     locked: true,
                 });
+            }
+        }
+    }
+
+    /// KiCad groups with footprints become blocks.
+    fn read_groups(&mut self, root: &Node) {
+        for g in root.children("group") {
+            let mut block = Block {
+                name: g.args().first().and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                ..Default::default()
+            };
+            for m in g.child("members").map(|m| m.args()).unwrap_or(&[]) {
+                let Some(id) = m.as_str() else { continue };
+                if let Some(f) = self.fp_uuids.get(id) {
+                    block.refs.push(f.clone());
+                } else if let Some(obs) = self.copper_uuids.get(id) {
+                    block.uuids.push(id.to_string());
+                    block.copper.extend(obs);
+                }
+            }
+            if !block.refs.is_empty() {
+                self.b.blocks.push(block);
             }
         }
     }

@@ -222,7 +222,18 @@ impl UuidGen {
 
 /// Shift footprints (by reference) in a board file: only the footprint's own `(at x y [r])`
 /// changes, pads and graphics are relative to it.
-pub fn move_footprints(text: &str, offsets: &std::collections::HashMap<String, Point>) -> anyhow::Result<String> {
+pub fn move_footprints(
+    text: &str,
+    offsets: &std::collections::HashMap<String, Point>,
+    blocks: &[gummiband_core::board::Block],
+) -> anyhow::Result<String> {
+    // tracks and vias of a block go with it
+    let mut copper: std::collections::HashMap<&str, Point> = std::collections::HashMap::new();
+    for b in blocks {
+        if let Some(d) = b.refs.iter().find_map(|r| offsets.get(r)) {
+            copper.extend(b.uuids.iter().map(|u| (u.as_str(), *d)));
+        }
+    }
     let root = crate::sexpr::parse(text).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
     let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
     for fp in root
@@ -255,6 +266,24 @@ pub fn move_footprints(text: &str, offsets: &std::collections::HashMap<String, P
         }
         new.push(')');
         edits.push((at.span(), new));
+    }
+    for n in root
+        .args()
+        .iter()
+        .filter(|n| matches!(n.head(), Some("segment") | Some("arc") | Some("via")))
+    {
+        let id = n.child_str("uuid").or_else(|| n.child_str("tstamp"));
+        let Some(d) = id.and_then(|i| copper.get(i)) else {
+            continue;
+        };
+        for key in ["start", "mid", "end", "at"] {
+            if let Some(p) = n.child(key) {
+                let v = p.args().iter().filter_map(|x| x.as_f64()).collect::<Vec<_>>();
+                if v.len() >= 2 {
+                    edits.push((p.span(), format!("({key} {} {})", f(v[0] + d.x), f(v[1] + d.y))));
+                }
+            }
+        }
     }
     edits.sort_by_key(|e| e.0.start);
     let mut out = String::with_capacity(text.len());
