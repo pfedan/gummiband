@@ -100,6 +100,8 @@ pub struct Mesh {
     pub status: Vec<u32>,
     /// Triangles covered by each obstacle (fixed: vias only split free triangles).
     pub obs_tris: Arc<FastMap<u32, Vec<u32>>>,
+    /// Obstacles around each original vertex (via vertices have none).
+    pub vert_obs: Arc<Vec<Vec<u32>>>,
     /// Per edge end (2 * edge + end): demands.
     pub demands: Vec<Vec<Demand>>,
     /// Unused via sites inside each triangle.
@@ -343,6 +345,7 @@ impl Mesh {
             vert_tris: Vec::new(),
             status: Vec::new(),
             obs_tris: Arc::new(FastMap::default()),
+            vert_obs: Default::default(),
             demands: Vec::new(),
             tri_sites: Vec::new(),
             site_tri: vec![NONE; shared.sites.len()],
@@ -367,6 +370,21 @@ impl Mesh {
             }
         }
         m.obs_tris = Arc::new(ot);
+        m.vert_obs = Arc::new(
+            m.vert_tris
+                .iter()
+                .map(|list| {
+                    let mut obs: Vec<u32> = Vec::new();
+                    for &t in list {
+                        let o = m.status[t as usize];
+                        if o != NONE && !obs.contains(&o) {
+                            obs.push(o);
+                        }
+                    }
+                    obs
+                })
+                .collect(),
+        );
         m.demands = (0..m.edges.len() as u32)
             .flat_map(|e| {
                 let [a, b] = m.edge_demands(e);

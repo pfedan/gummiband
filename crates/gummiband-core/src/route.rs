@@ -193,15 +193,21 @@ struct Node {
     pos: Point,
     g: f64,
     parent: u32,
-    /// Bloom filter of the triangles walked back from here up to the last via or start.
-    seen: u128,
+    /// Bloom filter of the triangles of this node's block: the triangles walked back from a
+    /// node are cut into blocks, so a loop test looks at a few filters, not at a whole path.
+    seen: u64,
+    /// Last node of the block before (none at a via or the start) and the size of this one.
+    block_up: u32,
+    block_len: u8,
     /// Nearest ancestor that is a via, for the hole spacing within one connection.
     via_up: u32,
 }
 
-fn tri_bit(t: u32, li: u8) -> u128 {
-    1 << (t.wrapping_add((li as u32) << 28).wrapping_mul(0x9e37_79b1) >> 25)
+fn tri_bit(t: u32, li: u8) -> u64 {
+    1 << (t.wrapping_add((li as u32) << 28).wrapping_mul(0x9e37_79b1) >> 26)
 }
+
+const BLOCK: u8 = 24;
 
 #[derive(PartialEq)]
 struct Open(f64, u32);
@@ -621,20 +627,14 @@ impl<'a> Router<'a> {
         t: u32,
         (pu, dir): (Point, Point),
         extra: Option<ExtraApex>,
-    ) -> Option<(f64, f64, Vec<u32>, Option<ViaInfo>)> {
+    ) -> Option<(f64, f64, &[u32], Option<ViaInfo>)> {
         let m = self.m(li);
         let [u, v] = m.edges[e as usize];
         let (pw, obs, via_here) = match extra {
-            Some(x) if x.side == k => (x.p, Vec::new(), Some(x.via)),
+            Some(x) if x.side == k => (x.p, &[][..], Some(x.via)),
             _ => {
                 let w = *m.tris[t as usize].iter().find(|&&x| x != u && x != v).unwrap();
-                let mut obs: Vec<u32> = Vec::new();
-                for &tt in &m.vert_tris[w as usize] {
-                    let o = m.status[tt as usize];
-                    if o != NONE && !obs.contains(&o) {
-                        obs.push(o);
-                    }
-                }
+                let obs = m.vert_obs.get(w as usize).map_or(&[][..], |o| &o[..]);
                 (m.verts[w as usize], obs, self.via_at(li, w))
             }
         };
@@ -690,7 +690,7 @@ impl<'a> Router<'a> {
                 if side > 1 {
                     continue;
                 }
-                let Some(half) = self.apex_half(h, &obs, via_here, it) else {
+                let Some(half) = self.apex_half(h, obs, via_here, it) else {
                     continue;
                 };
                 if side == 0 {
@@ -833,7 +833,7 @@ impl<'a> Router<'a> {
                 };
                 for (i, it) in items.iter().enumerate() {
                     if it.sides[k] <= 1
-                        && let Some(half) = self.apex_half(h, &obs, via_here, it)
+                        && let Some(half) = self.apex_half(h, obs, via_here, it)
                     {
                         if it.sides[k] == 0 {
                             bounds[i].1 = bounds[i].1.min(proj - half);
@@ -842,7 +842,7 @@ impl<'a> Router<'a> {
                         }
                     }
                 }
-                if let Some(half) = self.apex_half(h, &obs, via_here, new) {
+                if let Some(half) = self.apex_half(h, obs, via_here, new) {
                     apex[k] = (proj - half, proj + half);
                 }
             }
@@ -1523,11 +1523,13 @@ impl<'a> Router<'a> {
                     b.insert(g);
                 }
             }
-            // the triangles of the run this node belongs to: see the loop test in cross_out
-            let seen = match kind {
-                NK::Tri { t, li, .. } if parent != u32::MAX => nodes[parent as usize].seen | tri_bit(t, li),
-                NK::Tri { t, li, .. } => tri_bit(t, li),
-                _ => 0,
+            let (seen, block_up, block_len) = match (kind, nodes.get(parent as usize)) {
+                (NK::Tri { t, li, .. }, Some(n)) if n.block_len == BLOCK => (tri_bit(t, li), parent, 1),
+                (NK::Tri { t, li, .. }, Some(n)) if n.block_len > 0 => {
+                    (n.seen | tri_bit(t, li), n.block_up, n.block_len + 1)
+                }
+                (NK::Tri { t, li, .. }, _) => (tri_bit(t, li), u32::MAX, 1),
+                _ => (0, u32::MAX, 0),
             };
             let via_up = match nodes.get(parent as usize) {
                 Some(Node {
@@ -1543,6 +1545,8 @@ impl<'a> Router<'a> {
                 g,
                 parent,
                 seen,
+                block_up,
+                block_len,
                 via_up,
             });
             open.push(Open(g + h(pos), (nodes.len() - 1) as u32));
@@ -1621,20 +1625,23 @@ impl<'a> Router<'a> {
                 return;
             }
             // never enter a triangle this path already passed on this layer (no loops)
-            if node.seen & tri_bit(t2, lu as u8) != 0 {
-                let mut p = idx;
-                while p != u32::MAX {
-                    match nodes[p as usize].kind {
-                        NK::Tri { t: tp, li: lp, .. } if lp as usize == lu => {
-                            if tp == t2 {
-                                return;
-                            }
+            let bit = tri_bit(t2, lu as u8);
+            let mut block = idx;
+            while block != u32::MAX {
+                let top = &nodes[block as usize];
+                if top.seen & bit != 0 {
+                    let mut p = block;
+                    while p != top.block_up {
+                        let NK::Tri { t: tp, li: lp, .. } = nodes[p as usize].kind else {
+                            break;
+                        };
+                        if tp == t2 && lp as usize == lu {
+                            return;
                         }
-                        NK::Tri { .. } => {}
-                        _ => break,
+                        p = nodes[p as usize].parent;
                     }
-                    p = nodes[p as usize].parent;
                 }
+                block = top.block_up;
             }
             let mut item = item;
             item.w = self.width_at_edge(lu, e, item.w, &necks, neck_w);
