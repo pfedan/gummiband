@@ -161,7 +161,7 @@ def report(plan: bf.ImportPlan, applied, res: runner.RouteResult) -> str:
         f"Removed: {bf.format_counts(applied.removed)}",
         f"Created: {bf.format_counts(applied.created)}",
     ]
-    if plan.keep:
+    if plan.keep and not plan.add_only:
         lines.append(f"Kept locked: {bf.format_counts(plan.summary()['keep'])}")
     best = res.best_line()
     if best:
