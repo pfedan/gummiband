@@ -88,6 +88,10 @@ the violations are the price of the last connections through the pin rows. Origi
 - A post pass that removes via pairs when the hop also fits on the other layer (found in the MCP
   test: 23 short B.Cu hops, via cost 5 gives 175 instead of 208 vias without DRC errors).
 - Via count per net in the route result.
+- Follow-me with give: existing unlocked tracks should yield. Soft guides (a cost pull towards
+  the old route) failed on 2026-10-30: at most 65% of the length stays near the old way, and vias
+  grow from 278 to 755 at high weight. The right way is to import the tracks into the topology
+  (trace each one through the mesh into crossings) and let relaxation push them.
 - Adaptive track width: as wide as the surroundings allow, instead of one neck width per zone.
 
 ## M4b: GPU experiment
