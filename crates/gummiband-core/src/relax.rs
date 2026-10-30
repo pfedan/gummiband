@@ -215,23 +215,34 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         net_clr[a as usize] = net_clr[a as usize].max(c);
         net_clr[b as usize] = net_clr[b as usize].max(c);
     }
-    // per layer the tenth of the points that reaches farthest goes into the far tier
+    // per layer the split that makes the fewest grid cells to visit: a query looks at about
+    // the square of its reach, weighted by the pieces it sweeps
     let far_track: Vec<bool> = {
         let reach = |ti: usize| half_w(&geo.tracks[ti]) + net_clr[geo.tracks[ti].net as usize];
         let mut limit = vec![f64::INFINITY; n_layers];
         for (l, limit) in limit.iter_mut().enumerate() {
-            let mut by: Vec<(f64, usize)> = (0..geo.tracks.len())
+            let mut by: Vec<(f64, f64, f64, f64)> = (0..geo.tracks.len())
                 .filter(|&ti| geo.tracks[ti].layer as usize == l)
-                .map(|ti| (reach(ti), tracks[ti].len()))
+                .map(|ti| {
+                    let t = &geo.tracks[ti];
+                    (reach(ti), half_w(t), net_clr[t.net as usize], tracks[ti].len() as f64)
+                })
                 .collect();
             by.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-            let total: usize = by.iter().map(|b| b.1).sum();
-            let mut sum = 0;
-            for (r, n) in by {
-                sum += n;
-                *limit = r;
-                if sum * 10 >= total * 9 {
-                    break;
+            let span = |part: &[(f64, f64, f64, f64)], cell: f64| {
+                let hw = part.iter().map(|b| b.1).fold(0.0, f64::max);
+                let c = part.iter().map(|b| b.2).fold(0.0, f64::max);
+                let side = 2.0 * (hw + c + hw + 0.1) + cell;
+                part.iter().map(|b| b.3).sum::<f64>() * side * side
+            };
+            let mut best = f64::INFINITY;
+            for i in 0..by.len() {
+                if i + 1 == by.len() || by[i + 1].0 > by[i].0 {
+                    let cost = span(&by[..=i], 0.25) + span(&by[i + 1..], 1.0);
+                    if cost < best {
+                        best = cost;
+                        *limit = by[i].0;
+                    }
                 }
             }
         }
