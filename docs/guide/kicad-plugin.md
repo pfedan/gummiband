@@ -49,6 +49,23 @@ vias, length, violations) and the connections it could not route, if any.
    rest.
 5. **Undo** with Ctrl/Cmd+Z takes the whole routing back in one step.
 
+## Finish selected nets (follow-me, experimental)
+
+The second toolbar button, **Finish selected nets with Gummiband**, completes the nets you point
+at instead of rerouting the board:
+
+1. Start a track by hand if you like, or just select any track, via or pad of the nets you want
+   finished (several nets at once are fine).
+2. Click the button. Without a selection the plugin asks for one.
+3. All copper on the board stays, locked or not. The router adds only what is missing on the
+   selected nets, continuing a started track from where it ends: copper that touches no pad of its
+   net counts as a pin, so the new track starts right there.
+4. The additions arrive as one undo step.
+
+This is the plugin's form of `gummiband route --keep-all --nets A,B`. It is new and not yet
+tested live in KiCad, and new tracks keep too little clearance to existing tracks for now, so run
+the DRC on the result.
+
 ## Without a dialog
 
 If the plugin's Python has no wxPython (a Linux system interpreter, for example), the action runs
@@ -57,8 +74,8 @@ later). Use the [command line](cli.md) for full control in that case.
 
 ## What the plugin does not do yet
 
-- Route only selected nets or a selection of the board. Every run replaces all unlocked copper.
-  Lock the copper you want to keep instead.
+- Route a selection of the board. *Route with Gummiband* replaces all unlocked copper; lock the
+  copper you want to keep. *Finish selected nets* adds to existing copper but is experimental.
 - Set per net priorities or skip nets. Priorities come from the net classes; the MCP server and
   the CLI report offer more control, see [workflows](workflows.md#route-by-priority).
 - Move parts. `--move-parts` is a command line option for now, because moved footprints have to

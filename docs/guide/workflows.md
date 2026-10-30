@@ -29,7 +29,8 @@ gummiband route board.kicad_pcb -o out.kicad_pcb --keep-all --nets /SDA,/SCL
 ```
 
 `--keep-all` keeps every existing track and via, locked or not, and `--nets` limits the run to
-the named nets. The router adds to what is there: pins that already sit on one piece of copper
+the named nets. In KiCad the same is the toolbar action *Finish selected nets with Gummiband*:
+select a track, via or pad of the nets and click, see [Routing in KiCad](kicad-plugin.md). The router adds to what is there: pins that already sit on one piece of copper
 count as connected, and a connection may ride along existing copper of its net instead of drawing
 a new track beside it. This is new; its known limit is that new tracks keep too little clearance
 to existing tracks for now (the same holds for copper added through the MCP tool
