@@ -307,6 +307,69 @@ impl Board {
         out
     }
 
+    /// The board for routing only `nets` and `given` (all nets if `nets` is empty). The unlocked
+    /// kept copper of `given` is gone; the other nets get no connections and stay as obstacles.
+    pub fn only_nets(&self, nets: &[String], given: &std::collections::BTreeSet<String>) -> Board {
+        let mut b = self.clone();
+        if nets.is_empty() {
+            return b;
+        }
+        let ids: Vec<bool> = b.nets.iter().map(|n| given.contains(&n.name)).collect();
+        for o in b.obstacles.iter_mut() {
+            if !o.locked
+                && matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via)
+                && o.net.is_some_and(|n| ids[n as usize])
+            {
+                o.layers = LayerSet::default();
+            }
+        }
+        let pins = &b.pins;
+        for n in b.nets.iter_mut() {
+            if nets.contains(&n.name) {
+                continue;
+            }
+            if given.contains(&n.name) {
+                n.pins.retain(|&p| !pins[p].footprint.is_empty());
+            } else {
+                n.pins.clear();
+            }
+        }
+        b
+    }
+
+    /// Nets with unlocked tracks within `radius` of the pins of unrouted connections, given as
+    /// "NET from PIN".
+    pub fn nets_near_pins(&self, unrouted: &[String], radius: f64) -> Vec<String> {
+        let mut out = Vec::new();
+        for u in unrouted {
+            let Some(pin) = u
+                .rsplit(" from ")
+                .next()
+                .and_then(|n| self.pins.iter().find(|p| p.name == n))
+            else {
+                continue;
+            };
+            let targets = self.nets[pin.net as usize].pins.iter().map(|&p| self.pins[p].pos);
+            for at in std::iter::once(pin.pos).chain(targets) {
+                for o in &self.obstacles {
+                    if !o.locked
+                        && matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via)
+                        && o.shape.dist_to_point(at) < radius
+                        && let Some(n) = o.net
+                    {
+                        let name = self.nets[n as usize].name.clone();
+                        // plane nets stay: they have hundreds of small stubs and vias
+                        let plane = self.planes.iter().any(|p| p.net == n);
+                        if n != pin.net && !plane && !out.contains(&name) {
+                            out.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Give one net its own track width (a copy of its class with that width; the class's
     /// other nets keep theirs).
     pub fn set_net_width(&mut self, net: NetId, width: f64) {

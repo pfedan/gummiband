@@ -241,10 +241,14 @@ def plan_import(original: BoardCopper, routed: BoardCopper, keep_locked: bool) -
 
 
 def plan_addition(original: BoardCopper, routed: BoardCopper) -> ImportPlan:
-    """Only what the router added; everything on the board stays."""
+    """What the router added; only tracks of nets that gave way leave the board."""
     known = {it.key() for it in original.items}
     create = [it for it in routed.items if it.key() not in known]
-    return ImportPlan(True, [], list(original.items), create,
+    # tracks of nets that gave way are gone from the routed file
+    kept = {it.key() for it in routed.items}
+    remove = [it for it in original.items if it.key() not in kept]
+    keep = [it for it in original.items if it.key() in kept]
+    return ImportPlan(True, remove, keep, create,
                       list(original.warnings) + list(routed.warnings), add_only=True)
 
 

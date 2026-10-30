@@ -45,6 +45,11 @@ enum Cmd {
         /// a partly routed board or finishing a started track).
         #[arg(long)]
         keep_all: bool,
+        /// With --keep-all --nets: if a connection finds no way, let the unlocked tracks of other
+        /// nets within this many mm of its pin give way (they are routed again), growing in
+        /// steps up to this radius. 0: nothing moves.
+        #[arg(long, default_value_t = 0.0)]
+        give: f64,
         /// Route only these nets, comma separated (the others stay as they are).
         #[arg(long, value_delimiter = ',')]
         nets: Vec<String>,
@@ -209,6 +214,7 @@ fn main() -> Result<()> {
             output,
             keep_locked,
             keep_all,
+            give,
             nets,
             runs,
             via_pitch,
@@ -251,10 +257,6 @@ fn main() -> Result<()> {
                     if kb.board.net_id(n).is_none() {
                         anyhow::bail!("no net named {n:?}");
                     }
-                }
-                // nets without pins get no connections, their copper stays an obstacle
-                for n in kb.board.nets.iter_mut().filter(|n| !nets.contains(&n.name)) {
-                    n.pins.clear();
                 }
             }
             if let Some(path) = &net_widths {
@@ -302,35 +304,62 @@ fn main() -> Result<()> {
                 println!("movable parts: {}", b.movable.len());
             }
             let t0 = std::time::Instant::now();
-            let (sub, res) = gummiband_core::route_board(
-                b,
-                &SubstrateConfig {
-                    via_pitch,
-                    ..Default::default()
-                },
-                &RouterConfig {
-                    via_cost,
-                    layer_dirs,
-                    pair_pull,
-                    ..Default::default()
-                },
-                &gummiband_core::SearchConfig {
-                    population: runs,
-                    generations,
-                    geometry_generations,
-                    frames: frames.is_some(),
-                    progress: progress.then(|| {
-                        gummiband_core::ProgressFn(std::sync::Arc::new(move |p: &gummiband_core::Progress| {
-                            use std::io::Write;
-                            let mut v = serde_json::to_value(p).unwrap_or_default();
-                            v["seconds"] = serde_json::json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
-                            let mut out = std::io::stdout().lock();
-                            let _ = writeln!(out, "progress {v}");
-                            let _ = out.flush();
-                        }))
-                    }),
-                },
-            );
+            let sub_cfg = SubstrateConfig {
+                via_pitch,
+                ..Default::default()
+            };
+            let router_cfg = RouterConfig {
+                via_cost,
+                layer_dirs,
+                pair_pull,
+                ..Default::default()
+            };
+            let search_cfg = gummiband_core::SearchConfig {
+                population: runs,
+                generations,
+                geometry_generations,
+                frames: frames.is_some(),
+                progress: progress.then(|| {
+                    gummiband_core::ProgressFn(std::sync::Arc::new(move |p: &gummiband_core::Progress| {
+                        use std::io::Write;
+                        let mut v = serde_json::to_value(p).unwrap_or_default();
+                        v["seconds"] = serde_json::json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
+                        let mut out = std::io::stdout().lock();
+                        let _ = writeln!(out, "progress {v}");
+                        let _ = out.flush();
+                    }))
+                }),
+            };
+            // the nets asked for, and the nets that give way when a connection finds no way
+            let mut given: std::collections::BTreeSet<String> = Default::default();
+            let mut radius = 0.0;
+            let (routed_board, sub, res) = loop {
+                let board = b.only_nets(&nets, &given);
+                let (sub, res) = gummiband_core::route_board(&board, &sub_cfg, &router_cfg, &search_cfg);
+                if res.stats.unrouted.is_empty() || nets.is_empty() || radius >= give {
+                    break (board, sub, res);
+                }
+                radius = (radius * 2.0).max(2.0).min(give);
+                // around what was asked for; a net that gave way must not widen the circle
+                let asked: Vec<String> = res
+                    .stats
+                    .unrouted
+                    .iter()
+                    .filter(|u| nets.iter().any(|n| u.starts_with(&format!("{n} from "))))
+                    .cloned()
+                    .collect();
+                if asked.is_empty() {
+                    break (board, sub, res);
+                }
+                let more = b.nets_near_pins(&asked, radius);
+                let before = given.len();
+                given.extend(more.into_iter().filter(|n| !nets.contains(n)));
+                println!("give way within {radius} mm: {} nets", given.len());
+                if given.len() == before && radius >= give {
+                    break (board, sub, res);
+                }
+            };
+            let b = &routed_board;
             let dt = t0.elapsed();
             // the geometry belongs to the board with the shifted parts
             let shifted;
@@ -528,6 +557,7 @@ fn main() -> Result<()> {
                 unlocked: !keep_all,
                 locked: !keep_locked && !keep_all,
                 zone_layers: vec![],
+                nets: given.iter().cloned().collect(),
             };
             let ranges = write::strip_ranges(&kb, &opts);
             let text = write::patch(&kb, &ranges, &items);
@@ -610,6 +640,7 @@ fn main() -> Result<()> {
                 unlocked: true,
                 locked: !keep_locked,
                 zone_layers,
+                nets: Vec::new(),
             };
             let ranges = write::strip_ranges(&kb, &opts);
             let text = write::patch(&kb, &ranges, &[]);

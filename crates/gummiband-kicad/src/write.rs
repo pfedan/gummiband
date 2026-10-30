@@ -43,6 +43,8 @@ pub struct StripOptions {
     pub locked: bool,
     /// Remove copper zones (not keepouts) on these layers.
     pub zone_layers: Vec<String>,
+    /// Remove the unlocked tracks, arcs and vias of these nets in any case.
+    pub nets: Vec<String>,
 }
 
 /// Byte ranges of root items removed by `opts`.
@@ -52,7 +54,16 @@ pub fn strip_ranges(kb: &KicadBoard, opts: &StripOptions) -> Vec<Range<usize>> {
         match n.head() {
             Some("segment") | Some("arc") | Some("via") => {
                 let locked = n.flag("locked");
-                if (locked && opts.locked) || (!locked && opts.unlocked) {
+                let net_listed = !locked && !opts.nets.is_empty() && {
+                    let net = n.child("net").and_then(|c| c.args().first());
+                    let name = net.and_then(|x| x.as_str()).map(str::to_string).or_else(|| {
+                        let id = net.and_then(|x| x.as_f64())? as i64;
+                        let table = kb.net_numbers.as_ref()?;
+                        table.iter().find(|(_, v)| **v == id).map(|(k, _)| k.clone())
+                    });
+                    name.is_some_and(|x| opts.nets.contains(&x))
+                };
+                if (locked && opts.locked) || (!locked && opts.unlocked) || net_listed {
                     out.push(n.span());
                 }
             }

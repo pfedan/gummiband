@@ -952,6 +952,7 @@ fn route_blocking(
         unlocked: true,
         locked: !keep_locked,
         zone_layers: vec![],
+        nets: Vec::new(),
     };
     let ranges = write::strip_ranges(&kb, &opts);
     std::fs::write(&output, write::patch(&kb, &ranges, &items))
