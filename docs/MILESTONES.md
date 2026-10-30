@@ -113,26 +113,33 @@ the violations are the price of the last connections through the pin rows. Origi
 - Opt-in: `--features gpu` at build time and `GB_GPU=1` at run time, Metal through wgpu. Without
   them nothing changes, the default run stays byte-identical. Sleeping copper and vias of one layer
   stay on the CPU.
-- Share of the relaxation in the work (core seconds, 2026-10-30): Lichtschnitzel 40 %, with
-  `--geometry-generations 3 --move-parts` 70 %, Arty 54 %, but Corne 1 %, ULX3S 1 %, bga_dense 5 %.
-  On the hard boards topological A* decides the run time, and it does not fit a shader.
+- Share of the relaxation in the work (core seconds, 4 threads, 2026-10-30): Lichtschnitzel 31 %,
+  with `--geometry-generations 3 --move-parts` 63 %, Arty 43 %. Corne, ULX3S and bga_dense 1 to 5 %
+  (measured before the counters of PR #8 were removed, which only lowers these). On the hard
+  boards topological A* decides the run time, and it does not fit a shader.
 - A way to the GPU and back costs about 1.5 ms, a round of 27000 points about 0.1 ms. So the GPU
   runs ten rounds at a time, from one resampling to the next, and the vias take one step of ten
   times the size per batch. In one round per way the GPU only reaches the speed of 4 CPU cores.
-- With everything on the GPU the relaxation needs a tenth of the core seconds, but more
-  violations stay. So the last quarter (clearances only) stays on the CPU. That makes it about
-  2.5 times cheaper, with quality close to the CPU, mixed by board.
-- Lichtschnitzel `--geometry-generations 3 --move-parts`, seeds 1 to 4, 4 threads: 1270 core
-  seconds on the CPU, 736 with the GPU; violations 0, 4, 0, 2 against 5, 0, 0, 8. All 348/348.
-  Worst KiCad DRC finding of the GPU on seed 1: 0.12 mm instead of 0.2 mm. The gain is real, the
-  quality a little behind: for a final run take the CPU, or several seeds on the GPU.
+- With everything on the GPU more violations stay. So the last quarter (clearances only) stays on
+  the CPU. One relaxation of Lichtschnitzel on 4 threads: 0.73 instead of 1.8 core seconds, 0.40
+  instead of 0.66 s, with more violations on average.
+- Lichtschnitzel `--geometry-generations 3 --move-parts`, seeds 1 to 4, 4 threads: 996 core
+  seconds on the CPU, 593 with the GPU, all 348/348; violations 15, 4, 0, 2 against 5, 0, 0, 11.
+  On all 14 cores no clean comparison yet: under load the CPU was about level with the GPU.
+- Atomic counters that all threads touch per point made the relaxation three times slower
+  (PR #8, removed in PR #10). Timings from builds with them are worthless.
 - The relaxation is chaotic: a change of 1e-12 mm turns 1 short into 16 on `four_signal_layers`.
   Compare distributions (`relax_bench --ensemble`), not single runs.
 - Results repeat bit by bit on one machine. Metal may compile with fast math, so another GPU or
   driver can give another result: this path breaks the rule that results do not depend on the
   machine, which is why it stays opt-in.
-- Next: GPU screening of many finalists (the real gain would be search breadth), and running the
-  relaxation of several candidates in one batch.
+- Tried and dropped, 2026-10-30: taking the best of several slightly different relaxations
+  (margins 1e-7 mm apart). Eight tries of the polish step: Lichtschnitzel seeds 15, 4, 0, 2 become
+  12, 4, 0, 2. Eight tries of the full relaxation per finalist: 9, 4, 0, 9 at up to four times the
+  core seconds, and fine_pitch_mixed gets worse (25 instead of 19). The violations that remain are
+  mostly real bottlenecks, more relaxation does not remove them. They need another topology.
+- So search breadth through the GPU is not worth building now: it would pay only for many
+  finalists, and the search that makes them is what limits the hard boards.
 
 ## M5: User documentation
 
