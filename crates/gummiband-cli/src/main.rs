@@ -85,6 +85,10 @@ enum Cmd {
         /// of an existing routing, see bench/net_widths.py).
         #[arg(long)]
         net_widths: Option<PathBuf>,
+        /// Switch on KiCad's teardrops for vias and pads in the output; KiCad builds them when
+        /// it fills the zones.
+        #[arg(long)]
+        teardrops: bool,
         /// Print a "progress {json}" line after every phase of the search (best candidate so
         /// far, elapsed seconds), for the KiCad plugin and other front ends.
         #[arg(long)]
@@ -203,6 +207,7 @@ fn main() -> Result<()> {
             fixed,
             progress,
             net_widths,
+            teardrops,
         } => {
             let keep = if keep_locked {
                 KeepCopper::Locked
@@ -479,6 +484,11 @@ fn main() -> Result<()> {
                 text
             } else {
                 write::move_footprints(&text, &res.offsets)?
+            };
+            let text = if teardrops {
+                write::enable_teardrops(&text)?
+            } else {
+                text
             };
             std::fs::write(&output, text)?;
             println!("wrote {} items to {}", items.len(), output.display());

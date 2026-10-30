@@ -413,7 +413,8 @@ impl Mesh {
     }
 
     fn build_topology(&mut self) {
-        let mut edge_map: FastMap<(u32, u32), u32> = FastMap::with_capacity_and_hasher(self.tris.len() * 2, Default::default());
+        let mut edge_map: FastMap<(u32, u32), u32> =
+            FastMap::with_capacity_and_hasher(self.tris.len() * 2, Default::default());
         self.edges.clear();
         self.edge_tris.clear();
         self.tri_edges = vec![[0u32; 3]; self.tris.len()];

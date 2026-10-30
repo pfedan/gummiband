@@ -923,7 +923,11 @@ impl<'a> Router<'a> {
         x = y;
         lo.push(x);
         for (i, p) in placed[j..].iter().enumerate() {
-            let g = if i == 0 { p.gap_from_new } else { placed[j + i - 1].gap_next };
+            let g = if i == 0 {
+                p.gap_from_new
+            } else {
+                placed[j + i - 1].gap_next
+            };
             x = p.need_u.max(p.bounds.0).max(x + g + extra);
             lo.push(x);
         }
@@ -1511,10 +1515,7 @@ impl<'a> Router<'a> {
                 [q] => q.dist(p),
                 _ => {
                     // the exact distance only for those that can be the minimum
-                    let d2 = target_pts
-                        .iter()
-                        .map(|&q| (q - p).len2())
-                        .fold(f64::INFINITY, f64::min);
+                    let d2 = target_pts.iter().map(|&q| (q - p).len2()).fold(f64::INFINITY, f64::min);
                     target_pts
                         .iter()
                         .filter(|&&q| (q - p).len2() <= d2 * (1.0 + 1e-9))
@@ -1627,15 +1628,15 @@ impl<'a> Router<'a> {
         // crossings out of triangle t (layer lu) through local edge k
         #[allow(clippy::too_many_arguments)]
         let mut cross_out = |best: &mut Best,
-                         nodes: &mut Vec<Node>,
-                         open: &mut BinaryHeap<Open>,
-                         t: u32,
-                         lu: usize,
-                         k: u8,
-                         chord_from: Option<(CPos, Option<usize>)>,
-                         interior: Option<Point>,
-                         node: &Node,
-                         idx: u32| {
+                             nodes: &mut Vec<Node>,
+                             open: &mut BinaryHeap<Open>,
+                             t: u32,
+                             lu: usize,
+                             k: u8,
+                             chord_from: Option<(CPos, Option<usize>)>,
+                             interior: Option<Point>,
+                             node: &Node,
+                             idx: u32| {
             let m = self.m(lu);
             let t2 = m.tri_nbrs[t as usize][k as usize];
             if t2 == NONE {
@@ -1712,7 +1713,9 @@ impl<'a> Router<'a> {
             let dir = (pv - pu) * (1.0 / len);
             let n = self.cross[lu][e as usize].len();
             let escape = self.escape_penalty(lu, e, net);
-            let view = views.entry((lu as u8, e)).or_insert_with(|| self.edge_view(lu, e, &item));
+            let view = views
+                .entry((lu as u8, e))
+                .or_insert_with(|| self.edge_view(lu, e, &item));
             for j in 0..=n {
                 if free {
                     if let Some((cp, cs)) = chord_from
@@ -2447,11 +2450,7 @@ impl<'a> Router<'a> {
             match self.search(ci) {
                 Some(chain) => {
                     let validate = std::env::var("GB_VALIDATE_EACH").is_ok();
-                    let before = if validate {
-                        self.validate().len()
-                    } else {
-                        0
-                    };
+                    let before = if validate { self.validate().len() } else { 0 };
                     if self.commit(ci, &chain) {
                         if validate {
                             let v = self.validate();

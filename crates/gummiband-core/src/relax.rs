@@ -99,7 +99,9 @@ impl Tier {
         self.near.clear();
         let raw = &self.raw;
         self.near.extend(self.grid.ids().iter().map(|&i| raw[i as usize]));
-        let (e, c) = raw.iter().fold((0.0f32, 0.0f32), |(e, c), r| (e.max(r.extent), c.max(r.clr)));
+        let (e, c) = raw
+            .iter()
+            .fold((0.0f32, 0.0f32), |(e, c), r| (e.max(r.extent), c.max(r.clr)));
         (self.max_extent, self.max_clr) = (e as f64, c as f64);
     }
 
@@ -438,7 +440,8 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 }
                 // sums run in id order: collect the few candidates first
                 let mut hits: Vec<u32> = Vec::new();
-                let via_reach = (vr + max_vr + max_clr).max(drills[vi] / 2.0 + max_drill / 2.0 + board.rules.hole_to_hole)
+                let via_reach = (vr + max_vr + max_clr)
+                    .max(drills[vi] / 2.0 + max_drill / 2.0 + board.rules.hole_to_hole)
                     + cfg.margin
                     + 0.01;
                 via_grid.for_each_near(vc, via_reach, |vj| {

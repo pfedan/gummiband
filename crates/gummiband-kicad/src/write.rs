@@ -267,3 +267,42 @@ pub fn move_footprints(text: &str, offsets: &std::collections::HashMap<String, P
     out.push_str(&text[pos..]);
     Ok(out)
 }
+
+/// Switch on KiCad's teardrops for all vias and connected copper pads of a board file. The
+/// file only carries the settings: KiCad builds the shapes when it fills the zones, and leaves
+/// out what does not fit.
+pub fn enable_teardrops(text: &str) -> anyhow::Result<String> {
+    const TD: &str = "(teardrops (best_length_ratio 0.5) (max_length 1) (best_width_ratio 1) \
+                      (max_width 2) (curved_edges yes) (filter_ratio 0.9) (enabled yes) \
+                      (allow_two_segments yes) (prefer_zone_connections yes))";
+    let root = crate::sexpr::parse(text).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+    let mut at: Vec<usize> = Vec::new();
+    for n in root.args() {
+        match n.head() {
+            Some("via") if n.child("teardrops").is_none() => at.push(n.span().end - 1),
+            Some("footprint") | Some("module") => {
+                for pad in n.children("pad") {
+                    let kind = pad.args().get(1).and_then(|x| x.as_str());
+                    if matches!(kind, Some("smd") | Some("thru_hole"))
+                        && pad.child("net").is_some()
+                        && pad.child("teardrops").is_none()
+                    {
+                        at.push(pad.span().end - 1);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    at.sort_unstable();
+    let mut out = String::with_capacity(text.len() + at.len() * (TD.len() + 1));
+    let mut pos = 0;
+    for a in at {
+        out.push_str(&text[pos..a]);
+        out.push(' ');
+        out.push_str(TD);
+        pos = a;
+    }
+    out.push_str(&text[pos..]);
+    Ok(out)
+}
