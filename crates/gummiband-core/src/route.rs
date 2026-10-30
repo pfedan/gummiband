@@ -195,6 +195,8 @@ struct Node {
     parent: u32,
     /// Bloom filter of the triangles walked back from here up to the last via or start.
     seen: u128,
+    /// Nearest ancestor that is a via, for the hole spacing within one connection.
+    via_up: u32,
 }
 
 fn tri_bit(t: u32, li: u8) -> u128 {
@@ -1463,10 +1465,21 @@ impl<'a> Router<'a> {
             Goal::Plane => Vec::new(),
         };
         let h = |p: Point| -> f64 {
-            if target_pts.is_empty() {
-                0.0
-            } else {
-                target_pts.iter().map(|&q| q.dist(p)).fold(f64::INFINITY, f64::min)
+            match target_pts[..] {
+                [] => 0.0,
+                [q] => q.dist(p),
+                _ => {
+                    // the exact distance only for those that can be the minimum
+                    let d2 = target_pts
+                        .iter()
+                        .map(|&q| (q - p).len2())
+                        .fold(f64::INFINITY, f64::min);
+                    target_pts
+                        .iter()
+                        .filter(|&&q| (q - p).len2() <= d2 * (1.0 + 1e-9))
+                        .map(|&q| q.dist(p))
+                        .fold(f64::INFINITY, f64::min)
+                }
             }
         };
         let is_target = |pin: usize| -> bool {
@@ -1516,12 +1529,21 @@ impl<'a> Router<'a> {
                 NK::Tri { t, li, .. } => tri_bit(t, li),
                 _ => 0,
             };
+            let via_up = match nodes.get(parent as usize) {
+                Some(Node {
+                    kind: NK::Site { .. } | NK::Vert { .. },
+                    ..
+                }) => parent,
+                Some(n) => n.via_up,
+                None => u32::MAX,
+            };
             nodes.push(Node {
                 kind,
                 pos,
                 g,
                 parent,
                 seen,
+                via_up,
             });
             open.push(Open(g + h(pos), (nodes.len() - 1) as u32));
         };
@@ -1873,12 +1895,12 @@ impl<'a> Router<'a> {
                     // vias of this path so far (hole to hole spacing within one connection)
                     let mut own_vias: Vec<Point> = Vec::new();
                     {
-                        let mut p = idx;
+                        let mut p = node.via_up;
                         while p != u32::MAX {
                             if let NK::Site { site, .. } | NK::Vert { site, .. } = nodes[p as usize].kind {
                                 own_vias.push(self.site_point(site));
                             }
-                            p = nodes[p as usize].parent;
+                            p = nodes[p as usize].via_up;
                         }
                     }
                     let (_, own_drill, _) = self.via_size(net);
