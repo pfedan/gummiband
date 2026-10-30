@@ -37,6 +37,19 @@ class RouteOptions:
     finish_nets: Optional[List[str]] = None
 
 
+@dataclass
+class PlaceOptions:
+    # which parts move: "unlocked", "all", "outside" or "selected"
+    scope: str = "unlocked"
+    # the references of the scope "selected"
+    only: Optional[List[str]] = None
+    # references that stay in any case
+    fixed: Optional[List[str]] = None
+    starts: int = 4
+    gap: float = 0.3
+    halo: float = 0.3
+
+
 def load_settings(path: Path = SETTINGS_FILE) -> dict:
     try:
         with open(path, encoding="utf-8") as f:
@@ -100,6 +113,27 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
     if opts.frames_dir:
         cmd += ["--frames", str(opts.frames_dir)]
     return cmd
+
+
+def build_place_command(binary: str, board: Path, output: Path, report: Path,
+                        opts: PlaceOptions) -> List[str]:
+    cmd = [binary, "place", str(board), "-o", str(output), "--report", str(report),
+           "--starts", str(int(opts.starts)), "--gap", repr(float(opts.gap)),
+           "--halo", repr(float(opts.halo))]
+    if opts.scope == "selected":
+        cmd += ["--only", ",".join(opts.only or [])]
+    elif opts.scope == "outside":
+        cmd.append("--outside")
+    elif opts.scope == "all":
+        cmd.append("--all-unlocked")
+    if opts.fixed:
+        cmd += ["--fixed", ",".join(opts.fixed)]
+    return cmd
+
+
+def parse_references(text: str) -> List[str]:
+    """References from a text field: separated by commas or spaces."""
+    return [r for r in re.split(r"[,\s]+", text.strip()) if r]
 
 
 def tool_env(env: Mapping[str, str] = os.environ, extra_dirs=EXTRA_DIRS) -> dict:

@@ -11,12 +11,13 @@ from dataclasses import dataclass, field
 from typing import List, Mapping, Optional, Sequence
 
 from kipy.board_types import ArcTrack, BoardLayer, Net, Track, Via, ViaType
-from kipy.geometry import Vector2
+from kipy.geometry import Angle, PolygonWithHoles, PolyLine, PolyLineNode, Vector2
 from kipy.util.board_layer import layer_from_canonical_name
 
 from . import board_file as bf
 
 COMMIT_MESSAGE = "Route with Gummiband"
+PLACE_MESSAGE = "Place with Gummiband"
 CHUNK = 500  # items per create/delete request, keeps each request well below the timeout
 
 
@@ -143,3 +144,55 @@ def apply_plan(board, plan: bf.ImportPlan) -> ApplyResult:
         unknown_nets=resolve.unknown,
     )
 
+
+
+@dataclass
+class PlaceResult:
+    moved: int
+    zones: int
+    missing: List[str]
+
+
+def set_outline(zone, points: Sequence[bf.Point]) -> None:
+    """Replace the outline of a zone."""
+    line = PolyLine()
+    line.closed = True
+    for p in points:
+        line.append(PolyLineNode.from_point(vec(p)))
+    poly = PolygonWithHoles()
+    poly.outline = line
+    zone.outline.polygons.clear()
+    zone.outline.polygons.append(poly)
+
+
+def apply_placement(board, poses: Sequence, zones: Sequence[dict]) -> PlaceResult:
+    """Move footprints to the poses of ``gummiband place`` and the keepouts of moved parts to
+    their new outlines, all in one commit (one undo step)."""
+    by_ref = {fp.reference_field.text.value: fp for fp in board.get_footprints()}
+    changed = []
+    missing = []
+    for ref, x, y, rot in poses:
+        fp = by_ref.get(ref)
+        if fp is None:
+            missing.append(ref)
+            continue
+        fp.position = vec((x, y))
+        fp.orientation = Angle.from_degrees(rot)
+        changed.append(fp)
+    moved = len(changed)
+    outlines = {z["id"]: z["points"] for z in zones}
+    followers = [z for z in board.get_zones() if z.id.value in outlines] if outlines else []
+    for z in followers:
+        set_outline(z, outlines[z.id.value])
+    commit = board.begin_commit()
+    try:
+        for chunk in _chunks(changed + followers, CHUNK):
+            board.update_items(list(chunk))
+    except BaseException:
+        try:
+            board.drop_commit(commit)
+        except Exception:
+            pass  # report the original error, not the failed rollback
+        raise
+    board.push_commit(commit, PLACE_MESSAGE)
+    return PlaceResult(moved, len(followers), missing)

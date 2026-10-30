@@ -58,7 +58,8 @@ negotiated congestion), not any existing product's code.
 | --- | --- |
 | `gummiband-core` | geometry, board model, triangulation substrate, topological router, realization, checks. No I/O. |
 | `gummiband-kicad` | KiCad 9/10 s-expression reader and writer, net class and rule import from `.kicad_pro`. |
-| `gummiband-cli` | `gummiband` binary: `info`, `route`, `svg`. The plugin calls this. |
+| `gummiband-place` | placement: `auto` places any board from its netlist (`gummiband place`, MCP `place_parts`), the `gummiband-place` program makes the Lichtschnitzel outline variants. |
+| `gummiband-cli` | `gummiband` binary: `info`, `place`, `route`, `svg`. The plugin calls this. |
 | `plugin/` | KiCad action plugin (Python, KiCad IPC API): exports the board, runs the CLI, imports the result. |
 
 Units: millimetres as `f64` in the core. The writer rounds to KiCad's nanometre grid.

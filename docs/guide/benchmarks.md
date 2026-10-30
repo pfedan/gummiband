@@ -106,6 +106,26 @@ Relaxation is chaotic (a change far below a nanometre can turn one short into ma
 violation count says little: `--ensemble N` relaxes N times with a tiny change each and compares
 the distributions. Compare core seconds rather than wall time when other jobs run on the machine.
 
+## Placement from the netlist
+
+`gummiband place` on the Lichtschnitzel controller with the connectors, the module, holes, buttons
+and test points fixed, 133 parts from nothing, original outline and inner planes. Routed with
+`--geometry-generations 3 --move-parts`, judged with the KiCad DRC (measured on 2026-10-30):
+
+| Placement | Routed | Vias | Length | KiCad DRC |
+| --- | --- | --- | --- | --- |
+| Original (by hand) | 348/348 | 294 | 2633 mm | clean |
+| Seed 1 (default) | 348/348 | 232 | 2088 mm | clean |
+| Seed 11 | 348/348 | 217 | 2229 mm | clean |
+| Seed 31 | 348/348 | 205 | 2077 mm | clean |
+| Seed 41 | 348/348 | 234 | 2167 mm | 2 slivers |
+| Seed 21 | 347/348 | 240 | 2077 mm | 2 unconnected, 1 sliver, 1 dangling via |
+| Seed 51 | 350/350 | 289 | 2044 mm | 8 clearance, 1 short, 1 crossing, 1 mask bridge |
+
+Fewer vias and shorter tracks than the hand placement, but the seeds differ, so try a few. The
+placer knows no datasheet layouts: switch nodes come out 3.4 to 7.4 mm long against 3.0 mm in the
+original. Place a power stage by hand or lock it when that matters.
+
 ## Placement variants
 
 `bench/place/make-variants.sh` and `route-variants.sh` build and route the Lichtschnitzel

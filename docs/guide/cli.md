@@ -177,6 +177,46 @@ With `--pairs` the report also has `pairs`: one entry per differential pair with
 such as the board edge or a hole). Positions are board millimetres as KiCad shows them. Scripts
 and AI agents can act on this; the MCP server returns the same fields.
 
+## `gummiband place`
+
+Gives parts a position from the netlist, as a step of its own before routing. The input file stays
+untouched. Where a moving part sits in the input does not matter, so a pile of freshly imported
+footprints next to the board works as well as a placed board.
+
+```sh
+gummiband place my_board.kicad_pcb -o placed.kicad_pcb
+gummiband route placed.kicad_pcb -o routed.kicad_pcb
+```
+
+| Option | Default | What |
+| --- | --- | --- |
+| `--only R1,C2` | | place just these references, everything else stays |
+| `--outside` | | place just the parts outside the board outline |
+| `--all-unlocked` | | place every unlocked part, connectors, modules and mounting holes too |
+| `--fixed U1,U2` | | these stay in any case |
+| `--free TP1` | | move these on top of the above (a test point, a button) |
+| `--seed N` | 1 | first seed |
+| `--starts N` | 4 | independent runs in parallel, the one with the fewest crossings is kept |
+| `--iters N` | 3000000 | annealing moves per run |
+| `--gap MM` | 0.3 | spacing between courtyards |
+| `--margin MM` | 0.5 | distance of the courtyards from the outline |
+| `--halo MM` | 0.3 | extra room around parts with five or more pads, for their escape |
+| `--report FILE` | | JSON report: poses, decoupling assignment, crossings, every start |
+
+Without a scope option, all parts move except locked footprints, connectors, modules, mounting
+holes, buttons and test points. Locked footprints never move. A KiCad group moves as a whole; a
+group with tracks stays, since tracks do not turn yet.
+
+Tracks and vias of the input do not follow; the console says how many there are. Keepouts of a
+moved part follow it (a keepout counts as the part's if its courtyard covers at least half of it),
+other keepouts that forbid footprints or pads stay free of parts. All parts share one side as far
+as spacing goes, so a two sided board comes out less dense than it could be.
+
+What it looks at: wire length per net (wide and differential nets double, switch nodes eightfold,
+nets with a plane over most of the board not at all), the pins of a net with a partial plane
+staying over that plane, decoupling capacitors next to a supply pin of an IC (bulk capacitors at
+the inductor of their rail) and the courtyards.
+
 ## `gummiband strip`
 
 ```bash

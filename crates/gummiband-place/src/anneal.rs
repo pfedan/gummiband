@@ -42,7 +42,15 @@ pub struct Raster {
 
 impl Raster {
     pub fn new(outline: &Outline, fixed: &[Quad], margin: f64, gap: f64, h: f64) -> Raster {
-        let b = outline.bbox().grow(1.0);
+        let half_diag = h * std::f64::consts::FRAC_1_SQRT_2 + 1e-6;
+        let inside = |c: Point| outline.inside(c, margin + half_diag);
+        Raster::over(outline.bbox(), &inside, fixed, gap, h)
+    }
+
+    /// Raster over `bbox`: a cell is free if `inside(centre)` holds and no fixed courtyard with
+    /// `gap` touches it. `inside` has to account for the cell size itself.
+    pub fn over(bbox: R, inside: &dyn Fn(Point) -> bool, fixed: &[Quad], gap: f64, h: f64) -> Raster {
+        let b = bbox.grow(1.0);
         let nx = (b.w() / h).ceil() as usize;
         let ny = (b.h() / h).ceil() as usize;
         let half_diag = h * std::f64::consts::FRAC_1_SQRT_2 + 1e-6;
@@ -52,7 +60,7 @@ impl Raster {
             let mut row = 0u32;
             for i in 0..nx {
                 let c = pt(b.x0 + (i as f64 + 0.5) * h, b.y0 + (j as f64 + 0.5) * h);
-                let mut blocked = !outline.inside(c, margin + half_diag);
+                let mut blocked = !inside(c);
                 if !blocked {
                     for (q, bb) in fixed.iter().zip(&fb) {
                         if c.x >= bb.x0
@@ -111,12 +119,33 @@ impl Raster {
     }
 }
 
+/// Cost per mm around the board (a distance raster): pins of a net with a partial plane want to
+/// sit over that plane, so that a via reaches it.
+pub struct Field {
+    pub ox: f64,
+    pub oy: f64,
+    pub h: f64,
+    pub nx: usize,
+    pub ny: usize,
+    pub v: Vec<f32>,
+}
+
+impl Field {
+    pub fn at(&self, p: Point) -> f64 {
+        let i = (((p.x - self.ox) / self.h).max(0.0) as usize).min(self.nx - 1);
+        let j = (((p.y - self.oy) / self.h).max(0.0) as usize).min(self.ny - 1);
+        self.v[j * self.nx + i] as f64
+    }
+}
+
 /// Geometry of a movable unit for each of the four rotations, relative to the unit position.
 pub struct UnitGeom {
     pub rects: [Vec<R>; 4],
     pub bbox: [R; 4],
     pub pins: [Vec<Point>; 4],
     pub pin_net: Vec<usize>,
+    /// Plane field of each pin, see [`Field`].
+    pub pin_field: Vec<Option<usize>>,
     pub area: f64,
     pub nets: Vec<usize>,
     pub decaps: Vec<usize>,
@@ -142,6 +171,8 @@ pub struct Problem {
     pub raster: Raster,
     pub half_gap: f64,
     pub swappable: Vec<usize>,
+    pub fields: Vec<Field>,
+    pub field_weight: f64,
 }
 
 impl Problem {
@@ -184,11 +215,13 @@ impl Problem {
             }
             let bbox = [0, 1, 2, 3].map(|k| rects[k].iter().fold(R::empty(), |a, r| a.union(r)));
             let area = rects[0].iter().map(|r| r.area()).sum();
+            let pin_field = vec![None; pin_net.len()];
             geoms.push(UnitGeom {
                 rects,
                 bbox,
                 pins,
                 pin_net,
+                pin_field,
                 area,
                 nets: Vec::new(),
                 decaps: Vec::new(),
@@ -266,6 +299,8 @@ impl Problem {
                 raster,
                 half_gap: gap / 2.0,
                 swappable,
+                fields: Vec::new(),
+                field_weight: 0.0,
             },
             part_pins,
         )
@@ -332,6 +367,17 @@ impl<'a> Placer<'a> {
         dc.weight * a.dist(b)
     }
 
+    fn field_cost(&self, u: usize) -> f64 {
+        let g = &self.p.units[u];
+        let mut s = 0.0;
+        for (i, f) in g.pin_field.iter().enumerate() {
+            if let Some(f) = f {
+                s += self.p.fields[*f].at(self.pin(u, i));
+            }
+        }
+        s * self.p.field_weight
+    }
+
     pub fn rects(&self, u: usize) -> impl Iterator<Item = R> + '_ {
         let o = self.s.pos[u];
         self.p.units[u].rects[self.s.k[u]].iter().map(move |r| r.shift(o))
@@ -372,7 +418,9 @@ impl<'a> Placer<'a> {
     }
 
     pub fn wire(&self) -> f64 {
-        self.net_cost.iter().sum::<f64>() + (0..self.p.decaps.len()).map(|d| self.decap(d)).sum::<f64>()
+        self.net_cost.iter().sum::<f64>()
+            + (0..self.p.decaps.len()).map(|d| self.decap(d)).sum::<f64>()
+            + (0..self.p.units.len()).map(|u| self.field_cost(u)).sum::<f64>()
     }
 
     pub fn total_overlap(&self) -> f64 {
@@ -388,7 +436,9 @@ impl<'a> Placer<'a> {
     }
 
     fn local_cost(&self, us: &[usize], nets: &[usize], decs: &[usize], lambda: f64) -> (f64, f64) {
-        let w: f64 = nets.iter().map(|&n| self.hpwl(n)).sum::<f64>() + decs.iter().map(|&d| self.decap(d)).sum::<f64>();
+        let w: f64 = nets.iter().map(|&n| self.hpwl(n)).sum::<f64>()
+            + decs.iter().map(|&d| self.decap(d)).sum::<f64>()
+            + us.iter().map(|&u| self.field_cost(u)).sum::<f64>();
         let mut ov = 0.0;
         if lambda > 0.0 {
             for &u in us {
@@ -556,7 +606,8 @@ impl<'a> Placer<'a> {
                             continue;
                         }
                         let w: f64 = nets.iter().map(|&n| self.hpwl(n)).sum::<f64>()
-                            + decs.iter().map(|&d| self.decap(d)).sum::<f64>();
+                            + decs.iter().map(|&d| self.decap(d)).sum::<f64>()
+                            + self.field_cost(u);
                         let cost = w + 2.0 * c.dist(home);
                         if best.is_none_or(|b| cost < b.0) {
                             best = Some((cost, c, k));

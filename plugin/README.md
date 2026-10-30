@@ -83,10 +83,11 @@ and creates the new ones through the IPC API, in batches of 500 items.
 | `plugin.json` | IPC API plugin manifest (schema `https://go.kicad.org/api/schemas/v1`) |
 | `requirements.txt` | installed by KiCad into the plugin environment |
 | `gummiband_action.py` | entrypoint: dialog, temp copy, CLI run, import, report |
+| `gummiband_place.py` | entrypoint of *Place with Gummiband*: scope dialog, CLI run, one commit |
 | `gb_plugin/sexpr.py` | s-expression reader |
 | `gb_plugin/board_file.py` | copper items of a board file, import plan (no KiCad needed) |
 | `gb_plugin/runner.py` | binary lookup, command line, running the router |
-| `gb_plugin/kicad_apply.py` | conversion to `kipy` objects, the commit |
+| `gb_plugin/kicad_apply.py` | conversion to `kipy` objects, the commits of routing and placing |
 | `dev_run.py` | headless dry run of the import |
 | `tests/` | unit tests |
 

@@ -106,6 +106,7 @@ pub struct Part {
     pub node: usize,
     pub pos: Point,
     pub rot: f64,
+    pub locked: bool,
     /// Courtyard in the footprint frame (unrotated).
     pub court: Vec<R>,
     pub pads: Vec<Pad>,
@@ -205,6 +206,7 @@ impl Design {
                 node: i,
                 pos,
                 rot,
+                locked: fp.flag("locked"),
                 court,
                 pads,
                 keepouts,

@@ -41,7 +41,7 @@ class ConsoleUi:
     def ask_options(self, defaults: runner.RouteOptions) -> Optional[runner.RouteOptions]:
         return dataclasses.replace(defaults, frames_dir=None)
 
-    def run_with_progress(self, fn):
+    def run_with_progress(self, fn, busy: str = "Routing..."):
         return fn(None)
 
     def info(self, text: str):
@@ -52,8 +52,9 @@ class ConsoleUi:
 
 
 class WxUi:
-    def __init__(self):
+    def __init__(self, title: str = TITLE):
         self.app = wx.App(False)
+        self.title = title
 
     def ask_options(self, defaults: runner.RouteOptions) -> Optional[runner.RouteOptions]:
         """``defaults.frames_dir`` is where the animation would go; the check box decides
@@ -95,16 +96,17 @@ class WxUi:
         finally:
             dlg.Destroy()
 
-    def run_with_progress(self, fn):
+    def run_with_progress(self, fn, busy: str = "Routing..."):
         """Call ``fn(keep_going)`` while a progress dialog pulses; Cancel stops the router."""
         # the first message sets the dialog width: as long as a typical progress line
-        dlg = wx.ProgressDialog(TITLE, "geometry generation 3: 1000/1000 routed, 1000 vias, "
+        dlg = wx.ProgressDialog(self.title, "geometry generation 3: 1000/1000 routed, 1000 vias, "
                                 "10000 mm, 100 clearance violations\n0 s", maximum=100,
                                 style=wx.PD_APP_MODAL | wx.PD_CAN_ABORT | wx.PD_ELAPSED_TIME)
         t0 = time.monotonic()
 
         def keep_going(progress=None) -> bool:
-            cont, _skip = dlg.Pulse(f"{runner.progress_text(progress)}\n"
+            line = runner.progress_text(progress) if progress else busy
+            cont, _skip = dlg.Pulse(f"{line}\n"
                                     f"{time.monotonic() - t0:.0f} s")
             return cont
 
@@ -114,14 +116,14 @@ class WxUi:
             dlg.Destroy()
 
     def info(self, text: str):
-        wx.MessageBox(text, TITLE, wx.OK | wx.ICON_INFORMATION)
+        wx.MessageBox(text, self.title, wx.OK | wx.ICON_INFORMATION)
 
     def error(self, text: str):
         if text.count("\n") < 12:
-            wx.MessageBox(text, TITLE, wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(text, self.title, wx.OK | wx.ICON_ERROR)
             return
         # long output (router stdout/stderr): scrollable, selectable text
-        dlg = wx.Dialog(None, title=TITLE, style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        dlg = wx.Dialog(None, title=self.title, style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         txt = wx.TextCtrl(dlg, value=text, size=(760, 460),
                           style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
         txt.SetFont(wx.Font(wx.FontInfo(11).Family(wx.FONTFAMILY_TELETYPE)))

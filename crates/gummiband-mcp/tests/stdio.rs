@@ -143,6 +143,7 @@ fn initialize_list_load_route() {
             "load_board",
             "move_part",
             "part_info",
+            "place_parts",
             "render",
             "route",
             "set_net_options"
@@ -235,6 +236,12 @@ fn initialize_list_load_route() {
     );
     assert_eq!(zone["items_added"], 1);
     assert!(std::fs::read_to_string(&work).unwrap().contains("(zone"));
+    let placed = s.call(
+        "place_parts",
+        json!({"board": zone["board"], "only": ["R2"], "starts": 1}),
+    );
+    assert_eq!(placed["placed"].as_array().unwrap().len(), 1, "{placed}");
+    assert_eq!(placed["placed"][0]["reference"], "R2", "{placed}");
 
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);

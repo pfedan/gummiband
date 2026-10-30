@@ -206,5 +206,31 @@ class TailTest(unittest.TestCase):
         self.assertEqual(runner.tail("1\n2\n3\n4", 2), "...\n3\n4")
 
 
+class PlaceCommandTest(unittest.TestCase):
+    def cmd(self, **kw):
+        return runner.build_place_command("/bin/gb", Path("a.kicad_pcb"), Path("b.kicad_pcb"),
+                                          Path("r.json"), runner.PlaceOptions(**kw))
+
+    def test_default_scope_has_no_flag(self):
+        c = self.cmd()
+        self.assertEqual(c[:6], ["/bin/gb", "place", "a.kicad_pcb", "-o", "b.kicad_pcb", "--report"])
+        for flag in ("--only", "--outside", "--all-unlocked", "--fixed"):
+            self.assertNotIn(flag, c)
+
+    def test_scopes(self):
+        c = self.cmd(scope="selected", only=["C1", "R2"])
+        self.assertEqual(c[c.index("--only") + 1], "C1,R2")
+        self.assertIn("--outside", self.cmd(scope="outside"))
+        self.assertIn("--all-unlocked", self.cmd(scope="all"))
+
+    def test_fixed(self):
+        c = self.cmd(fixed=["U1", "U2"])
+        self.assertEqual(c[c.index("--fixed") + 1], "U1,U2")
+
+    def test_parse_references(self):
+        self.assertEqual(runner.parse_references(" U1, C2  R3,"), ["U1", "C2", "R3"])
+        self.assertEqual(runner.parse_references(""), [])
+
+
 if __name__ == "__main__":
     unittest.main()

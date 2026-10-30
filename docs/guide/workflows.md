@@ -185,6 +185,20 @@ project.
 `--svg out.svg` draws the final result with its violations, `--svg-tris` adds the triangulation
 the router plans on. Both open in any browser.
 
+## Place the parts
+
+Before routing, in KiCad with the *Place with Gummiband* button, or on the command line with
+[`gummiband place`](cli.md#gummiband-place):
+
+1. Put the connectors, the module and whatever else has a fixed spot on the board and lock it.
+2. Pick what should move: the selected parts, the parts still outside the board, or all unlocked
+   ones. The parts you have not picked stay and the moving ones work around them.
+3. Look at the result, move what you want by hand, lock it and place the rest again if you like.
+4. Route.
+
+An agent does the same over MCP: `move_part` for the parts it has a plan for, `place_parts` with
+`fixed` or `only` for the rest, then `route`.
+
 ## Try placement variants
 
 `gummiband-place` (`cargo build --release -p gummiband-place`) rebuilds the Lichtschnitzel

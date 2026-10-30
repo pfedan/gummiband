@@ -11,6 +11,7 @@ repository = "https://github.com/pfedan/gummiband"
 [workspace.dependencies]
 gummiband-core = { path = "crates/gummiband-core" }
 gummiband-kicad = { path = "crates/gummiband-kicad" }
+gummiband-place = { path = "crates/gummiband-place" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 rayon = "1"

@@ -83,6 +83,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `list_nets` | `board`, `filter?`, `include_single?` | nets with class, pin count, plane flag, effective priority, skip flag |
 | `part_info` | `board`, `reference` | pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
 | `move_part` | `board`, `reference`, `x`, `y`, `rotation?` | id and path of the working copy with the footprint at its new position, `items_added`, `warnings` |
+| `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?` | id and path of the working copy, the new poses, decoupling assignment, crossings, smallest courtyard distance, pins off their plane, `warnings` |
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
@@ -130,6 +131,20 @@ or `render` on the result. Pads, their nets and the footprint's own copper move 
 
 ```json
 {"name": "move_part", "arguments": {"board": "b1", "reference": "C12", "x": 152.4, "y": 118.0, "rotation": 90}}
+```
+
+### place_parts
+
+Gives parts a position from the netlist in the working copy, see
+[`gummiband place`](guide/cli.md#gummiband-place). An agent with its own plan places the parts it
+cares about with `move_part` and leaves the rest to this tool: `fixed` names what stays, `only` what
+moves. `scope` is `unlocked` (the default: not locked and not mechanical), `all_unlocked` or
+`outside`. Locked footprints never move. The tool places, it does not judge: `route` and `drc` tell
+how good the result is, another `seed` gives another try.
+
+```json
+{"name": "place_parts", "arguments": {"board": "b1", "fixed": ["U1", "L1"], "seed": 2}}
+{"name": "place_parts", "arguments": {"board": "b1", "only": ["C12", "C13", "R4"]}}
 ```
 
 ### add_zone
@@ -288,8 +303,7 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
 
 - `move_part` and `add_zone` are new and tested on small boards only; `move_part` checks no
   courtyards, and a zone is not filled until KiCad fills it.
-- Not reachable through MCP yet: creating a board, the automatic placement search
-  (`--move-parts`, `gummiband-place`), `--shove` and `--give`, and per net widths and priorities
+- Not reachable through MCP yet: creating a board, `--move-parts`, `--shove` and `--give`, and per net widths and priorities
   from files (`--net-widths`, `--net-priorities`; priorities go through `set_net_options`).
 - Progress notifications during long routes, and cancellation (the core has no cancel hook).
 - `route` returns Gummiband's own clearance check; KiCad's verdict needs a `drc` call.

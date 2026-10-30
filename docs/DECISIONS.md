@@ -23,7 +23,10 @@ Standing decisions of the project owner, kept here so that they survive any sess
 
 ## Router behaviour
 
-- Placement is fixed by default. `--move-parts` is opt-in; locked footprints, connectors,
+- Placement is a step of its own before routing (`gummiband place`), for people through a plugin
+  button with the choice of parts (selected, outside the board, all unlocked), for agents through
+  `place_parts` next to their own `move_part`. Locked footprints never move.
+- Placement is fixed by default while routing. `--move-parts` is opt-in; locked footprints, connectors,
   modules and mounting holes stay. Full placement re-searches are used sparingly.
 - Necking goes down to the pad width at most, never below the board minimum or what custom
   rules allow; current paths must stay electrically sensible.
