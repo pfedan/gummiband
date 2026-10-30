@@ -2,7 +2,7 @@ mod svg;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use gummiband_core::board::ObstacleKind;
 use gummiband_core::realize::Elem;
@@ -119,9 +119,17 @@ enum Cmd {
         /// footprints, connectors, modules and mounting holes stay).
         #[arg(long)]
         move_parts: bool,
-        /// References that never move under --move-parts, comma separated.
+        /// References that never move under --move-parts and --placements, comma separated.
         #[arg(long, value_delimiter = ',')]
         fixed: Vec<String>,
+        /// Try this many placements from the netlist (see `gummiband place`), route each one with
+        /// these settings and keep the best: fewest open connections, then clearance violations,
+        /// vias and length. Parts that are not locked or mechanical get new positions.
+        #[arg(long, default_value_t = 0)]
+        placements: usize,
+        /// First seed of --placements.
+        #[arg(long, default_value_t = 1)]
+        placement_seed: u64,
         /// Track width per net from a JSON file {"net name": width_mm, ...} (e.g. the widths
         /// of an existing routing, see bench/net_widths.py).
         #[arg(long)]
@@ -320,6 +328,8 @@ fn main() -> Result<()> {
             frames,
             move_parts,
             fixed,
+            placements,
+            placement_seed,
             progress,
             until_stop,
             air,
@@ -334,6 +344,9 @@ fn main() -> Result<()> {
             if shove && (!keep_all || nets.is_empty() || move_parts) {
                 anyhow::bail!("--shove needs --keep-all and --nets, and fixed parts");
             }
+            if placements > 0 && (keep_all || !nets.is_empty() || pairs) {
+                anyhow::bail!("--placements routes the whole board: not with --keep-all, --nets or --pairs");
+            }
             let keep = if keep_all {
                 KeepCopper::All
             } else if keep_locked {
@@ -341,71 +354,6 @@ fn main() -> Result<()> {
             } else {
                 KeepCopper::None
             };
-            let kb = read_board(
-                &board,
-                &ReadOptions {
-                    keep,
-                    plane_layers: cli.plane_layers.clone(),
-                    move_parts,
-                    fixed,
-                    ..Default::default()
-                },
-            )?;
-            let mut kb = kb;
-            if !nets.is_empty() {
-                for n in &nets {
-                    if kb.board.net_id(n).is_none() {
-                        anyhow::bail!("no net named {n:?}");
-                    }
-                }
-            }
-            if let Some(path) = &net_widths {
-                let map: std::collections::HashMap<String, f64> =
-                    serde_json::from_str(&std::fs::read_to_string(path)?)?;
-                let mut n = 0;
-                for (name, w) in map {
-                    if let Some(net) = kb.board.net_id(&name) {
-                        kb.board.set_net_width(net, w);
-                        n += 1;
-                    }
-                }
-                println!("net widths: {n} nets");
-            }
-            if let Some(path) = &net_priorities {
-                let map: std::collections::HashMap<String, i32> =
-                    serde_json::from_str(&std::fs::read_to_string(path)?)?;
-                for n in kb.board.nets.iter_mut() {
-                    if let Some(&p) = map.get(&n.name) {
-                        n.priority = p;
-                    }
-                }
-            }
-            if let (true, Some(z)) = (pairs, pair_zdiff) {
-                gummiband_core::pairs::apply_zdiff(&mut kb.board, z);
-            }
-            // debugging: GB_SHIFT="R8:0.3,0;C4:0,-0.2" routes the board with these parts shifted
-            let shifted_in;
-            let b = match std::env::var("GB_SHIFT") {
-                Ok(spec) => {
-                    let off: std::collections::HashMap<String, gummiband_core::geom::Point> = spec
-                        .split(';')
-                        .filter_map(|e| {
-                            let (r, d) = e.split_once(':')?;
-                            let (x, y) = d.split_once(',')?;
-                            Some((
-                                r.to_string(),
-                                gummiband_core::geom::pt(x.parse().ok()?, y.parse().ok()?),
-                            ))
-                        })
-                        .collect();
-                    shifted_in = kb.board.with_offsets(&off);
-                    &shifted_in
-                }
-                Err(_) => &kb.board,
-            };
-            if move_parts {
-                println!("movable parts: {}", b.movable.len());
-            }
             let t0 = std::time::Instant::now();
             let sub_cfg = SubstrateConfig {
                 via_pitch,
@@ -438,17 +386,120 @@ fn main() -> Result<()> {
                 open_end: open_end.clone(),
                 air: air.unwrap_or(if until_stop { 0.03 } else { 0.0 }),
                 prefer_width,
-                progress: progress.then(|| {
-                    gummiband_core::ProgressFn(std::sync::Arc::new(move |p: &gummiband_core::Progress| {
-                        use std::io::Write;
-                        let mut v = serde_json::to_value(p).unwrap_or_default();
-                        v["seconds"] = serde_json::json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
-                        let mut out = std::io::stdout().lock();
-                        let _ = writeln!(out, "progress {v}");
-                        let _ = out.flush();
-                    }))
-                }),
+                progress: progress.then(|| progress_lines(t0, String::new())),
             };
+            let load = |path: &std::path::Path| -> Result<gummiband_kicad::KicadBoard> {
+                let kb = read_board(
+                    path,
+                    &ReadOptions {
+                        keep,
+                        plane_layers: cli.plane_layers.clone(),
+                        move_parts,
+                        fixed: fixed.clone(),
+                        ..Default::default()
+                    },
+                )?;
+                let mut kb = kb;
+                if !nets.is_empty() {
+                    for n in &nets {
+                        if kb.board.net_id(n).is_none() {
+                            anyhow::bail!("no net named {n:?}");
+                        }
+                    }
+                }
+                if let Some(path) = &net_widths {
+                    let map: std::collections::HashMap<String, f64> =
+                        serde_json::from_str(&std::fs::read_to_string(path)?)?;
+                    let mut n = 0;
+                    for (name, w) in map {
+                        if let Some(net) = kb.board.net_id(&name) {
+                            kb.board.set_net_width(net, w);
+                            n += 1;
+                        }
+                    }
+                    println!("net widths: {n} nets");
+                }
+                if let Some(path) = &net_priorities {
+                    let map: std::collections::HashMap<String, i32> =
+                        serde_json::from_str(&std::fs::read_to_string(path)?)?;
+                    for n in kb.board.nets.iter_mut() {
+                        if let Some(&p) = map.get(&n.name) {
+                            n.priority = p;
+                        }
+                    }
+                }
+                if let (true, Some(z)) = (pairs, pair_zdiff) {
+                    gummiband_core::pairs::apply_zdiff(&mut kb.board, z);
+                }
+                Ok(kb)
+            };
+            let input = board;
+            let placed_dir = std::env::temp_dir().join(format!("gummiband-placements-{}", std::process::id()));
+            let mut placement = None;
+            let board = if placements > 0 {
+                let opts = gummiband_place::auto::PlaceOptions {
+                    fixed: fixed.clone(),
+                    seed: placement_seed,
+                    starts: 1,
+                    plane_layers: cli.plane_layers.clone(),
+                    ..Default::default()
+                };
+                let found = try_placements(&input, &placed_dir, placements, &opts, &|path, seed, i| {
+                    let kb = load(path)?;
+                    if !kb.board.copper.is_empty() {
+                        anyhow::bail!("--placements needs a board without kept copper, tracks do not follow the parts");
+                    }
+                    let search = gummiband_core::SearchConfig {
+                        frames: false,
+                        // only the winner runs open ended
+                        open_end: None,
+                        progress: progress.then(|| progress_lines(t0, format!("placement {i}/{placements}: "))),
+                        ..search_cfg.clone()
+                    };
+                    let (_, res) = gummiband_core::route_board(&kb.board, &sub_cfg, &router_cfg, &search);
+                    let violations = gummiband_core::check::check(&kb.board.with_offsets(&res.offsets), &res.geometry);
+                    Ok(Trial {
+                        seed,
+                        routed: res.stats.routed,
+                        connections: res.stats.conns,
+                        violations: violations.len(),
+                        vias: res.stats.vias,
+                        length: res.stats.length,
+                    })
+                })
+                .inspect_err(|_| {
+                    let _ = std::fs::remove_dir_all(&placed_dir);
+                })?;
+                let path = found.path.clone();
+                placement = Some(found);
+                path
+            } else {
+                input.clone()
+            };
+            let kb = load(&board)?;
+            // debugging: GB_SHIFT="R8:0.3,0;C4:0,-0.2" routes the board with these parts shifted
+            let shifted_in;
+            let b = match std::env::var("GB_SHIFT") {
+                Ok(spec) => {
+                    let off: std::collections::HashMap<String, gummiband_core::geom::Point> = spec
+                        .split(';')
+                        .filter_map(|e| {
+                            let (r, d) = e.split_once(':')?;
+                            let (x, y) = d.split_once(',')?;
+                            Some((
+                                r.to_string(),
+                                gummiband_core::geom::pt(x.parse().ok()?, y.parse().ok()?),
+                            ))
+                        })
+                        .collect();
+                    shifted_in = kb.board.with_offsets(&off);
+                    &shifted_in
+                }
+                Err(_) => &kb.board,
+            };
+            if move_parts {
+                println!("movable parts: {}", b.movable.len());
+            }
             // the nets asked for, and the nets that give way when a connection finds no way
             let mut given: std::collections::BTreeSet<String> = Default::default();
             let mut radius = 0.0;
@@ -750,9 +801,10 @@ fn main() -> Result<()> {
             if let Some(path) = report {
                 let st = &res.stats;
                 let json = serde_json::json!({
-                    "board": board.display().to_string(),
+                    "board": input.display().to_string(),
                     "output": output.display().to_string(),
                     "seconds": dt.as_secs_f64(),
+                    "placement": placement.as_ref().map(Placement::to_json),
                     "connections": st.conns,
                     "routed": st.routed,
                     "unrouted": st.unrouted,
@@ -783,6 +835,7 @@ fn main() -> Result<()> {
                 });
                 std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
             }
+            let _ = std::fs::remove_dir_all(&placed_dir);
         }
         Cmd::Place {
             board,
@@ -955,4 +1008,116 @@ fn track_end_teardrops(input: &std::path::Path, output: &std::path::Path) -> Res
         }
     }
     Ok(())
+}
+
+/// The `progress {json}` lines of a route, with `prefix` in front of each phase.
+fn progress_lines(t0: std::time::Instant, prefix: String) -> gummiband_core::ProgressFn {
+    gummiband_core::ProgressFn(std::sync::Arc::new(move |p: &gummiband_core::Progress| {
+        use std::io::Write;
+        let mut p = p.clone();
+        p.phase = format!("{prefix}{}", p.phase);
+        let mut v = serde_json::to_value(&p).unwrap_or_default();
+        v["seconds"] = serde_json::json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "progress {v}");
+        let _ = out.flush();
+    }))
+}
+
+/// One placement of --placements, routed.
+struct Trial {
+    seed: u64,
+    routed: usize,
+    connections: usize,
+    violations: usize,
+    vias: usize,
+    length: f64,
+}
+
+impl Trial {
+    /// Lower is better: completion first, then clean copper, then vias and length.
+    fn score(&self) -> (usize, usize, usize, f64) {
+        (self.connections - self.routed, self.violations, self.vias, self.length)
+    }
+}
+
+/// The winner of --placements.
+struct Placement {
+    /// The placed board, the final route reads it.
+    path: PathBuf,
+    report: gummiband_place::auto::PlaceReport,
+    trials: Vec<Trial>,
+    seed: u64,
+}
+
+impl Placement {
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "seed": self.seed,
+            "moved": self.report.moved,
+            "zones": self.report.zones.iter().map(|(id, pts)| {
+                let pts: Vec<[f64; 2]> = pts.iter().map(|p| [p.x, p.y]).collect();
+                serde_json::json!({ "id": id, "points": pts })
+            }).collect::<Vec<_>>(),
+            "tried": self.trials.iter().map(|t| serde_json::json!({
+                "seed": t.seed,
+                "routed": t.routed,
+                "connections": t.connections,
+                "violations": t.violations,
+                "vias": t.vias,
+                "length_mm": t.length,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// Place the board `count` times and let `route` judge every result. The seeds run one after the
+/// other: each route uses all threads itself.
+fn try_placements(
+    input: &std::path::Path,
+    dir: &std::path::Path,
+    count: usize,
+    opts: &gummiband_place::auto::PlaceOptions,
+    route: &dyn Fn(&std::path::Path, u64, usize) -> Result<Trial>,
+) -> Result<Placement> {
+    std::fs::create_dir_all(dir)?;
+    let mut best: Option<Placement> = None;
+    let mut trials: Vec<Trial> = Vec::new();
+    for i in 0..count {
+        let seed = opts.seed + i as u64;
+        let placed =
+            gummiband_place::auto::place_board(input, &gummiband_place::auto::PlaceOptions { seed, ..opts.clone() })?;
+        let path = dir.join(format!("placement-{seed}.kicad_pcb"));
+        std::fs::write(&path, &placed.text)?;
+        for ext in ["kicad_pro", "kicad_dru"] {
+            let src = input.with_extension(ext);
+            if src.exists() {
+                std::fs::copy(&src, path.with_extension(ext))?;
+            }
+        }
+        let t = route(&path, seed, i + 1)?;
+        println!(
+            "placement {}/{count}, seed {seed}: {}/{} routed, {} violations, {} vias, {:.0} mm",
+            i + 1,
+            t.routed,
+            t.connections,
+            t.violations,
+            t.vias,
+            t.length
+        );
+        let better = trials.iter().all(|o| t.score() < o.score());
+        trials.push(t);
+        if better {
+            best = Some(Placement {
+                path,
+                report: placed.report,
+                trials: Vec::new(),
+                seed,
+            });
+        }
+    }
+    let mut best = best.context("--placements needs at least one placement")?;
+    println!("best placement: seed {}", best.seed);
+    best.trials = trials;
+    Ok(best)
 }

@@ -258,8 +258,9 @@ def plan_from_texts(original_text: str, routed_text: str, keep_locked: bool) -> 
 
 @dataclass
 class PartMoves:
-    """Footprints that ``route --move-parts`` shifted."""
-    poses: List[Tuple[str, float, float]]  # reference and new position
+    """Footprints the router moved: ``route --move-parts`` shifts them, ``--placements`` turns
+    them too."""
+    poses: List[tuple]  # reference, new position and, if it changed, the new rotation
     stale_copper: int  # kept tracks and vias that moved along with a footprint group
 
 
@@ -275,12 +276,15 @@ def _reference(fp: sexpr.Node) -> Optional[str]:
     return None
 
 
-def _positions(text: str) -> Dict[str, Point]:
+def _positions(text: str) -> Dict[str, Tuple[float, float, float]]:
+    """Position and rotation by reference."""
     out = {}
     for fp in sexpr.iter_top_level(text, ("footprint", "module")):
-        ref, at = _reference(fp), sexpr.floats(sexpr.child(fp, "at"), 2)
+        node = sexpr.child(fp, "at")
+        ref, at = _reference(fp), sexpr.floats(node, 2)
         if ref and at:
-            out[ref] = at
+            turned = sexpr.floats(node, 3)
+            out[ref] = (at[0], at[1], turned[2] if turned else 0.0)
     return out
 
 
@@ -290,7 +294,12 @@ def plan_moves(original_text: str, routed_text: str) -> PartMoves:
     poses = []
     for ref, at in sorted(_positions(routed_text).items()):
         old = before.get(ref)
-        if old and max(abs(at[0] - old[0]), abs(at[1] - old[1])) > 1e-6:
+        if not old:
+            continue
+        turned = abs((at[2] - old[2] + 180.0) % 360.0 - 180.0) > 1e-6
+        if turned:
+            poses.append((ref, at[0], at[1], at[2]))
+        elif max(abs(at[0] - old[0]), abs(at[1] - old[1])) > 1e-6:
             poses.append((ref, at[0], at[1]))
     old_copper = {it.uuid: it for it in read_copper(original_text).items}
     stale = sum(1 for it in read_copper(routed_text).items

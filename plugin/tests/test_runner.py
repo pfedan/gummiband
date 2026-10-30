@@ -355,6 +355,22 @@ class FieldTableTest(unittest.TestCase):
                     self.assertNotIn(f.name, saved)
 
 
+class PlacementsCommandTest(unittest.TestCase):
+    def cmd(self, **kw):
+        return runner.build_command("/bin/gb", Path("a.kicad_pcb"), Path("b.kicad_pcb"),
+                                    runner.RouteOptions(**kw))
+
+    def test_off_by_default(self):
+        self.assertNotIn("--placements", self.cmd())
+
+    def test_placements_with_fixed_parts_and_report(self):
+        c = self.cmd(placements=6, fixed=["U1"], report="r.json")
+        self.assertEqual(c[c.index("--placements") + 1], "6")
+        self.assertEqual(c[c.index("--fixed") + 1], "U1")
+        self.assertEqual(c[c.index("--report") + 1], "r.json")
+        self.assertNotIn("--move-parts", c)
+
+
 class PlaceCommandTest(unittest.TestCase):
     def cmd(self, **kw):
         return runner.build_place_command("/bin/gb", Path("a.kicad_pcb"), Path("b.kicad_pcb"),

@@ -206,6 +206,10 @@ could be.
 An agent does the same over MCP: `move_part` for the parts it has a plan for, `place_parts` with
 `fixed` or `only` for the rest, then `route`.
 
+To let the router pick, `route --placements 12` tries twelve placements and keeps the best one, so
+the seed lottery of the placer turns into a search. In KiCad it is *Placements to try* in the route
+dialog. An agent loops over `place_parts` and `route` itself.
+
 ## Try placement variants
 
 `gummiband-place` (`cargo build --release -p gummiband-place`) rebuilds the Lichtschnitzel

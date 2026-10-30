@@ -9,6 +9,7 @@ board with the routed ones in one commit (one undo step).
 from __future__ import annotations
 
 import dataclasses
+import json
 import shutil
 import sys
 import tempfile
@@ -456,13 +457,18 @@ def main() -> int:
         binary = runner.find_binary()
         src = save_copy(board, work)
         out = work / f"{src.stem}-routed.kicad_pcb"
-        cmd = runner.build_command(binary, src, out, opts)
+        report_file = work / "route.json"
+        cmd = runner.build_command(binary, src, out, dataclasses.replace(
+            opts, report=str(report_file) if opts.placements else None))
         res = ui.run_with_metrics(lambda keep_going, accept: runner.run_route(
             cmd, out, work, keep_going, accept), runner.open_ended(opts))
         before, after = src.read_text(encoding="utf-8"), out.read_text(encoding="utf-8")
         plan = bf.plan_from_texts(before, after, opts.keep_locked)
-        moves = bf.plan_moves(before, after) if opts.move_parts else None
-        applied = kicad_apply.apply_plan(board, plan, moves.poses if moves else ())
+        moves = bf.plan_moves(before, after) if opts.move_parts or opts.placements else None
+        zones = []
+        if opts.placements:
+            zones = json.loads(report_file.read_text(encoding="utf-8"))["placement"]["zones"]
+        applied = kicad_apply.apply_plan(board, plan, moves.poses if moves else (), zones)
     except runner.RouteCancelled:
         shutil.rmtree(work, ignore_errors=True)
         return 0
