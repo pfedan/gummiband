@@ -108,14 +108,13 @@ fn main() -> anyhow::Result<()> {
             let ms = |i: usize| (p1[i] - p0[i]) as f64 * 1e-6;
             let rounds = (p1[8] - p0[8]).max(1) as f64;
             println!(
-                "  {core_s:.2} core s, per round: pieces {:.2}, vias {:.2}, tracks {:.2} ms; gather {:.2}, upload {:.2}, wait {:.2} ms; {} points per round",
+                "  {core_s:.2} core s, per round: pieces {:.2}, vias {:.2}, tracks {:.2} ms; gather {:.2}, upload {:.2}, wait {:.2} ms",
                 ms(2) / rounds,
                 ms(3) / rounds,
                 ms(4) / rounds,
-                ms(13) / rounds,
-                ms(14) / rounds,
-                ms(15) / rounds,
-                (p1[9] - p0[9]) / rounds as u64,
+                ms(10) / rounds,
+                ms(11) / rounds,
+                ms(12) / rounds,
             );
             let g = &done[0];
             let v = check::check(&kb.board, g);

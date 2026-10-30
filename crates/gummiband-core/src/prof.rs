@@ -1,5 +1,6 @@
 //! Cumulative phase timers and work counters, printed with `GB_TIMING`. Calls that run in
-//! parallel add up, so the shares are of the work done, not of the wall clock.
+//! parallel add up, so the shares are of the work done, not of the wall clock. Not for loops
+//! over points: an atomic that all threads touch makes the relaxation three times slower.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -15,16 +16,13 @@ pub enum Slot {
     Taut,
     Check,
     Rounds,
-    Points,
-    PointsSkipped,
-    Candidates,
     Calls,
     GpuGather,
     GpuUpload,
     GpuWait,
 }
 
-const NAMES: [&str; 16] = [
+const NAMES: [&str; 13] = [
     "evaluate",
     "relax setup",
     "relax pieces",
@@ -34,16 +32,13 @@ const NAMES: [&str; 16] = [
     "taut",
     "check",
     "rounds",
-    "points",
-    "points skipped",
-    "candidates",
     "relax calls",
     "gpu gather ns",
     "gpu upload ns",
     "gpu wait ns",
 ];
 
-static SLOTS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+static SLOTS: [AtomicU64; 13] = [const { AtomicU64::new(0) }; 13];
 
 #[inline]
 pub fn add(s: Slot, n: u64) {
