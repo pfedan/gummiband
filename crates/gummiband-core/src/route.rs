@@ -23,6 +23,8 @@ pub struct RouterConfig {
     /// Weight of the pull between the nets of a differential pair: a step costs up to this
     /// factor of its length extra, the farther it is from the partner (0 = off).
     pub pair_pull: f64,
+    /// Factor on the via cost in the pass that routes connections with vias again (0 = off).
+    pub via_pass: f64,
     /// Weight of the preferred directions: routing layers alternate between horizontal and
     /// vertical, a step costs this much extra per mm across its layer's direction (0 = off).
     pub layer_dirs: f64,
@@ -55,6 +57,7 @@ impl Default for RouterConfig {
             via_cost: 3.0,
             layer_dirs: 0.0,
             pair_pull: 0.0,
+            via_pass: 4.0,
             fanout_first: true,
             max_expansions: env("GB_MAXEXP", 400_000.0) as usize,
             seed: 0,
@@ -2639,7 +2642,34 @@ impl<'a> Router<'a> {
             still.dedup();
             failed = still;
         }
+        self.reduce_vias();
         self.conn_segs.iter().filter(|s| !s.is_empty()).count()
+    }
+
+    /// Connections with vias are routed again at a high via price. A connection keeps the
+    /// result if it has fewer vias; otherwise it is routed again at the normal price.
+    fn reduce_vias(&mut self) {
+        let price = self.cfg.via_pass;
+        if price <= 0.0 {
+            return;
+        }
+        let normal = self.cfg.via_cost;
+        for ci in 0..self.conns.len() {
+            let before = self.conn_vias[ci].len();
+            if before == 0 || self.conn_segs[ci].is_empty() {
+                continue;
+            }
+            self.rip_up(ci);
+            self.cfg.via_cost = normal * price;
+            let ok = self.route_one(ci);
+            self.cfg.via_cost = normal;
+            if !ok || self.conn_vias[ci].len() >= before {
+                if ok {
+                    self.rip_up(ci);
+                }
+                self.route_one(ci);
+            }
+        }
     }
 
     pub fn route_one(&mut self, ci: usize) -> bool {

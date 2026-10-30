@@ -67,6 +67,10 @@ enum Cmd {
         /// every third run of the portfolio; 0 = off.
         #[arg(long, default_value_t = 0.5)]
         layer_dirs: f64,
+        /// Factor on the via cost in the pass that routes connections with vias again and
+        /// keeps what has fewer vias (0 = off).
+        #[arg(long, default_value_t = 4.0)]
+        via_pass: f64,
         /// Weight of the pull between the nets of differential pairs (0 = off).
         #[arg(long, default_value_t = 0.0)]
         pair_pull: f64,
@@ -221,6 +225,7 @@ fn main() -> Result<()> {
             via_cost,
             layer_dirs,
             pair_pull,
+            via_pass,
             generations,
             geometry_generations,
             svg,
@@ -312,6 +317,7 @@ fn main() -> Result<()> {
                 via_cost,
                 layer_dirs,
                 pair_pull,
+                via_pass,
                 ..Default::default()
             };
             let search_cfg = gummiband_core::SearchConfig {
