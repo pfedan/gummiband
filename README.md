@@ -94,4 +94,5 @@ Reference and development:
 
 ## License
 
-MIT.
+All rights reserved. Gummiband is not published under an open source license; ask the author
+before using it beyond trying it out.
