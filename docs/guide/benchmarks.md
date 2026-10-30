@@ -122,6 +122,8 @@ and test points fixed, 133 parts from nothing, original outline and inner planes
 | Seed 21 | 347/348 | 240 | 2077 mm | 2 unconnected, 1 sliver, 1 dangling via |
 | Seed 51 | 350/350 | 289 | 2044 mm | 8 clearance, 1 short, 1 crossing, 1 mask bridge |
 
+The seeds of this table are from before seeds stopped sharing starts.
+
 Fewer vias and shorter tracks than the hand placement, but the seeds differ, so try a few. The
 placer knows no datasheet layouts: switch nodes come out 3.4 to 7.4 mm long against 3.0 mm in the
 original. Place a power stage by hand or lock it when that matters.

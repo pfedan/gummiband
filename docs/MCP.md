@@ -147,9 +147,12 @@ between courtyards and `halo` (0.3 mm) the extra room around parts with five or 
 result names the working copy to route next, the new pose of every moved part (`placed`), which
 decoupling capacitor was assigned to which part, the `crossings` between the nets (a measure of
 the vias to expect), the smallest distance between two courtyards and the pins that ended up off
-the plane of their net (`off_plane`, routing reaches them with a via). Tracks and vias of the
-input do not follow, so call it before `route`. The tool places, it does not judge: `route` and
-`drc` tell how good the result is, another `seed` gives another try, and seeds differ a lot.
+the plane of their net (`off_plane`, routing reaches them with a via). Locked copper stays: parts
+keep `gap` away from it, and a part with locked copper of its net on a pad stays (`anchored`), so add
+pre-routed copper before this call, not after. Unlocked tracks and vias do not follow, so call it
+before `route`. The tool places, it does not judge: `route` and `drc` tell how good the result is,
+another `seed` gives another try, and seeds differ a lot. Neighbouring seeds share no starts. The
+crossing count is no forecast of the routed result.
 
 ```json
 {"name": "place_parts", "arguments": {"board": "b1", "fixed": ["U1", "L1"], "seed": 2}}
