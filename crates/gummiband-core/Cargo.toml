@@ -4,7 +4,14 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+# Experimental: the point loop of the relaxation as a compute shader, opt-in with GB_GPU=1.
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+
 [dependencies]
+bytemuck = { version = "1", features = ["derive"], optional = true }
+pollster = { version = "0.4", optional = true }
+wgpu = { version = "30", optional = true, default-features = false, features = ["metal", "wgsl"] }
 rayon.workspace = true
 serde.workspace = true
 spade.workspace = true

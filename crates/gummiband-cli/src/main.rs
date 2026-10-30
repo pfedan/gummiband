@@ -385,6 +385,7 @@ fn main() -> Result<()> {
                 } else {
                     gummiband_core::route_board(&board, &sub_cfg, &router_cfg, &search_cfg)
                 };
+                gummiband_core::prof::report();
                 if res.stats.unrouted.is_empty() || nets.is_empty() || radius >= give {
                     break (board, sub, res);
                 }

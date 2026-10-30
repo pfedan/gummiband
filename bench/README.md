@@ -39,6 +39,14 @@ each board is in `boards/out/<board>.route.log`.
 `run-lichtschnitzel.sh` routes it and prints the KiCad DRC summary; `drc_report.py` summarizes a
 DRC JSON report in more detail.
 
+## Relaxation on the CPU and the GPU
+
+`cargo run --release -p gummiband-cli --features gpu --example relax_bench -- BOARD` routes the
+board with a small search and relaxes the same routing on the CPU and the GPU. It prints the time,
+the core seconds, a breakdown per round, the violations and a hash of the result. `--ensemble N`
+relaxes it N times with a margin changed by next to nothing: the relaxation is chaotic, a single
+violation count says little. Compare core seconds when other jobs run on the machine.
+
 ## Real boards (external)
 
 `kicad-autorouter-benchmarks.zip` (not in the repository; sources and licenses in its

@@ -142,6 +142,9 @@ vias of the other nets are no obstacles but part of the topology (`gummiband-cor
 2. Elastic optimizer (`relax`): every track is a chain of points under tension, obstacles,
    vias and other tracks push with their clearance, vias move as well and drag their tracks.
    All tracks relax in parallel (Jacobi rounds); the last quarter resolves clearances only.
+   Experimental: with the `gpu` cargo feature and `GB_GPU=1` the rounds before the last quarter
+   run as a compute shader (`relax_gpu.rs`, `relax_gpu.wgsl`, wgpu on Metal), see M4b in
+   `MILESTONES.md`.
 3. Taut pass: straight shortcuts wherever they keep all clearances (removes the waves).
 4. Fillets: every corner is rounded with the largest arc that keeps all clearances; the output
    uses real KiCad arcs.
