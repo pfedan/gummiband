@@ -111,6 +111,12 @@ runs per layer in parallel and the checks per net. `--threads` (or `RAYON_NUM_TH
 the pool, `--runs` the number of attempts per phase. Memory grows with the number of parallel
 attempts on large boards.
 
+The GPU is optional and experimental: a binary built with the `gpu` feature and started with
+`GB_GPU=1` runs the bulk of the track relaxation as a compute shader (Metal on macOS). The
+topological search stays on the CPU, so the gain is limited to boards where relaxation takes a
+large share of the time, and the result can differ between GPUs, which is why it is off by
+default. See the [environment variables](cli.md#environment-variables).
+
 ## Current limits
 
 Things the router does not do yet. The [milestones](../MILESTONES.md) say what comes next.
