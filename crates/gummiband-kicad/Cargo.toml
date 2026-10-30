@@ -1,0 +1,11 @@
+[package]
+name = "gummiband-kicad"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gummiband-core.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+thiserror = "2"

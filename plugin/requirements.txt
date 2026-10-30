@@ -1,0 +1,4 @@
+# Installed by KiCad into the plugin's virtual environment (pip, binary wheels only).
+# wxPython is not listed: KiCad's bundled Python (macOS, Windows) already has it, and the
+# plugin runs without a dialog where it is missing.
+kicad-python>=0.8.0,<1
