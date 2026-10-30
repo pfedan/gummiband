@@ -214,7 +214,6 @@ pub struct StackItem {
     pub epsilon_r: f64,
 }
 
-
 /// One kept track, arc or via of the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CopperItem {

@@ -137,7 +137,15 @@ pub fn apply_pair_rules(board: &mut Board, text: &str) {
         };
         let gap = of("diff_pair_gap").and_then(constraint_opt);
         let width = of("track_width").and_then(constraint_opt);
-        let skew = of("skew").and_then(|c| c.child("max")?.args().first()?.as_str()?.trim_end_matches("mm").parse().ok());
+        let skew = of("skew").and_then(|c| {
+            c.child("max")?
+                .args()
+                .first()?
+                .as_str()?
+                .trim_end_matches("mm")
+                .parse()
+                .ok()
+        });
         if gap.is_none() && skew.is_none() {
             continue;
         }

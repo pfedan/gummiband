@@ -201,12 +201,16 @@ fn glob_match(pat: &str, s: &str) -> bool {
 impl Reader {
     /// Copper and dielectric layers of the stackup, for impedance estimates.
     fn read_stackup(&mut self, root: &Node) {
-        let Some(st) = root.child("setup").and_then(|x| x.child("stackup")) else { return };
+        let Some(st) = root.child("setup").and_then(|x| x.child("stackup")) else {
+            return;
+        };
         let number = |l: &Node, k: &str| l.child(k).and_then(|c| c.args().first()).and_then(|v| v.as_f64());
         for l in st.children("layer") {
             let name = l.args().first().and_then(|x| x.as_str()).unwrap_or("");
             let kind = l.child_str("type").unwrap_or("");
-            let Some(thickness) = number(l, "thickness") else { continue };
+            let Some(thickness) = number(l, "thickness") else {
+                continue;
+            };
             if kind == "copper" {
                 self.b.stackup.push(StackItem {
                     copper: self.b.layer_id(name),

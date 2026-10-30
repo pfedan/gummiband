@@ -52,6 +52,7 @@ fn main() -> anyhow::Result<()> {
         geometry_generations: 0,
         frames: false,
         progress: None,
+        seed: None,
     };
     let t = Instant::now();
     let (sub, res) = route_board(

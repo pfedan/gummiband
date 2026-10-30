@@ -367,3 +367,68 @@ pub fn add_locked(kb: &KicadBoard, items: &[Item]) -> String {
         .replace("\t(via\n", "\t(via\n\t\t(locked yes)\n");
     format!("{head}{tail}")
 }
+
+/// Set a footprint's position (and rotation, if given) in a board file.
+pub fn place_footprint(text: &str, reference: &str, x: f64, y: f64, rotation: Option<f64>) -> anyhow::Result<String> {
+    let root = crate::sexpr::parse(text).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+    for fp in root
+        .args()
+        .iter()
+        .filter(|n| matches!(n.head(), Some("footprint") | Some("module")))
+    {
+        let name = fp
+            .children("property")
+            .find(|p| p.args().first().and_then(|x| x.as_str()) == Some("Reference"))
+            .and_then(|p| p.args().get(1)?.as_str())
+            .or_else(|| {
+                fp.children("fp_text")
+                    .find(|t| t.args().first().and_then(|x| x.as_str()) == Some("reference"))
+                    .and_then(|t| t.args().get(1)?.as_str())
+            });
+        if name != Some(reference) {
+            continue;
+        }
+        let Some(at) = fp.child("at") else { continue };
+        let old = at.args().iter().filter_map(|x| x.as_f64()).nth(2);
+        let mut new = format!("(at {} {}", f(x), f(y));
+        if let Some(r) = rotation.or(old) {
+            new.push_str(&format!(" {}", f(r)));
+        }
+        new.push(')');
+        let span = at.span();
+        return Ok(format!("{}{}{}", &text[..span.start], new, &text[span.end..]));
+    }
+    anyhow::bail!("no footprint {reference:?}")
+}
+
+/// A copper zone on one layer, appended to the board text. KiCad fills it (press B, or the
+/// DRC with --refill-zones).
+pub fn add_zone(
+    kb: &KicadBoard,
+    text: &str,
+    net: NetId,
+    layer: LayerId,
+    outline: &[Point],
+    priority: u32,
+    ids: u64,
+) -> String {
+    let name = &kb.board.nets[net as usize].name;
+    let net_item = match &kb.net_numbers {
+        Some(t) => format!("(net {}) (net_name {})", t.get(name).copied().unwrap_or(0), quote(name)),
+        None => format!("(net {})", quote(name)),
+    };
+    let mut gen_id = UuidGen::new(ids ^ text.len() as u64);
+    let mut pts = String::new();
+    for p in outline {
+        pts.push_str(&format!("(xy {} {}) ", f(p.x), f(p.y)));
+    }
+    let zone = format!(
+        "\t(zone {net_item} (layer {}) (uuid \"{}\") (hatch edge 0.5) (priority {priority}) \
+         (connect_pads (clearance 0.2)) (min_thickness 0.2) (fill yes (thermal_gap 0.3) \
+         (thermal_bridge_width 0.3)) (polygon (pts {pts})))\n",
+        quote(&kb.layer_names[layer as usize]),
+        gen_id.next(),
+    );
+    let end = text.rfind(')').unwrap_or(text.len());
+    format!("{}{}{}", &text[..end], zone, &text[end..])
+}

@@ -1126,6 +1126,7 @@ mod tests {
             geometry_generations: 0,
             frames: false,
             progress: None,
+            seed: None,
         };
         let (_, res) = route_board(&b, &SubstrateConfig::default(), &RouterConfig::default(), &search);
         assert_eq!(res.stats.routed, 1, "{:?}", res.stats.unrouted);

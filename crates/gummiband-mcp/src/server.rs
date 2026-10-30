@@ -186,6 +186,32 @@ pub struct AddLockedIn {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct MovePartIn {
+    /// Board id from load_board.
+    pub board: String,
+    /// Footprint reference, e.g. C12.
+    pub reference: String,
+    /// New position in mm.
+    pub x: f64,
+    pub y: f64,
+    /// New rotation in degrees (default: unchanged).
+    pub rotation: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddZoneIn {
+    /// Board id from load_board.
+    pub board: String,
+    pub net: String,
+    /// Copper layer name, e.g. In1.Cu. A plane on an inner layer.
+    pub layer: String,
+    /// Outline as [x, y] points in mm, at least three.
+    pub points: Vec<[f64; 2]>,
+    /// Zone priority (default 0).
+    pub priority: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListNetsIn {
     /// Board id from load_board.
     pub board: String,
@@ -216,6 +242,11 @@ pub struct RouteIn {
     /// Portfolio size: router runs with different orders (default 14, fixed so that results
     /// do not depend on the machine).
     pub runs: Option<usize>,
+    /// Keep all tracks and vias of the input and add to them; with `nets` only those nets are
+    /// routed and everything else stays.
+    pub keep_all: Option<bool>,
+    /// Seed of the search. The same seed gives the same result; another one a different try.
+    pub seed: Option<u64>,
     /// Weight of the pull between the nets of differential pairs (default 0: off; 1 is a good
     /// start, it can cost clearance on tight boards).
     pub pair_pull: Option<f64>,
@@ -427,6 +458,21 @@ pub struct PairOut {
 
 /// The fields of `gummiband route --report`, plus a few for the session.
 #[derive(Debug, Serialize, JsonSchema)]
+pub struct BlockedOut {
+    pub connection: String,
+    pub nets: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct NetStatOut {
+    pub net: String,
+    pub length_mm: f64,
+    pub vias: usize,
+    pub min_width_mm: f64,
+    pub max_width_mm: f64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct RouteOut {
     pub board: String,
     pub input: String,
@@ -437,6 +483,8 @@ pub struct RouteOut {
     pub routed: usize,
     /// Unrouted connections ("net: pad -> pad").
     pub unrouted: Vec<String>,
+    /// For each unrouted connection the nets running in its way, to prioritize or move them.
+    pub blocked: Vec<BlockedOut>,
     pub vias: usize,
     pub length_mm: f64,
     pub items_written: usize,
@@ -450,6 +498,8 @@ pub struct RouteOut {
     pub portfolio: Vec<PortfolioOut>,
     /// Differential pairs, with `pairs` set.
     pub pairs: Vec<PairOut>,
+    /// Per routed net: track length, vias and widths, longest first.
+    pub nets: Vec<NetStatOut>,
     /// Project files copied next to the output.
     pub copied: Vec<String>,
 }
@@ -842,6 +892,79 @@ impl Gummiband {
         Ok((format!("{} locked items in {}", out.items_added, out.path), out))
     }
 
+    /// The working copy of a board: the file itself if it is one already.
+    fn working_copy(path: &Path) -> PathBuf {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("board");
+        if stem.ends_with(".prerouted") {
+            path.to_path_buf()
+        } else {
+            path.with_file_name(format!("{stem}.prerouted.kicad_pcb"))
+        }
+    }
+
+    /// Change the text of the working copy and load it; returns the board id.
+    fn edit_copy(
+        &self,
+        board: &str,
+        edit: impl FnOnce(&KicadBoard, &str) -> Result<String>,
+    ) -> Result<(String, String)> {
+        let (path, keep, options) =
+            self.with_entry(board, |e| Ok((e.path.clone(), e.keep_locked, e.options.clone())))?;
+        let work = Self::working_copy(&path);
+        let from = if work.is_file() { work.clone() } else { path.clone() };
+        let kb = read(&from, true)?;
+        let text = edit(&kb, &std::fs::read_to_string(&from)?)?;
+        std::fs::write(&work, text).with_context(|| format!("writing {}", work.display()))?;
+        if work != path {
+            external::copy_project_files(&path, &work);
+        }
+        let (_, loaded) = self.load(LoadBoardIn {
+            path: work.display().to_string(),
+            keep_locked: Some(keep || work.is_file()),
+        })?;
+        let id = loaded.board;
+        self.with_entry(&id, |e| {
+            e.options = options;
+            Ok(())
+        })?;
+        Ok((id, work.display().to_string()))
+    }
+
+    fn do_move_part(&self, p: MovePartIn) -> Result<(String, AddLockedOut)> {
+        let (id, path) = self.edit_copy(&p.board, |_, text| {
+            write::place_footprint(text, &p.reference, p.x, p.y, p.rotation)
+        })?;
+        let out = AddLockedOut {
+            board: id,
+            path,
+            items_added: 1,
+            warnings: Vec::new(),
+        };
+        Ok((format!("moved {} to {}, {}", p.reference, p.x, p.y), out))
+    }
+
+    fn do_add_zone(&self, p: AddZoneIn) -> Result<(String, AddLockedOut)> {
+        if p.points.len() < 3 {
+            bail!("a zone needs at least three points");
+        }
+        let (id, path) = self.edit_copy(&p.board, |kb, text| {
+            let b = &kb.board;
+            let net = b.net_id(&p.net).with_context(|| format!("no net named {:?}", p.net))?;
+            let layer = b
+                .layer_id(&p.layer)
+                .with_context(|| format!("no layer {:?}", p.layer))?;
+            let pts: Vec<_> = p.points.iter().map(|q| gummiband_core::geom::pt(q[0], q[1])).collect();
+            Ok(write::add_zone(kb, text, net, layer, &pts, p.priority.unwrap_or(0), 1))
+        })?;
+        let out = AddLockedOut {
+            board: id,
+            path,
+            items_added: 1,
+            warnings: Vec::new(),
+        };
+        Ok((format!("zone {} on {}", p.net, p.layer), out))
+    }
+
     fn set_options(&self, p: SetNetOptionsIn) -> Result<(String, SetNetOptionsOut)> {
         self.with_entry(&p.board, |e| {
             let b = &e.kb.board;
@@ -954,6 +1077,7 @@ fn route_blocking(
         geometry_generations: p.geometry_generations.unwrap_or(0),
         frames: false,
         progress: None,
+        seed: p.seed,
     };
     let (res, pair_reports) = if p.pairs == Some(true) {
         let cfg = gummiband_core::pairs::PairConfig {
@@ -963,7 +1087,10 @@ fn route_blocking(
         let (_, res, reports) = gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, &search_cfg, &cfg);
         (res, reports)
     } else {
-        (gummiband_core::route_board(b, &sub_cfg, &router_cfg, &search_cfg).1, Vec::new())
+        (
+            gummiband_core::route_board(b, &sub_cfg, &router_cfg, &search_cfg).1,
+            Vec::new(),
+        )
     };
     let seconds = t0.elapsed().as_secs_f64();
     let viol = gummiband_core::check::check(b, &res.geometry);
@@ -998,9 +1125,10 @@ fn route_blocking(
             net: v.net,
         });
     }
+    let keep_all = p.keep_all == Some(true);
     let opts = write::StripOptions {
-        unlocked: true,
-        locked: !keep_locked,
+        unlocked: !keep_all,
+        locked: !keep_locked && !keep_all,
         zone_layers: vec![],
         nets: Vec::new(),
         items: Vec::new(),
@@ -1011,6 +1139,36 @@ fn route_blocking(
     let copied = external::copy_project_files(&path, &output);
 
     let net = |n: u32| b.nets[n as usize].name.clone();
+    let mut per_net: BTreeMap<u32, NetStatOut> = BTreeMap::new();
+    let mut stat = |n: u32| {
+        per_net.entry(n).or_insert_with(|| NetStatOut {
+            net: b.nets[n as usize].name.clone(),
+            length_mm: 0.0,
+            vias: 0,
+            min_width_mm: f64::INFINITY,
+            max_width_mm: 0.0,
+        }) as *mut NetStatOut
+    };
+    for t in &res.geometry.tracks {
+        let e = unsafe { &mut *stat(t.net) };
+        for w in t.pts.windows(2) {
+            let width = t.piece_width(w[0], w[1]);
+            e.length_mm += w[0].dist(w[1]);
+            e.min_width_mm = e.min_width_mm.min(width);
+            e.max_width_mm = e.max_width_mm.max(width);
+        }
+    }
+    for v in &res.geometry.vias {
+        unsafe { (*stat(v.net)).vias += 1 };
+    }
+    let mut nets_out: Vec<NetStatOut> = per_net.into_values().collect();
+    for n in &mut nets_out {
+        n.length_mm = r3(n.length_mm);
+        if !n.min_width_mm.is_finite() {
+            n.min_width_mm = 0.0;
+        }
+    }
+    nets_out.sort_by(|a, b| b.length_mm.total_cmp(&a.length_mm));
     let mut by_kind = BTreeMap::new();
     for v in &viol {
         *by_kind
@@ -1019,6 +1177,7 @@ fn route_blocking(
     }
     let st = &res.stats;
     let out = RouteOut {
+        nets: nets_out,
         board: id,
         input: path.display().to_string(),
         output: output.display().to_string(),
@@ -1027,6 +1186,14 @@ fn route_blocking(
         connections: st.conns,
         routed: st.routed,
         unrouted: st.unrouted.clone(),
+        blocked: st
+            .blocked
+            .iter()
+            .map(|(connection, nets)| BlockedOut {
+                connection: connection.clone(),
+                nets: nets.clone(),
+            })
+            .collect(),
         vias: st.vias,
         length_mm: st.length,
         items_written: items.len(),
@@ -1224,6 +1391,32 @@ impl Gummiband {
     }
 
     #[tool(
+        description = "Move a part to a new position (and rotation) in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. Courtyards are not checked; use drc.",
+        output_schema = schema_for_output::<AddLockedOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn move_part(&self, Parameters(p): Parameters<MovePartIn>) -> Result<CallToolResult, ErrorData> {
+        let me = self.clone();
+        match blocking(move || me.do_move_part(p)).await {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Add a copper zone (net, layer, polygon, priority) to the working copy. On a KiCad power layer it becomes a plane the router connects to with vias. KiCad fills it; drc refills zones.",
+        output_schema = schema_for_output::<AddLockedOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn add_zone(&self, Parameters(p): Parameters<AddZoneIn>) -> Result<CallToolResult, ErrorData> {
+        let me = self.clone();
+        match blocking(move || me.do_add_zone(p)).await {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
         description = "Add pre-routed copper (tracks as polylines, vias) as locked items: the router keeps it and routes around it, and track ends join their net. The input file stays untouched: the copper goes into a working copy <input>.prerouted.kicad_pcb, which is loaded with keep_locked; use the returned board id from now on. Check the result with drc and render.",
         output_schema = schema_for_output::<AddLockedOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
@@ -1265,7 +1458,15 @@ impl Gummiband {
         let id = p.board.clone();
         let res = blocking(move || {
             // the copper to keep changes the board model (locked track ends become pins)
-            let kb = if keep_locked == loaded_keep {
+            let kb = if p.keep_all == Some(true) {
+                Arc::new(read_board(
+                    &path,
+                    &ReadOptions {
+                        keep: KeepCopper::All,
+                        ..Default::default()
+                    },
+                )?)
+            } else if keep_locked == loaded_keep {
                 kb
             } else {
                 Arc::new(read(&path, keep_locked)?)
