@@ -82,6 +82,14 @@ pitch parts. A router margin of 0.06 mm brings Corne to 14 violations but only 3
 the violations are the price of the last connections through the pin rows. Original widths
 (0.2032 mm) did not change it either; the original design is clean under the same rules.
 
+## Next: search quality
+
+- Negotiated routing in dense areas (rip-up with rising congestion price) instead of order only.
+- A post pass that removes via pairs when the hop also fits on the other layer (found in the MCP
+  test: 23 short B.Cu hops, via cost 5 gives 175 instead of 208 vias without DRC errors).
+- Via count per net in the route result.
+- Adaptive track width: as wide as the surroundings allow, instead of one neck width per zone.
+
 ## M4b: GPU experiment
 
 - Relaxation, clearance check and candidate screening fit a compute shader (wgpu): uniform
