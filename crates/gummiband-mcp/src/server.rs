@@ -27,7 +27,9 @@ set_net_options (priority: lower routes first; skip: leave a net unrouted) -> ro
 routed .kicad_pcb and returns stats, unrouted connections and clearance violations) -> drc on \
 the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board coordinates) to \
 look at problems. To pre-route a critical part by hand (datasheet layout): part_info -> \
-add_locked_copper -> route the returned board id. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
+add_locked_copper -> route the returned board id. move_part and add_zone edit the same working \
+copy. To change one net on a routed board: load the routed file -> route with keep_all, nets and \
+reroute. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
 Routing is CPU heavy (seconds to minutes); routes run one at a time.";
 
 // ------------------------------------------------------------------------------ session
@@ -245,6 +247,9 @@ pub struct RouteIn {
     /// Keep all tracks and vias of the input and add to them; with `nets` only those nets are
     /// routed and everything else stays.
     pub keep_all: Option<bool>,
+    /// With `keep_all` and `nets`: remove the unlocked tracks and vias of those nets first and
+    /// route them anew. Without it a net that is already connected stays as it is.
+    pub reroute: Option<bool>,
     /// Seed of the search. The same seed gives the same result; another one a different try.
     pub seed: Option<u64>,
     /// Weight of the pull between the nets of differential pairs (default 0: off; 1 is a good
@@ -1023,6 +1028,14 @@ impl Gummiband {
     }
 }
 
+/// The nets whose copper goes before routing.
+fn reroute_nets(p: &RouteIn) -> Vec<String> {
+    match p.reroute {
+        Some(true) => p.nets.clone().unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 fn route_blocking(
     id: String,
     path: PathBuf,
@@ -1130,7 +1143,7 @@ fn route_blocking(
         unlocked: !keep_all,
         locked: !keep_locked && !keep_all,
         zone_layers: vec![],
-        nets: Vec::new(),
+        nets: reroute_nets(&p),
         items: Vec::new(),
     };
     let ranges = write::strip_ranges(&kb, &opts);
@@ -1457,12 +1470,16 @@ impl Gummiband {
         let keep_locked = p.keep_locked.unwrap_or(loaded_keep);
         let id = p.board.clone();
         let res = blocking(move || {
+            if p.reroute == Some(true) && (p.keep_all != Some(true) || p.nets.as_ref().is_none_or(Vec::is_empty)) {
+                bail!("reroute needs keep_all and nets");
+            }
             // the copper to keep changes the board model (locked track ends become pins)
             let kb = if p.keep_all == Some(true) {
                 Arc::new(read_board(
                     &path,
                     &ReadOptions {
                         keep: KeepCopper::All,
+                        ignore_nets: reroute_nets(&p),
                         ..Default::default()
                     },
                 )?)

@@ -68,6 +68,12 @@ impl Server {
         assert_eq!(mirrored, r["structuredContent"]);
         r["structuredContent"].clone()
     }
+
+    fn call_err(&mut self, name: &str, args: Value) -> String {
+        let r = self.request("tools/call", json!({"name": name, "arguments": args}));
+        assert_eq!(r["isError"], json!(true), "{name}: {r}");
+        r["content"][0]["text"].as_str().unwrap().to_string()
+    }
 }
 
 impl Drop for Server {
@@ -220,6 +226,27 @@ fn initialize_list_load_route() {
         .count();
     let after = std::fs::read_to_string(&keep_out).unwrap().matches("(segment").count();
     assert!(after > before, "{before} {after}");
+
+    // nothing left to route: the search has no connections to work on
+    let kept = s.call("load_board", json!({"path": keep_out}));
+    let done = dir.join("tiny.done.kicad_pcb");
+    let r = s.call(
+        "route",
+        json!({"board": kept["board"], "keep_all": true, "nets": ["B"], "output": done}),
+    );
+    assert_eq!(r["connections"], 0, "{r}");
+    assert_eq!(std::fs::read_to_string(&done).unwrap().matches("(segment").count(), after);
+
+    // reroute replaces the copper of the net, the other nets stay
+    let again = dir.join("tiny.again.kicad_pcb");
+    let r = s.call(
+        "route",
+        json!({"board": kept["board"], "keep_all": true, "reroute": true, "nets": ["B"], "runs": 1,
+               "generations": 0, "output": again}),
+    );
+    assert_eq!(r["routed"], 1, "{r}");
+    assert!(std::fs::read_to_string(&again).unwrap().contains("(segment"));
+    assert!(s.call_err("route", json!({"board": kept["board"], "reroute": true})).contains("reroute"));
     assert!(r["blocked"].as_array().unwrap().is_empty(), "{r}");
 
     // placement and zones go into the same working copy

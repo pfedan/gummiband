@@ -33,6 +33,8 @@ pub struct ReadOptions {
     pub move_parts: bool,
     /// References that never move.
     pub fixed: Vec<String>,
+    /// Do not keep the unlocked tracks and vias of these nets.
+    pub ignore_nets: Vec<String>,
 }
 
 impl Default for ReadOptions {
@@ -43,6 +45,7 @@ impl Default for ReadOptions {
             plane_layers: Vec::new(),
             move_parts: false,
             fixed: Vec::new(),
+            ignore_nets: Vec::new(),
         }
     }
 }
@@ -103,7 +106,7 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
             Some("footprint") | Some("module") => r.read_footprint(n),
             Some("segment") | Some("arc") | Some("via") => {
                 let first = r.b.obstacles.len();
-                r.read_copper(n, opts.keep, i as u32);
+                r.read_copper(n, opts.keep, &opts.ignore_nets, i as u32);
                 if let Some(id) = item_id(n) {
                     r.copper_uuids
                         .insert(id.to_string(), (first..r.b.obstacles.len()).collect());
@@ -530,6 +533,7 @@ impl Reader {
                     plane_layers: vec![],
                     move_parts: false,
                     fixed: vec![],
+                    ignore_nets: vec![],
                 },
             );
         }
@@ -699,7 +703,7 @@ impl Reader {
         }
     }
 
-    fn read_copper(&mut self, n: &Node, keep: KeepCopper, source: u32) {
+    fn read_copper(&mut self, n: &Node, keep: KeepCopper, ignore_nets: &[String], source: u32) {
         let locked = n.flag("locked");
         match keep {
             KeepCopper::None => return,
@@ -707,6 +711,9 @@ impl Reader {
             _ => {}
         }
         let net = self.net_of(n);
+        if !locked && net.is_some_and(|i| ignore_nets.contains(&self.b.nets[i as usize].name)) {
+            return;
+        }
         let clearance = self.clearance_of(net);
         let me = self.b.rules.max_error;
         let first = self.b.obstacles.len() as u32;
