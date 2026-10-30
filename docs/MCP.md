@@ -127,7 +127,9 @@ footprints whose courtyard lies within 3 mm.
 Preliminary. Moves a footprint to a new position in mm (and rotation in degrees, unchanged if
 left out) in the working copy `<input>.prerouted.kicad_pcb`; the input file stays untouched and
 the returned board id is the one to route. Courtyards and overlaps are not checked, so run `drc`
-or `render` on the result. Pads, their nets and the footprint's own copper move along.
+or `render` on the result. Pads, their nets and the footprint's own copper move along. Without
+`rotation` only the position changes; with it the pads, the footprint's texts and its own zones
+turn with the footprint, so the part arrives as KiCad would place it.
 
 ```json
 {"name": "move_part", "arguments": {"board": "b1", "reference": "C12", "x": 152.4, "y": 118.0, "rotation": 90}}
@@ -139,8 +141,15 @@ Gives parts a position from the netlist in the working copy, see
 [`gummiband place`](guide/cli.md#gummiband-place). An agent with its own plan places the parts it
 cares about with `move_part` and leaves the rest to this tool: `fixed` names what stays, `only` what
 moves. `scope` is `unlocked` (the default: not locked and not mechanical), `all_unlocked` or
-`outside`. Locked footprints never move. The tool places, it does not judge: `route` and `drc` tell
-how good the result is, another `seed` gives another try.
+`outside`. Locked footprints never move. `starts` (default 4) is the number of independent
+placements, of which the one with the fewest crossings is kept; `gap` (0.3 mm) is the spacing
+between courtyards and `halo` (0.3 mm) the extra room around parts with five or more pads. The
+result names the working copy to route next, the new pose of every moved part (`placed`), which
+decoupling capacitor was assigned to which part, the `crossings` between the nets (a measure of
+the vias to expect), the smallest distance between two courtyards and the pins that ended up off
+the plane of their net (`off_plane`, routing reaches them with a via). Tracks and vias of the
+input do not follow, so call it before `route`. The tool places, it does not judge: `route` and
+`drc` tell how good the result is, another `seed` gives another try, and seeds differ a lot.
 
 ```json
 {"name": "place_parts", "arguments": {"board": "b1", "fixed": ["U1", "L1"], "seed": 2}}
@@ -304,6 +313,9 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
 
 - `move_part` and `add_zone` are new and tested on small boards only; `move_part` checks no
   courtyards, and a zone is not filled until KiCad fills it.
+- `place_parts` is new. It lacks the `--iters`, `--margin` and `--free` options of
+  `gummiband place`, knows no datasheet layouts (place and lock power stages with `move_part`),
+  and treats both board sides as one space.
 - Not reachable through MCP yet: creating a board, `--move-parts`, `--shove` and `--give`, and per net widths and priorities
   from files (`--net-widths`, `--net-priorities`; priorities go through `set_net_options`).
 - Progress notifications during long routes, and cancellation (the core has no cancel hook).

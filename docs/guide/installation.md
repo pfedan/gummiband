@@ -33,8 +33,9 @@ The MCP server for AI agents is a separate binary, built with
 
 ## 2. KiCad plugin
 
-The plugin is an IPC API action plugin for KiCad 10 (Python). It adds a *Route with Gummiband*
-button to the PCB editor's plugin toolbar.
+The plugin is an IPC API action plugin for KiCad 10 (Python). It adds three buttons to the PCB
+editor's plugin toolbar: *Route with Gummiband*, *Finish selected nets with Gummiband* and
+*Place with Gummiband*.
 
 1. **Enable the API.** In KiCad, *Preferences > Plugins*, tick *Enable KiCad API*. On macOS and
    Windows keep KiCad's bundled Python interpreter, which has wxPython for the dialog.
@@ -65,7 +66,7 @@ button to the PCB editor's plugin toolbar.
    `gummiband` on `PATH`, in `~/.cargo/bin`, `/opt/homebrew/bin` or `/usr/local/bin`.
 4. **Restart KiCad** or press the reload button in *Preferences > Plugins*. KiCad creates a
    Python environment for the plugin and installs `kicad-python` from PyPI into it; this needs
-   internet access once. The toolbar button appears when the environment is ready.
+   internet access once. The toolbar buttons appear when the environment is ready.
 
 Routing from the plugin needs nothing else: no `kicad-cli`, no extra Python packages.
 
@@ -82,9 +83,9 @@ Without them the router works the same; only the images and the DRC shortcuts ar
 
 ## Troubleshooting
 
-**No Gummiband button in KiCad.** Check that the API is enabled, that the folder sits in the
+**No Gummiband buttons in KiCad.** Check that the API is enabled, that the folder sits in the
 IPC plugin directory of the right KiCad version, and that *Preferences > Plugins* lists the
-action with its toolbar button switched on. If the plugin environment failed to build (no
+actions with their toolbar buttons switched on. If the plugin environment failed to build (no
 internet, a PyPI hiccup), right-click the action there and choose *Recreate Plugin Environment*.
 
 **"gummiband binary not found".** Set `gummiband_bin` in `plugin/settings.json` to the absolute

@@ -1,8 +1,10 @@
 # Placing and routing in KiCad
 
-The plugin adds one action to the PCB editor: *Route with Gummiband*. It exports a copy of the
-open board with its project to a temp folder, runs `gummiband route` on the copy and imports the
-result into the open board as **one undo step**. Your file on disk is only changed when you save.
+The plugin adds three actions to the PCB editor's plugin toolbar: *Route with Gummiband*, *Finish
+selected nets with Gummiband* and *Place with Gummiband*. Each exports a copy of the open board
+with its project to a temp folder, runs the `gummiband` binary on the copy and imports the result
+into the open board as **one undo step**. Your file on disk is only changed when you save. This
+chapter describes the routing action first, then the two newer ones.
 
 Setup is in [Installation](installation.md).
 
@@ -82,9 +84,23 @@ move:
 - **All unlocked parts, those too.**
 
 Locked footprints never move. *Also keep* takes references that should stay in addition. The
-footprints and the keepouts that belong to them move in one undo step. Tracks and vias do not
-follow, so use it before routing. The options are those of
-[`gummiband place`](cli.md#gummiband-place).
+other fields are *Parallel runs* (independent placements, the one with the fewest crossings
+wins, 4 by default), *Courtyard spacing* (0.3 mm) and *Room around ICs* (0.3 mm extra for parts
+with five or more pads); they are the `--starts`, `--gap` and `--halo` options of
+[`gummiband place`](cli.md#gummiband-place). The button always uses seed 1; placements differ a
+lot from seed to seed, so for another attempt use `--seed` on the command line or the `seed` of the
+MCP tool.
+
+The footprints and the keepouts that belong to them move in one undo step, so Ctrl/Cmd+Z takes the
+placement back entirely. Tracks and vias do not follow, so use it before routing. The message box
+at the end says how many parts moved, how many stayed, the crossings between the nets and which
+pins ended up off their plane. Without wxPython the action runs with the defaults: the selected
+parts if there is a selection, otherwise all unlocked parts.
+
+The button is new and not yet tested live in KiCad. The placer knows no datasheet layouts: place
+a power stage or a crystal by hand, lock it, and let the button do the rest around it. Parts on
+both sides of the board share the same space, so a two sided board comes out less dense than it
+could be.
 
 ## Without a dialog
 
