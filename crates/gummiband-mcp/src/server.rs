@@ -242,6 +242,9 @@ pub struct RouteIn {
     /// Portfolio size: router runs with different orders (default 14, fixed so that results
     /// do not depend on the machine).
     pub runs: Option<usize>,
+    /// Keep all tracks and vias of the input and add to them; with `nets` only those nets are
+    /// routed and everything else stays.
+    pub keep_all: Option<bool>,
     /// Seed of the search. The same seed gives the same result; another one a different try.
     pub seed: Option<u64>,
     /// Weight of the pull between the nets of differential pairs (default 0: off; 1 is a good
@@ -455,6 +458,12 @@ pub struct PairOut {
 
 /// The fields of `gummiband route --report`, plus a few for the session.
 #[derive(Debug, Serialize, JsonSchema)]
+pub struct BlockedOut {
+    pub connection: String,
+    pub nets: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct NetStatOut {
     pub net: String,
     pub length_mm: f64,
@@ -474,6 +483,8 @@ pub struct RouteOut {
     pub routed: usize,
     /// Unrouted connections ("net: pad -> pad").
     pub unrouted: Vec<String>,
+    /// For each unrouted connection the nets running in its way, to prioritize or move them.
+    pub blocked: Vec<BlockedOut>,
     pub vias: usize,
     pub length_mm: f64,
     pub items_written: usize,
@@ -1114,9 +1125,10 @@ fn route_blocking(
             net: v.net,
         });
     }
+    let keep_all = p.keep_all == Some(true);
     let opts = write::StripOptions {
-        unlocked: true,
-        locked: !keep_locked,
+        unlocked: !keep_all,
+        locked: !keep_locked && !keep_all,
         zone_layers: vec![],
         nets: Vec::new(),
         items: Vec::new(),
@@ -1174,6 +1186,14 @@ fn route_blocking(
         connections: st.conns,
         routed: st.routed,
         unrouted: st.unrouted.clone(),
+        blocked: st
+            .blocked
+            .iter()
+            .map(|(connection, nets)| BlockedOut {
+                connection: connection.clone(),
+                nets: nets.clone(),
+            })
+            .collect(),
         vias: st.vias,
         length_mm: st.length,
         items_written: items.len(),
@@ -1438,7 +1458,15 @@ impl Gummiband {
         let id = p.board.clone();
         let res = blocking(move || {
             // the copper to keep changes the board model (locked track ends become pins)
-            let kb = if keep_locked == loaded_keep {
+            let kb = if p.keep_all == Some(true) {
+                Arc::new(read_board(
+                    &path,
+                    &ReadOptions {
+                        keep: KeepCopper::All,
+                        ..Default::default()
+                    },
+                )?)
+            } else if keep_locked == loaded_keep {
                 kb
             } else {
                 Arc::new(read(&path, keep_locked)?)

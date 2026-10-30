@@ -41,6 +41,8 @@ pub struct RunStats {
     pub vias: usize,
     pub length: f64,
     pub unrouted: Vec<String>,
+    /// For each unrouted connection the nets that run in its way.
+    pub blocked: Vec<(String, Vec<String>)>,
     /// Clearance violations after the geometry step (None if not relaxed).
     pub violations: Option<usize>,
     /// Of those, the ones where copper of two nets touches or crosses (shorts).
@@ -236,7 +238,24 @@ fn evaluate_inner(
             format!("{} from {}", board.nets[c.net as usize].name, board.pins[c.from].name)
         })
         .collect();
+    // what is in the way of each unrouted connection, for the report
+    let blocked = unrouted_ids
+        .iter()
+        .map(|&ci| {
+            let c = &r.conns[ci];
+            let mut nets: Vec<&str> = r
+                .blockers(ci)
+                .into_iter()
+                .map(|v| board.nets[r.conns[v].net as usize].name.as_str())
+                .collect();
+            nets.sort_unstable();
+            nets.dedup();
+            let name = format!("{} from {}", board.nets[c.net as usize].name, board.pins[c.from].name);
+            (name, nets.into_iter().map(str::to_string).collect())
+        })
+        .collect();
     let stats = RunStats {
+        blocked,
         seed: cfg.seed,
         fanout_first: cfg.fanout_first,
         via_cost: cfg.via_cost,

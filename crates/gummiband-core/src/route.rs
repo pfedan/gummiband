@@ -2747,7 +2747,7 @@ impl<'a> Router<'a> {
     }
 
     /// Connections whose routes pass close to the straight line of a failed connection.
-    fn blockers(&self, ci: usize) -> Vec<usize> {
+    pub fn blockers(&self, ci: usize) -> Vec<usize> {
         let c = &self.conns[ci];
         let a = self.board.pins[c.from].pos;
         let b = match &c.goal {

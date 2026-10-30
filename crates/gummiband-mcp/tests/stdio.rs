@@ -205,6 +205,23 @@ fn initialize_list_load_route() {
     assert!(r["routed"].as_u64().unwrap() >= 1, "{r}");
     assert!(!r["nets"].as_array().unwrap().is_empty(), "{r}");
 
+    // keep_all adds to a routed board: net B joins, the tracks of A stay
+    let routed = s.call("load_board", json!({"path": dir.join("tiny.routed.kicad_pcb")}));
+    let keep_out = dir.join("tiny.kept.kicad_pcb");
+    let r = s.call(
+        "route",
+        json!({"board": routed["board"], "keep_all": true, "nets": ["B"], "runs": 1, "generations": 0,
+               "output": keep_out}),
+    );
+    assert_eq!(r["routed"], 1, "{r}");
+    let before = std::fs::read_to_string(dir.join("tiny.routed.kicad_pcb"))
+        .unwrap()
+        .matches("(segment")
+        .count();
+    let after = std::fs::read_to_string(&keep_out).unwrap().matches("(segment").count();
+    assert!(after > before, "{before} {after}");
+    assert!(r["blocked"].as_array().unwrap().is_empty(), "{r}");
+
     // placement and zones go into the same working copy
     let moved = s.call(
         "move_part",
