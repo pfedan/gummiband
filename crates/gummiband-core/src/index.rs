@@ -1,6 +1,59 @@
 //! Uniform grid over bounding boxes for proximity queries.
 
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
 use crate::geom::{Point, Rect};
+
+/// Multiplicative hasher for the small integer keys of the inner loops (nothing in this crate
+/// depends on the iteration order of a map, and no key comes from outside).
+#[derive(Default, Clone, Copy)]
+pub struct FastHasher(u64);
+
+impl FastHasher {
+    #[inline]
+    fn add(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl Hasher for FastHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0.rotate_left(26)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.add(b as u64);
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, x: u8) {
+        self.add(x as u64);
+    }
+    #[inline]
+    fn write_u32(&mut self, x: u32) {
+        self.add(x as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, x: u64) {
+        self.add(x);
+    }
+    #[inline]
+    fn write_i32(&mut self, x: i32) {
+        self.add(x as u32 as u64);
+    }
+    #[inline]
+    fn write_i64(&mut self, x: i64) {
+        self.add(x as u64);
+    }
+    #[inline]
+    fn write_usize(&mut self, x: usize) {
+        self.add(x as u64);
+    }
+}
+
+pub type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
 
 pub struct GridIndex {
     origin: Point,

@@ -8,10 +8,11 @@
 //! cross those triangles are threaded through the new ones.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 
 use crate::board::{Board, NetId, ObstacleKind};
 use crate::geom::{Point, Rect, orient, point_seg_dist, pt, segs_intersect};
+use crate::index::FastMap;
 use crate::topo::{Mesh, NONE, OUTSIDE, PAD_SITE, STEINER, Substrate};
 
 #[derive(Debug, Clone)]
@@ -137,11 +138,12 @@ pub struct Router<'a> {
     pub cfg: RouterConfig,
     /// [layer][edge] -> segment ids ordered from edges[e][0] to edges[e][1]
     pub cross: Vec<Vec<Vec<u32>>>,
-    chords: Vec<HashMap<u32, Vec<Chord>>>,
+    /// [layer][triangle] -> chords
+    chords: Vec<Vec<Vec<Chord>>>,
     pub segs: Vec<Option<Seg>>,
     /// Placed vias by site id.
-    pub vias: HashMap<u32, ViaInfo>,
-    via_cells: HashMap<(i32, i32), Vec<u32>>,
+    pub vias: FastMap<u32, ViaInfo>,
+    via_cells: FastMap<(i32, i32), Vec<u32>>,
     pub conns: Vec<Conn>,
     /// Segment ids per connection (empty = unrouted).
     pub conn_segs: Vec<Vec<u32>>,
@@ -244,10 +246,10 @@ impl<'a> Router<'a> {
             sub: sub.clone(),
             cfg,
             cross: sub.m.iter().map(|m| vec![Vec::new(); m.edges.len()]).collect(),
-            chords: vec![HashMap::new(); sub.m.len()],
+            chords: sub.m.iter().map(|m| vec![Vec::new(); m.tris.len()]).collect(),
             segs: Vec::new(),
-            vias: HashMap::new(),
-            via_cells: HashMap::new(),
+            vias: FastMap::default(),
+            via_cells: FastMap::default(),
             conns: Vec::new(),
             conn_segs: Vec::new(),
             conn_vias: Vec::new(),
@@ -536,8 +538,7 @@ impl<'a> Router<'a> {
 
     /// Side of the apex of t the chord of `seg` in t passes, seen on edge e (see [`Item`]).
     fn chord_side(&self, li: usize, e: u32, t: u32, seg: u32) -> u8 {
-        let Some(list) = self.chords[li].get(&t) else { return 2 };
-        let Some(ch) = list.iter().find(|c| c.seg == seg) else {
+        let Some(ch) = self.chords[li][t as usize].iter().find(|c| c.seg == seg) else {
             return 2;
         };
         let ke = self.m(li).local_edge(t, e) as u8;
@@ -811,9 +812,10 @@ impl<'a> Router<'a> {
     /// Can a chord of `net` from `a` (slot sa) to `b` (slot sb) be added to triangle t?
     #[allow(clippy::too_many_arguments)]
     fn chord_ok(&self, t: u32, li: usize, net: NetId, a: CPos, sa: Option<usize>, b: CPos, sb: Option<usize>) -> bool {
-        let Some(list) = self.chords[li].get(&t) else {
+        let list = &self.chords[li][t as usize];
+        if list.is_empty() {
             return true;
-        };
+        }
         let x = self.coord(t, li, a, None, sa);
         let y = self.coord(t, li, b, None, sb);
         let (lo, hi) = if x < y { (x, y) } else { (y, x) };
@@ -837,9 +839,10 @@ impl<'a> Router<'a> {
 
     /// Can a half chord from interior point `p` to boundary position `b` be added to t?
     fn half_chord_ok(&self, t: u32, li: usize, net: NetId, p: Point, b: CPos, sb: Option<usize>) -> bool {
-        let Some(list) = self.chords[li].get(&t) else {
+        let list = &self.chords[li][t as usize];
+        if list.is_empty() {
             return true;
-        };
+        }
         let q = self.pos_point(t, li, b, None, sb);
         list.iter().all(|ch| {
             self.segs[ch.seg as usize].as_ref().unwrap().net == net || {
@@ -965,7 +968,8 @@ impl<'a> Router<'a> {
                 continue;
             }
             let tv = m.tris[t as usize];
-            if let Some(list) = self.chords[li].get(&t) {
+            let list = &self.chords[li][t as usize];
+            if !list.is_empty() {
                 // which new edge (s, v_i) each chord crosses and where
                 let mut per_edge: [Vec<(f64, Item)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
                 for ch in list {
@@ -1006,10 +1010,10 @@ impl<'a> Router<'a> {
                 }
                 let side_idx = m.edge_tris[e as usize].iter().position(|&x| x == t).unwrap();
                 let mut items = self.items_on(li, e);
-                let chords = self.chords[li].get(&t);
+                let chords = &self.chords[li][t as usize];
                 for (it, &sg) in items.iter_mut().zip(&self.cross[li][e as usize]) {
                     it.sides[side_idx] = 2;
-                    let Some(ch) = chords.and_then(|l| l.iter().find(|c| c.seg == sg)) else {
+                    let Some(ch) = chords.iter().find(|c| c.seg == sg) else {
                         continue;
                     };
                     let hits = self.rethread_hits(t, li, ch, p);
@@ -1081,20 +1085,20 @@ impl<'a> Router<'a> {
             }
             // geometry of the old chords, before the mesh changes
             let mut old: Vec<(Chord, Vec<(usize, f64)>, Point)> = Vec::new();
-            if let Some(list) = self.chords[li].remove(&t) {
-                for ch in list {
-                    let hits = self.rethread_hits(t, li, &ch, p);
-                    let a = self.pos_point(t, li, ch.a, Some(ch.seg), None);
-                    let b = self.pos_point(t, li, ch.b, Some(ch.seg), None);
-                    old.push((ch, hits, a.lerp(b, 1e-6)));
-                }
+            for ch in std::mem::take(&mut self.chords[li][t as usize]) {
+                let hits = self.rethread_hits(t, li, &ch, p);
+                let a = self.pos_point(t, li, ch.a, Some(ch.seg), None);
+                let b = self.pos_point(t, li, ch.b, Some(ch.seg), None);
+                old.push((ch, hits, a.lerp(b, 1e-6)));
             }
             let old_tv = self.m(li).tris[t as usize];
             let old_edges = self.m(li).tri_edges[t as usize];
             let (_, x) = self.sub.m[li].split(t, site, p, &shared.sites);
             let ne = self.m(li).edges.len();
             self.cross[li].resize(ne, Vec::new());
-            let mut on_edge: HashMap<u32, Vec<(f64, u32)>> = HashMap::new();
+            let nt = self.m(li).tris.len();
+            self.chords[li].resize(nt, Vec::new());
+            let mut on_edge: FastMap<u32, Vec<(f64, u32)>> = FastMap::default();
             for (ch, hits, start_pt) in old {
                 let m = &self.sub.m[li];
                 let new_edge = |k: usize| -> u32 { m.tri_edges[x[k] as usize][2] }; // E_k = (s, v_k)
@@ -1213,7 +1217,7 @@ impl<'a> Router<'a> {
                     if !seg.chord_tris.contains(&xt) {
                         seg.chord_tris.push(xt);
                     }
-                    self.chords[li].entry(xt).or_default().push(c);
+                    self.chords[li][xt as usize].push(c);
                 }
             }
             // order on the new edges: from v_i (edges[e][0]) towards s
@@ -1314,9 +1318,9 @@ impl<'a> Router<'a> {
         let nl = self.nl();
 
         let mut nodes: Vec<Node> = Vec::new();
-        let mut best: HashMap<(u8, u32, u32), f64> = HashMap::new();
+        let mut best: FastMap<(u8, u32, u32), f64> = FastMap::default();
         let mut open = BinaryHeap::new();
-        type Best = HashMap<(u8, u32, u32), f64>;
+        type Best = FastMap<(u8, u32, u32), f64>;
         let push = |best: &mut Best,
                     nodes: &mut Vec<Node>,
                     open: &mut BinaryHeap<Open>,
@@ -1480,6 +1484,7 @@ impl<'a> Router<'a> {
             }
         };
 
+        let tracing = self.trace.lock().unwrap().is_some();
         let mut expansions = 0;
         while let Some(Open(_, idx)) = open.pop() {
             let node = nodes[idx as usize];
@@ -1490,7 +1495,7 @@ impl<'a> Router<'a> {
             if expansions > self.cfg.max_expansions {
                 return None;
             }
-            if let Some(t) = self.trace.lock().unwrap().as_mut() {
+            if tracing && let Some(t) = self.trace.lock().unwrap().as_mut() {
                 let li = match node.kind {
                     NK::Tri { li, .. } | NK::Vert { li, .. } | NK::Site { li, .. } => li,
                     _ => 0,
@@ -1974,7 +1979,7 @@ impl<'a> Router<'a> {
         }
         for (t, ch) in chords {
             s.chord_tris.push(t);
-            self.chords[li].entry(t).or_default().push(ch);
+            self.chords[li][t as usize].push(ch);
         }
         self.segs.push(Some(s));
         id
@@ -1990,9 +1995,7 @@ impl<'a> Router<'a> {
                 self.cross[li][c.e as usize].retain(|&x| x != sid);
             }
             for t in &s.chord_tris {
-                if let Some(list) = self.chords[li].get_mut(t) {
-                    list.retain(|ch| ch.seg != sid);
-                }
+                self.chords[li][*t as usize].retain(|ch| ch.seg != sid);
             }
         }
         for v in std::mem::take(&mut self.conn_vias[ci]) {
@@ -2175,13 +2178,14 @@ impl<'a> Router<'a> {
         for _ in 0..3 {
             match self.search(ci) {
                 Some(chain) => {
-                    let before = if std::env::var("GB_VALIDATE_EACH").is_ok() {
+                    let validate = std::env::var("GB_VALIDATE_EACH").is_ok();
+                    let before = if validate {
                         self.validate().len()
                     } else {
                         0
                     };
                     if self.commit(ci, &chain) {
-                        if std::env::var("GB_VALIDATE_EACH").is_ok() {
+                        if validate {
                             let v = self.validate();
                             if v.len() > before {
                                 let kinds: Vec<String> = chain.iter().map(|n| format!("{:?}", n.kind)).collect();
@@ -2244,10 +2248,10 @@ impl<'a> Router<'a> {
 
     /// Chords of triangle t (debugging aid).
     pub fn chords_debug(&self, li: usize, t: u32) -> Vec<String> {
-        self.chords[li]
-            .get(&t)
-            .map(|l| l.iter().map(|c| format!("{}:{:?}->{:?}", c.seg, c.a, c.b)).collect())
-            .unwrap_or_default()
+        self.chords[li][t as usize]
+            .iter()
+            .map(|c| format!("{}:{:?}->{:?}", c.seg, c.a, c.b))
+            .collect()
     }
 
     /// Consistency checks of the topological state (debugging aid).
