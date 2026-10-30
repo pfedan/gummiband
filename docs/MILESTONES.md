@@ -93,7 +93,17 @@ the violations are the price of the last connections through the pin rows. Origi
 
 ## Next: search quality
 
-- Negotiated routing in dense areas (rip-up with rising congestion price) instead of order only.
+- Negotiated routing: done as an option, `route --negotiate N` (see ARCHITECTURE). Measured on
+  2026-10-30 with `--runs 14 --generations 1 --negotiate 20`, KiCad DRC against the plain run:
+  `fine_pitch_mixed` 0 open and 0 errors instead of 8 and 7, `four_signal_layers` 0 open instead
+  of 4, `bga_dense` 8 instead of 12, Arty 2 open and 2 errors instead of 3 and 11, Corne 1 open
+  instead of 12 and 669 errors instead of 702 (own check 1269 instead of 2289). Lichtschnitzel
+  `--geometry-generations 3`: 348/348, 287 vias and DRC clean instead of 294 vias and 4 errors.
+  The other synthetic boards stay clean. The run takes both searches, about twice as long. Open:
+  ULX3S does not converge (the original also routes on In2): 160 open instead of 162, own check
+  42 instead of 79, but 186 DRC errors instead of 133 and 1865 s instead of 438 s, so a board with
+  more connections than room on its layers should be recognised early. Corne's clearance errors
+  at the fine pitch parts remain.
 - A post pass that removes via pairs when the hop also fits on the other layer (found in the MCP
   test: 23 short B.Cu hops, via cost 5 gives 175 instead of 208 vias without DRC errors).
 - Via count per net in the route result.

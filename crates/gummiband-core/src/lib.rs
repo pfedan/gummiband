@@ -388,7 +388,7 @@ pub fn route_board(
         let cost = r.stats.cost() + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0;
         (r.stats.routed, cost, v.iter().map(|x| x.at).collect())
     };
-    let (sub, res) = route_fixed(board, sub_cfg, base, search);
+    let (sub, res) = route_search(board, sub_cfg, base, search);
     if board.movable.is_empty() || search.geometry_generations == 0 {
         return (sub, res);
     }
@@ -447,7 +447,7 @@ pub fn route_board(
         if hot.len() > 20 || best.1.stats.conns > 400 {
             continue;
         }
-        let (sub, mut res) = route_fixed(&moved, sub_cfg, base, search);
+        let (sub, mut res) = route_search(&moved, sub_cfg, base, search);
         res.offsets = next.clone();
         let sc = score(&moved, &res);
         eprintln!(
@@ -469,6 +469,45 @@ pub fn route_board(
         search.report(&format!("placement round {round}"), &st);
     }
     best
+}
+
+/// One full search on a fixed placement ([`route_fixed`]). A negotiation is a second search next
+/// to the plain one and not a replacement: it completes the dense boards, but on a loose board
+/// the routing order alone may leave the geometry more room. The better result counts,
+/// completion first.
+fn route_search(
+    board: &Board,
+    sub_cfg: &SubstrateConfig,
+    base: &RouterConfig,
+    search: &SearchConfig,
+) -> (Substrate, RouteResult) {
+    let negotiated = route_fixed(board, sub_cfg, base, search);
+    if base.negotiate == 0 || std::env::var("GB_NEG_ONLY").is_ok() {
+        return negotiated;
+    }
+    let plain = RouterConfig {
+        negotiate: 0,
+        ..base.clone()
+    };
+    let (sub, mut res) = route_fixed(board, sub_cfg, &plain, search);
+    let key = |r: &RouteResult| {
+        let v = check::check(board, &r.geometry);
+        let shorts = v.iter().filter(|x| x.actual <= 0.0).count();
+        (
+            r.stats.routed,
+            r.stats.cost() + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0,
+        )
+    };
+    let (a, b) = (key(&negotiated.1), key(&res));
+    eprintln!(
+        "negotiated: {}/{} routed, cost {:.0}; plain: {}/{} routed, cost {:.0}",
+        a.0, negotiated.1.stats.conns, a.1, b.0, res.stats.conns, b.1
+    );
+    if a.0 > b.0 || (a.0 == b.0 && a.1 < b.1) {
+        return negotiated;
+    }
+    res.portfolio.extend(negotiated.1.portfolio);
+    (sub, res)
 }
 
 /// One full search on a fixed placement: build the substrate once, run a portfolio of router
