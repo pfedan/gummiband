@@ -104,9 +104,14 @@ the violations are the price of the last connections through the pin rows. Origi
   161 vias, 2970 mm. With `--prefer-width 0.25` instead: 323/323, 126 vias, 2904 mm, 91 % of the
   length at 0.2 mm or more, 72 % at 0.25 mm. No run so far on Corne and ULX3S. Starting without
   geometry generations leaves more violations for the open end to work off.
-- Text on copper is not read as an obstacle: all remaining DRC errors of the Arty runs (11 shorts,
-  28 clearance, 40 solder mask with `--prefer-width`) are between copper and the text on F.Cu.
-
+- Text on copper is an obstacle since 2026-10-30, as a box. Arty then has no routing errors in the
+  DRC; the last connection `/CRVL_IO1` depends on the run: 323/323 after 5 minutes in one run,
+  322/323 in others. The box is a little larger than the letters.
+- Corne, 10 minutes with `--geometry-generations 1`: 474/482, 393 vias, 7953 mm, against 452 vias
+  and 8352 mm of the complete original. DRC: 378 clearance errors at 19 spots, all between 0.15 and
+  0.189 mm against 0.19 mm, 199 solder mask bridges, 1 short, 1 crossing. Every short piece of track
+  counts as a violation of its own, so one spot weighs about 20. Solder mask openings are not
+  obstacles for the router.
 - Negotiated routing: done as an option, `route --negotiate N` (see ARCHITECTURE). Measured on
   2026-10-30 with `--runs 14 --generations 1 --negotiate 20`, KiCad DRC against the plain run:
   `fine_pitch_mixed` 0 open and 0 errors instead of 8 and 7, `four_signal_layers` 0 open instead

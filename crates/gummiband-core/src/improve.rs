@@ -239,6 +239,12 @@ fn mutant<'a>(
     if routed < floor || (routed == s.cand.stats.routed && same_routes(&s.router, &r, &conns)) {
         return None;
     }
+    if conns.iter().any(|&ci| {
+        let net = r.conns[ci].net;
+        r.net_pieces(net) > s.router.net_pieces(net)
+    }) {
+        return None;
+    }
     let (fresh, segs, sites) = r.tagged_geometry();
     let (mut geo, segs, sites) = warm_start(s, &r, fresh, &segs, &sites);
     relax::relax(board, sub, &mut geo, relax_cfg);
@@ -711,6 +717,16 @@ mod tests {
         b
     }
 
+    /// The pieces of a net of the twisted board: one when routed, two without the connection.
+    fn rebuild_pieces(b: &Board) -> usize {
+        let sub = Substrate::build(b, &SubstrateConfig::default());
+        let mut r = Router::new(b, &sub, RouterConfig::default());
+        r.plan();
+        assert_eq!(r.net_pieces(0), 2);
+        r.run();
+        r.net_pieces(0)
+    }
+
     /// Route with an open end and stop at this generation.
     fn run_to(b: &Board, stop_at: usize) -> crate::RouteResult {
         let flag = Arc::new(AtomicBool::new(false));
@@ -742,6 +758,8 @@ mod tests {
         let cost = |r: &crate::RouteResult| r.stats.cost() + check::check(&b, &r.geometry).len() as f64 * 1000.0;
         assert!(cost(&res) <= cost(&start), "{} > {}", cost(&res), cost(&start));
         assert!(loose_ends(&b, &res.geometry).is_empty(), "{:?}", loose_ends(&b, &res.geometry));
+        let again_router = rebuild_pieces(&b);
+        assert_eq!(again_router, 1);
         let again = run_to(&b, 60);
         assert_eq!(res.geometry.vias.len(), again.geometry.vias.len());
         let pts = |r: &crate::RouteResult| r.geometry.tracks.iter().flat_map(|t| t.pts.clone()).collect::<Vec<_>>();
