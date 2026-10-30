@@ -309,7 +309,9 @@ pub fn route_board(
         let cost = r.stats.cost() + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0;
         (r.stats.routed, cost, v.iter().map(|x| x.at).collect())
     };
+    let t0 = std::time::Instant::now();
     let (sub, res) = route_fixed(board, sub_cfg, base, search);
+    let search_time = t0.elapsed().as_secs_f64();
     if board.movable.is_empty() || search.geometry_generations == 0 {
         return (sub, res);
     }
@@ -360,6 +362,11 @@ pub fn route_board(
             let mut st = best.1.stats.clone();
             st.violations = Some(best_score.2.len());
             search.report(&format!("placement round {round}"), &st);
+            continue;
+        }
+        // a full new search pays off only for a handful of local problems, and only if a
+        // search is not expensive; otherwise the fast path above is all there is
+        if hot.len() > 20 || search_time > 120.0 {
             continue;
         }
         let (sub, mut res) = route_fixed(&moved, sub_cfg, base, search);

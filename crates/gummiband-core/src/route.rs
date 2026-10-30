@@ -421,7 +421,7 @@ impl<'a> Router<'a> {
             .board
             .rules
             .min_track_width
-            .max(pad_w.min(0.25))
+            .max(pad_w)
             .min(cls.track_width);
         if neck_w >= cls.track_width - 1e-9 {
             return (Vec::new(), cls.track_width);
