@@ -1,6 +1,6 @@
 {
     "$schema": "https://go.kicad.org/api/schemas/v1",
-    "identifier": "gummiband.kicad-plugin",
+    "identifier": "com.github.pfedan.gummiband",
     "name": "Gummiband",
     "description": "Topological rubber band autorouter: routes the open board with the gummiband CLI and imports the tracks and vias as one undo step.",
     "runtime": {
