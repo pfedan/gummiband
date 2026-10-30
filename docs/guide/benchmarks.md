@@ -94,6 +94,18 @@ Prints the total track length, via count and the width the designer used per net
 weighted). With `--json` it writes the widths for `gummiband route --net-widths`, so a
 re-routing can be compared at equal widths.
 
+## Relaxation on the CPU and the GPU
+
+```bash
+cargo run --release -p gummiband-cli --features gpu --example relax_bench -- BOARD [--ensemble N]
+```
+
+Routes the board with a small search and relaxes the same routing on the CPU and on the GPU,
+printing time, core seconds, a breakdown per round, the violations and a hash of the result.
+Relaxation is chaotic (a change far below a nanometre can turn one short into many), so a single
+violation count says little: `--ensemble N` relaxes N times with a tiny change each and compares
+the distributions. Compare core seconds rather than wall time when other jobs run on the machine.
+
 ## Placement variants
 
 `bench/place/make-variants.sh` and `route-variants.sh` build and route the Lichtschnitzel
