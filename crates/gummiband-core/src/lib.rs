@@ -869,7 +869,7 @@ pub fn route_fixed(
     let pairs: Vec<NetId> = board.diff_pairs().into_iter().flat_map(|(a, b)| [a, b]).collect();
     let may_grow = |n: NetId| board.nets[n as usize].class == 0 && !pairs.contains(&n);
     if search.prefer_width > 0.0 {
-        if let Some(c) = improve::make_room(board, &sub, &best, search.prefer_width, may_grow) {
+        if let Some(c) = improve::make_room(board, &sub, &best, search.prefer_width, search.air / 2.0, may_grow) {
             best = c;
             search.report("room", &best.stats);
         }

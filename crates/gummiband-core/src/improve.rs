@@ -319,6 +319,7 @@ fn relax_all(board: &Board, sub: &Substrate, c: &mut Candidate, cfg: &relax::Rel
 /// rest stays as it is.
 fn settle(board: &Board, sub: &Substrate, c: &mut Candidate, best: &Candidate, cfg: &relax::RelaxConfig) {
     let cfg = relax::RelaxConfig {
+        iterations: env("GB_AIR_IT", 120.0) as usize,
         margin: relax::RelaxConfig::default().margin,
         ..cfg.clone()
     };
@@ -337,25 +338,57 @@ fn settle(board: &Board, sub: &Substrate, c: &mut Candidate, best: &Candidate, c
 
 /// Make room for wider tracks: the tracks in `wanted` push as if they were `target` wide, and with
 /// them everything they touch, in chains as far as that goes. No tension, so nothing pulls back.
-/// Measured at the old widths nothing may get worse; only the wide pieces come later.
+/// A spot that has no room for it stays at the old width, the rest of the track does not. Measured
+/// at the old widths nothing may get worse; the wide pieces themselves come later.
 pub(crate) fn make_room(
     board: &Board,
     sub: &Substrate,
     best: &Candidate,
     target: f64,
+    reserve: f64,
     wanted: impl Fn(u32) -> bool,
 ) -> Option<Candidate> {
     let mut c = best.clone();
-    let widths: Vec<f64> = c.geo.tracks.iter().map(|t| t.width).collect();
+    let plain: Vec<(f64, Vec<crate::geom::Rect>)> =
+        c.geo.tracks.iter().map(|t| (t.width, t.necks.clone())).collect();
     c.geo.tracks.iter_mut().filter(|t| wanted(t.net)).for_each(|t| t.width = t.width.max(target));
+    let base = relax::RelaxConfig::default();
     let cfg = relax::RelaxConfig {
         iterations: env("GB_AIR_IT", 120.0) as usize,
         tension: 0.0,
+        margin: base.margin + reserve,
         via_edge: true,
-        ..Default::default()
+        taut: false,
+        ..base.clone()
+    };
+    for _ in 0..env("GB_ROOM_ROUNDS", 6.0) as usize {
+        relax_all(board, sub, &mut c, &cfg);
+        let left = check::check(board, &c.geo);
+        if left.is_empty() {
+            break;
+        }
+        for v in &left {
+            let mut zone = crate::geom::Rect::empty();
+            zone.add(v.at);
+            let zone = zone.grow(0.6);
+            let nets = [Some(v.nets.0), v.nets.1];
+            for t in c.geo.tracks.iter_mut().filter(|t| nets.contains(&Some(t.net))) {
+                t.necks.push(zone);
+            }
+        }
+    }
+    // the shortcuts at the widths reached; taut keeps half the margin
+    let cfg = relax::RelaxConfig {
+        iterations: 0,
+        margin: 2.0 * (base.margin + reserve),
+        taut: true,
+        ..cfg
     };
     relax_all(board, sub, &mut c, &cfg);
-    c.geo.tracks.iter_mut().zip(&widths).for_each(|(t, &w)| t.width = w);
+    for (t, (w, necks)) in c.geo.tracks.iter_mut().zip(plain) {
+        t.width = w;
+        t.necks = necks;
+    }
     judge(board, &mut c);
     settle(board, sub, &mut c, best, &cfg);
     if std::env::var("GB_OPEN_LOG").is_ok() {

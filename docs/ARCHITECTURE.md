@@ -240,8 +240,9 @@ also let the board edge push vias (`RelaxConfig::via_edge`).
 
 `--prefer-width` runs at the very end, on the best result, because the topology keeps counting
 with the narrow tracks. First the tracks push as if they had the target width, without tension,
-so that neighbours and vias give way in chains; then, at the old widths again, the nets in
-trouble settle. After that `relax::prefer_width` lets every piece of track grow in steps of
+so that neighbours and vias give way in chains. A spot that has no room for that becomes a neck of
+1.2 mm at the old width, and the pushing goes on, for a few rounds; one tight spot must not cost a
+track its whole length. After that `relax::prefer_width` lets every piece of track grow in steps of
 0.025 mm, round by round so that a bundle shares its room, drops wider stretches under 1.5 mm and
 ramps every change of width by one step per piece.
 

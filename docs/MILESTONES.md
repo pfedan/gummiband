@@ -99,11 +99,11 @@ the violations are the price of the last connections through the pin rows. Origi
   0 open, 3 to 10 clearance errors against 3). Arty 323/323 and 126 vias against 322/323 and 214.
   The original Arty has 147 vias, 3073 mm, tracks of 0.182 and 0.2 mm, and 217 mm on inner layers;
   we route it with 0.15 mm in 2884 mm on two layers. With the original widths as a hard rule: 321/323,
-  161 vias, 2970 mm. With `--prefer-width 0.25` instead: 323/323, 126 vias, 2897 mm, 91 % of the
-  length at 0.2 mm or more, 58 % at 0.25 mm. No run so far on Corne and ULX3S. Starting without
+  161 vias, 2970 mm. With `--prefer-width 0.25` instead: 323/323, 126 vias, 2904 mm, 91 % of the
+  length at 0.2 mm or more, 72 % at 0.25 mm. No run so far on Corne and ULX3S. Starting without
   geometry generations leaves more violations for the open end to work off.
-- Text on copper is not read as an obstacle: all remaining DRC errors of the Arty runs (6 shorts,
-  31 clearance, 28 solder mask with `--prefer-width`) are between copper and the text on F.Cu.
+- Text on copper is not read as an obstacle: all remaining DRC errors of the Arty runs (11 shorts,
+  28 clearance, 40 solder mask with `--prefer-width`) are between copper and the text on F.Cu.
 
 - Negotiated routing: done as an option, `route --negotiate N` (see ARCHITECTURE). Measured on
   2026-10-30 with `--runs 14 --generations 1 --negotiate 20`, KiCad DRC against the plain run:

@@ -33,6 +33,9 @@ pub struct RelaxConfig {
     /// The board edge pushes vias as well. Off for the search itself, where vias stay near the
     /// place the router gave them; passes that push hard can shove a via over the edge rule.
     pub via_edge: bool,
+    /// Finish with the shortcuts of [`taut`]. Off, the tracks stay chains of short pieces where
+    /// the rounds left them, and a clearance check can say where it hurts.
+    pub taut: bool,
 }
 
 impl Default for RelaxConfig {
@@ -48,6 +51,7 @@ impl Default for RelaxConfig {
             max_step: 0.03,
             gpu: std::env::var("GB_GPU").is_ok(),
             via_edge: false,
+            taut: true,
         }
     }
 }
@@ -892,7 +896,17 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         v.resting = !via_awake[i];
     }
     let t_taut = std::time::Instant::now();
-    let tracks = prof::time(Slot::Taut, || taut(board, sub, geo, tracks, cfg, &awake));
+    let tracks: Vec<(Vec<Point>, Vec<Elem>)> = if cfg.taut {
+        prof::time(Slot::Taut, || taut(board, sub, geo, tracks, cfg, &awake))
+    } else {
+        tracks
+            .into_iter()
+            .map(|p| {
+                let elems = p.windows(2).map(|w| Elem::Line(w[0], w[1])).collect();
+                (p, elems)
+            })
+            .collect()
+    };
     if std::env::var("GB_TIMING").is_ok() {
         eprintln!(
             "relax rounds {:.2} s, taut {:.2} s",
