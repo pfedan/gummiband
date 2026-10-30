@@ -61,6 +61,9 @@ class RouteOptions:
     pair_pull: float = 0.0
     pair_skew: float = 0.1
     pair_zdiff: float = 0.0  # 0 = keep the track widths of the net class
+    # keep improving after the normal search until the user accepts the result
+    until_stop: bool = True
+    prefer_width: float = 0.0  # tracks of the default class grow up to this where there is room
 
 
 @dataclass
@@ -87,14 +90,14 @@ class PlaceOptions:
 # layer names, net files) starts empty every time.
 ROUTE_SAVED = ("keep_locked", "runs", "via_cost", "geometry_generations", "animate", "move_parts", "placements",
                "teardrops", "generations", "via_pitch", "layer_dirs", "via_pass", "negotiate", "threads", "pairs", "pair_pull",
-               "pair_skew", "pair_zdiff")
+               "pair_skew", "pair_zdiff", "until_stop", "prefer_width")
 PLACE_SAVED = ("starts", "gap", "halo", "seed", "iters", "margin", "threads")
 
 # Options of the command line that are left out at their default value.
 ROUTE_FLAGS = (("generations", "--generations"), ("via_pitch", "--via-pitch"),
                ("layer_dirs", "--layer-dirs"), ("via_pass", "--via-pass"),
                ("negotiate", "--negotiate"), ("pair_pull", "--pair-pull"),
-               ("placements", "--placements"))
+               ("placements", "--placements"), ("prefer_width", "--prefer-width"))
 PAIR_FLAGS = (("pair_skew", "--pair-skew"), ("pair_zdiff", "--pair-zdiff"))
 PLACE_FLAGS = (("seed", "--seed"), ("iters", "--iters"), ("margin", "--margin"))
 
@@ -205,6 +208,12 @@ def _changed(opts, flags: tuple) -> List[str]:
     return cmd
 
 
+def open_ended(opts: RouteOptions) -> bool:
+    """Whether the run goes on until the user accepts it: not with the wide tracks of pairs, and
+    not for finishing tracks, where only the nets asked for may change."""
+    return opts.until_stop and not opts.pairs and not opts.finish_nets
+
+
 def _global_flags(opts) -> List[str]:
     cmd: List[str] = []
     if opts.threads > 0:
@@ -235,6 +244,8 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
         cmd += ["--net-widths", str(opts.net_widths)]
     if opts.net_priorities:
         cmd += ["--net-priorities", str(opts.net_priorities)]
+    if open_ended(opts):
+        cmd.append("--until-stop")
     if opts.frames_dir:
         cmd += ["--frames", str(opts.frames_dir)]
     if opts.report:
@@ -325,14 +336,22 @@ def progress_text(p: Optional[dict]) -> str:
     return text
 
 
+def converged(p: Optional[dict]) -> bool:
+    """The open end has found its level, see ``--until-stop``."""
+    return bool(p) and bool(p.get("converged"))
+
+
 def run_route(cmd: List[str], output: Path, cwd: Optional[Path] = None,
-              keep_going: Optional[Callable[[Optional[dict]], bool]] = None) -> RouteResult:
+              keep_going: Optional[Callable[[Optional[dict]], bool]] = None,
+              accept: Optional[Callable[[], bool]] = None) -> RouteResult:
     """Run the router and wait for it. ``keep_going(progress)`` is polled about ten times a
     second while the router runs, with the latest progress report (see ``parse_progress``);
-    returning False kills the router."""
+    returning False kills the router. With ``--until-stop`` the router runs until ``accept()``
+    returns True, then it finishes its best result."""
     try:
-        proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, errors="replace", env=tool_env())
+        proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, errors="replace",
+                                env=tool_env())
     except OSError as e:
         raise RunnerError(f"cannot start {cmd[0]}: {e}") from e
     out: dict = {"stdout": [], "progress": None}
@@ -352,11 +371,18 @@ def run_route(cmd: List[str], output: Path, cwd: Optional[Path] = None,
     for t in readers:
         t.start()
     cancelled = False
+    accepted = False
     while proc.poll() is None:
         readers[0].join(0.1)
         if keep_going is not None and not cancelled and not keep_going(out["progress"]):
             cancelled = True
             proc.kill()
+        if accept is not None and not accepted and accept():
+            accepted = True
+            try:
+                proc.stdin.close()  # the router reads this as the end of the run
+            except OSError:
+                pass
     for t in readers:
         t.join()
     proc.wait()

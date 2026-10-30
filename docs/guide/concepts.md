@@ -73,6 +73,12 @@ track can remain just outside a connector.
 
 `--net-widths` overrides the class width per net.
 
+`--prefer-width` goes the other way: the class width is the minimum, and tracks of the default
+class get wider where there is room. It is the last step: the routing does not see it, so it costs
+no connections. Tracks first push their neighbours and vias aside as far as those can go, then
+they grow, with a taper at every change of width. KiCad's teardrops (`--teardrops`) can smooth
+that further, but the taper does not depend on them.
+
 ## Vias
 
 Vias are placed on a grid of candidate positions (`--via-pitch`, 0.5 mm by default) wherever
@@ -121,6 +127,8 @@ default. See the [environment variables](cli.md#environment-variables).
 
 Things the router does not do yet. The [milestones](../MILESTONES.md) say what comes next.
 
+- **Text on copper layers is not an obstacle yet.** Tracks and vias can run through it, so the
+  DRC reports them. Keep such text on a side that has no routing there, or move it afterwards.
 - **Partial routing is experimental.** By default a run replaces all unlocked copper; lock what
   you want to keep. `--keep-all` with `--nets` adds to existing copper, the MCP `route` with
   `reroute` re-lays named nets on a finished board, and an agent can add locked copper through

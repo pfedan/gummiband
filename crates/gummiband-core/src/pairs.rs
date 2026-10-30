@@ -1615,6 +1615,9 @@ pub fn route_pairs(
         frames: false,
         progress: None,
         seed: search.seed,
+        open_end: None,
+        air: 0.0,
+        prefer_width: 0.0,
     };
     // a repaired end that finds no way keeps the two tracks it had: completion comes first
     let split_geo = geo;
@@ -1780,6 +1783,9 @@ mod tests {
             frames: false,
             progress: None,
             seed: None,
+            open_end: None,
+            air: 0.0,
+            prefer_width: 0.0,
         };
         let (_, res, rep) = route_pairs(
             &b,
@@ -1816,6 +1822,9 @@ mod tests {
             frames: false,
             progress: None,
             seed: None,
+            open_end: None,
+            air: 0.0,
+            prefer_width: 0.0,
         };
         let (_, res, _) = route_pairs(
             &b,

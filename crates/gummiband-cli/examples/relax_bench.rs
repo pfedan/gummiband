@@ -53,6 +53,9 @@ fn main() -> anyhow::Result<()> {
         frames: false,
         progress: None,
         seed: None,
+        open_end: None,
+        air: 0.0,
+        prefer_width: 0.0,
     };
     let t = Instant::now();
     let (sub, res) = route_board(
