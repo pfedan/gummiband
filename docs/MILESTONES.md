@@ -93,6 +93,50 @@ pitch parts. A router margin of 0.06 mm brings Corne to 14 violations but only 3
 the violations are the price of the last connections through the pin rows. Original widths
 (0.2032 mm) did not change it either; the original design is clean under the same rules.
 
+## Solder mask openings
+
+KiCad reports `solder_mask_bridge` when a mask opening shows copper of two nets. The router did not
+know openings, and on Corne the DRC stopped at its limit of 199 per type. Measured on 2026-10-31
+with kicad-cli 10.0.7 and test boards:
+
+- A pad's opening is the pad plus its margin (pad, then footprint, then `pad_to_mask_clearance`; a
+  margin of 0 counts as not set). Copper of another net at the exact margin passes, 0.001 mm less
+  is a bridge, for tracks and vias alike. `solder_mask_to_copper_clearance` adds to the margin.
+- Openings of `allow_soldermask_bridges` footprints do not count, and neither does a bare drill.
+  A non-plated pad wider than its drill opens the mask, a pad without net does as well.
+- A shape on a mask layer is a bridge only with two nets in it. For the check it reaches as far as
+  the board's margin beyond its edge, whatever the margin of its footprint; a pad without copper
+  does not reach beyond its shape. A zone on a mask layer gave no bridge.
+- Vias are tented on Corne and Lichtschnitzel, so only their copper counts, like a track.
+
+On Corne an opening is only that: pads with `pad_to_mask_clearance` 0.2 mm, seven footprints with a
+margin of their own (0.09 to 0.19 mm), no shapes on the mask layers. The clearance is 0.19 mm, so a
+rubber band that hugs a pad lies 0.01 mm inside its opening, and almost all bridges were that
+shallow. Now a pad's margin plus 0.01 mm counts as its clearance where that is more, and the shapes
+are keepouts on the outer layer. A shape with one net in it stays free for that net: such a net
+draws real track there, which an own-net obstacle would not give it (`Mesh::opening`).
+
+Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the state before):
+
+| | open connections | `solder_mask_bridge` | of these from routing | spots of the own check | DRC `shorting_items` |
+| --- | --- | --- | --- | --- | --- |
+| main | 8, 10, 8, 7, 6 | 199 (the limit) | 1388, 1462, 1599, 1396, 1509 | 57, 85, 84, 63, 79 | 4, 5, 9, 0, 9 |
+| now | 9, 11, 12, 13, 9 | 20, 17, 14, 16, 18 | 16, 13, 10, 12, 14 | 54, 62, 54, 72, 58 | 0, 0, 0, 1, 0 |
+
+- The bridges from routing are counted from the geometry for main, as the DRC stops at 199; the
+  count matches the DRC on all runs below the limit. The unrouted board has 4 of its own (a pad
+  without net beside pad S2 of EXSW1, EXSW2 and their right hand twins), the router cannot change
+  them.
+- The price is 3 connections on average (7.8 to 10.8 of 482 open). What stays in the openings are
+  spots the own check reports as well: bottlenecks at Y1 and vias next to capacitors.
+- Room of 0.003 mm instead of 0.01 keeps the connections (7.4 open), at 70 instead of 60 spots and
+  nearly twice the shorts of main; 0.005 mm has the open connections of 0.01 with 78 spots. The
+  search is too chaotic for more than that from five seeds. Bridges stay at 10 to 13 per run in
+  all three.
+- Lichtschnitzel has a margin of 0: byte-identical (`50c4f3cfb765`).
+- A synthetic board with shapes, text and a pad without copper in the way: 12 bridges before, 0
+  after, all connected.
+
 ## Next: search quality
 
 - Open end: `route --until-stop` (see ARCHITECTURE). Single runs on 2026-10-30, 150 s in all,

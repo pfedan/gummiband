@@ -640,7 +640,9 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         continue;
                     }
                     let need = match o.kind {
-                        ObstacleKind::Keepout { vias: no_vias, tracks } => {
+                        ObstacleKind::Keepout {
+                            vias: no_vias, tracks, ..
+                        } => {
                             // a via outside a track keepout still needs room for the ends of
                             // its tracks on that layer (they end at the via centre)
                             let ends = via_tracks[vi]
