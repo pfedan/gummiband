@@ -126,6 +126,11 @@ step:
 - Where no 45 degree path fits, typically inside tight bundles at an odd angle, the piece keeps
   its angle. The output counts these pieces and their length.
 
+The same step also works on a board that is already routed, without routing again:
+`gummiband angles45`, the plugin button *45 degree tracks with Gummiband* and the MCP tool
+`angles_45`. There every run of track between two vias, branches or pads is one track, and
+runs that do not change stay as they are.
+
 Expect tracks about 4 to 5 % longer and a few percent of the length left off the grid on dense
 boards (see [benchmarks](benchmarks.md#conventional-45-degree-tracks)). The step takes a second
 or less.

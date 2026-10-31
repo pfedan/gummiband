@@ -251,6 +251,26 @@ in `--fixed`. On the Lichtschnitzel controller (only connectors fixed, four seed
 VBUS_F came out at 18 to 26 mm instead of 58 to 78 mm and every inductor sat 3.2 mm from its switch
 pins, at about the same via count and track length.
 
+## `gummiband angles45`
+
+```bash
+gummiband angles45 routed.kicad_pcb -o routed-45.kicad_pcb [--nets A,B] [--report r.json]
+```
+
+The 45 degree step of `route --angles 45` on a board that is already routed, without routing
+again: the unlocked tracks become conventional 45 degree tracks with chamfered corners and no
+arcs. Each run of track between two vias, branches or pads is converted on its own; vias, track
+ends, pads and locked tracks stay where they are, so connectivity stays as it was. Every new
+piece keeps the clearances, and a piece with no room on the grid keeps its angle. Runs of track
+that do not change stay in the file byte for byte. Narrow necks below a minimum width rule stay
+as they are. `--nets` converts only the tracks of these nets; the others stay and count as
+obstacles.
+
+The console shows one line like `45 degrees: 626 tracks, 606 changed, 2348 -> 2446 mm, 31
+pieces off the grid (60.4 mm), 1 sharp corners, violations 17 -> 17, 1.1 s`, where the
+violations are Gummiband's own check before and after. `--report` writes the same numbers as
+JSON under `angles_45`. The plugin button *45 degree tracks with Gummiband* runs this command.
+
 ## `gummiband strip`
 
 ```bash

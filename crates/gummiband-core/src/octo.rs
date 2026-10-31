@@ -13,7 +13,7 @@
 use crate::board::{Board, KEEPOUT_GAP, NetId, ObstacleKind};
 use crate::geom::{Point, Rect, point_seg_dist, pt, seg_seg_dist};
 use crate::index::GridIndex;
-use crate::realize::{Elem, Geometry};
+use crate::realize::{Elem, Geometry, Track, Via};
 
 /// What the 45 degree step did.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
@@ -655,6 +655,61 @@ fn off_grid(pts: &[Point]) -> (usize, f64) {
     out
 }
 
+/// The 45 degree step on the copper a board already has, without routing again: the unlocked
+/// tracks become soft copper (see [`Board::soften`]), every run of track between two vias,
+/// branches or pads is converted like a routed track, and [`crate::import::soft_changes`] tells
+/// which file items to replace. Only the tracks of `nets` change (all nets if it is empty); the
+/// others, locked tracks, vias and track ends stay where they are.
+pub fn octilinear_copper(board: &mut Board, nets: &[String]) -> (Geometry, crate::import::SoftChanges, OctoStats) {
+    board.soften(&[]);
+    let board = &*board;
+    let pick = |n: NetId| nets.is_empty() || nets.contains(&board.nets[n as usize].name);
+    let mut geo = Geometry::default();
+    for (i, ch) in board.soft.chains.iter().enumerate() {
+        geo.tracks.push(Track {
+            pts: ch.pts.clone(),
+            elems: ch.elems.clone(),
+            width: ch.width,
+            layer: ch.layer,
+            net: ch.net,
+            necks: Vec::new(),
+            neck_w: ch.width,
+            // `octilinear` leaves what has an origin alone
+            origin: (!pick(ch.net)).then_some(i as u32),
+            resting: false,
+            fitted: Vec::new(),
+        });
+    }
+    for (i, n) in board.soft.nodes.iter().enumerate() {
+        geo.vias.push(Via {
+            at: n.at,
+            diameter: n.r * 2.0,
+            drill: n.drill,
+            net: n.net,
+            layer: n.layer,
+            origin: Some(i as u32),
+            resting: true,
+        });
+    }
+    let stats = octilinear(board, &mut geo);
+    for (i, t) in geo.tracks.iter_mut().enumerate() {
+        let old = &board.soft.chains[i].elems;
+        let same = |a: Point, b: Point| a.dist(b) < 1e-6;
+        t.resting = old.len() == t.elems.len()
+            && old.iter().zip(&t.elems).all(|(x, y)| match (*x, *y) {
+                (Elem::Line(a, b), Elem::Line(c, d)) => same(a, c) && same(b, d),
+                (Elem::Arc(a, m, b), Elem::Arc(c, n, d)) => same(a, c) && same(m, n) && same(b, d),
+                _ => false,
+            });
+        if t.resting {
+            t.fitted.clear();
+        }
+        t.origin = Some(i as u32);
+    }
+    let changes = crate::import::soft_changes(board, &geo);
+    (geo, changes, stats)
+}
+
 /// Passes over all tracks. A track converted early may stand in the way of its neighbours, and
 /// a bundle frees its room only from the outside in, so every pass works on the result of the
 /// one before: what got room since then straightens out. Staircases only in the last pass.
@@ -804,6 +859,71 @@ pub fn octilinear(board: &Board, geo: &mut Geometry) -> OctoStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::{CopperItem, CopperKind, LayerSet, Obstacle};
+    use crate::geom::Shape;
+
+    /// The two pads of net A at (2, 5) and (8, 5), joined by an unlocked track through `pts`.
+    fn routed_board(pts: &[Point]) -> Board {
+        let mut b = crate::topo::tests::two_pad_board();
+        for (i, w) in pts.windows(2).enumerate() {
+            let first = b.obstacles.len() as u32;
+            b.obstacles.push(Obstacle {
+                shape: Shape::Capsule {
+                    a: w[0],
+                    b: w[1],
+                    r: 0.1,
+                },
+                layers: LayerSet::single(0),
+                net: Some(0),
+                kind: ObstacleKind::Track,
+                hole: None,
+                clearance: 0.2,
+                pin: None,
+                locked: false,
+            });
+            b.copper.push(CopperItem {
+                kind: CopperKind::Line {
+                    a: w[0],
+                    b: w[1],
+                    width: 0.2,
+                    layer: 0,
+                },
+                net: Some(0),
+                locked: false,
+                source: 10 + i as u32,
+                first,
+                last: first + 1,
+            });
+        }
+        b
+    }
+
+    #[test]
+    fn copper_of_a_file_turns_45_degrees_in_place() {
+        let mut b = routed_board(&[pt(2.0, 5.0), pt(5.0, 6.3), pt(8.0, 5.0)]);
+        let (geo, changes, st) = octilinear_copper(&mut b, &[]);
+        assert_eq!(st.tracks, 1);
+        assert_eq!(changes.strip, vec![10, 11]);
+        let t = &geo.tracks[0];
+        assert!(!t.resting);
+        assert!(t.pts[0].dist(pt(2.0, 5.0)) < 1e-9 && t.pts.last().unwrap().dist(pt(8.0, 5.0)) < 1e-9);
+        for w in t.pts.windows(2) {
+            assert!(grid_dir(w[1] - w[0]).is_some(), "{:?}", t.pts);
+        }
+        assert!(crate::check::check(&b, &geo).is_empty());
+    }
+
+    #[test]
+    fn copper_on_the_grid_or_of_other_nets_stays() {
+        let mut b = routed_board(&[pt(2.0, 5.0), pt(8.0, 5.0)]);
+        let (_, changes, _) = octilinear_copper(&mut b, &[]);
+        assert!(changes.strip.is_empty());
+        let mut b = routed_board(&[pt(2.0, 5.0), pt(5.0, 6.3), pt(8.0, 5.0)]);
+        let (geo, changes, st) = octilinear_copper(&mut b, &["B".to_string()]);
+        assert_eq!(st.tracks, 0);
+        assert!(changes.strip.is_empty());
+        assert!(geo.tracks[0].resting);
+    }
 
     #[test]
     fn two_legs_lie_on_the_grid() {

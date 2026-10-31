@@ -492,6 +492,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gummiband-core",
+ "serde",
  "serde_json",
  "thiserror",
 ]

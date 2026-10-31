@@ -11,7 +11,7 @@ import tempfile
 import threading
 from dataclasses import MISSING, dataclass, fields
 from pathlib import Path
-from typing import Callable, List, Mapping, Optional
+from typing import Callable, List, Mapping, Optional, Sequence
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 SETTINGS_FILE = PLUGIN_DIR / "settings.json"
@@ -257,6 +257,22 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
     if opts.report:
         cmd += ["--report", str(opts.report)]
     return cmd + _global_flags(opts)
+
+
+def build_angles_command(binary: str, board: Path, output: Path, nets: Sequence[str] = (),
+                         opts: Optional[RouteOptions] = None) -> List[str]:
+    """``gummiband angles45``: the unlocked tracks of ``board`` (of ``nets``, or all) on the 45
+    degree grid, without routing again. ``opts`` gives the global flags (threads, planes)."""
+    cmd = [binary, "angles45", str(board), "-o", str(output)]
+    if nets:
+        cmd += ["--nets", ",".join(nets)]
+    return cmd + _global_flags(opts or RouteOptions())
+
+
+def angles_line(stdout: str) -> Optional[str]:
+    """The summary line of ``gummiband angles45``."""
+    m = re.search(r"^45 degrees: .*$", stdout, re.M)
+    return m.group(0) if m else None
 
 
 def build_place_command(binary: str, board: Path, output: Path, report: Path,

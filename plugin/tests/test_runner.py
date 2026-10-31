@@ -243,6 +243,16 @@ open({str(self.out)!r}, "w").write("done")
         plain = runner.build_command("gb", Path("b"), Path("o"), runner.RouteOptions())
         self.assertNotIn("--angles", plain)
 
+    def test_angles_command(self):
+        cmd = runner.build_angles_command("gb", Path("b"), Path("o"), ["GND", "VCC"],
+                                          runner.RouteOptions(threads=2))
+        self.assertEqual(cmd[:5], ["gb", "angles45", "b", "-o", "o"])
+        self.assertEqual(cmd[cmd.index("--nets") + 1], "GND,VCC")
+        self.assertEqual(cmd[cmd.index("--threads") + 1], "2")
+        self.assertNotIn("--nets", runner.build_angles_command("gb", Path("b"), Path("o")))
+        line = "45 degrees: 3 tracks, 2 changed, 10 -> 11 mm"
+        self.assertEqual(runner.angles_line(f"x\n{line}\nreplaced 4 items\n"), line)
+
     def test_prefer_width_flag(self):
         opts = runner.RouteOptions(prefer_width=0.25)
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)

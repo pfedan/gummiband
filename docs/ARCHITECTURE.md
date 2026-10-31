@@ -193,7 +193,10 @@ vias of the other nets are no obstacles but part of the topology (`gummiband-cor
    90 and 135 degree corners. Every leg is tested with the clearance rules of `check` against the
    current copper, with its own width (the old width, a neck only where the router had one), so
    no violation is added. Four passes over all tracks, because a tight bundle only gets room from
-   the outside in. Vias and track ends stay.
+   the outside in. Vias and track ends stay. `octilinear_copper` runs the same step on the
+   copper of a routed file (`gummiband angles45`): `Board::soften` cuts the unlocked tracks into
+   runs between vias, branches and pads, each run is one track, and `soft_changes` names the
+   file items to replace; runs that did not change stay in the file.
 
 ## Differential pairs
 

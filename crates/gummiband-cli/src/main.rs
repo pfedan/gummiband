@@ -235,6 +235,20 @@ enum Cmd {
         #[arg(long)]
         report: Option<PathBuf>,
     },
+    /// Turn the unlocked tracks of a routed board into 45 degree tracks, without routing again.
+    /// Vias, track ends, pads and locked tracks stay where they are; every new piece keeps the
+    /// clearances, and a piece that finds no room on the grid keeps its angle.
+    Angles45 {
+        board: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Only the tracks of these nets, comma separated (default: all nets).
+        #[arg(long, value_delimiter = ',')]
+        nets: Vec<String>,
+        /// Write a machine readable JSON report.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
     /// Remove tracks, vias and outer copper zones (benchmark preparation).
     Strip {
         board: PathBuf,
@@ -1003,6 +1017,53 @@ fn main() -> Result<()> {
                 std::fs::write(path, serde_json::to_string_pretty(&json)?)?;
             }
             println!("wrote {}", output.display());
+        }
+        Cmd::Angles45 {
+            board: input,
+            output,
+            nets,
+            report,
+        } => {
+            let t0 = std::time::Instant::now();
+            let kb = read_board(
+                &input,
+                &ReadOptions {
+                    keep: KeepCopper::All,
+                    plane_layers: cli.plane_layers.clone(),
+                    ..Default::default()
+                },
+            )?;
+            let (text, r) = gummiband_kicad::octo_write::angles_45(&kb, &nets)?;
+            std::fs::write(&output, text)?;
+            let secs = t0.elapsed().as_secs_f64();
+            let st = &r.stats;
+            println!(
+                "45 degrees: {} tracks, {} changed, {:.0} -> {:.0} mm, {} pieces off the grid ({:.1} mm), {} sharp corners, violations {} -> {}, {secs:.1} s",
+                st.tracks,
+                r.tracks_changed,
+                st.length_before,
+                st.length_after,
+                st.any_angle,
+                st.any_angle_length,
+                st.sharp_corners,
+                r.violations_before,
+                r.violations_after
+            );
+            println!(
+                "replaced {} items with {} items, wrote {}",
+                r.items_removed,
+                r.items_written,
+                output.display()
+            );
+            if let Some(path) = report {
+                let json = serde_json::json!({
+                    "board": input.display().to_string(),
+                    "output": output.display().to_string(),
+                    "seconds": secs,
+                    "angles_45": r,
+                });
+                std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
+            }
         }
         Cmd::Strip {
             board,
