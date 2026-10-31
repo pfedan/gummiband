@@ -423,13 +423,12 @@ fn place_new_vias(tracks: &mut [Track], vias: &mut [Via], planes: &[crate::board
             }
         }
         let Some(p) = to else { continue };
-        // a via with tracks on one layer only connects them to the plane of its net: it must not
-        // leave that plane, its connection counts as made through it (GB_PLANE_HOLD; GB_PLANE_LOG
+        // a via in the plane of its net must not leave it: a connection of the net may count as
+        // made through that plane, also one that only shares the via (GB_PLANE_HOLD; GB_PLANE_LOG
         // says when it would happen)
         let r = v.diameter / 2.0;
-        let one_layer = ends.windows(2).all(|w| tracks[w[0].0].layer == tracks[w[1].0].layer);
         let home = planes.iter().find(|pl| pl.net == v.net && pl.outline.contains(v.at));
-        if let Some(pl) = home.filter(|_| one_layer) {
+        if let Some(pl) = home {
             let floor = (r + 0.3).min(pl.outline.boundary_dist(v.at));
             let stays = pl.outline.contains(p) && pl.outline.boundary_dist(p) >= floor;
             if !stays {
