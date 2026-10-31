@@ -242,7 +242,8 @@ takes over from the parent what is still there, asleep; only the new copper star
 relaxation wakes what it touches. This costs about 1/20 of a full evaluation, so far more mutants
 fit in. Every 24 generations the whole board is relaxed again, tension first, which also tightens
 what has been asleep. After 24 generations without a noticeable gain a side branch starts from the
-result with a bold change that may be worse, gets half of the mutants for 32 generations and
+result with a bold change, from a handful of connections around a spot up to a quarter of the board
+with every branch that failed, that may be worse, gets half of the mutants for 32 generations and
 replaces the result if it beats it. A gain means more connections, fewer violations or shorts, or
 0.2 % less via and length cost.
 

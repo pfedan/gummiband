@@ -159,11 +159,13 @@ fn bold(s: &State, level: usize, rng: &mut Rng) -> Move {
     }
     let (at, _) = spot(s, rng);
     let r = &s.router;
-    let reach = (2.0 + level as f64 + rng.unit() * 2.0).min(15.0);
-    let want = (6 + 4 * level + (rng.next() % 6) as usize).min(r.conns.len());
-    let mut near: Vec<usize> = (0..r.conns.len())
-        .filter(|&ci| s.places[ci].iter().any(|p| p.dist(at) < reach))
-        .collect();
+    // from a handful up to a quarter of the board, whatever its size
+    let quarter = (r.conns.len() / 4).max(6);
+    let want = 6 + level.min(TOP_LEVEL) * (quarter - 6) / TOP_LEVEL + (rng.next() % 6) as usize;
+    let distance = |ci: usize| s.places[ci].iter().map(|p| p.dist(at)).fold(f64::INFINITY, f64::min);
+    let mut by_way: Vec<(f64, usize)> = (0..r.conns.len()).map(|ci| (distance(ci), ci)).collect();
+    by_way.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut near: Vec<usize> = by_way.iter().take(want * 3 / 2).map(|x| x.1).collect();
     shuffle(&mut near, rng);
     near.truncate(want);
     near.sort_by_key(|&ci| !r.conn_segs[ci].is_empty());
@@ -574,8 +576,7 @@ fn better_or_same(a: &Candidate, b: &Candidate) -> bool {
 }
 
 /// Side branches that have to fail in a row, each bolder than the last, before the search counts
-/// as converged. From here on they take a stretch of 15 mm of the board and more than 50
-/// connections at a time.
+/// as converged. The last ones take a quarter of the connections of the board at a time.
 pub(crate) const TOP_LEVEL: usize = 12;
 
 /// The results that no other beats in both vias and length, at the level of the best one. The
