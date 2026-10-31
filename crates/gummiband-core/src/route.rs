@@ -3233,6 +3233,11 @@ impl<'a> Router<'a> {
     /// the way, with the points of the way. All on a copy: a via leaves its mark in the mesh even
     /// when it is gone, and a via in a pad needs its site unused. None if there is no way even so.
     pub(crate) fn way_through(&self, ci: usize, crossing: f64) -> Option<(Vec<usize>, Vec<Point>)> {
+        self.way_through_vias(ci, crossing).map(|(hit, way, _)| (hit, way))
+    }
+
+    /// [`Router::way_through`], and how many vias the way takes.
+    pub(crate) fn way_through_vias(&self, ci: usize, crossing: f64) -> Option<(Vec<usize>, Vec<Point>, usize)> {
         let mut r = self.clone();
         r.prices = Some(Prices {
             soft: true,
@@ -3243,7 +3248,8 @@ impl<'a> Router<'a> {
             reserve: 0.0,
             solid: true,
         });
-        r.route_one(ci).then(|| (r.in_the_way(ci), r.conn_points(ci)))
+        r.route_one(ci)
+            .then(|| (r.in_the_way(ci), r.conn_points(ci), r.conn_vias[ci].len()))
     }
 
     /// What connection `ci`, laid through everything, runs into.

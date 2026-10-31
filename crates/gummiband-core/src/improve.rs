@@ -13,7 +13,7 @@ use crate::board::Board;
 use crate::geom::{Point, Rect};
 use crate::index::FastMap;
 use crate::realize::{Geometry, Track, Via};
-use crate::route::{Router, seg_param_intersection};
+use crate::route::{Goal, Router, seg_param_intersection};
 use crate::topo::Substrate;
 use crate::{Candidate, Genome, Rng, Search, SearchConfig, candidate, check, relax};
 
@@ -42,6 +42,8 @@ struct Move {
     via_cost: f64,
     hot: Option<(Point, f64)>,
     aim: Option<Aim>,
+    /// The via price it drew, for [`Bandit`].
+    arm: Option<usize>,
 }
 
 /// A move that gets an open connection through: what lies on its way goes, the connection is
@@ -59,6 +61,8 @@ struct Aim {
     chain: usize,
     /// For the choice of the others.
     seed: u64,
+    /// The connection is routed and the move is for its cost, see [`aim_at_cost`].
+    improve: bool,
 }
 
 fn env(key: &str, default: f64) -> f64 {
@@ -119,14 +123,23 @@ fn aim(s: &State, bold: usize, rng: &mut Rng) -> Move {
             extra: (rng.next() % (2 + 2 * bold as u64).min(24)) as usize,
             chain: 1 + bold.min(5),
             seed: rng.next(),
+            improve: false,
         }),
+        arm: None,
     }
 }
 
 /// A move for `s`. The longer nothing helped, the more it takes out.
-fn pick(s: &State, stale: usize, boldness: usize, rng: &mut Rng) -> Move {
+fn pick(s: &State, stale: usize, boldness: usize, bandit: Option<&Bandit>, rng: &mut Rng) -> Move {
     if !s.router.unrouted().is_empty() && rng.unit() < 0.5 {
         return aim(s, boldness, rng);
+    }
+    let ideas = ideas();
+    if ideas.aim_cost > 0.0
+        && rng.unit() < ideas.aim_cost
+        && let Some(m) = aim_at_cost(s, boldness, rng)
+    {
+        return m;
     }
     let (at, hot) = spot(s, rng);
     let r = &s.router;
@@ -140,12 +153,21 @@ fn pick(s: &State, stale: usize, boldness: usize, rng: &mut Rng) -> Move {
     near.truncate(want);
     // what is open goes first
     near.sort_by_key(|&ci| !r.conn_segs[ci].is_empty());
-    let factor = [0.5, 0.7, 1.0, 1.0, 1.4, 2.0, 4.0][(rng.next() % 7) as usize];
+    let (factor, arm) = if ideas.via_price || ideas.bandit {
+        let k = match bandit.filter(|_| ideas.bandit) {
+            Some(b) => b.draw(rng),
+            None => (rng.next() % ARMS as u64) as usize,
+        };
+        (price_arms(r.cfg.via_cost)[k], Some(k))
+    } else {
+        ([0.5, 0.7, 1.0, 1.0, 1.4, 2.0, 4.0][(rng.next() % 7) as usize], None)
+    };
     Move {
         conns: near,
         via_cost: r.cfg.via_cost * factor,
         hot: hot.then(|| (at, 0.05 + 0.25 * rng.unit())),
         aim: None,
+        arm,
     }
 }
 
@@ -173,6 +195,7 @@ fn bold(s: &State, level: usize, rng: &mut Rng) -> Move {
         via_cost: r.cfg.via_cost * factor,
         hot: None,
         aim: None,
+        arm: None,
     }
 }
 
@@ -431,12 +454,16 @@ fn open_cost(c: &Candidate) -> f64 {
 /// What has to go for `aim`: what its connection runs into, and at random what lies around its way.
 /// A pad in a pocket has no way out but a via in the pad, the last resort of a run as well.
 fn around_way(r: &mut Router, s: &State, aim: &Aim) -> Option<Vec<usize>> {
-    let (mut hit, way) = r.way_through(aim.ci, aim.crossing).or_else(|| {
-        r.cfg.via_in_pad = true;
-        let found = r.way_through(aim.ci, aim.crossing);
-        r.cfg.via_in_pad = false;
-        found
-    })?;
+    let (mut hit, way) = if aim.improve {
+        cheaper_way(r, s, aim)?
+    } else {
+        r.way_through(aim.ci, aim.crossing).or_else(|| {
+            r.cfg.via_in_pad = true;
+            let found = r.way_through(aim.ci, aim.crossing);
+            r.cfg.via_in_pad = false;
+            found
+        })?
+    };
     let mut near: Vec<usize> = (0..r.conns.len())
         .filter(|&cj| cj != aim.ci && !hit.contains(&cj))
         .filter(|&cj| s.places[cj].iter().any(|p| way.iter().any(|q| q.dist(*p) < aim.reach)))
@@ -608,6 +635,13 @@ fn mutant<'a>(
     let mut conns = mv.conns.clone();
     if let Some(aim) = &mv.aim {
         conns = vec![aim.ci];
+        if aim.improve {
+            // its own way and the vias it shares must not stand in the way it looks for
+            with_shared_vias(&r, &mut conns, 0);
+            for &ci in &conns {
+                r.rip_up(ci);
+            }
+        }
         conns.extend(around_way(&mut r, s, aim)?);
     }
     with_shared_vias(&r, &mut conns, 0);
@@ -641,6 +675,10 @@ fn mutant<'a>(
         let net = r.conns[ci].net;
         r.net_splits(net) > s.router.net_splits(net)
     }) {
+        return None;
+    }
+    if ideas().prune && hopeless(s, &r, &conns, routed) {
+        PRUNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return None;
     }
     if !go_on() {
@@ -1061,6 +1099,8 @@ pub(crate) fn run(
     let branch_life = env("GB_BRANCH_LIFE", 32.0) as usize;
     let mut side: Option<(State, usize)> = None;
     let mut level = 0;
+    let mut bandit = Bandit::new();
+    let ideas = *ideas();
     // benchmarks: a fixed number of generations instead of a stop from outside
     let limit = env("GB_OPEN_GENERATIONS", f64::INFINITY);
     while !search.stopped() && ((generation - first) as f64) < limit {
@@ -1086,8 +1126,8 @@ pub(crate) fn run(
         let [on_side, on_best] = first_through(
             [shared, pop - shared],
             &mut |lane| match (lane, &side) {
-                (0, Some((s, _))) => pick(s, 0, level, &mut lanes[0]),
-                _ => pick(&best, stale, stale / 16, &mut lanes[1]),
+                (0, Some((s, _))) => pick(s, 0, level, Some(&bandit), &mut lanes[0]),
+                _ => pick(&best, stale, stale / 16, Some(&bandit), &mut lanes[1]),
             },
             &|lane, m, go_on| {
                 let (from, floor) = match (lane, &side) {
@@ -1110,6 +1150,9 @@ pub(crate) fn run(
             n.2.as_ref().is_some_and(|c| c.cand.stats.routed > parent.cand.stats.routed)
         });
         let (aimed, more) = (aimed.len(), more.count());
+        if ideas.bandit || ideas.aim_cost > 0.0 || ideas.prune {
+            learn(&ideas, &mut bandit, &next, side.as_ref().map(|s| &s.0), &best, generation, log);
+        }
         let mut wins = 0;
         // one more connection, at the price of shorts for now
         let mut promising: Option<State> = None;
@@ -1216,6 +1259,273 @@ pub(crate) fn run(
     }
     let others = front.others(&best.cand);
     (best.cand, others)
+}
+
+// ------------------------------------------------------------------------------- experiments
+//
+// Ideas under test, each switched on by its own environment variable and off by default: a run
+// without them is the same byte for byte.
+
+/// The experiments switched on for this run.
+#[derive(Clone, Copy, Debug)]
+struct Ideas {
+    /// `GB_VIA_PRICE`: the via price of a move reaches up to what a via is worth in the cost of
+    /// the result (40 mm of track), not only four times the normal price of the router.
+    via_price: bool,
+    /// `GB_BANDIT`: the via price of a move is drawn by what has won on this board so far
+    /// (Thompson sampling over the prices of `via_price`).
+    bandit: bool,
+    /// `GB_AIM_COST=share`: that share of the moves aims at an expensive routed connection, see
+    /// [`aim_at_cost`].
+    aim_cost: f64,
+    /// `GB_PRUNE`: a mutant that cannot beat its parent is dropped before its relaxation, see
+    /// [`hopeless`].
+    prune: bool,
+}
+
+fn ideas() -> &'static Ideas {
+    static IDEAS: std::sync::OnceLock<Ideas> = std::sync::OnceLock::new();
+    IDEAS.get_or_init(|| Ideas {
+        via_price: std::env::var("GB_VIA_PRICE").is_ok(),
+        bandit: std::env::var("GB_BANDIT").is_ok(),
+        aim_cost: env("GB_AIM_COST", 0.0),
+        prune: std::env::var("GB_PRUNE").is_ok(),
+    })
+}
+
+/// Mutants dropped by [`hopeless`], for the log.
+static PRUNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// What a via is worth in mm of track in the cost of a result (`RunStats::cost`: 2 per via,
+/// 0.05 per mm). The router lays a connection at 3 mm per via, which helps it through dense
+/// spots, but a mutant is judged at 40.
+const VIA_WORTH: f64 = 2.0 / 0.05;
+
+/// Number of via prices a move can draw.
+const ARMS: usize = 8;
+
+/// The via prices of a move as factors of the normal via cost: the usual ones and on up to what
+/// a via is worth.
+fn price_arms(normal: f64) -> [f64; ARMS] {
+    let top = (VIA_WORTH / normal.max(1e-9)).max(4.0);
+    [0.5, 0.7, 1.0, 1.4, 2.0, 4.0, (4.0 * top).sqrt(), top]
+}
+
+/// Which via price wins on this board: per price the moves made and how many of them beat their
+/// parent, with a memory that fades, so that the choice follows the search from phase to phase.
+struct Bandit {
+    tries: [f64; ARMS],
+    wins: [f64; ARMS],
+}
+
+impl Bandit {
+    fn new() -> Bandit {
+        Bandit {
+            tries: [0.0; ARMS],
+            wins: [0.0; ARMS],
+        }
+    }
+
+    /// A price by Thompson sampling: each one draws from what it did so far, the best draw wins.
+    /// The prior is about one win in ten moves.
+    fn draw(&self, rng: &mut Rng) -> usize {
+        let mut best = (0, f64::NEG_INFINITY);
+        for k in 0..ARMS {
+            let x = beta(0.5 + self.wins[k], 4.5 + (self.tries[k] - self.wins[k]).max(0.0), rng);
+            if x > best.1 {
+                best = (k, x);
+            }
+        }
+        best.0
+    }
+
+    fn learn(&mut self, arm: usize, won: bool) {
+        self.tries[arm] += 1.0;
+        if won {
+            self.wins[arm] += 1.0;
+        }
+    }
+
+    fn fade(&mut self, keep: f64) {
+        self.tries.iter_mut().chain(self.wins.iter_mut()).for_each(|x| *x *= keep);
+    }
+}
+
+fn normal_draw(rng: &mut Rng) -> f64 {
+    let u = rng.unit().max(1e-300);
+    (-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * rng.unit()).cos()
+}
+
+/// Gamma(a, 1) after Marsaglia and Tsang.
+fn gamma_draw(a: f64, rng: &mut Rng) -> f64 {
+    if a < 1.0 {
+        let u = rng.unit().max(1e-300);
+        return gamma_draw(a + 1.0, rng) * u.powf(1.0 / a);
+    }
+    let d = a - 1.0 / 3.0;
+    let c = 1.0 / (9.0 * d).sqrt();
+    loop {
+        let x = normal_draw(rng);
+        let v = (1.0 + c * x).powi(3);
+        if v <= 0.0 {
+            continue;
+        }
+        let u = rng.unit().max(1e-300);
+        if u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
+            return d * v;
+        }
+    }
+}
+
+fn beta(a: f64, b: f64, rng: &mut Rng) -> f64 {
+    let x = gamma_draw(a, rng);
+    let y = gamma_draw(b, rng);
+    x / (x + y).max(1e-300)
+}
+
+fn polyline(p: &[Point]) -> f64 {
+    p.windows(2).map(|w| w[0].dist(w[1])).sum()
+}
+
+/// A move for an expensive routed connection of `s`, chosen by what it costs over its straight
+/// way: its vias at what they are worth and its detour. It looks for its way again as if a via
+/// cost that much (or, without vias, at about the normal price), through what is in the way at a
+/// price; if that way is cheaper than its own, what it runs into goes, the connection is laid
+/// first and the others after it, like an open connection. None if nothing costs extra.
+fn aim_at_cost(s: &State, bold: usize, rng: &mut Rng) -> Option<Move> {
+    let r = &s.router;
+    let excess: Vec<f64> = (0..r.conns.len())
+        .map(|ci| {
+            if r.conn_segs[ci].is_empty() {
+                return 0.0;
+            }
+            let p = &s.places[ci];
+            let direct = match &r.conns[ci].goal {
+                Goal::Pins(q) => q.iter().map(|&q| r.board.pins[q].pos.dist(p[0])).fold(f64::INFINITY, f64::min),
+                Goal::Plane => 0.0,
+            };
+            // through the middle of the edges even a straight track looks a little longer
+            let detour = (polyline(p) - 1.25 * direct).max(0.0);
+            r.conn_vias[ci].len() as f64 * VIA_WORTH + detour
+        })
+        .collect();
+    let total: f64 = excess.iter().sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let mut at = rng.unit() * total;
+    let mut ci = 0;
+    for (c, &x) in excess.iter().enumerate() {
+        if x > 0.0 {
+            ci = c;
+            at -= x;
+            if at <= 0.0 {
+                break;
+            }
+        }
+    }
+    let arms = price_arms(r.cfg.via_cost);
+    let own = if r.conn_vias[ci].is_empty() {
+        arms[2 + (rng.next() % 3) as usize]
+    } else {
+        arms[5 + (rng.next() % 3) as usize]
+    } * r.cfg.via_cost;
+    let boldness = bold as f64;
+    Some(Move {
+        conns: Vec::new(),
+        via_cost: r.cfg.via_cost * [0.7, 1.0, 1.0, 1.4, 2.0][(rng.next() % 5) as usize],
+        hot: None,
+        aim: Some(Aim {
+            ci,
+            crossing: own * [0.08, 0.15, 0.3][(rng.next() % 3) as usize] / (1.0 + 0.25 * boldness),
+            via_cost: own,
+            reach: 0.3 + rng.unit() * (0.7 + 0.5 * boldness).min(5.0),
+            extra: (rng.next() % (2 + 2 * bold as u64).min(24)) as usize,
+            chain: 1 + bold.min(5),
+            seed: rng.next(),
+            improve: true,
+        }),
+        arm: None,
+    })
+}
+
+/// The way of `aim` (ripped up in `r`) at its own via price, and what it runs into, if it is
+/// cheaper than the way the connection had in `s`: fewer vias, or as many and shorter.
+fn cheaper_way(r: &mut Router, s: &State, aim: &Aim) -> Option<(Vec<usize>, Vec<Point>)> {
+    let normal = r.cfg.via_cost;
+    r.cfg.via_cost = aim.via_cost;
+    let found = r.way_through_vias(aim.ci, aim.crossing);
+    r.cfg.via_cost = normal;
+    let (hit, way, vias) = found?;
+    let (old_vias, old_len) = (s.router.conn_vias[aim.ci].len(), polyline(&s.places[aim.ci]));
+    let cheaper = vias < old_vias || (vias == old_vias && polyline(&way) < old_len - 0.5);
+    cheaper.then_some((hit, way))
+}
+
+/// A mutant that cannot beat its parent: no more connections, more vias, and nothing it moved
+/// comes near a spot of the parent, so it cannot win by a spot it removes. A via is worth 40 mm
+/// of track; what the moved connections may win in length is guessed from the edges they cross,
+/// with room to spare.
+fn hopeless(s: &State, r: &Router, conns: &[usize], routed: usize) -> bool {
+    if routed > s.cand.stats.routed {
+        return false;
+    }
+    let more = r.vias.len() as f64 - s.router.vias.len() as f64;
+    if more <= 0.0 {
+        return false;
+    }
+    let near_spot = |p: &Point| s.cand.hot.iter().any(|h| h.dist(*p) < 3.0);
+    if conns
+        .iter()
+        .any(|&ci| s.places[ci].iter().any(near_spot) || r.conn_points(ci).iter().any(near_spot))
+    {
+        return false;
+    }
+    let gain: f64 = conns
+        .iter()
+        .map(|&ci| polyline(&s.places[ci]) - polyline(&r.conn_points(ci)))
+        .sum();
+    more * VIA_WORTH > gain.max(0.0) * 1.5 + 10.0
+}
+
+/// What the mutants of a generation tell: the bandit learns which via prices beat their parent,
+/// and the log says how the experiments did.
+fn learn(
+    ideas: &Ideas,
+    bandit: &mut Bandit,
+    next: &[(bool, Move, Option<State>)],
+    side: Option<&State>,
+    best: &State,
+    generation: usize,
+    log: bool,
+) {
+    let parent = |on_side: bool| if on_side { side.unwrap_or(best) } else { best };
+    let won = |on_side: bool, c: &Option<State>| c.as_ref().is_some_and(|c| better(&c.cand, &parent(on_side).cand));
+    if ideas.bandit {
+        bandit.fade(0.98);
+        for (on_side, m, c) in next {
+            if let Some(arm) = m.arm {
+                bandit.learn(arm, won(*on_side, c));
+            }
+        }
+    }
+    if log {
+        let costly: Vec<_> = next.iter().filter(|n| n.1.aim.as_ref().is_some_and(|a| a.improve)).collect();
+        let laid = costly.iter().filter(|n| n.2.is_some()).count();
+        let wins = costly.iter().filter(|n| won(n.0, &n.2)).count();
+        let pruned = PRUNED.swap(0, std::sync::atomic::Ordering::Relaxed);
+        let mut line = format!(
+            "ideas {generation}: cost aims {} laid {laid} won {wins}, pruned {pruned}",
+            costly.len()
+        );
+        if ideas.bandit && generation % 24 == 0 {
+            let share: Vec<String> = (0..ARMS)
+                .map(|k| format!("{:.0}/{:.0}", bandit.wins[k], bandit.tries[k]))
+                .collect();
+            line += &format!(", bandit {}", share.join(" "));
+        }
+        eprintln!("{line}");
+    }
 }
 
 #[cfg(test)]
