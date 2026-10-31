@@ -238,14 +238,50 @@ wins.
 which it gets by repeating that run, and keeps the relaxed geometry next to it, with the segment of
 each track and the site of each via. A mutant clones the router, rips up a few connections around
 one spot (with those that share a via), routes them in a random order at a varied via cost, and
-takes over from the parent what is still there, asleep; only the new copper starts awake, with
-its ends on the vias where they are now, and the relaxation wakes what it touches. This costs
-about 1/20 of a full evaluation, so far more mutants fit in. Every 24 generations the whole board
-is relaxed again, tension first, which also tightens what has been asleep. After 24 generations
-without a noticeable gain a side branch starts from the result with a bold change (a whole area,
-larger with every branch that failed) that may be worse, gets half of the mutants for 32
-generations and replaces the result if it beats it. A gain means more connections, fewer
-violations or shorts, or 0.2 % less via and length cost.
+takes over from the parent what is still there, asleep; only the new copper starts awake, and the
+relaxation wakes what it touches. This costs about 1/20 of a full evaluation, so far more mutants
+fit in. Every 24 generations the whole board is relaxed again, tension first, which also tightens
+what has been asleep. After 24 generations without a noticeable gain a side branch starts from the
+result with a bold change that may be worse, gets half of the mutants for 32 generations and
+replaces the result if it beats it. A gain means more connections, fewer violations or shorts, or
+0.2 % less via and length cost.
+
+While connections are open, half of the moves aim at one of them instead of at a spot:
+
+1. The connection looks for its way as in a negotiation (`Router::way_through`, on a copy of the
+   router): it may run through tracks and overfull edges at a price, which the move varies. Only an
+   edge with no room for it even when empty stays closed. What it ran into is what really blocks
+   it: the tracks it crosses, what lies on the edges that overflow, the vias at those edges and
+   what passes its own vias, on every layer. `Router::blockers` can only guess this from the
+   straight line, and a spot at a pin of the connection did not even take the connection itself.
+2. These connections go, with those that share a via and a few more around the way.
+3. The open connection is laid first, at its own via cost, between 0.1 and 1 of the normal one: the
+   last connections often need a change of layer that the normal price talks them out of. The
+   others follow at a varied via cost, then at the normal one. Where it finds no way at all, for
+   instance from a pad in a pocket, a via in the pad helps, the last resort of a run.
+4. A connection that lost its way in this clears its own in the same way (`clear_ways`), as long as
+   the chain of the move lasts, and never at the expense of one that already cleared its way.
+
+A side branch aims at open connections too, in four of five bold moves; the others take out a whole
+area as before. With every branch that failed the moves get bolder: more goes around the way, it
+costs less to run into something, the chain gets longer. So far a mutant could not lose a
+connection even in a side branch, because a lost connection was also a net in one more piece.
+`Router::net_splits` counts the pieces no open connection accounts for, so that a split stays
+forbidden and a lost connection does not.
+
+A mutant with one more connection that does not beat the result, because of its shorts, starts a
+side branch of its own at once, if it is better than the one running, and a branch lives on as
+long as it gains. Two in five spots go to a short while there are any.
+
+The start of the relaxation decides most of this. On Corne only 3 of 84 mutants with one more
+connection beat the result, the others brought 4 to 20 shorts, because a track that starts on the
+wrong side of a neighbour stays there. The realization places tracks by the topology, the
+neighbours asleep lie where the relaxation left them, so a new track now starts between its
+neighbours as they really are (`Router::threaded`: on every edge between the real crossings of its
+neighbours, a taut polyline through those portals), with the vias at their real places. And the
+site of a new via can lie behind a track that has moved over it since: its track then crosses that
+track an odd number of times, which no push undoes, so the via goes along its track past the
+crossing if that leaves fewer such crossings on all its tracks (`place_new_vias`).
 
 The open end does not count violations but spots: all violations of one pair of nets within 2 mm
 are one spot (`check::spots`), because the check reports every short piece of track, so that one
