@@ -191,7 +191,7 @@ enum Cmd {
         /// References released although they count as mechanical, comma separated.
         #[arg(long, value_delimiter = ',')]
         free: Vec<String>,
-        /// First seed.
+        /// Another seed gives another set of starts.
         #[arg(long, default_value_t = 1)]
         seed: u64,
         /// Independent runs in parallel; the one with the fewest crossings is kept. The crossings
@@ -210,6 +210,11 @@ enum Cmd {
         /// Extra room around parts with five or more pads in mm, for their escape.
         #[arg(long, default_value_t = 0.3)]
         halo: f64,
+        /// Use the schematic beyond the netlist: sheets and clusters around ICs stay together,
+        /// inductors sit at their converter, decoupling capacitors prefer an IC of their sheet,
+        /// wide nets and switch nodes count their full length.
+        #[arg(long)]
+        semantic: bool,
         /// Write a machine readable JSON report.
         #[arg(long)]
         report: Option<PathBuf>,
@@ -463,9 +468,6 @@ fn main() -> Result<()> {
                 };
                 let found = try_placements(&input, &placed_dir, placements, &opts, &|path, seed, i| {
                     let kb = load(path)?;
-                    if !kb.board.copper.is_empty() {
-                        anyhow::bail!("--placements needs a board without kept copper, tracks do not follow the parts");
-                    }
                     let search = gummiband_core::SearchConfig {
                         frames: false,
                         // only the winner runs open ended
@@ -869,6 +871,7 @@ fn main() -> Result<()> {
             gap,
             margin,
             halo,
+            semantic,
             report,
         } => {
             use gummiband_place::auto::{PlaceOptions, Scope};
@@ -892,6 +895,7 @@ fn main() -> Result<()> {
                 margin,
                 halo,
                 plane_layers: cli.plane_layers.clone(),
+                semantic,
             };
             let placed = gummiband_place::auto::place_board(&board, &opts)?;
             let r = &placed.report;
@@ -903,12 +907,21 @@ fn main() -> Result<()> {
                 r.free_area
             );
             for (s, w, c) in &r.starts {
-                println!("  seed {s}: wire {w:.0}, {c} crossings");
+                println!("  start {s}: wire {w:.0}, {c} crossings");
             }
             println!(
-                "best: seed {}, wire {:.0}, {} crossings, smallest courtyard distance {:.2} mm",
-                r.seed, r.wire, r.crossings, r.min_separation
+                "best: seed {} start {}, wire {:.0}, {} crossings, smallest courtyard distance {:.2} mm",
+                r.seed, r.start, r.wire, r.crossings, r.min_separation
             );
+            for (l, ic) in &r.coils {
+                println!("inductor {l} at {ic}");
+            }
+            for (name, refs) in &r.groups {
+                println!("group {name}: {}", refs.join(" "));
+            }
+            if !r.anchored.is_empty() {
+                println!("stayed for their kept copper: {}", r.anchored.join(" "));
+            }
             if !r.off_plane.is_empty() {
                 println!("pins off their plane: {}", r.off_plane.join(" "));
             }
@@ -928,6 +941,8 @@ fn main() -> Result<()> {
             if let Some(path) = report {
                 let json = serde_json::json!({
                     "seed": r.seed,
+                    "start": r.start,
+                    "anchored": r.anchored,
                     "wire": r.wire,
                     "crossings": r.crossings,
                     "starts": r.starts,
@@ -943,6 +958,8 @@ fn main() -> Result<()> {
                         })
                         .collect::<Vec<_>>(),
                     "decoupling": r.decoupling,
+                    "coils": r.coils,
+                    "groups": r.groups,
                     "off_plane": r.off_plane,
                     "stale_copper": r.stale_copper,
                     "free_area": r.free_area,

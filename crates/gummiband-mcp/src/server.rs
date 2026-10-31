@@ -29,7 +29,7 @@ the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board 
 look at problems. To pre-route a critical part by hand (datasheet layout): part_info -> \
 add_locked_copper -> route the returned board id. move_part and add_zone edit the same working \
 copy. To change one net on a routed board: load the routed file -> route with keep_all, nets and \
-reroute. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
+reroute. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short), add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
 Routing is CPU heavy (seconds to minutes); routes run one at a time.";
 
 // ------------------------------------------------------------------------------ session
@@ -49,6 +49,14 @@ pub struct PadOut {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct PartInfoOut {
     pub reference: String,
+    pub value: String,
+    /// Position and rotation of the footprint in mm and degrees.
+    pub x: f64,
+    pub y: f64,
+    pub rotation: f64,
+    pub locked: bool,
+    /// Schematic sheet of the part, empty on the root sheet.
+    pub sheet: String,
     /// Courtyard box [x0, y0, x1, y1] in mm, if the footprint has one.
     pub courtyard: Option<[f64; 4]>,
     pub pads: Vec<PadOut>,
@@ -214,7 +222,7 @@ pub struct PlacePartsIn {
     /// References that stay in any case, e.g. the parts you placed yourself with move_part.
     #[serde(default)]
     pub fixed: Vec<String>,
-    /// First seed (default 1); another seed gives another placement.
+    /// Default 1; another seed gives another set of starts, none shared with a neighbouring seed.
     pub seed: Option<u64>,
     /// Independent runs (default 1); the one with the fewest crossings is kept. The crossings
     /// hardly predict the routed result: for another attempt change the seed instead.
@@ -223,6 +231,12 @@ pub struct PlacePartsIn {
     pub gap: Option<f64>,
     /// Extra room around parts with five or more pads in mm (default 0.3).
     pub halo: Option<f64>,
+    /// Use the schematic beyond the netlist (default false): parts of a sheet and clusters
+    /// around an IC stay together, an inductor sits at the switch pins of its converter,
+    /// decoupling capacitors prefer an IC of their own sheet, and wide nets and switch nodes
+    /// count their full length, so an input chain stays in order. Connectors and power stages
+    /// you care about still belong in `fixed`.
+    pub semantic: Option<bool>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -248,7 +262,19 @@ pub struct PlacePartsOut {
     pub min_separation: f64,
     /// Pins outside the plane of their net; routing reaches them.
     pub off_plane: Vec<String>,
+    /// Parts that stayed because locked copper ends on one of their pads.
+    pub anchored: Vec<String>,
+    /// With `semantic`: inductors with the converter they were pulled to.
+    pub coils: Vec<(String, String)>,
+    /// With `semantic`: groups kept together (sheet, or sheet/anchor IC) with their parts.
+    pub groups: Vec<GroupOut>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GroupOut {
+    pub name: String,
+    pub parts: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -441,6 +467,16 @@ pub struct LoadBoardOut {
     pub custom_clearance_pairs: usize,
     /// Net options kept from an earlier load of the same file.
     pub net_options: BTreeMap<String, NetOption>,
+    /// Differential pairs recognised by net name (`..P`/`..N`, `..+`/`..-`). route couples
+    /// them only with `pair_pull` or `pairs`.
+    pub diff_pairs: Vec<DiffPairOut>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DiffPairOut {
+    pub p: String,
+    pub n: String,
+    pub class: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -521,6 +557,18 @@ pub struct PairOut {
     pub swaps: usize,
 }
 
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CouplingOut {
+    pub p: String,
+    pub n: String,
+    /// Track of both nets within width + gap + 0.1 mm of the partner on the same layer.
+    pub coupled_mm: f64,
+    /// Track of both nets.
+    pub length_mm: f64,
+    pub vias_p: usize,
+    pub vias_n: usize,
+}
+
 /// The fields of `gummiband route --report`, plus a few for the session.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BlockedOut {
@@ -563,6 +611,11 @@ pub struct RouteOut {
     pub portfolio: Vec<PortfolioOut>,
     /// Differential pairs, with `pairs` set.
     pub pairs: Vec<PairOut>,
+    /// Every recognised differential pair, whatever the settings: how much of it runs next to
+    /// its partner.
+    pub coupling: Vec<CouplingOut>,
+    /// Hints on the settings, e.g. pairs that were not asked to couple.
+    pub notes: Vec<String>,
     /// Per routed net: track length, vias and widths, longest first.
     pub nets: Vec<NetStatOut>,
     /// Project files copied next to the output.
@@ -716,6 +769,15 @@ impl Gummiband {
             custom_rules,
             custom_clearance_pairs: b.pair_clearance.len(),
             net_options: options.clone(),
+            diff_pairs: b
+                .diff_pairs()
+                .into_iter()
+                .map(|(p, n)| DiffPairOut {
+                    p: b.nets[p as usize].name.clone(),
+                    n: b.nets[n as usize].name.clone(),
+                    class: b.class_of(p).name.clone(),
+                })
+                .collect(),
         };
         let summary = format!(
             "Loaded {} as board {id}: {:.1} x {:.1} mm, {} copper layers ({}), {} pins, {} nets ({} to route, {} connections), {} net classes, {} custom rules.",
@@ -738,7 +800,7 @@ impl Gummiband {
             out.connections,
             b.classes.len(),
             custom_rules
-        );
+        ) + &pairs_note(&out.diff_pairs);
         boards.insert(
             id,
             Entry {
@@ -840,8 +902,16 @@ impl Gummiband {
                 None => Vec::new(),
             };
             neighbours.sort();
+            let d = gummiband_place::model::Design::from_root(&e.kb.root);
+            let part = d.by_ref.get(&p.reference).map(|&i| &d.parts[i]);
             let out = PartInfoOut {
                 reference: p.reference.clone(),
+                value: part.map(|q| q.value.clone()).unwrap_or_default(),
+                x: part.map_or(0.0, |q| r3(q.pos.x)),
+                y: part.map_or(0.0, |q| r3(q.pos.y)),
+                rotation: part.map_or(0.0, |q| q.rot),
+                locked: part.is_some_and(|q| q.locked),
+                sheet: part.map(|q| q.sheet_name.clone()).unwrap_or_default(),
                 courtyard: court.map(|c| [r3(c.min.x), r3(c.min.y), r3(c.max.x), r3(c.max.y)]),
                 pads,
                 neighbours,
@@ -999,11 +1069,35 @@ impl Gummiband {
         let (id, path) = self.edit_copy(&p.board, |_, text| {
             write::place_footprint(text, &p.reference, p.x, p.y, p.rotation)
         })?;
+        // courtyard boxes after the move: a quick look, drc has the exact answer
+        let warnings = self.with_entry(&id, |e| {
+            let b = &e.kb.board;
+            let Some(c) = b.courtyards.get(&p.reference) else {
+                return Ok(Vec::new());
+            };
+            let c = c.grow(-0.05);
+            let mut hits: Vec<String> = b
+                .courtyards
+                .iter()
+                .filter(|(r, o)| **r != p.reference && c.overlaps(o))
+                .map(|(r, _)| r.clone())
+                .collect();
+            hits.sort();
+            let mut w: Vec<String> = hits
+                .into_iter()
+                .map(|r| format!("courtyard box of {} overlaps {r}", p.reference))
+                .collect();
+            let bb = b.bbox();
+            if c.min.x < bb.min.x || c.min.y < bb.min.y || c.max.x > bb.max.x || c.max.y > bb.max.y {
+                w.push(format!("courtyard of {} leaves the board outline", p.reference));
+            }
+            Ok(w)
+        })?;
         let out = AddLockedOut {
             board: id,
             path,
             items_added: 1,
-            warnings: Vec::new(),
+            warnings,
         };
         Ok((format!("moved {} to {}, {}", p.reference, p.x, p.y), out))
     }
@@ -1028,6 +1122,7 @@ impl Gummiband {
             starts: p.starts.unwrap_or(defaults.starts),
             gap: p.gap.unwrap_or(defaults.gap),
             halo: p.halo.unwrap_or(defaults.halo),
+            semantic: p.semantic.unwrap_or(false),
             ..defaults
         };
         let path = self.with_entry(&p.board, |e| Ok(e.path.clone()))?;
@@ -1040,10 +1135,7 @@ impl Gummiband {
             Ok(placed.text)
         })?;
         let r = report.context("placement did not run")?;
-        let mut warnings = Vec::new();
-        if r.stale_copper > 0 {
-            warnings.push(format!("{} tracks and vias do not follow the parts", r.stale_copper));
-        }
+        let warnings = Vec::new();
         let text = format!("placed {} parts, {} crossings", r.moved.len(), r.crossings);
         let out = PlacePartsOut {
             board: id,
@@ -1062,6 +1154,13 @@ impl Gummiband {
             crossings: r.crossings,
             min_separation: r.min_separation,
             off_plane: r.off_plane,
+            anchored: r.anchored,
+            coils: r.coils,
+            groups: r
+                .groups
+                .into_iter()
+                .map(|(name, parts)| GroupOut { name, parts })
+                .collect(),
             warnings,
         };
         Ok((text, out))
@@ -1311,8 +1410,32 @@ fn route_blocking(
             .entry(v.what.split(' ').next().unwrap_or("").to_string())
             .or_insert(0) += 1;
     }
+    let mut coupling = Vec::new();
+    for (a, c) in b.diff_pairs() {
+        let (w, g, _) = b.pair_shape(a, c, 0);
+        let (coupled, total) = gummiband_core::pair_coupling_of(&res.geometry, a, c, w + g + 0.1);
+        let vias = |n| res.geometry.vias.iter().filter(|v| v.net == n).count();
+        coupling.push(CouplingOut {
+            p: net(a),
+            n: net(c),
+            coupled_mm: r3(coupled),
+            length_mm: r3(total),
+            vias_p: vias(a),
+            vias_n: vias(c),
+        });
+    }
+    let mut notes = Vec::new();
+    if !coupling.is_empty() && p.pair_pull.unwrap_or(0.0) == 0.0 && p.pairs != Some(true) {
+        let names: Vec<String> = coupling.iter().map(|x| format!("{}/{}", x.p, x.n)).collect();
+        notes.push(format!(
+            "differential pairs {} were routed as independent nets: set pair_pull (1 to 4) or pairs to couple them",
+            names.join(", ")
+        ));
+    }
     let st = &res.stats;
     let out = RouteOut {
+        coupling,
+        notes,
         nets: nets_out,
         board: id,
         input: path.display().to_string(),
@@ -1399,8 +1522,20 @@ fn route_blocking(
         } else {
             format!(" Skipped nets: {}.", out.skipped_nets.len())
         }
-    );
+    ) + &out.notes.iter().map(|n| format!(" Note: {n}.")).collect::<String>();
     Ok((summary, out))
+}
+
+/// Sentence on the recognised pairs for the summaries, empty without pairs.
+fn pairs_note(pairs: &[DiffPairOut]) -> String {
+    if pairs.is_empty() {
+        return String::new();
+    }
+    let names: Vec<String> = pairs.iter().map(|x| format!("{}/{}", x.p, x.n)).collect();
+    format!(
+        " Differential pairs: {}; route couples them only with pair_pull or pairs.",
+        names.join(", ")
+    )
 }
 
 fn render_blocking(p: RenderIn) -> Result<(String, RenderOut, Vec<u8>)> {
@@ -1540,7 +1675,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Move a part to a new position (and rotation) in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. Courtyards are not checked; use drc.",
+        description = "Move a part to a new position (and rotation) in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. `warnings` names courtyard boxes it now overlaps (boxes only: drc has the exact answer).",
         output_schema = schema_for_output::<AddLockedOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]

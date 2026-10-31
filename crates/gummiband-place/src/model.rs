@@ -113,6 +113,11 @@ pub struct Part {
     /// Keepout polygons of the footprint (board coordinates in the file) that forbid copper pours
     /// on inner layers, with their layer names.
     pub keepouts: Vec<(Vec<Point>, Vec<String>)>,
+    /// Schematic sheet instance of the part: its sheet path without the symbol, empty on the
+    /// root sheet or without a path.
+    pub sheet: String,
+    /// Name of that sheet for reports (the sheet path if the file gives no name).
+    pub sheet_name: String,
 }
 
 impl Part {
@@ -199,6 +204,20 @@ impl Design {
                     keepouts.push((pts, layers));
                 }
             }
+            // `(path "/sheet/.../symbol")`: everything but the symbol is the sheet instance
+            let sheet = fp
+                .child_str("path")
+                .and_then(|p| p.rsplit_once('/'))
+                .map(|(s, _)| s.to_string())
+                .unwrap_or_default();
+            let sheet_name = match fp
+                .child_str("sheetname")
+                .map(str::to_string)
+                .unwrap_or_else(|| prop("Sheetname"))
+            {
+                n if !n.is_empty() && n != "/" => n.trim_matches('/').to_string(),
+                _ => sheet.clone(),
+            };
             parts.push(Part {
                 reference,
                 value,
@@ -210,6 +229,8 @@ impl Design {
                 court,
                 pads,
                 keepouts,
+                sheet,
+                sheet_name,
             });
         }
         let by_ref = parts

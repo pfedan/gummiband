@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use gummiband_core::board::Board;
+use gummiband_core::board::{Board, LayerSet};
 use gummiband_core::geom::{Point, Polygon, pt};
 use gummiband_kicad::place_write::{self, Patch, kicad_rot};
 use gummiband_kicad::sexpr::Node;
@@ -24,6 +24,18 @@ const PLANE_INSET: f64 = 0.4;
 const PLANE_WEIGHT: f64 = 1.5;
 /// Grid of the written positions.
 const GRID: f64 = 0.05;
+/// Annealing seeds per placement seed, more than anyone starts.
+const SEED_STEP: u64 = 1000;
+/// With `semantic`: pull of an inductor pad to the switch pins of its converter, per mm.
+const COIL_WEIGHT: f64 = 6.0;
+/// With `semantic`: weight of the box around all parts of a schematic sheet.
+const SHEET_WEIGHT: f64 = 0.15;
+/// With `semantic`: weight of the box around a cluster of parts tied by local signal nets.
+const CLUSTER_WEIGHT: f64 = 0.5;
+/// With `semantic`: factor on the weight of a current path, per 0.5 mm of class width.
+const POWER_WEIGHT: f64 = 2.0;
+/// With `semantic`: a signal net ties its parts into a cluster up to this many parts.
+const CLUSTER_NET_PARTS: usize = 3;
 
 /// Which parts get a new position. Locked footprints stay in every case.
 #[derive(Debug, Clone, Default)]
@@ -46,7 +58,7 @@ pub struct PlaceOptions {
     pub fixed: Vec<String>,
     /// References released on top of the scope (a test point, a button).
     pub free: Vec<String>,
-    /// First seed; the starts use `seed .. seed + starts`.
+    /// Another seed gives another set of starts, none shared with a neighbouring seed.
     pub seed: u64,
     /// Independent annealing runs, the one with the fewest crossings is kept. The crossings hardly
     /// predict the routed result, so one run is the default.
@@ -60,6 +72,11 @@ pub struct PlaceOptions {
     /// Extra room around the courtyards of parts with five or more pads, for their escape.
     pub halo: f64,
     pub plane_layers: Vec<String>,
+    /// Use what the schematic says beyond the netlist: parts of a sheet and clusters around an
+    /// IC stay together, an inductor sits at the switch pins of its converter, decoupling
+    /// capacitors go to an IC of their own sheet, and current paths (wide nets, switch nodes)
+    /// count their full length instead of a box, so a series chain stays in order.
+    pub semantic: bool,
 }
 
 impl Default for PlaceOptions {
@@ -75,6 +92,7 @@ impl Default for PlaceOptions {
             margin: 0.5,
             halo: 0.3,
             plane_layers: Vec::new(),
+            semantic: false,
         }
     }
 }
@@ -83,23 +101,31 @@ impl Default for PlaceOptions {
 pub struct PlaceReport {
     pub fixed: Vec<String>,
     pub moved: Vec<String>,
+    /// Parts that stayed because kept copper ends on one of their pads.
+    pub anchored: Vec<String>,
     /// New pose of every moved part: reference, x, y, rotation in degrees.
     pub poses: Vec<(String, f64, f64, f64)>,
     /// New outline of every keepout that followed its part: zone id, points.
     pub zones: Vec<(String, Vec<Point>)>,
     /// Decoupling capacitors with the part they were assigned to.
     pub decoupling: Vec<(String, String)>,
+    /// With `semantic`: inductors with the converter they were pulled to.
+    pub coils: Vec<(String, String)>,
+    /// With `semantic`: groups kept together, name and parts.
+    pub groups: Vec<(String, Vec<String>)>,
     /// Pins left outside the plane of their net: reached by routing.
     pub off_plane: Vec<String>,
     /// Tracks and vias in the input: they do not follow the parts.
     pub stale_copper: usize,
     pub seed: u64,
+    /// The start that won, counted from 1.
+    pub start: usize,
     /// Weighted wire length of the placement.
     pub wire: f64,
     /// Crossings between the spanning trees of the nets, a measure of the vias to expect.
     pub crossings: usize,
-    /// Result of every start: seed, wire, crossings; a start without a legal placement is left out.
-    pub starts: Vec<(u64, f64, usize)>,
+    /// Result of every start: its number, wire, crossings; a start without a legal placement is left out.
+    pub starts: Vec<(usize, f64, usize)>,
     pub free_area: f64,
     pub movable_area: f64,
     pub min_separation: f64,
@@ -111,7 +137,7 @@ pub struct Placed {
 }
 
 /// Parts that stay, as flags per part of `d`.
-fn fixed_parts(d: &Design, kb: &KicadBoard, opts: &PlaceOptions, outer: &Polygon) -> Result<Vec<bool>> {
+fn fixed_parts(d: &Design, kb: &KicadBoard, opts: &PlaceOptions, outer: &Polygon) -> Result<(Vec<bool>, Vec<usize>)> {
     let only: &[String] = match &opts.scope {
         Scope::Only(refs) => refs,
         _ => &[],
@@ -142,6 +168,11 @@ fn fixed_parts(d: &Design, kb: &KicadBoard, opts: &PlaceOptions, outer: &Polygon
             !chosen || p.locked || opts.fixed.contains(&p.reference) || p.court.is_empty()
         })
         .collect();
+    // copper that ends on a pad keeps the part where it is: tracks do not follow
+    let anchored = anchored_parts(d, &kb.board, &fixed);
+    for &i in &anchored {
+        fixed[i] = true;
+    }
     // a block with its copper stays, the writer cannot turn tracks yet
     for b in &kb.board.blocks {
         if !b.uuids.is_empty() {
@@ -159,7 +190,89 @@ fn fixed_parts(d: &Design, kb: &KicadBoard, opts: &PlaceOptions, outer: &Polygon
             ids.iter().for_each(|&i| fixed[i] = true);
         }
     }
-    Ok(fixed)
+    Ok((fixed, anchored))
+}
+
+/// Parts with kept copper of their net on a pad, among those not fixed yet.
+fn anchored_parts(d: &Design, board: &Board, fixed: &[bool]) -> Vec<usize> {
+    let on_pad = |pin: &gummiband_core::board::Pin| -> bool {
+        let reach = pin.size.0.max(pin.size.1) * 0.5;
+        board.copper.iter().filter(|c| c.net == Some(pin.net)).any(|c| {
+            board.obstacles[c.first as usize..c.last as usize]
+                .iter()
+                .any(|o| o.shape.dist_to_point(pin.pos) <= reach)
+        })
+    };
+    (0..d.parts.len())
+        .filter(|&i| !fixed[i])
+        .filter(|&i| {
+            board
+                .pins
+                .iter()
+                .any(|p| p.footprint == d.parts[i].reference && on_pad(p))
+        })
+        .collect()
+}
+
+/// Kept copper on the layers of the moving parts, to look up by position.
+struct CopperGrid<'a> {
+    board: &'a Board,
+    bbox: R,
+    cols: usize,
+    cells: Vec<Vec<usize>>,
+    reach: f64,
+}
+
+impl<'a> CopperGrid<'a> {
+    const CELL: f64 = 2.0;
+
+    fn new(board: &'a Board, d: &Design, fixed: &[bool], bbox: R, reach: f64) -> CopperGrid<'a> {
+        let mut layers = LayerSet::default();
+        for p in &board.pins {
+            if d.by_ref.get(&p.footprint).is_some_and(|&i| !fixed[i]) {
+                for l in p.layers.iter() {
+                    layers.insert(l);
+                }
+            }
+        }
+        let cols = (bbox.w() / Self::CELL).ceil() as usize + 1;
+        let rows = (bbox.h() / Self::CELL).ceil() as usize + 1;
+        let mut cells = vec![Vec::new(); cols * rows];
+        let column = |x: f64| (((x - bbox.x0) / Self::CELL).max(0.0) as usize).min(cols - 1);
+        let row = |y: f64| (((y - bbox.y0) / Self::CELL).max(0.0) as usize).min(rows - 1);
+        for c in &board.copper {
+            for o in c.first as usize..c.last as usize {
+                let ob = &board.obstacles[o];
+                if !ob.layers.intersects(layers) {
+                    continue;
+                }
+                let b = ob.shape.bbox().grow(reach);
+                for j in row(b.min.y)..=row(b.max.y) {
+                    for i in column(b.min.x)..=column(b.max.x) {
+                        cells[j * cols + i].push(o);
+                    }
+                }
+            }
+        }
+        CopperGrid {
+            board,
+            bbox,
+            cols,
+            cells,
+            reach,
+        }
+    }
+
+    fn near(&self, p: Point) -> bool {
+        if p.x < self.bbox.x0 || p.y < self.bbox.y0 || p.x > self.bbox.x1 || p.y > self.bbox.y1 {
+            return false;
+        }
+        let i = ((p.x - self.bbox.x0) / Self::CELL) as usize;
+        let j = ((p.y - self.bbox.y0) / Self::CELL) as usize;
+        self.cells[j * self.cols + i]
+            .iter()
+            .any(|&o| self.board.obstacles[o].shape.dist_to_point(p) < self.reach)
+    }
 }
 
 fn movable_units(d: &Design, kb: &KicadBoard, fixed: &[bool]) -> Vec<Unit> {
@@ -250,7 +363,8 @@ fn inductor_pins(d: &Design, net: usize) -> Vec<(usize, usize, usize)> {
 /// pin's share follows the pads it stands for, so a power stage gets more than a logic chip and
 /// every pin has its fast capacitor before one gets a second.
 /// The result: capacitor pad, supply pin, weight.
-fn decoupling(d: &Design, fixed: &[bool]) -> Vec<((usize, usize), (usize, usize), f64)> {
+/// With `same_sheet` a capacitor prefers the pins of its own schematic sheet.
+fn decoupling(d: &Design, fixed: &[bool], same_sheet: bool) -> Vec<((usize, usize), (usize, usize), f64)> {
     let mut by_net: Vec<Vec<(f64, usize, usize)>> = vec![Vec::new(); d.nets.len()];
     for (i, c) in d.parts.iter().enumerate() {
         if fixed[i] || !c.reference.starts_with('C') || c.pads.len() != 2 {
@@ -283,7 +397,13 @@ fn decoupling(d: &Design, fixed: &[bool]) -> Vec<((usize, usize), (usize, usize)
             if set.is_empty() {
                 continue;
             }
-            let k = (0..set.len())
+            let sheet = &d.parts[c].sheet;
+            let own: Vec<usize> = (0..set.len())
+                .filter(|&i| same_sheet && &d.parts[set[i].0].sheet == sheet)
+                .collect();
+            let cand = if own.is_empty() { (0..set.len()).collect() } else { own };
+            let k = cand
+                .into_iter()
                 .min_by(|&a, &b| {
                     let share = |i: usize| (count[i] + 1) as f64 / set[i].2 as f64;
                     share(a).partial_cmp(&share(b)).unwrap()
@@ -294,6 +414,135 @@ fn decoupling(d: &Design, fixed: &[bool]) -> Vec<((usize, usize), (usize, usize)
         }
     }
     out
+}
+
+fn is_coil(p: &crate::model::Part) -> bool {
+    p.pads.len() == 2 && (p.reference.starts_with('L') || p.footprint.contains("Inductor"))
+}
+
+fn is_ic(p: &crate::model::Part) -> bool {
+    p.pads.len() >= 4 && !(p.footprint.contains("Connector") || p.reference.starts_with('J'))
+}
+
+/// Each inductor to the IC with the most pads on one of its nets (the switch node of a
+/// converter): the inductor pad and the IC pad in the middle of that pin group.
+fn coil_springs(d: &Design) -> Vec<((usize, usize), (usize, usize))> {
+    let mut out = Vec::new();
+    for (l, coil) in d.parts.iter().enumerate().filter(|(_, p)| is_coil(p)) {
+        let mut best: Option<(usize, usize, usize)> = None;
+        for (k, pad) in coil.pads.iter().enumerate() {
+            let Some(n) = pad.net.filter(|&n| !is_ground(&d.nets[n])) else {
+                continue;
+            };
+            for (i, p) in d.parts.iter().enumerate().filter(|(i, p)| *i != l && is_ic(p)) {
+                let count = p.pads.iter().filter(|x| x.net == Some(n)).count();
+                if count > 0 && best.is_none_or(|b| count > b.2) {
+                    best = Some((k, i, count));
+                }
+            }
+        }
+        let Some((k, i, _)) = best else { continue };
+        let n = coil.pads[k].net;
+        let on: Vec<usize> = (0..d.parts[i].pads.len())
+            .filter(|&x| d.parts[i].pads[x].net == n)
+            .collect();
+        let c = on.iter().fold(pt(0.0, 0.0), |a, &x| a + d.parts[i].pads[x].local) * (1.0 / on.len() as f64);
+        let mid = *on
+            .iter()
+            .min_by(|&&a, &&b| {
+                let pa = d.parts[i].pads[a].local.dist(c);
+                pa.partial_cmp(&d.parts[i].pads[b].local.dist(c)).unwrap()
+            })
+            .unwrap();
+        out.push(((l, k), (i, mid)));
+    }
+    out
+}
+
+struct Group {
+    name: String,
+    parts: Vec<usize>,
+    weight: f64,
+}
+
+/// Parts that belong together by the schematic: each sheet instance (when there are several),
+/// and inside a sheet the clusters tied by small local signal nets, such as a converter with its
+/// feedback divider, boot capacitor and mode resistors. Ground, planes and current paths do not
+/// tie, they reach everything. A cluster holds one IC at most. A group needs a movable part.
+fn semantic_groups(d: &Design, terms: &Nets, fixed: &[bool]) -> Vec<Group> {
+    let mut groups = Vec::new();
+    let mut sheets: Vec<&str> = d.parts.iter().map(|p| p.sheet.as_str()).collect();
+    sheets.sort();
+    sheets.dedup();
+    let live = |ps: &[usize]| ps.len() >= 2 && ps.iter().any(|&i| !fixed[i]);
+    if sheets.len() >= 2 {
+        for s in &sheets {
+            let ps: Vec<usize> = (0..d.parts.len()).filter(|&i| d.parts[i].sheet == *s).collect();
+            if live(&ps) && ps.len() < d.parts.len() {
+                groups.push(Group {
+                    name: d.parts[ps[0]].sheet_name.clone(),
+                    parts: ps,
+                    weight: SHEET_WEIGHT,
+                });
+            }
+        }
+    }
+    let mut root: Vec<usize> = (0..d.parts.len()).collect();
+    let mut ics: Vec<bool> = d.parts.iter().map(is_ic).collect();
+    fn find(r: &mut [usize], i: usize) -> usize {
+        let mut i = i;
+        while r[i] != i {
+            r[i] = r[r[i]];
+            i = r[i];
+        }
+        i
+    }
+    for (n, name) in d.nets.iter().enumerate() {
+        if is_ground(name) || terms.weight[n] == 0.0 || !terms.partial[n].is_empty() || terms.power[n] {
+            continue;
+        }
+        let mut ps: Vec<usize> = (0..d.parts.len())
+            .filter(|&i| d.parts[i].pads.iter().any(|x| x.net == Some(n)))
+            .collect();
+        ps.dedup();
+        if ps.len() < 2 || ps.len() > CLUSTER_NET_PARTS || ps.iter().any(|&i| d.parts[i].sheet != d.parts[ps[0]].sheet)
+        {
+            continue;
+        }
+        for &i in &ps[1..] {
+            // one IC per cluster: a chain of passives does not tie two ICs together
+            let (a, b) = (find(&mut root, ps[0]), find(&mut root, i));
+            if a != b && !(ics[a] && ics[b]) {
+                root[a] = b;
+                ics[b] |= ics[a];
+            }
+        }
+    }
+    let mut by_root: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..d.parts.len() {
+        let r = find(&mut root, i);
+        by_root.entry(r).or_default().push(i);
+    }
+    let mut clusters: Vec<Vec<usize>> = by_root.into_values().filter(|ps| ps.len() >= 3 && live(ps)).collect();
+    clusters.sort();
+    for ps in clusters {
+        let anchor = *ps
+            .iter()
+            .max_by_key(|&&i| (d.parts[i].pads.len(), std::cmp::Reverse(i)))
+            .unwrap();
+        let sheet = &d.parts[anchor].sheet_name;
+        let name = if sheet.is_empty() {
+            d.parts[anchor].reference.clone()
+        } else {
+            format!("{sheet}/{}", d.parts[anchor].reference)
+        };
+        groups.push(Group {
+            name,
+            parts: ps,
+            weight: CLUSTER_WEIGHT,
+        });
+    }
+    groups
 }
 
 /// Distance raster of a partial plane: 0 well inside it, growing outside.
@@ -333,6 +582,10 @@ struct Nets {
     weight: Vec<f64>,
     /// Polygons of the partial plane of a net, indexed by net of the design.
     partial: Vec<Vec<Polygon>>,
+    /// Current paths: wide nets and switch nodes, with or without a partial plane.
+    power: Vec<bool>,
+    /// Width of the net class over the default 0.5 mm of a current path, at least 1.
+    current: Vec<f64>,
 }
 
 /// Nets with a plane over most of the board cost nothing; a partial plane carries its net itself,
@@ -340,6 +593,8 @@ struct Nets {
 fn net_terms(d: &Design, board: &Board, board_area: f64) -> Nets {
     let mut weight = vec![1.0; d.nets.len()];
     let mut partial: Vec<Vec<Polygon>> = vec![Vec::new(); d.nets.len()];
+    let mut power = vec![false; d.nets.len()];
+    let mut current = vec![1.0; d.nets.len()];
     let pads_on = |n: usize| -> usize {
         d.parts
             .iter()
@@ -366,12 +621,18 @@ fn net_terms(d: &Design, board: &Board, board_area: f64) -> Nets {
         } else if !polys.is_empty() {
             weight[n] = 0.3;
             partial[n] = polys.into_iter().cloned().collect();
+            // a small pour on a current path still carries its current from pad to pad
+            let c = &board.classes[net.class as usize];
+            power[n] = c.track_width >= 0.5;
+            current[n] = (c.track_width / 0.5).max(1.0);
         } else {
             let c = &board.classes[net.class as usize];
             let coil = d
                 .parts
                 .iter()
                 .any(|p| p.reference.starts_with('L') && p.pads.iter().any(|x| x.net == Some(n)));
+            power[n] = coil || c.track_width >= 0.5;
+            current[n] = (c.track_width / 0.5).max(1.0);
             weight[n] = if coil {
                 // the switch node of a converter: as short as it gets
                 8.0
@@ -384,7 +645,12 @@ fn net_terms(d: &Design, board: &Board, board_area: f64) -> Nets {
             };
         }
     }
-    Nets { weight, partial }
+    Nets {
+        weight,
+        partial,
+        power,
+        current,
+    }
 }
 
 /// Crossings between the spanning trees of the nets (pads in their final position).
@@ -399,7 +665,7 @@ fn crossings(d: &Design, pose: &[(Point, f64)], weight: &[f64]) -> usize {
     }
     let mut segs: Vec<(usize, Point, Point)> = Vec::new();
     for (n, ps) in pins.iter().enumerate() {
-        if weight[n] < 0.5 || ps.len() < 2 {
+        if weight.get(n).is_none_or(|&w| w < 0.5) || ps.len() < 2 {
             continue;
         }
         let mut done = vec![false; ps.len()];
@@ -536,7 +802,7 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         v
     };
     let (outer, cutouts) = outlines.split_first().context("the board has no outline")?;
-    let fixed = fixed_parts(&d, &kb, opts, outer)?;
+    let (fixed, anchored) = fixed_parts(&d, &kb, opts, outer)?;
     for p in &mut d.parts {
         if p.pads.len() >= 5 {
             for r in &mut p.court {
@@ -600,11 +866,13 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
     let cell = 0.1;
     let half_diag = cell * std::f64::consts::FRAC_1_SQRT_2 + 1e-6;
     let edge = opts.margin + half_diag;
+    let copper = CopperGrid::new(&kb.board, &d, &fixed, bbox, opts.gap + half_diag);
     let inside = |c: Point| -> bool {
         outer.contains(c)
             && outer.boundary_dist(c) >= edge
             && !cutouts.iter().any(|h| h.contains(c) || h.boundary_dist(c) < edge)
             && !barred.iter().any(|z| z.contains(c) || z.boundary_dist(c) < half_diag)
+            && !copper.near(c)
     };
     let raster = Raster::over(bbox, &inside, &fixed_quads, opts.gap, cell);
     let free_area = bbox.area() - raster.blocked(&bbox);
@@ -616,6 +884,28 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
 
     // ---- nets
     let terms = net_terms(&d, &kb.board, outer.signed_area().abs());
+    let pairs = decoupling(&d, &fixed, opts.semantic);
+    let coils = if opts.semantic { coil_springs(&d) } else { Vec::new() };
+    let groups = if opts.semantic {
+        semantic_groups(&d, &terms, &fixed)
+    } else {
+        Vec::new()
+    };
+    // a group is a net of its own between the courtyard centres of its parts
+    let real_nets = d.nets.len();
+    for g in &groups {
+        d.nets.push(format!("group:{}", g.name));
+        let n = d.nets.len() - 1;
+        for &i in &g.parts {
+            let p = &mut d.parts[i];
+            let c = p.court.iter().fold(R::empty(), |b, r| b.union(r)).center();
+            p.pads.push(crate::model::Pad {
+                number: String::new(),
+                local: c,
+                net: Some(n),
+            });
+        }
+    }
     let mut fixed_pins = Vec::new();
     for (i, p) in d.parts.iter().enumerate() {
         if fixed[i] {
@@ -626,20 +916,39 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
             }
         }
     }
-    let pairs = decoupling(&d, &fixed);
+    let spring = |a: (usize, usize), b: (usize, usize), w: f64| {
+        // the moving end first; two fixed ends are no term
+        let (a, b) = if fixed[a.0] { (b, a) } else { (a, b) };
+        let target = if fixed[b.0] {
+            Err(d.parts[b.0].pad_world(&d.parts[b.0].pads[b.1]))
+        } else {
+            Ok(b)
+        };
+        (a, target, w)
+    };
     let decap_pairs: Vec<_> = pairs
         .iter()
-        .map(|&(c, (ic, pad), w)| {
-            let target = if fixed[ic] {
-                Err(d.parts[ic].pad_world(&d.parts[ic].pads[pad]))
-            } else {
-                Ok((ic, pad))
-            };
-            (c, target, w)
-        })
+        .map(|&(c, ic, w)| spring(c, ic, w))
+        .chain(coils.iter().map(|&(l, ic)| spring(l, ic, COIL_WEIGHT)))
         .collect();
-    let net_weight = |n: usize| terms.weight[n];
+    let net_weight = |n: usize| {
+        if n < real_nets {
+            let w = terms.weight[n];
+            if opts.semantic && terms.power[n] {
+                w.max(1.0) * POWER_WEIGHT * terms.current[n].min(3.0)
+            } else {
+                w
+            }
+        } else {
+            groups[n - real_nets].weight
+        }
+    };
     let (mut prob, part_pins) = Problem::new(&d, &units, &net_weight, &fixed_pins, &decap_pairs, raster, opts.gap);
+    if opts.semantic {
+        for n in 0..real_nets {
+            prob.nets[n].mst = terms.power[n];
+        }
+    }
 
     // ---- partial planes
     let mut field_of: HashMap<usize, usize> = HashMap::new();
@@ -661,18 +970,19 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
     }
 
     // ---- the starts, in parallel; the fewest crossings win, then the shortest wires
-    let seeds: Vec<u64> = (0..opts.starts.max(1) as u64).map(|i| opts.seed + i).collect();
-    let mut results: Vec<(u64, State, f64, usize)> = seeds
+    let starts: Vec<usize> = (1..=opts.starts.max(1)).collect();
+    let mut results: Vec<(usize, State, f64, usize)> = starts
         .par_iter()
-        .filter_map(|&seed| {
+        .filter_map(|&start| {
+            let seed = opts.seed.wrapping_sub(1).wrapping_mul(SEED_STEP) + start as u64;
             let (s, wire) = run(&prob, &bbox, seed, opts.iters)?;
             let c = crossings(&d, &unit_poses(&d, &units, &s), &terms.weight);
-            Some((seed, s, wire, c))
+            Some((start, s, wire, c))
         })
         .collect();
     results.sort_by(|a, b| (a.3, a.2).partial_cmp(&(b.3, b.2)).unwrap());
-    let starts: Vec<(u64, f64, usize)> = results.iter().map(|r| (r.0, r.2, r.3)).collect();
-    let Some((seed, state, wire, crossed)) = results.into_iter().next() else {
+    let starts: Vec<(usize, f64, usize)> = results.iter().map(|r| (r.0, r.2, r.3)).collect();
+    let Some((start, state, wire, crossed)) = results.into_iter().next() else {
         bail!(
             "no legal placement: movable courtyards {movable_area:.0} mm2 on {free_area:.0} mm2 free, \
              try a smaller --gap or --halo"
@@ -787,6 +1097,7 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         report: PlaceReport {
             fixed: names(true),
             moved: names(false),
+            anchored: anchored.iter().map(|&i| d.parts[i].reference.clone()).collect(),
             poses: (0..d.parts.len())
                 .filter(|&i| !fixed[i])
                 .map(|i| (d.parts[i].reference.clone(), pose[i].0.x, pose[i].0.y, pose[i].1))
@@ -796,9 +1107,22 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
                 .iter()
                 .map(|&((c, _), (ic, _), _)| (d.parts[c].reference.clone(), d.parts[ic].reference.clone()))
                 .collect(),
+            coils: coils
+                .iter()
+                .map(|&((l, _), (ic, _))| (d.parts[l].reference.clone(), d.parts[ic].reference.clone()))
+                .collect(),
+            groups: groups
+                .iter()
+                .map(|g| {
+                    let mut v: Vec<String> = g.parts.iter().map(|&i| d.parts[i].reference.clone()).collect();
+                    v.sort();
+                    (g.name.clone(), v)
+                })
+                .collect(),
             off_plane,
             stale_copper,
-            seed,
+            seed: opts.seed,
+            start,
             wire,
             crossings: crossed,
             starts,
@@ -862,6 +1186,21 @@ mod tests {
         s += &fp("Lib:R", "R1", spot(3), false, &[("1", "A"), ("2", "B")]);
         s.push_str(")\n");
         s
+    }
+
+    /// A locked track, inserted before the end of the board.
+    fn with_track(board: &str, a: (f64, f64), b: (f64, f64), layer: &str, net: &str) -> String {
+        let end = board.rfind(')').unwrap();
+        format!(
+            "{}\t(segment (start {} {}) (end {} {}) (width 0.3) (layer \"{layer}\") (net \"{net}\") \
+             (locked yes) (uuid \"00000000-0000-0000-0000-000000000001\"))\n{}",
+            &board[..end],
+            a.0,
+            a.1,
+            b.0,
+            b.1,
+            &board[end..]
+        )
     }
 
     fn place(text: &str, name: &str, opts: &PlaceOptions) -> Result<Placed> {
@@ -967,6 +1306,125 @@ mod tests {
             ..quick()
         };
         assert!(place(&board(|_| (160.0, 160.0)), "unknown", &opts).is_err());
+    }
+
+    #[test]
+    fn neighbouring_seeds_share_no_start() {
+        let spot = |i: usize| (110.0 + i as f64 * 4.0, 110.0);
+        let opts = |seed| PlaceOptions { seed, ..quick() };
+        let one = place(&board(spot), "seed1", &opts(1)).unwrap();
+        let two = place(&board(spot), "seed2", &opts(2)).unwrap();
+        assert_eq!(one.report.starts.len(), 2);
+        assert_ne!(one.report.poses, two.report.poses);
+        assert_eq!(two.report.seed, 2);
+    }
+
+    #[test]
+    fn parts_stay_off_locked_copper() {
+        // a wall across the board, on the parts' side
+        let text = with_track(&board(|_| (160.0, 160.0)), (112.0, 100.0), (112.0, 120.0), "F.Cu", "B");
+        let p = place(&text, "wall", &quick()).unwrap();
+        for (r, x, _, _) in &p.report.poses {
+            assert!((x - 112.0).abs() > 1.3, "{r} sits on the track at {x}");
+        }
+    }
+
+    #[test]
+    fn copper_on_the_other_side_does_not_block() {
+        let text = with_track(&board(|_| (160.0, 160.0)), (112.0, 100.0), (112.0, 120.0), "B.Cu", "B");
+        assert!(place(&text, "other", &quick()).is_ok());
+    }
+
+    #[test]
+    fn a_part_with_copper_on_its_pad_stays() {
+        let text = with_track(&board(|_| (116.0, 110.0)), (115.4, 110.0), (112.0, 112.0), "F.Cu", "B");
+        let p = place(&text, "anchor", &quick()).unwrap();
+        assert_eq!(p.report.anchored, vec!["U2"]);
+        assert!(p.report.fixed.contains(&"U2".to_string()));
+    }
+
+    /// A footprint on a schematic sheet.
+    fn on_sheet(fp: String, sheet: &str) -> String {
+        let at = fp.find("\t\t(property").unwrap();
+        format!(
+            "{}\t\t(path \"/{sheet}-uuid/sym\") (sheetname \"{sheet}\") (sheetfile \"{sheet}.kicad_sch\")\n{}",
+            &fp[..at],
+            &fp[at..]
+        )
+    }
+
+    /// A 40 x 30 mm board: a converter IC with two switch pads, its inductor, a connector far
+    /// away on the output, and a small sheet of its own with two resistors.
+    fn converter() -> String {
+        let mut s = String::from(
+            "(kicad_pcb (version 20240108) (generator test)\n\
+             \t(layers (0 \"F.Cu\" signal) (31 \"B.Cu\" signal) (44 \"Edge.Cuts\" user))\n\
+             \t(setup (pad_to_mask_clearance 0))\n\
+             \t(gr_rect (start 100 100) (end 140 130) (stroke (width 0.1) (type solid)) (fill none) \
+             (layer \"Edge.Cuts\"))\n",
+        );
+        let far = (170.0, 170.0);
+        s += &on_sheet(
+            fp(
+                "Lib:IC",
+                "U1",
+                far,
+                false,
+                &[("1", "SW"), ("2", "SW"), ("3", "VIN"), ("4", "EN")],
+            ),
+            "power",
+        );
+        s += &on_sheet(fp("Lib:L", "L1", far, false, &[("1", "SW"), ("2", "OUT")]), "power");
+        s += &on_sheet(fp("Lib:R", "R1", far, false, &[("1", "VIN"), ("2", "EN")]), "power");
+        s += &fp(
+            "Connector:X",
+            "J1",
+            (137.0, 127.0),
+            false,
+            &[("1", "OUT"), ("2", "VIN")],
+        );
+        s += &on_sheet(fp("Lib:R", "R2", far, false, &[("1", "OUT"), ("2", "S")]), "sense");
+        s += &on_sheet(fp("Lib:R", "R3", far, false, &[("1", "S"), ("2", "EN")]), "sense");
+        s.push_str(")\n");
+        s
+    }
+
+    #[test]
+    fn without_semantic_nothing_changes_in_the_report() {
+        let p = place(&converter(), "plain", &quick()).unwrap();
+        assert!(p.report.coils.is_empty());
+        assert!(p.report.groups.is_empty());
+    }
+
+    #[test]
+    fn semantic_puts_the_inductor_at_the_switch_pins() {
+        let opts = PlaceOptions {
+            semantic: true,
+            ..quick()
+        };
+        let p = place(&converter(), "coil", &opts).unwrap();
+        assert_eq!(p.report.coils, vec![("L1".to_string(), "U1".to_string())]);
+        let (lx, ly) = pose(&p.report, "L1");
+        let (ux, uy) = pose(&p.report, "U1");
+        let d = ((lx - ux).powi(2) + (ly - uy).powi(2)).sqrt();
+        assert!(d < 4.0, "L1 is {d} mm from U1");
+    }
+
+    #[test]
+    fn semantic_groups_follow_the_sheets() {
+        let opts = PlaceOptions {
+            semantic: true,
+            ..quick()
+        };
+        let p = place(&converter(), "groups", &opts).unwrap();
+        let names: Vec<&str> = p.report.groups.iter().map(|g| g.0.as_str()).collect();
+        assert!(names.contains(&"power"), "{names:?}");
+        assert!(names.contains(&"sense"), "{names:?}");
+        let sense = &p.report.groups.iter().find(|g| g.0 == "sense").unwrap().1;
+        assert_eq!(sense, &vec!["R2".to_string(), "R3".to_string()]);
+        // U1 with R1 on EN/VIN is a cluster; R3 on EN belongs to another sheet
+        let cluster = p.report.groups.iter().find(|g| g.0 == "power/U1").map(|g| &g.1);
+        assert_eq!(cluster, None, "two parts are no cluster: {:?}", p.report.groups);
     }
 
     #[test]

@@ -101,7 +101,7 @@ when the progress reports `converged`.
 | --- | --- | --- |
 | `--move-parts` | off | During the geometry generations, parts next to clearance problems may shift a little to open a channel. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay (by footprint library name and by reference prefix J, P, CN, USB, H, MH, SW, TP). The output file has the moved footprints at their new positions, with the footprint's own zones (a keepout drawn inside the footprint) moved along, and the console lists every move. Footprints in a KiCad group form a block that moves as a whole with its kept tracks and vias (zones in the group do not move yet); a block with one fixed member stays put. Blocks are new and untested on a real board. |
 | `--fixed R1,U3` | none | More references that never move under `--move-parts` and `--placements`. |
-| `--placements N` | 0 | Place the board N times from the netlist (see [`gummiband place`](#gummiband-place), default scope), route each result with the settings of this command and keep the best: fewest open connections, then clearance violations, vias and length. Takes N + 1 routes, the last one writes the winner; `--until-stop` applies to that last one only. Not with `--keep-all`, `--nets` or `--pairs`, nor on a board with kept copper, since tracks do not follow the parts. The JSON report gets a `placement` block with every try. |
+| `--placements N` | 0 | Place the board N times from the netlist (see [`gummiband place`](#gummiband-place), default scope), route each result with the settings of this command and keep the best: fewest open connections, then clearance violations, vias and length. Takes N + 1 routes, the last one writes the winner; `--until-stop` applies to that last one only. Not with `--keep-all`, `--nets` or `--pairs`. The JSON report gets a `placement` block with every try. |
 | `--placement-seed S` | 1 | First seed of `--placements`. |
 | `--teardrops` | off | Switches on KiCad's teardrops for every via and connected pad in the output file, and the track end teardrops (the wedges where a track changes width, for example at a neck) in the output's project. KiCad builds the shapes itself: open the file and fill the zones once (B), then the teardrops appear. The plugin cannot set them through KiCad's API and opens *Edit Teardrops* instead. |
 | `--net-priorities prio.json` | none | Routing order per net from a JSON file `{"net name": priority, ...}`; lower numbers route first. Nets not in the file keep their net class priority. The MCP server does the same with `set_net_options`. |
@@ -203,19 +203,23 @@ gummiband route placed.kicad_pcb -o routed.kicad_pcb
 | `--all-unlocked` | | place every unlocked part, connectors, modules and mounting holes too |
 | `--fixed U1,U2` | | these stay in any case |
 | `--free TP1` | | move these on top of the above (a test point, a button) |
-| `--seed N` | 1 | first seed |
+| `--seed N` | 1 | another seed gives another set of starts, none shared with a neighbouring seed |
 | `--starts N` | 1 | independent runs in parallel, the one with the fewest crossings is kept. The crossings hardly predict the routed result (correlation about 0 over 12 seeds on Lichtschnitzel), so for another attempt change `--seed`, or let `route --placements N` route several placements |
 | `--iters N` | 3000000 | annealing moves per run |
 | `--gap MM` | 0.3 | spacing between courtyards |
 | `--margin MM` | 0.5 | distance of the courtyards from the outline |
 | `--halo MM` | 0.3 | extra room around parts with five or more pads, for their escape |
-| `--report FILE` | | JSON report: poses, decoupling assignment, crossings, every start |
+| `--semantic` | off | use the schematic beyond the netlist, see below |
+| `--report FILE` | | JSON report: poses, decoupling assignment, crossings, every start, with `--semantic` inductors and groups |
 
 Without a scope option, all parts move except locked footprints, connectors, modules, mounting
 holes, buttons and test points. Locked footprints never move. A KiCad group moves as a whole; a
 group with tracks stays, since tracks do not turn yet.
 
-Tracks and vias of the input do not follow; the console says how many there are. Keepouts of a
+Locked tracks and vias stay: parts keep the `--gap` distance from them on the layers the moving
+parts use, and a part with locked copper of its net on a pad stays where it is (the console and the
+report name it). Copper added after placing is not known to the placer, so lock your pre-routed
+copper first. Unlocked tracks and vias do not follow; the console says how many there are. Keepouts of a
 moved part follow it (a keepout counts as the part's if its courtyard covers at least half of it),
 other keepouts that forbid footprints or pads stay free of parts. All parts share one side as far
 as spacing goes, so a two sided board comes out less dense than it could be.
@@ -224,6 +228,27 @@ What it looks at: wire length per net (wide and differential nets double, switch
 nets with a plane over most of the board not at all), the pins of a net with a partial plane
 staying over that plane, decoupling capacitors next to a supply pin of an IC (bulk capacitors at
 the inductor of their rail) and the courtyards.
+
+`--semantic` adds what the schematic says beyond the netlist. It changes results, so it is off by
+default; without it the output is the same as before.
+
+- Each schematic sheet instance (from the footprint's `path`, named by `sheetname`) stays
+  together, weakly, as a box around its parts.
+- Inside a sheet, small signal nets (up to three parts) tie a cluster around one IC: a converter
+  with its feedback divider, boot capacitor and mode resistors. A chain of passives does not tie
+  two ICs together. Ground, planes and current paths tie nothing.
+- An inductor is pulled to the IC with the most pads on one of its nets (the switch node), pad to
+  pad.
+- Decoupling capacitors prefer an IC of their own sheet.
+- Current paths (classes of 0.5 mm and wider, switch nodes) count their spanning tree instead of a
+  box, at a weight that grows with the class width. A series chain such as connector, fuse,
+  shunt, eFuse then stays in order, and a TVS or input capacitor stays on the path instead of
+  anywhere inside its box.
+
+The console lists the inductors and groups. Connectors and power stages that matter still belong
+in `--fixed`. On the Lichtschnitzel controller (only connectors fixed, four seeds) the routed
+VBUS_F came out at 18 to 26 mm instead of 58 to 78 mm and every inductor sat 3.2 mm from its switch
+pins, at about the same via count and track length.
 
 ## `gummiband strip`
 
