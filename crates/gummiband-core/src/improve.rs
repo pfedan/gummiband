@@ -9,8 +9,6 @@
 //! that brings too many shorts for now starts such a branch as well. At the end the copper gets
 //! some air.
 
-use rayon::prelude::*;
-
 use crate::board::Board;
 use crate::geom::{Point, Rect};
 use crate::index::FastMap;
@@ -496,6 +494,102 @@ fn clear_ways(r: &mut Router, aim: &Aim, conns: &mut Vec<usize>, lost: &mut Vec<
     }
 }
 
+/// Moves a lane of a generation may make, per mutant it needs.
+const TRIES: usize = 4;
+
+/// The mutant of a move of lane `l`, given whether it is still needed.
+type Eval<'e, 'a> = dyn Fn(usize, &Move, &dyn Fn() -> bool) -> Option<State<'a>> + Sync + 'e;
+
+/// The mutants of a generation, in lanes that need `want[l]` mutants each. The moves of a lane come
+/// one by one from `make(l)` and run on all threads; a move that comes to nothing makes room for
+/// the next one of its lane at once, until every lane has its mutants or has made `TRIES` moves per
+/// mutant. The first ones in the order of the moves count, not those that are done first, so the
+/// result does not depend on the threads or the timing. A move behind them that still runs learns
+/// from `go_on` that it is not needed any more.
+fn first_through<'a, const N: usize>(
+    want: [usize; N],
+    make: &mut (dyn FnMut(usize) -> Move + Send),
+    eval: &Eval<'_, 'a>,
+) -> [Vec<(Move, Option<State<'a>>)>; N] {
+    struct Lane<'a> {
+        want: usize,
+        /// Per move, once it is done: the move and its mutant, None if it came to nothing.
+        done: Vec<Option<(Move, Option<State<'a>>)>>,
+        through: usize,
+        running: usize,
+    }
+    impl Lane<'_> {
+        fn open(&self) -> bool {
+            self.through < self.want && self.done.len() < self.want * TRIES
+        }
+        /// Mutants still missing if all that run come through.
+        fn need(&self) -> isize {
+            self.want as isize - (self.through + self.running) as isize
+        }
+        /// Whether the move at `i` can still be one of the first that come through.
+        fn needed(&self, i: usize) -> bool {
+            self.done[..i]
+                .iter()
+                .filter(|d| matches!(d, Some((_, Some(_)))))
+                .count()
+                < self.want
+        }
+    }
+    let state = std::sync::Mutex::new((
+        make,
+        want.map(|want| Lane {
+            want,
+            done: Vec::new(),
+            through: 0,
+            running: 0,
+        }),
+    ));
+    rayon::broadcast(|_| {
+        loop {
+            let (l, i, m) = {
+                let mut g = state.lock().unwrap();
+                let (make, lanes) = &mut *g;
+                // the lane that lacks the most; once all that is missing runs, the next moves
+                // start ahead, in case one fails
+                let Some(l) = (0..N)
+                    .filter(|&l| lanes[l].open())
+                    .max_by_key(|&l| (lanes[l].need(), N - l))
+                else {
+                    break;
+                };
+                let lane = &mut lanes[l];
+                lane.done.push(None);
+                lane.running += 1;
+                (l, lane.done.len() - 1, make(l))
+            };
+            let go_on = || state.lock().unwrap().1[l].needed(i);
+            let c = eval(l, &m, &go_on);
+            let mut g = state.lock().unwrap();
+            let lane = &mut g.1[l];
+            lane.running -= 1;
+            lane.through += c.is_some() as usize;
+            lane.done[i] = Some((m, c));
+        }
+    });
+    let (_, lanes) = state.into_inner().unwrap();
+    lanes.map(|lane| {
+        let mut through = 0;
+        lane.done
+            .into_iter()
+            .map_while(|d| {
+                (through < lane.want).then(|| {
+                    let (m, c) = d.expect("every move is done");
+                    through += c.is_some() as usize;
+                    (m, c)
+                })
+            })
+            .collect()
+    })
+}
+
+/// `go_on` tells a mutant whether it is still needed: a generation may have all it needs before
+/// the mutant is done, then it stops before its relaxation.
+#[allow(clippy::too_many_arguments)]
 fn mutant<'a>(
     board: &'a Board,
     sub: &Substrate,
@@ -504,8 +598,9 @@ fn mutant<'a>(
     relax_cfg: &relax::RelaxConfig,
     generation: usize,
     floor: usize,
+    go_on: &dyn Fn() -> bool,
 ) -> Option<State<'a>> {
-    if mv.conns.is_empty() && mv.aim.is_none() {
+    if (mv.conns.is_empty() && mv.aim.is_none()) || !go_on() {
         return None;
     }
     let mut r = s.router.clone();
@@ -546,6 +641,9 @@ fn mutant<'a>(
         let net = r.conns[ci].net;
         r.net_splits(net) > s.router.net_splits(net)
     }) {
+        return None;
+    }
+    if !go_on() {
         return None;
     }
     let (fresh, segs, sites) = r.tagged_from(s.router.segs.len() as u32);
@@ -961,53 +1059,60 @@ pub(crate) fn run(
     let branch_life = env("GB_BRANCH_LIFE", 32.0) as usize;
     let mut side: Option<(State, usize)> = None;
     let mut level = 0;
-    while !search.stopped() {
+    // benchmarks: a fixed number of generations instead of a stop from outside
+    let limit = env("GB_OPEN_GENERATIONS", f64::INFINITY);
+    while !search.stopped() && ((generation - first) as f64) < limit {
         generation += 1;
         if side.is_none() && stale >= branch_after {
-            let moves: Vec<Move> = (0..pop).map(|_| bold(&best, level, rng)).collect();
             let floor = best.cand.stats.routed.saturating_sub(2);
-            side = moves
-                .par_iter()
-                .map(|m| mutant(board, sub, &best, m, &local, generation, floor))
-                .collect::<Vec<_>>()
+            let mut moves = Rng(rng.next());
+            let [starts] = first_through([pop], &mut |_| bold(&best, level, &mut moves), &|_, m, go_on| {
+                mutant(board, sub, &best, m, &local, generation, floor, go_on)
+            });
+            side = starts
                 .into_iter()
-                .flatten()
+                .filter_map(|(_, s)| s)
                 .min_by(|a, b| open_cost(&a.cand).total_cmp(&open_cost(&b.cand)))
                 .map(|s| (s, branch_life));
             if side.is_none() {
                 level += 1;
             }
         }
+        // half of the mutants for the side branch, if there is one; each lane its own moves
         let shared = if side.is_some() { pop / 2 } else { 0 };
-        let moves: Vec<(bool, Move)> = (0..pop)
-            .map(|i| match &side {
-                Some((s, _)) if i < shared => (true, pick(s, 0, level, rng)),
-                _ => (false, pick(&best, stale, stale / 16, rng)),
-            })
-            .collect();
-        let next: Vec<(bool, Option<State>)> = moves
-            .par_iter()
-            .map(|(on_side, m)| {
-                let (from, floor) = match (&side, on_side) {
-                    (Some((s, _)), true) => (s, s.cand.stats.routed),
+        let mut lanes = [Rng(rng.next()), Rng(rng.next())];
+        let [on_side, on_best] = first_through(
+            [shared, pop - shared],
+            &mut |lane| match (lane, &side) {
+                (0, Some((s, _))) => pick(s, 0, level, &mut lanes[0]),
+                _ => pick(&best, stale, stale / 16, &mut lanes[1]),
+            },
+            &|lane, m, go_on| {
+                let (from, floor) = match (lane, &side) {
+                    (0, Some((s, _))) => (s, s.cand.stats.routed),
                     _ => (&best, best.cand.stats.routed),
                 };
-                (*on_side, mutant(board, sub, from, m, &local, generation, floor))
-            })
+                mutant(board, sub, from, m, &local, generation, floor, go_on)
+            },
+        );
+        let next: Vec<(bool, Move, Option<State>)> = on_side
+            .into_iter()
+            .map(|(m, c)| (true, m, c))
+            .chain(on_best.into_iter().map(|(m, c)| (false, m, c)))
             .collect();
-        let tried = next.iter().filter(|n| n.1.is_some()).count();
-        let aimed: Vec<_> = moves.iter().zip(&next).filter(|(m, _)| m.1.aim.is_some()).collect();
-        let laid = aimed.iter().filter(|(_, n)| n.1.is_some()).count();
-        let more = aimed.iter().filter(|(m, n)| {
-            let parent = if m.0 { side.as_ref().map(|s| &s.0) } else { None }.unwrap_or(&best);
-            n.1.as_ref().is_some_and(|c| c.cand.stats.routed > parent.cand.stats.routed)
+        let tried = next.iter().filter(|n| n.2.is_some()).count();
+        let aimed: Vec<_> = next.iter().filter(|n| n.1.aim.is_some()).collect();
+        let laid = aimed.iter().filter(|n| n.2.is_some()).count();
+        let more = aimed.iter().filter(|n| {
+            let parent = if n.0 { side.as_ref().map(|s| &s.0) } else { None }.unwrap_or(&best);
+            n.2.as_ref().is_some_and(|c| c.cand.stats.routed > parent.cand.stats.routed)
         });
         let (aimed, more) = (aimed.len(), more.count());
         let mut wins = 0;
         // one more connection, at the price of shorts for now
         let mut promising: Option<State> = None;
         let mut record = false;
-        for (on_side, c) in next {
+        for (on_side, _, c) in next {
             let Some(c) = c else { continue };
             record |= front.offer(&c.cand, &best.cand);
             if on_side {
@@ -1394,7 +1499,7 @@ mod tests {
         };
         let mut rng = Rng(1);
         let mv = aim(&s, 0, &mut rng);
-        let m = mutant(&b, &sub, &s, &mv, &relax_cfg, 1, s.cand.stats.routed).expect("a way for B");
+        let m = mutant(&b, &sub, &s, &mv, &relax_cfg, 1, s.cand.stats.routed, &|| true).expect("a way for B");
         assert_eq!(m.cand.stats.routed, 2);
         assert!(m.router.unrouted().is_empty());
         assert!(m.router.validate().is_empty(), "{:?}", m.router.validate());
@@ -1455,7 +1560,7 @@ mod tests {
             ..Default::default()
         };
         let mv = aim(&s, 0, &mut Rng(1));
-        let m = mutant(&b, &sub, &s, &mv, &relax_cfg, 1, 0).expect("a way through the pad");
+        let m = mutant(&b, &sub, &s, &mv, &relax_cfg, 1, 0, &|| true).expect("a way through the pad");
         assert_eq!(m.cand.stats.routed, 1);
         assert!(m.router.vias.keys().any(|&v| m.router.site_point(v).dist(at) < 1e-6));
     }

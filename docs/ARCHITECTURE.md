@@ -240,7 +240,13 @@ each track and the site of each via. A mutant clones the router, rips up a few c
 one spot (with those that share a via), routes them in a random order at a varied via cost, and
 takes over from the parent what is still there, asleep; only the new copper starts awake, and the
 relaxation wakes what it touches. This costs about 1/20 of a full evaluation, so far more mutants
-fit in. Every 24 generations the whole board is relaxed again, tension first, which also tightens
+fit in. Many moves come to nothing (the connections find their old ways again), so a generation does
+not start a fixed number of mutants and wait for all of them: every core takes the next move as soon
+as it is free, until the generation has its mutants (as many as the portfolio has runs, half of them
+for the side branch, if there is one). The first ones in the order of the moves count, not the first
+ones done, so the result does not depend on the threads; a mutant that is no longer needed stops
+before its relaxation.
+Every 24 generations the whole board is relaxed again, tension first, which also tightens
 what has been asleep. After 24 generations without a noticeable gain a side branch starts from the
 result with a bold change, from a handful of connections around a spot up to a quarter of the board
 with every branch that failed, that may be worse, gets half of the mutants for 32 generations and
@@ -315,6 +321,7 @@ ramps every change of width by one step per piece.
 - Portfolio: N independent router runs (different orders and seeds), one per core.
 - Within a run: A* candidates for independent connections in the same congestion round, the
   realization per layer and the checks per net run in parallel.
+- Open end: one loop per core takes the next move of a generation (`improve::first_through`).
 - Data shared between threads is immutable (substrate); per run state is owned by the run.
 
 ## KiCad integration
