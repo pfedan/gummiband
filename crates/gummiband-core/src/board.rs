@@ -103,6 +103,11 @@ pub enum ObstacleKind {
     Keepout {
         vias: bool,
         tracks: bool,
+        /// A solder mask opening, a rule area on the outer copper layer below it. It may have a
+        /// net: the net of the copper that lies in it, which is free to enter (see
+        /// [`crate::topo::Mesh::opening`]).
+        #[serde(default)]
+        mask: bool,
     },
     /// Copper zone fill or outline.
     Zone,

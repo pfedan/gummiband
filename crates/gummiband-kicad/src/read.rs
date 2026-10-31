@@ -9,6 +9,11 @@ use gummiband_core::geom::*;
 
 use crate::sexpr::{self, Node};
 
+/// Room between copper of another net and a pad's solder mask opening. KiCad accepts the exact
+/// margin, but the file's grid and the arcs of the tracks round. Less does not pay: 0.003 and
+/// 0.005 mm leave as many bridges on Corne, with more violations (docs/MILESTONES.md).
+const MASK_GAP: f64 = 0.01;
+
 /// What to do with existing tracks and vias of the input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeepCopper {
@@ -93,10 +98,17 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
         movable: Vec::new(),
         fp_uuids: HashMap::new(),
         copper_uuids: HashMap::new(),
+        mask_margin: 0.0,
+        mask_copper: 0.0,
+        openings: Vec::new(),
     };
 
     r.read_layers(&root, opts);
     r.read_stackup(&root);
+    r.mask_margin = root
+        .child("setup")
+        .and_then(|s| s.child_f64("pad_to_mask_clearance"))
+        .unwrap_or(0.0);
     r.read_rules(pro);
     r.read_classes(pro);
     r.read_net_table(&root);
@@ -121,6 +133,7 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
         }
     }
     r.finish_outline();
+    r.finish_openings();
     r.read_groups(&root);
     if !matches!(opts.keep, KeepCopper::None) {
         r.b.add_island_pins();
@@ -162,6 +175,12 @@ struct Reader {
     /// File ids of footprints and of copper with its obstacles, to resolve groups.
     fp_uuids: HashMap<String, String>,
     copper_uuids: HashMap<String, Vec<usize>>,
+    /// `pad_to_mask_clearance` of the board.
+    mask_margin: f64,
+    /// `solder_mask_to_copper_clearance` of the rules, on top of the margin.
+    mask_copper: f64,
+    /// Obstacles that are solder mask openings of their own, see [`Reader::finish_openings`].
+    openings: Vec<usize>,
 }
 
 /// The file id of an item: `uuid` since KiCad 8, `tstamp` before.
@@ -294,6 +313,7 @@ impl Reader {
         if let Some(v) = g("max_error") {
             rules.max_error = v;
         }
+        self.mask_copper = g("solder_mask_to_copper_clearance").unwrap_or(0.0);
     }
 
     fn read_classes(&mut self, pro: Option<&serde_json::Value>) {
@@ -459,6 +479,92 @@ impl Reader {
         self.b.obstacles.len() - 1
     }
 
+    /// The outer copper layer below a solder mask layer.
+    fn below_mask(&self, layer: &str) -> Option<LayerId> {
+        match layer {
+            "F.Mask" => self.b.layer_id("F.Cu"),
+            "B.Mask" => self.b.layer_id("B.Cu"),
+            _ => None,
+        }
+    }
+
+    /// The outer copper layers below the solder mask layers of a pad.
+    fn pad_masks(&self, pad: &Node) -> Vec<LayerId> {
+        let on = |name: &str| {
+            pad.child("layers")
+                .is_some_and(|l| l.args().iter().any(|x| x.as_str() == Some(name)))
+        };
+        let both = on("*.Mask") || on("F&B.Mask");
+        ["F.Mask", "B.Mask"]
+            .into_iter()
+            .filter(|m| both || on(m))
+            .filter_map(|m| self.below_mask(m))
+            .collect()
+    }
+
+    /// A solder mask opening of its own over copper layer `layer`, with no copper of its own.
+    fn push_opening(&mut self, shape: Shape, layer: LayerId) {
+        let i = self.push_obstacle(Obstacle {
+            shape,
+            layers: LayerSet::single(layer),
+            net: None,
+            kind: ObstacleKind::Keepout {
+                vias: true,
+                tracks: true,
+                mask: true,
+            },
+            hole: None,
+            clearance: 0.0,
+            pin: None,
+            locked: true,
+        });
+        self.openings.push(i);
+    }
+
+    /// A shape drawn on a mask layer: for the bridge check of KiCad it reaches as far as the
+    /// board's margin (not the one of its footprint, measured with KiCad 10) beyond its edge.
+    fn push_drawn_opening(&mut self, shape: Shape, layer: LayerId) {
+        let reach = (self.mask_margin + self.mask_copper).max(0.0);
+        self.push_opening(shape.grown(reach), layer);
+    }
+
+    /// KiCad calls an opening a bridge when it shows copper of two nets. So the net of the pads and
+    /// graphics in an opening may enter it, and an opening over bare board is closed to all. An
+    /// opening with several nets in it is a bridge by itself: no track changes that, and an
+    /// obstacle would only cut off the pads, so it is dropped.
+    fn finish_openings(&mut self) {
+        for i in std::mem::take(&mut self.openings) {
+            let opening = &self.b.obstacles[i];
+            let bb = opening.shape.bbox();
+            let mut nets: Vec<NetId> = Vec::new();
+            for o in &self.b.obstacles {
+                if matches!(o.kind, ObstacleKind::Pad | ObstacleKind::Graphic)
+                    && o.layers.intersects(opening.layers)
+                    && o.shape.bbox().overlaps(&bb)
+                    && o.shape.dist(&opening.shape) <= 0.0
+                    && let Some(n) = o.net
+                    && !nets.contains(&n)
+                {
+                    nets.push(n);
+                }
+            }
+            let opening = &mut self.b.obstacles[i];
+            match nets[..] {
+                [] => {}
+                [n] => opening.net = Some(n),
+                _ => {
+                    eprintln!("solder mask opening with {} nets in it: no obstacle", nets.len());
+                    opening.layers = LayerSet::default();
+                    opening.kind = ObstacleKind::Keepout {
+                        vias: false,
+                        tracks: false,
+                        mask: true,
+                    };
+                }
+            }
+        }
+    }
+
     fn read_footprint(&mut self, fp: &Node) {
         let at = fp.child_f64s("at").unwrap_or_default();
         let pos = pt(at.first().copied().unwrap_or(0.0), at.get(1).copied().unwrap_or(0.0));
@@ -498,8 +604,14 @@ impl Reader {
         if !fp.flag("locked") && !fixed_kind {
             self.movable.push(reference.clone());
         }
+        // openings of a footprint that allows bridges do not count, not even for the tracks
+        let bridges = fp
+            .child("attr")
+            .is_some_and(|a| a.args().iter().any(|x| x.as_str() == Some("allow_soldermask_bridges")));
+        let margin = fp.child_f64("solder_mask_margin").filter(|m| *m != 0.0);
+        let margin = (!bridges).then_some(margin.unwrap_or(self.mask_margin));
         for pad in fp.children("pad") {
-            self.read_pad(pad, pos, rot, &reference);
+            self.read_pad(pad, pos, rot, &reference, margin);
         }
         let mut court = Rect::empty();
         for g in fp.args() {
@@ -523,12 +635,15 @@ impl Reader {
         for g in fp.args() {
             if let Some(h) = g.head()
                 && matches!(h, "fp_line" | "fp_arc" | "fp_rect" | "fp_circle" | "fp_poly")
+                && !(bridges && self.below_mask(g.child_str("layer").unwrap_or("")).is_some())
             {
                 self.read_graphic(g, Some((pos, rot)));
             }
         }
         for t in fp.children("fp_text") {
-            self.read_text(t, Some((pos, rot)));
+            if !(bridges && self.below_mask(t.child_str("layer").unwrap_or("")).is_some()) {
+                self.read_text(t, Some((pos, rot)));
+            }
         }
         for z in fp.children("zone") {
             self.read_zone(
@@ -550,7 +665,8 @@ impl Reader {
         }
     }
 
-    fn read_pad(&mut self, pad: &Node, fp_pos: Point, fp_rot: f64, reference: &str) {
+    /// `margin`: the solder mask margin of the footprint, None if its openings do not count.
+    fn read_pad(&mut self, pad: &Node, fp_pos: Point, fp_rot: f64, reference: &str, margin: Option<f64>) {
         let a = pad.args();
         let number = a.first().and_then(|x| x.as_str()).unwrap_or("").to_string();
         let kind = a.get(1).and_then(|x| x.as_str()).unwrap_or("smd");
@@ -574,6 +690,9 @@ impl Reader {
                 .fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.min(v))))
                 .map(|v| v / 2.0)
         });
+        // (KiCad takes a margin of 0 as not set)
+        let margin = margin.map(|m| pad.child_f64("solder_mask_margin").filter(|v| *v != 0.0).unwrap_or(m));
+        let masks = self.pad_masks(pad);
 
         if kind == "np_thru_hole" {
             let r = hole.unwrap_or(w.min(h) / 2.0).max(w.min(h) / 2.0);
@@ -588,9 +707,21 @@ impl Reader {
                 pin: None,
                 locked: true,
             });
-            return;
-        }
-        if layers.is_empty() {
+            // a bare drill opens no mask, a pad wider than the drill does
+            if let Some(m) = margin
+                && w.min(h) / 2.0 > hole.unwrap_or(r)
+                && m + self.mask_copper + MASK_GAP > clearance
+            {
+                for &l in &masks {
+                    self.push_opening(
+                        Shape::Circle {
+                            c: center,
+                            r: r + m + self.mask_copper,
+                        },
+                        l,
+                    );
+                }
+            }
             return;
         }
 
@@ -674,7 +805,29 @@ impl Reader {
             _ => shapes.push(Shape::Polygon(roundrect_polygon(center, w, h, 0.0, rad, me))),
         }
 
-        let clearance = pad.child_f64("clearance").unwrap_or(0.0).max(self.clearance_of(net));
+        // a pad without copper opens the mask in its own shape: KiCad gives it no margin
+        if layers.is_empty() {
+            if margin.is_some() {
+                for &l in &masks {
+                    for s in &shapes {
+                        self.push_opening(s.grown(self.mask_copper), l);
+                    }
+                }
+            }
+            return;
+        }
+
+        // The mask opening of a pad is the pad grown by its margin, which is what the clearance
+        // of the pad describes: copper of another net stays out, its own net gets to the pad as
+        // ever, and pads with openings that overlap do not lock each other out. A through hole
+        // pad has the one clearance on all layers, a little more than its inner ones need.
+        let mut clearance = pad.child_f64("clearance").unwrap_or(0.0).max(self.clearance_of(net));
+        if let Some(m) = margin
+            && m + self.mask_copper > 0.0
+            && masks.iter().any(|&l| layers.has(l))
+        {
+            clearance = clearance.max(m + self.mask_copper + MASK_GAP);
+        }
         let pin_idx = net.map(|_| self.b.pins.len());
         let mut obs = Vec::new();
         for s in shapes {
@@ -838,7 +991,11 @@ impl Reader {
                     shape: Shape::Polygon(Polygon::new(outline)),
                     layers,
                     net: None,
-                    kind: ObstacleKind::Keepout { vias, tracks },
+                    kind: ObstacleKind::Keepout {
+                        vias,
+                        tracks,
+                        mask: false,
+                    },
                     hole: None,
                     clearance: 0.0,
                     pin: None,
@@ -898,7 +1055,8 @@ impl Reader {
         let layer = g.child_str("layer").unwrap_or("");
         let is_edge = layer == "Edge.Cuts";
         let cu = self.b.layer_id(layer);
-        if !is_edge && cu.is_none() {
+        let mask = self.below_mask(layer);
+        if !is_edge && cu.is_none() && mask.is_none() {
             return;
         }
         let me = self.b.rules.max_error;
@@ -956,9 +1114,6 @@ impl Reader {
             }
             return;
         }
-        let layer = cu.unwrap();
-        let net = self.net_of(g);
-        let clearance = self.clearance_of(net);
         let mut shapes = Vec::new();
         if closed && filled && polyline.len() >= 3 {
             shapes.push(Shape::Polygon(Polygon::new(polyline.clone())));
@@ -974,6 +1129,15 @@ impl Reader {
                 });
             }
         }
+        if let Some(l) = mask {
+            for s in shapes {
+                self.push_drawn_opening(s, l);
+            }
+            return;
+        }
+        let layer = cu.unwrap();
+        let net = self.net_of(g);
+        let clearance = self.clearance_of(net);
         for s in shapes {
             self.push_obstacle(Obstacle {
                 shape: s,
@@ -990,9 +1154,12 @@ impl Reader {
 
     /// Text on a copper layer is copper, without a net. The router does not need the letters: a
     /// box around the text is an obstacle that is a little too large, from the widths of KiCad's
-    /// stroke font, which average about 0.8 of the character size.
+    /// stroke font, which average about 0.8 of the character size. Text on a solder mask layer
+    /// opens the mask, the same box.
     fn read_text(&mut self, t: &Node, tf: Option<(Point, f64)>) {
-        let Some(layer) = t.child_str("layer").and_then(|l| self.b.layer_id(l)) else {
+        let name = t.child_str("layer").unwrap_or("");
+        let mask = self.below_mask(name);
+        let Some(layer) = self.b.layer_id(name).or(mask) else {
             return;
         };
         // (gr_text "text" ...), (fp_text user "text" ...)
@@ -1039,14 +1206,19 @@ impl Reader {
         };
         let angle = at.get(2).copied().unwrap_or(0.0);
         let corner = |x: f64, y: f64| origin + kicad_rot(pt(x, y), angle);
+        let shape = Shape::Polygon(Polygon::new(vec![
+            corner(x0, y0),
+            corner(x0 + width, y0),
+            corner(x0 + width, y0 + height),
+            corner(x0, y0 + height),
+        ]));
+        if mask.is_some() {
+            self.push_drawn_opening(shape, layer);
+            return;
+        }
         let clearance = self.clearance_of(None);
         self.push_obstacle(Obstacle {
-            shape: Shape::Polygon(Polygon::new(vec![
-                corner(x0, y0),
-                corner(x0 + width, y0),
-                corner(x0 + width, y0 + height),
-                corner(x0, y0 + height),
-            ])),
+            shape,
             layers: LayerSet::single(layer),
             net: None,
             kind: ObstacleKind::Graphic,
@@ -1185,6 +1357,168 @@ mod tests {
         let bb = shapes[0].shape.bbox();
         assert!((bb.min.x - 9.9).abs() < 1e-9 && (bb.max.x - (9.9 + 3.6)).abs() < 1e-9, "{bb:?}");
         assert!((bb.min.y - 19.4).abs() < 1e-9 && (bb.max.y - 20.6).abs() < 1e-9, "{bb:?}");
+    }
+
+    fn mask_board(body: &str) -> Board {
+        let text = format!(
+            r#"(kicad_pcb (version 20221018) (generator "test")
+            (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (38 "B.Mask" user) (39 "F.Mask" user))
+            (setup (pad_to_mask_clearance 0.3))
+            (net 0 "") (net 1 "A") (net 2 "B")
+            {body})"#
+        );
+        parse_board(text, None, &ReadOptions::default()).unwrap().board
+    }
+
+    fn pad_clearance(b: &Board, reference: &str) -> f64 {
+        let pin = b.pins.iter().find(|p| p.footprint == reference).unwrap();
+        b.obstacles[pin.obstacles[0]].clearance
+    }
+
+    fn openings(b: &Board) -> Vec<&Obstacle> {
+        let mask = |o: &&Obstacle| matches!(o.kind, ObstacleKind::Keepout { mask: true, .. }) && !o.layers.is_empty();
+        b.obstacles.iter().filter(mask).collect()
+    }
+
+    const PAD: &str = r#"(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") (net 1 "A"))"#;
+
+    fn footprint(reference: &str, at: &str, inner: &str) -> String {
+        format!(
+            r#"(footprint "t" (layer "F.Cu") (at {at}) (fp_text reference "{reference}" (at 0 0) (layer "F.Fab")) {inner})"#
+        )
+    }
+
+    /// The opening of a pad is the pad and its margin: pad, then footprint, then board. The
+    /// default clearance of 0.2 stays when the margin is smaller, and so do pads without opening.
+    #[test]
+    fn the_mask_margin_of_a_pad_is_a_clearance() {
+        let pads = [
+            footprint("BOARD", "10 10", PAD),
+            footprint("FP", "20 10", &format!("(solder_mask_margin 0.4) {PAD}")),
+            footprint(
+                "ZERO",
+                "30 10",
+                r#"(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") (solder_mask_margin 0) (net 1 "A"))"#,
+            ),
+            footprint(
+                "PAD",
+                "40 10",
+                r#"(solder_mask_margin 0.4) (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") (solder_mask_margin 0.5) (net 1 "A"))"#,
+            ),
+            footprint("SMALL", "50 10", &format!("(solder_mask_margin 0.05) {PAD}")),
+            footprint(
+                "BRIDGES",
+                "60 10",
+                &format!("(attr smd allow_soldermask_bridges) {PAD}"),
+            ),
+            footprint(
+                "BARE",
+                "70 10",
+                r#"(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "A"))"#,
+            ),
+            footprint(
+                "BACK",
+                "80 10",
+                r#"(pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.5) (layers "*.Cu" "B.Mask") (net 1 "A"))"#,
+            ),
+        ];
+        let b = mask_board(&pads.concat());
+        let want = [
+            ("BOARD", 0.31),
+            ("FP", 0.41),
+            ("ZERO", 0.31),
+            ("PAD", 0.51),
+            ("SMALL", 0.2),
+            ("BRIDGES", 0.2),
+            ("BARE", 0.2),
+            ("BACK", 0.31),
+        ];
+        for (reference, clearance) in want {
+            assert!((pad_clearance(&b, reference) - clearance).abs() < 1e-9, "{reference}");
+        }
+        assert!(openings(&b).is_empty());
+    }
+
+    /// Mask shapes: closed to everyone over bare board, open to the net of the copper in them,
+    /// no obstacle where they show two nets already or the footprint allows bridges.
+    #[test]
+    fn shapes_on_the_mask_are_openings() {
+        let square = |layer: &str, head: &str| {
+            format!(
+                r#"({head} (pts (xy -2 -2) (xy 2 -2) (xy 2 2) (xy -2 2)) (layer "{layer}") (width 0) (fill solid))"#
+            )
+        };
+        let second = r#"(pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "B"))"#;
+        let parts = [
+            format!(
+                "(gr_poly (pts (xy 8 8) (xy 12 8) (xy 12 12) (xy 8 12)) (layer \"B.Mask\") (width 0) (fill solid))"
+            ),
+            r#"(gr_line (start 20 10) (end 24 10) (layer "F.Mask") (width 0.2))"#.to_string(),
+            r#"(gr_line (start 20 20) (end 24 20) (layer "F.SilkS") (width 0.2))"#.to_string(),
+            r#"(gr_text "AB" (at 30 10 0) (layer "F.Mask") (effects (font (size 1 1) (thickness 0.2))))"#.to_string(),
+            footprint("EMPTY", "40 10", &square("F.Mask", "fp_poly")),
+            footprint("ONE", "50 10", &format!("{PAD} {}", square("F.Mask", "fp_poly"))),
+            footprint(
+                "TWO",
+                "60 10",
+                &format!("{PAD} {second} {}", square("F.Mask", "fp_poly")),
+            ),
+            footprint(
+                "BRIDGES",
+                "70 10",
+                &format!("(attr smd allow_soldermask_bridges) {}", square("F.Mask", "fp_poly")),
+            ),
+            footprint(
+                "HOLE",
+                "80 10",
+                r#"(pad "" np_thru_hole circle (at 0 0) (size 2 2) (drill 1) (layers "*.Cu" "*.Mask"))"#,
+            ),
+            footprint(
+                "DRILL",
+                "90 10",
+                r#"(pad "" np_thru_hole circle (at 0 0) (size 1 1) (drill 1) (layers "*.Cu" "*.Mask"))"#,
+            ),
+            footprint(
+                "FREE",
+                "100 10",
+                r#"(pad "" smd rect (at 0 0) (size 1 1) (layers "F.Mask"))"#,
+            ),
+        ];
+        let b = mask_board(&parts.concat());
+        let seen: Vec<_> = openings(&b)
+            .iter()
+            .map(|o| (o.shape.bbox().center().x.round() as i64, o.layers, o.net))
+            .collect();
+        let (top, bottom) = (LayerSet::single(0), LayerSet::single(1));
+        let a = Some(b.net_id("A").unwrap());
+        let want = [
+            (10, bottom, None),
+            (22, top, None),
+            (30, top, None),
+            (40, top, None),
+            (50, top, a),
+            (80, top, None),
+            (80, bottom, None),
+            (100, top, None),
+        ];
+        assert_eq!(seen.len(), want.len(), "{seen:?}");
+        for w in want {
+            assert!(seen.contains(&w), "{w:?} in {seen:?}");
+        }
+        // a drawn shape reaches as far as the board's margin of 0.3, a pad without copper does not
+        let bb = |x: f64| {
+            openings(&b)
+                .iter()
+                .find(|o| (o.shape.bbox().center().x - x).abs() < 1.0)
+                .unwrap()
+                .shape
+                .bbox()
+        };
+        assert!((bb(10.0).width() - 4.6).abs() < 1e-9 && (bb(40.0).width() - 4.6).abs() < 1e-9);
+        assert!((bb(100.0).width() - 1.0).abs() < 1e-9);
+        // they belong to the footprint, so that they move with it
+        let of = |r: &str| b.footprint_obstacles.get(r).map_or(0, |o| o.len());
+        assert_eq!((of("EMPTY"), of("HOLE"), of("BRIDGES")), (1, 3, 0));
     }
 
     /// A pad's angle in the file is absolute, not relative to the footprint, and KiCad leaves it

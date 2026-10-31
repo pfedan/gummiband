@@ -100,6 +100,10 @@ pub struct Mesh {
     pub vert_tris: Vec<Vec<u32>>,
     /// Per triangle: NONE (free), OUTSIDE or the covering obstacle.
     pub status: Vec<u32>,
+    /// Free triangles in a solder mask opening around copper of one net: that net routes through
+    /// them as through free space (no copper of its own lies there), for the others they are
+    /// closed.
+    pub opening: FastMap<u32, NetId>,
     /// Triangles covered by each obstacle (fixed: vias only split free triangles).
     pub obs_tris: Arc<FastMap<u32, Vec<u32>>>,
     /// Obstacles around each original vertex (via vertices have none).
@@ -355,6 +359,7 @@ impl Mesh {
             edge_tris: Vec::new(),
             vert_tris: Vec::new(),
             status: Vec::new(),
+            opening: FastMap::default(),
             obs_tris: Arc::new(FastMap::default()),
             vert_obs: Default::default(),
             demands: Vec::new(),
@@ -375,6 +380,15 @@ impl Mesh {
                 classify(board, shared, l, c)
             })
             .collect();
+        for (i, o) in board.obstacles.iter().enumerate() {
+            if let (ObstacleKind::Keepout { .. }, Some(net), true) = (o.kind, o.net, o.layers.has(l)) {
+                for t in 0..m.tris.len() {
+                    if m.status[t] == NONE && shared.obs_polys[i].contains(m.tri_center(t as u32)) {
+                        m.opening.insert(t as u32, net);
+                    }
+                }
+            }
+        }
         let mut ot: FastMap<u32, Vec<u32>> = FastMap::default();
         for (t, &o) in m.status.iter().enumerate() {
             if o != NONE && o != OUTSIDE {
@@ -479,6 +493,11 @@ impl Mesh {
                 self.vert_tris[v as usize].push(ti as u32);
             }
         }
+    }
+
+    /// True if triangle t lies in a solder mask opening around copper of another net.
+    pub fn closed(&self, t: u32, net: NetId) -> bool {
+        self.opening.get(&t).is_some_and(|&n| n != net)
     }
 
     pub fn other_tri(&self, e: u32, t: u32) -> u32 {
@@ -607,6 +626,9 @@ impl Mesh {
                 self.tri_nbrs.push(nbrs);
                 self.status.push(NONE);
                 self.tri_sites.push(Vec::new());
+                if let Some(&net) = self.opening.get(&t) {
+                    self.opening.insert(x[k], net);
+                }
             }
             let oe = old_edges[k] as usize;
             for side in 0..2 {
@@ -680,8 +702,9 @@ fn classify(board: &Board, shared: &Shared, l: LayerId, c: Point) -> u32 {
         if !o.layers.has(l) {
             continue;
         }
+        // (an opening with a net is no obstacle to its net, see Mesh::opening)
         if let ObstacleKind::Keepout { tracks, .. } = o.kind
-            && !tracks
+            && (!tracks || o.net.is_some())
         {
             continue;
         }
@@ -722,7 +745,8 @@ fn build_sites(board: &Board, shared: &Shared, pitch: f64) -> Vec<Site> {
             for id in shared.obs_index.query_point(p, 2.5) {
                 let o = &board.obstacles[id as usize];
                 let d = shared.obs_polys[id as usize].dist_to_point(p);
-                if let ObstacleKind::Keepout { vias, .. } = o.kind {
+                // (a mask opening is seen by net, like copper)
+                if let ObstacleKind::Keepout { vias, mask: false, .. } = o.kind {
                     if vias && d == 0.0 {
                         return None;
                     }
@@ -747,7 +771,9 @@ fn build_sites(board: &Board, shared: &Shared, pitch: f64) -> Vec<Site> {
                     });
                 }
             }
-            if nbrs.iter().any(|n| (n.dist as f64) < min_via_r) {
+            let copper =
+                |n: &SiteNeighbor| !matches!(board.obstacles[n.obs as usize].kind, ObstacleKind::Keepout { .. });
+            if nbrs.iter().any(|n| (n.dist as f64) < min_via_r && copper(n)) {
                 return None;
             }
             Some(Site { p, nbrs, pad: None })
@@ -788,7 +814,7 @@ fn build_pad_sites(board: &Board, shared: &Shared) -> Vec<Site> {
                     continue;
                 }
                 let d = shared.obs_polys[id as usize].dist_to_point(p);
-                if let ObstacleKind::Keepout { vias, .. } = o.kind {
+                if let ObstacleKind::Keepout { vias, mask: false, .. } = o.kind {
                     if vias && d == 0.0 {
                         ok = false;
                     }
@@ -894,6 +920,38 @@ pub(crate) mod tests {
         assert!(m.status.contains(&OUTSIDE));
         let sites = (0..s.shared.sites.len() as u32).filter(|&q| s.site_usable(q)).count();
         assert!(sites > 100, "sites {sites}");
+    }
+
+    /// Via vertices split the free triangles of an opening: the pieces stay closed.
+    #[test]
+    fn an_opening_stays_closed_when_a_triangle_splits() {
+        let mut b = two_pad_board();
+        b.obstacles.push(Obstacle {
+            shape: Shape::Polygon(Polygon::new(vec![pt(4., 3.), pt(6., 3.), pt(6., 7.), pt(4., 7.)])),
+            layers: LayerSet::single(1),
+            net: Some(0),
+            kind: ObstacleKind::Keepout {
+                vias: true,
+                tracks: true,
+                mask: true,
+            },
+            hole: None,
+            clearance: 0.0,
+            pin: None,
+            locked: true,
+        });
+        let mut s = Substrate::build(&b, &SubstrateConfig::default());
+        assert!(s.m[0].opening.is_empty() && !s.m[1].opening.is_empty());
+        let inside = |p: Point| p.x > 4.0 && p.x < 6.0 && p.y > 3.0 && p.y < 7.0;
+        let site = (0..s.shared.sites.len() as u32)
+            .find(|&q| s.site_usable(q) && inside(s.shared.sites[q as usize].p))
+            .unwrap();
+        let p = s.shared.sites[site as usize].p;
+        let shared = s.shared.clone();
+        let m = &mut s.m[1];
+        let t = m.site_tri[site as usize];
+        let (_, x) = m.split(t, site, p, &shared.sites);
+        assert!(x.iter().all(|&t| m.closed(t, 1) && !m.closed(t, 0)));
     }
 
     #[test]

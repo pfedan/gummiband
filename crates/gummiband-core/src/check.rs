@@ -179,7 +179,7 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
                     continue;
                 }
                 let need = match o.kind {
-                    ObstacleKind::Keepout { tracks, vias } => {
+                    ObstacleKind::Keepout { tracks, vias, .. } => {
                         let applies = match p {
                             Piece::Seg { .. } => tracks,
                             Piece::Via { .. } => vias,
@@ -198,9 +198,12 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
                         what: format!(
                             "{} {}~{}",
                             match o.kind {
+                                // clear of the copper rule: it is the pad's mask opening that asks for more
+                                ObstacleKind::Pad if d >= board.clearance(Some(net), o.net) - 1e-4 => "mask",
                                 ObstacleKind::Pad => "pad",
                                 ObstacleKind::Track => "locked-track",
                                 ObstacleKind::Via => "locked-via",
+                                ObstacleKind::Keepout { mask: true, .. } => "mask",
                                 ObstacleKind::Keepout { .. } => "keepout",
                                 ObstacleKind::Zone => "zone",
                                 ObstacleKind::Graphic => "graphic",
