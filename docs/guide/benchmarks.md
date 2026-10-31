@@ -19,8 +19,9 @@ bench/run_suite.sh                 # all boards
 bench/run_suite.sh bus qfn_fanout  # some of them
 ```
 
-The script builds the CLI, routes every board into `bench/boards/out/` (4 runs, 1 generation, 4
-threads by default; override with `RUNS`, `GENERATIONS`, `RAYON_NUM_THREADS`, `ROUTE_ARGS`,
+The script builds the CLI, routes every board into `bench/boards/out/` (4 runs, 1 generation, no
+geometry generations, 4 threads by default; override with `RUNS`, `GENERATIONS`,
+`GEOMETRY_GENERATIONS`, `RAYON_NUM_THREADS`, `ROUTE_ARGS`,
 `TIMEOUT`), runs the KiCad DRC on each result and prints a table: connections routed, vias,
 length, wall time, the router's own violations and the DRC counts (unconnected, clearance,
 shorts, crossings, other). The table is also in `bench/boards/out/results.txt`, the router output

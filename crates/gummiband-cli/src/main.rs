@@ -98,9 +98,14 @@ enum Cmd {
         /// Generations of the evolutionary order search after the portfolio.
         #[arg(long, default_value_t = 3)]
         generations: usize,
-        /// Generations that select by clearance violations after the geometry step (slower).
-        #[arg(long, default_value_t = 0)]
+        /// Generations that select by clearance violations after the geometry step. Each costs
+        /// about one routing pass; 0 is fastest and leaves many more violations.
+        #[arg(long, default_value_t = 3)]
         geometry_generations: usize,
+        /// Seed of the search (default: GB_EVO_SEED, then a constant). The same seed gives the
+        /// same result, another one a different try.
+        #[arg(long)]
+        seed: Option<u64>,
         /// Write a debug SVG.
         #[arg(long)]
         svg: Option<PathBuf>,
@@ -189,8 +194,9 @@ enum Cmd {
         /// Another seed gives another set of starts.
         #[arg(long, default_value_t = 1)]
         seed: u64,
-        /// Independent runs in parallel; the one with the fewest crossings is kept.
-        #[arg(long, default_value_t = 4)]
+        /// Independent runs in parallel; the one with the fewest crossings is kept. The crossings
+        /// hardly predict the routed result, so for another attempt change --seed instead.
+        #[arg(long, default_value_t = 1)]
         starts: usize,
         /// Annealing moves per run.
         #[arg(long, default_value_t = 3_000_000)]
@@ -337,6 +343,7 @@ fn main() -> Result<()> {
             pair_zdiff,
             generations,
             geometry_generations,
+            seed,
             svg,
             svg_tris,
             report,
@@ -397,7 +404,7 @@ fn main() -> Result<()> {
                 generations,
                 geometry_generations,
                 frames: frames.is_some(),
-                seed: None,
+                seed,
                 open_end: open_end.clone(),
                 air: air.unwrap_or(if until_stop { 0.03 } else { 0.0 }),
                 prefer_width,

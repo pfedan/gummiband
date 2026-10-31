@@ -73,7 +73,7 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(
             runner.build_command("gb", Path("/a/b.kicad_pcb"), Path("/t/o.kicad_pcb"), opts),
             ["gb", "route", "/a/b.kicad_pcb", "-o", "/t/o.kicad_pcb", "--progress", "--keep-locked",
-             "--runs", "8", "--via-cost", "2.0"])
+             "--runs", "8", "--via-cost", "2.0", "--geometry-generations", "0"])
         opts.keep_locked = False
         self.assertNotIn("--keep-locked", runner.build_command("gb", Path("b"), Path("o"), opts))
 
@@ -256,7 +256,7 @@ class AdvancedCommandTest(unittest.TestCase):
                                    runner.RouteOptions(geometry_generations=0, keep_locked=False,
                                                        until_stop=False))
         self.assertEqual(cmd, ["gb", "route", "b", "-o", "o", "--progress",
-                               "--runs", "14", "--via-cost", "3.0"])
+                               "--runs", "14", "--via-cost", "3.0", "--geometry-generations", "0"])
 
     def test_changed_values_reach_the_router(self):
         opts = runner.RouteOptions(generations=5, via_pitch=0.25, negotiate=20, threads=4,

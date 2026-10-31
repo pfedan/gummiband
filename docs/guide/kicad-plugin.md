@@ -127,7 +127,7 @@ move:
 
 Locked footprints never move. *Also keep* takes references that should stay in addition. The
 other fields are *Parallel runs* (independent placements, the one with the fewest crossings
-wins, 4 by default), *Courtyard spacing* (0.3 mm), *Room around ICs* (0.3 mm extra for parts with
+wins, 1 by default: the crossings hardly predict how well the board routes), *Courtyard spacing* (0.3 mm), *Room around ICs* (0.3 mm extra for parts with
 five or more pads) and *Seed* (1); placements differ a lot from seed to seed, so for another attempt
 change it. The *Advanced* tab has *Release* (parts that may move although they count as mechanical),
 *Distance to the outline* (0.5 mm), *Annealing moves per run* (3,000,000), *Worker threads* and
