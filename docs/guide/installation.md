@@ -33,9 +33,9 @@ The MCP server for AI agents is a separate binary, built with
 
 ## 2. KiCad plugin
 
-The plugin is an IPC API action plugin for KiCad 10 (Python). It adds three buttons to the PCB
-editor's plugin toolbar: *Route with Gummiband*, *Finish selected nets with Gummiband* and
-*Place with Gummiband*.
+The plugin is an IPC API action plugin for KiCad 10 (Python). It adds four buttons to the PCB
+editor's plugin toolbar: *Route with Gummiband*, *Finish selected nets with Gummiband*, *45
+degree tracks with Gummiband* and *Place with Gummiband*.
 
 1. **Enable the API.** In KiCad, *Preferences > Plugins*, tick *Enable KiCad API*. On macOS and
    Windows keep KiCad's bundled Python interpreter, which has wxPython for the dialog.

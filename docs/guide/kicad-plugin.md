@@ -117,6 +117,25 @@ button is new and not yet tested live in KiCad. Refill the zones (B) before you 
 after vias moved, stale plane fills report errors that are not there. Moved vias lose their
 teardrop settings.
 
+## 45 degree tracks
+
+The button **45 degree tracks with Gummiband** turns a finished any-angle result into
+conventional 45 degree tracks without routing again, for example after you have looked at the
+any-angle routing and decided the reviewer wants 45 degrees after all:
+
+1. Select a track, via or pad of the nets to convert, or select nothing to convert all nets.
+2. Click the button. There is no dialog; it takes a second or two.
+3. The unlocked tracks of those nets get straight pieces in the eight directions of the 45
+   degree grid and chamfered corners. Vias, track ends, pads and locked tracks stay where they
+   are, and every new piece keeps the clearances: where no 45 degree path fits, a piece keeps its
+   angle. Tracks that do not change stay as they are.
+4. Everything arrives as one undo step, and a message gives the removed and created items and
+   the length before and after.
+
+This is the plugin's form of `gummiband angles45`. The same step can run at the end of routing
+with *45 degree tracks* under *Advanced*; see
+[Conventional 45 degree tracks](concepts.md#conventional-45-degree-tracks).
+
 ## Place with Gummiband
 
 A second step with its own toolbar button, used before routing. In the dialog you pick which parts

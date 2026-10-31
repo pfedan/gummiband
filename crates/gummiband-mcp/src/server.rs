@@ -29,7 +29,7 @@ the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board 
 look at problems. To pre-route a critical part by hand (datasheet layout): part_info -> \
 add_locked_copper -> route the returned board id. move_part and add_zone edit the same working \
 copy. To change one net on a routed board: load the routed file -> route with keep_all, nets and \
-reroute. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short), add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
+reroute. To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short), add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
 Routing is CPU heavy (seconds to minutes); routes run one at a time.";
 
 // ------------------------------------------------------------------------------ session
@@ -375,6 +375,29 @@ pub struct RouteIn {
     pub angles: Option<String>,
     /// Maximum number of violations listed (default 50; the total is always given).
     pub max_violations: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct Angles45In {
+    /// Path of a routed .kicad_pcb (for example the output of route).
+    pub path: String,
+    /// Output .kicad_pcb (default: `<input>.45.kicad_pcb` next to the input).
+    pub output: Option<String>,
+    /// Only the tracks of these nets (default: all nets).
+    pub nets: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct Angles45Out {
+    pub output: String,
+    /// Runs of track between vias, branches and pads that were looked at, and those that changed.
+    pub tracks: usize,
+    pub tracks_changed: usize,
+    #[serde(flatten)]
+    pub angles: AnglesOut,
+    /// Gummiband's own clearance check before and after (drc has the exact answer).
+    pub violations_before: usize,
+    pub violations_after: usize,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1647,6 +1670,56 @@ fn render_blocking(p: RenderIn) -> Result<(String, RenderOut, Vec<u8>)> {
     Ok((summary, out, data))
 }
 
+fn angles_45_blocking(p: Angles45In) -> Result<(String, Angles45Out)> {
+    let path = abs_path(&p.path);
+    let output = match &p.output {
+        Some(o) => abs_path(o),
+        None => {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("board");
+            path.with_file_name(format!("{stem}.45.kicad_pcb"))
+        }
+    };
+    let kb = read_board(
+        &path,
+        &ReadOptions {
+            keep: KeepCopper::All,
+            ..Default::default()
+        },
+    )?;
+    let (text, r) = gummiband_kicad::octo_write::angles_45(&kb, p.nets.as_deref().unwrap_or(&[]))?;
+    std::fs::write(&output, text).with_context(|| format!("cannot write {}", output.display()))?;
+    external::copy_project_files(&path, &output);
+    let st = &r.stats;
+    let out = Angles45Out {
+        output: output.display().to_string(),
+        tracks: st.tracks,
+        tracks_changed: r.tracks_changed,
+        angles: AnglesOut {
+            length_before_mm: r3(st.length_before),
+            length_after_mm: r3(st.length_after),
+            off_grid_pieces: st.any_angle,
+            off_grid_mm: r3(st.any_angle_length),
+            sharp_corners: st.sharp_corners,
+        },
+        violations_before: r.violations_before,
+        violations_after: r.violations_after,
+    };
+    let s = format!(
+        "45 degrees: {} of {} tracks changed, {:.0} -> {:.0} mm, {} pieces off the grid ({:.1} mm), {} sharp corners, Gummiband violations {} -> {}. Wrote {}.",
+        out.tracks_changed,
+        out.tracks,
+        st.length_before,
+        st.length_after,
+        st.any_angle,
+        st.any_angle_length,
+        st.sharp_corners,
+        r.violations_before,
+        r.violations_after,
+        out.output
+    );
+    Ok((s, out))
+}
+
 // -------------------------------------------------------------------------------- tools
 
 #[tool_router]
@@ -1799,6 +1872,18 @@ impl Gummiband {
         })
         .await;
         match res {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Turn the unlocked tracks of a routed .kicad_pcb into conventional 45 degree tracks without routing again (the same step as route with angles \"45\", on copper that is already there). Vias, track ends, pads and locked tracks stay; every new piece keeps the clearances, a piece with no room on the grid keeps its angle, and tracks that do not change stay in the file as they are. Writes <input>.45.kicad_pcb by default. Check the result with drc.",
+        output_schema = schema_for_output::<Angles45Out>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn angles_45(&self, Parameters(p): Parameters<Angles45In>) -> Result<CallToolResult, ErrorData> {
+        match blocking(move || angles_45_blocking(p)).await {
             Ok((s, out)) => ok(s, &out),
             Err(e) => fail(format!("{e:#}")),
         }

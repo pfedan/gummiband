@@ -88,6 +88,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
 | `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `air?`, `prefer_width?`, `angles?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
+| `angles_45` | `path`, `output?`, `nets?` | path of the written `<input>.45.kicad_pcb`, runs of track looked at and changed, length before and after, pieces off the grid, sharp corners, Gummiband's violations before and after |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?` | PNG (image content) and its path, region, pixels per mm |
 
@@ -258,6 +259,19 @@ because no 45 degree path fit, `sharp_corners` left unchamfered).
 
 ```json
 {"name": "route", "arguments": {"board": "b1", "runs": 2, "generations": 0}}
+```
+
+### angles_45
+
+Turns the unlocked tracks of a routed `.kicad_pcb` into conventional 45 degree tracks without
+routing again, like `gummiband angles45`: the same step as `route` with `angles: "45"`, on copper
+that is already there. Vias, track ends, pads and locked tracks stay; every new piece keeps the
+clearances, and a piece with no room on the grid keeps its angle. `nets` limits it to those
+nets. The output goes to `<input>.45.kicad_pcb` by default, with the `.kicad_pro` and
+`.kicad_dru` copied next to it for `drc`.
+
+```json
+{"name": "angles_45", "arguments": {"path": "/abs/path/lichtschnitzel.routed.kicad_pcb"}}
 ```
 
 ### drc
