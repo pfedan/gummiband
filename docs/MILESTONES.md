@@ -84,6 +84,15 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   offsets) and a fitness that includes the final DRC result.
 - Benchmarks against Freerouting on the controller and the injector board.
 - Profiling: incremental capacity checks, cheaper relaxation.
+- Micro-optimisation and an open end that keeps the cores busy, 2026-10-31, on 556edbd, 4 cores in
+  the cloud. Without an open end the results stay byte for byte the same: default run Lichtschnitzel
+  100 s instead of 133 s, Arty 88 s instead of 112 s. The open end makes 549 instead of 211 real
+  mutants per minute on Lichtschnitzel and 474 instead of 263 on Arty: every core takes the next
+  move until the generation has its 14 mutants, and the relaxation of a mutant takes about half the
+  time. Stopped after 270 s, seeds 1 and 2, open end cost (2 per via, 0.05 per mm, plus the flaw):
+  Lichtschnitzel 968 and 961 instead of 991 and 1007 (246 and 246 vias instead of 258 and 271), Arty
+  365 and 405 instead of 371 and 448 (111 and 128 vias instead of 114 and 151). Generations of 4
+  mutants were not better (986, 976, 396, 400).
 
 ## Open: fine pitch fan-out (Corne)
 

@@ -33,8 +33,11 @@ Standing decisions of the project owner, kept here so that they survive any sess
   rules allow; current paths must stay electrically sensible.
 - Completion comes first: the geometry stage never trades a connection for cleaner geometry.
 - Results are deterministic: the same input and seed give the same output on every machine, at
-  any thread count (fixed default portfolio, no decisions by the clock). An open ended run
-  (`--until-stop`) ends when the user says so, the same seed and last generation repeat.
+  any thread count (fixed default portfolio, no decisions by the clock). This rule holds for runs
+  without an open end. An open ended run (`--until-stop`) ends when the user says so; there
+  keeping the cores busy comes first, and its results may change with the way the mutants are
+  scheduled, also with the timing. Its present scheduling still repeats the same seed and last
+  generation at any thread count.
 - Late search works on the result, not on the routing order. Moving a connection in the order
   routes the whole board again and loses what is good, so an open ended run takes out a few
   connections around one spot, lays them again and relaxes what they touch. Bolder side branches
@@ -74,6 +77,6 @@ Standing decisions of the project owner, kept here so that they survive any sess
   scratch folders. Ask for paths instead of searching other folders.
 - Order of work: converge the current state, then the roadmap at bird's eye level
   (`docs/MILESTONES.md`), then targeted new benchmarks. Micro-optimisation runs independently,
-  also on newly added algorithms, and must preserve results.
+  also on newly added algorithms, and must preserve results byte for byte.
 - User documentation lives in the main README and `docs/`, user centred, in English.
 - Jetson Orin is not a test or benchmark board until the owner explicitly says so.

@@ -7,8 +7,8 @@
 use rayon::prelude::*;
 
 use crate::board::{Board, LayerId, ObstacleKind};
-use crate::geom::{Point, Rect, point_seg_dist, pt};
-use crate::index::{GridIndex, PointGrid};
+use crate::geom::{Point, Rect, point_seg_dist, point_seg_offset, pt};
+use crate::index::{GridIndex, PointGrid, axis_cell};
 use crate::prof::{self, Slot};
 use crate::realize::{Elem, Geometry, Track};
 use crate::topo::Substrate;
@@ -161,6 +161,31 @@ fn surely_outside(dx: f64, dy: f64, r: f64) -> bool {
     dx * dx + dy * dy >= r * r * SURE
 }
 
+/// True if the point at offset (dx, dy) is certainly no farther than `r`.
+#[inline]
+fn surely_within(dx: f64, dy: f64, r: f64) -> bool {
+    dx * dx + dy * dy <= r * r * (1.0 / SURE)
+}
+
+/// True if the offset `v` is longer than `r`; the root only where the squares cannot tell.
+#[inline]
+fn longer(v: Point, r: f64) -> bool {
+    if surely_outside(v.x, v.y, r) {
+        true
+    } else if surely_within(v.x, v.y, r) {
+        false
+    } else {
+        v.len() > r
+    }
+}
+
+/// `a.max(b)` for an `a` that is not NaN, in one instruction instead of the NaN handling of
+/// `f64::max` (the result is the same).
+#[inline]
+fn max_of(a: f64, b: f64) -> f64 {
+    if b > a { b } else { a }
+}
+
 /// What the point loop needs to know of a piece, kept in grid order for cheap sweeps.
 #[derive(Clone, Copy)]
 struct NearPiece {
@@ -178,8 +203,12 @@ struct Tier {
     grid: PointGrid,
     /// In grid order.
     near: Vec<NearPiece>,
+    /// The order key of each piece in `near`, see `LayerPieces`.
+    keys: Vec<u64>,
     /// Pieces and their keys in id order while building, kept to reuse the buffers.
     raw: Vec<NearPiece>,
+    /// `raw` changed since the last build.
+    moved: bool,
     mids: Vec<Point>,
     max_extent: f64,
     max_clr: f64,
@@ -190,7 +219,9 @@ impl Tier {
         Tier {
             grid: PointGrid::new(bounds, cell, &[]),
             near: Vec::new(),
+            keys: Vec::new(),
             raw: Vec::new(),
+            moved: false,
             mids: Vec::new(),
             max_extent: 0.0,
             max_clr: 0.0,
@@ -218,6 +249,16 @@ impl Tier {
             }
         });
     }
+
+    /// Like `for_each_near`, with the order key of each piece.
+    #[inline]
+    fn for_each_keyed(&self, p: Point, radius: f64, mut f: impl FnMut(&NearPiece, u64)) {
+        self.grid.for_each_run(p, radius, |lo, hi| {
+            for (r, &k) in self.near[lo..hi].iter().zip(&self.keys[lo..hi]) {
+                f(r, k);
+            }
+        });
+    }
 }
 
 /// How far a point may lie from the point of the last grid sweep and reuse its result.
@@ -225,10 +266,12 @@ const SWEEP_SKIN: f64 = 0.4;
 
 /// Scratch of the point loop.
 struct Sweep {
-    /// Pieces within the skin of `anchor`, and the candidates of the current point.
+    /// Pieces within the skin of `anchor`, and the candidates of the current point (pieces by
+    /// their order keys, vias by id).
     anchor: Point,
-    list: Vec<NearPiece>,
-    near: Vec<(u32, u32)>,
+    list: Vec<Swept>,
+    near: Vec<u64>,
+    vias: Vec<u32>,
 }
 
 impl Default for Sweep {
@@ -237,14 +280,24 @@ impl Default for Sweep {
             anchor: pt(f64::INFINITY, f64::INFINITY),
             list: Vec::new(),
             near: Vec::new(),
+            vias: Vec::new(),
         }
     }
+}
+
+/// A piece in the sweep of a track: what the point filter needs, and the order key.
+#[derive(Clone, Copy)]
+struct Swept {
+    mid: Point,
+    extent: f32,
+    clr: f32,
+    key: u64,
 }
 
 /// The pieces of one layer. A single wide or high clearance net would size the query of every
 /// point on the board, so the few tracks that reach far sit in a coarse grid of their own.
 /// Pushes must add up in the same order whatever the grids: by the cell of the fine grid and
-/// within a cell by id, see `order_key`.
+/// within a cell by id. The order key holds both, the cell above the id.
 struct LayerPieces {
     fine: Tier,
     far: Tier,
@@ -258,8 +311,29 @@ impl LayerPieces {
         }
     }
 
-    fn order_key(&self, r: &NearPiece) -> (u32, u32) {
-        (self.fine.grid.cell_of(r.mid) as u32, r.id)
+    /// The grids of the tiers whose pieces moved.
+    fn rebuild(&mut self) {
+        let key = |cell: u32, r: &NearPiece| (cell as u64) << 32 | r.id as u64;
+        if std::mem::take(&mut self.fine.moved) {
+            self.fine.rebuild();
+            let Tier { grid, near, keys, .. } = &mut self.fine;
+            let cells = grid.key_cells();
+            keys.clear();
+            keys.extend(
+                grid.ids()
+                    .iter()
+                    .zip(near.iter())
+                    .map(|(&i, r)| key(cells[i as usize], r)),
+            );
+        }
+        if std::mem::take(&mut self.far.moved) {
+            self.far.rebuild();
+            let grid = &self.fine.grid;
+            self.far.keys.clear();
+            self.far
+                .keys
+                .extend(self.far.near.iter().map(|r| key(grid.cell_of(r.mid) as u32, r)));
+        }
     }
 }
 
@@ -318,6 +392,18 @@ pub fn simplify(pts: &[Point], tol: f64) -> Vec<Point> {
 }
 
 pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConfig) {
+    relax_while(board, sub, geo, cfg, &|| true);
+}
+
+/// `relax`, as long as `go_on` says so before each round. False once it says no, and then `geo`
+/// is left half way: for a mutant of the open end that is no longer needed.
+pub fn relax_while(
+    board: &Board,
+    sub: &Substrate,
+    geo: &mut Geometry,
+    cfg: &RelaxConfig,
+    go_on: &dyn Fn() -> bool,
+) -> bool {
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
     let t_start = std::time::Instant::now();
     // coarse points while the bands move a lot, fine points for the final clearance work
@@ -359,6 +445,12 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
     let max_w = geo.tracks.iter().map(|t| t.width).fold(0.0, f64::max);
     let n_layers = geo.tracks.iter().map(|t| t.layer as usize + 1).max().unwrap_or(0);
     let half_w = |t: &Track| if t.necks.is_empty() { t.width } else { t.width.max(t.neck_w) } / 2.0;
+    // how much more than that a fitted width can give a piece, none before the widths are fitted
+    let fitted_over = geo
+        .tracks
+        .iter()
+        .flat_map(|t| t.fitted.iter().map(move |f| f.1 / 2.0 - half_w(t)))
+        .fold(0.0, f64::max);
     // per net the largest clearance it can ask for against any other net
     let mut net_clr: Vec<f64> = (0..board.nets.len() as u32).map(clr).collect();
     for (&(a, b), &c) in &board.pair_clearance {
@@ -504,12 +596,16 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
     // while annealing only a few spots still move: cells near the points and vias that moved
     // in the previous round are the only ones worth visiting (None: visit everything)
     let mut dirty: Option<Vec<bool>> = None;
+    // the points and vias at the begin of an annealing round, to find those that moved
+    let (mut old_tracks, mut old_vias): (Vec<Vec<Point>>, Vec<Point>) = (Vec::new(), Vec::new());
     prof::add(Slot::RelaxSetup, t_start.elapsed().as_nanos() as u64);
     prof::add(Slot::Calls, 1);
     let mut grids: Vec<LayerPieces> = (0..n_layers).map(|_| LayerPieces::new(bounds)).collect();
     let mut via_at: Vec<Point> = Vec::with_capacity(vias.len());
     let mut via_grid = PointGrid::new(bounds, 1.0, &[]);
     let mut pieces: Vec<Piece> = Vec::new();
+    // per track where its pieces begin in `pieces` and in the list of its tier
+    let mut track_at: Vec<(usize, usize)> = Vec::new();
     let annealing = |it: usize| it * 4 >= cfg.iterations * 3;
     // sleeping copper, vias of one layer and fitted widths stay on the CPU
     #[cfg(feature = "gpu")]
@@ -551,12 +647,18 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
     let via_gain = 10.0;
     let starts_batch = |it: usize| it == 0 || it % 10 == 9;
     for it in 0..cfg.iterations {
+        if !go_on() {
+            return false;
+        }
         let on_gpu_now = it < gpu_end;
         // anneal: the last quarter only resolves clearances
         let tension = if annealing(it) { 0.0 } else { cfg.tension };
         let t_round = std::time::Instant::now();
-        let before =
-            (annealing(it) && !on_gpu_now).then(|| (tracks.clone(), vias.iter().map(|v| v.0).collect::<Vec<_>>()));
+        let before = (annealing(it) && !on_gpu_now).then(|| {
+            old_tracks.clone_from(&tracks);
+            old_vias.clear();
+            old_vias.extend(vias.iter().map(|v| v.0));
+        });
         if it % 10 == 9 {
             tracks = tracks
                 .par_iter()
@@ -577,39 +679,64 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 .collect();
         }
         let keep_pieces = on_gpu_now && !starts_batch(it);
-        if !keep_pieces {
+        // from one resampling to the next the tracks keep their points: then only the pieces of
+        // copper that can have moved are new, all keep their ids and places
+        let in_place = !keep_pieces && it > gpu_end && it % 10 != 9;
+        if !keep_pieces && !in_place {
             pieces.clear();
+            track_at.clear();
+            for g in grids.iter_mut() {
+                for tier in [&mut g.fine, &mut g.far] {
+                    tier.raw.clear();
+                    tier.moved = true;
+                }
+            }
         }
-        for g in grids.iter_mut().filter(|_| !keep_pieces) {
-            g.fine.raw.clear();
-            g.far.raw.clear();
-        }
+        // asleep, a track only moves with the vias at its ends
+        let can_move = |ti: usize| {
+            let (a, b) = ends[ti];
+            awake[ti] || a.is_some_and(|v| via_awake[v]) || b.is_some_and(|v| via_awake[v])
+        };
         // pieces by their midpoints per layer; queries grow by the largest extent
         for (ti, p) in tracks.iter().enumerate().filter(|_| !keep_pieces) {
+            if in_place && !can_move(ti) {
+                continue;
+            }
             let t = &geo.tracks[ti];
             let g = &mut grids[t.layer as usize];
             let (hw, nc) = (half_w(t), (net_clr[t.net as usize] as f32).next_up());
-            let raw = if far_track[ti] { &mut g.far.raw } else { &mut g.fine.raw };
-            for w in p.windows(2) {
-                let id = pieces.len() as u32;
-                pieces.push(Piece {
+            let tier = if far_track[ti] { &mut g.far } else { &mut g.fine };
+            tier.moved = true;
+            if !in_place {
+                track_at.push((pieces.len(), tier.raw.len()));
+            }
+            let (first, at) = track_at[ti];
+            for (k, w) in p.windows(2).enumerate() {
+                let id = (first + k) as u32;
+                let piece = Piece {
                     a: w[0],
                     b: w[1],
                     track: ti as u32,
-                });
+                };
                 let hl = (w[1] - w[0]).len2().sqrt() * 0.5 * SURE;
-                raw.push(NearPiece {
+                let near = NearPiece {
                     mid: (w[0] + w[1]) * 0.5,
                     extent: ((hw + hl) as f32).next_up(),
                     clr: nc,
                     net: t.net,
                     id,
-                });
+                };
+                if in_place {
+                    pieces[id as usize] = piece;
+                    tier.raw[at + k] = near;
+                } else {
+                    pieces.push(piece);
+                    tier.raw.push(near);
+                }
             }
         }
-        for g in grids.iter_mut().filter(|_| !keep_pieces) {
-            g.fine.rebuild();
-            g.far.rebuild();
+        if !keep_pieces {
+            grids.par_iter_mut().for_each(LayerPieces::rebuild);
         }
         let (pieces, grids) = (&pieces, &grids);
         via_at.clear();
@@ -627,6 +754,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 &ends,
                 (&mut awake, &mut via_awake),
                 (max_clr, max_vr),
+                (&net_clr, fitted_over),
             );
         }
         let (awake, via_awake) = (&awake, &via_awake);
@@ -636,7 +764,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         let moved: Vec<Point> = vias
             .par_iter()
             .enumerate()
-            .map(|(vi, &(vc, vr, vn, vclr))| {
+            .map_init(Sweep::default, |sweep: &mut Sweep, (vi, &(vc, vr, vn, vclr))| {
                 if !via_awake[vi] || (on_gpu_now && !starts_batch(it)) {
                     return vc;
                 }
@@ -695,7 +823,8 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     }
                 }
                 // sums run in id order: collect the few candidates first
-                let mut hits: Vec<u32> = Vec::new();
+                let Sweep { near, vias: hits, .. } = sweep;
+                hits.clear();
                 let via_reach = (vr + max_vr + max_clr)
                     .max(drills[vi] / 2.0 + max_drill / 2.0 + board.rules.hole_to_hole)
                     + cfg.margin
@@ -706,7 +835,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     }
                 });
                 hits.sort_unstable();
-                for &vj in &hits {
+                for &vj in hits.iter() {
                     let vj = vj as usize;
                     let (c2, r2, n2, clr2) = vias[vj];
                     if matches!((via_layer[vi], via_layer[vj]), (Some(a), Some(b)) if a != b) {
@@ -726,10 +855,10 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     if surely_outside(dv.x, dv.y, need) {
                         continue;
                     }
-                    let d = vc.dist(c2);
+                    let d = dv.len();
                     if d < need {
                         let dir = if d > 1e-9 {
-                            (vc - c2).norm()
+                            dv * (1.0 / d)
                         } else {
                             pt(1.0, 0.0).rotate(vi as f64)
                         };
@@ -737,25 +866,25 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     }
                 }
                 // candidates of all layers, back in the order of one grid over all of them
-                let mut near: Vec<(u32, u32)> = Vec::new();
+                near.clear();
                 for (l, g) in grids.iter().enumerate() {
                     if via_layer[vi].is_some_and(|x| x as usize != l) {
                         continue;
                     }
                     for tier in [&g.fine, &g.far] {
                         let radius = vr + vclr.max(tier.max_clr).max(item_max) + cfg.margin + tier.max_extent;
-                        tier.for_each_near(vc, radius, |r| {
+                        tier.for_each_keyed(vc, radius, |r, key| {
                             let dm = vc - r.mid;
-                            let lim = vr + vclr.max(r.clr as f64).max(item_max) + cfg.margin + r.extent as f64;
+                            let lim = vr + max_of(max_of(vclr, r.clr as f64), item_max) + cfg.margin + r.extent as f64;
                             if r.net != vn && !surely_outside(dm.x, dm.y, lim) {
-                                near.push(g.order_key(r));
+                                near.push(key);
                             }
                         });
                     }
                 }
                 near.sort_unstable();
-                for &(_, pi) in &near {
-                    let pc = &pieces[pi as usize];
+                for &key in near.iter() {
+                    let pc = &pieces[key as u32 as usize];
                     let o = &geo.tracks[pc.track as usize];
                     let need = vr
                         + o.piece_width(pc.a, pc.b) / 2.0
@@ -769,17 +898,25 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         0.0
                     };
                     let q = pc.a + ab * tt;
-                    let d = vc.dist(q);
+                    let v = vc - q;
+                    if surely_outside(v.x, v.y, need) {
+                        continue;
+                    }
+                    let d = v.len();
                     if d < need {
-                        let dir = if d > 1e-9 { (vc - q).norm() } else { ab.perp().norm() };
+                        let dir = if d > 1e-9 { v * (1.0 / d) } else { ab.perp().norm() };
                         push = push + dir * ((need - d) * 0.5);
                     }
                 }
-                let l = push.len();
-                let mv = if l > cfg.max_step {
-                    push * (cfg.max_step / l)
-                } else {
+                let mv = if surely_within(push.x, push.y, cfg.max_step) {
                     push
+                } else {
+                    let l = push.len();
+                    if l > cfg.max_step {
+                        push * (cfg.max_step / l)
+                    } else {
+                        push
+                    }
                 };
                 let to = vc + mv * if on_gpu_now { via_gain } else { 1.0 };
                 let stays = |&(o, floor): &(&crate::geom::Polygon, f64)| {
@@ -820,18 +957,16 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             .map(|g| g.finish());
         #[cfg(not(feature = "gpu"))]
         let gpu_moves: Option<Vec<[f32; 2]>> = None;
-        let snapshot = &tracks;
-        tracks = snapshot
-            .par_iter()
+        // each track reads only its own points, the others it sees through the pieces
+        tracks
+            .par_iter_mut()
             .enumerate()
-            .map(|(ti, pts)| {
-                if !awake[ti] || on_gpu_now {
-                    return pts.clone();
-                }
+            .filter(|(ti, _)| awake[*ti] && !on_gpu_now)
+            .for_each(|(ti, track)| {
                 let t = &geo.tracks[ti];
                 let (c, net, nc) = (clr(t.net), t.net, net_clr[t.net as usize]);
                 let (grid, obs_cells) = (&grids[t.layer as usize], &layer_cells[t.layer as usize]);
-                let mut out = pts.clone();
+                let pts: &[Point] = track;
                 let n = pts.len();
                 // points in parallel too: a few long tracks would otherwise keep one core busy
                 let inner: Vec<Point> = (1..n.saturating_sub(1))
@@ -839,7 +974,8 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     .with_min_len(32)
                     .map_init(Sweep::default, |sweep: &mut Sweep, i| {
                         let p = pts[i];
-                        if dirty.as_ref().is_some_and(|d| !d[cells.cell_of(p)]) {
+                        let cell = cells.cell_of(p);
+                        if dirty.as_ref().is_some_and(|d| !d[cell]) {
                             return p;
                         }
                         let w = t.width_at(p);
@@ -848,14 +984,13 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         let mut mv = (mid - p) * tension;
                         let mut push = pt(0.0, 0.0);
                         // static obstacles
-                        let cell = cells.cell_of(p);
                         for &oi in obs_cells.get(cell) {
                             let o = &near_obs[oi as usize];
                             if o.own_net == net {
                                 continue;
                             }
                             let need = if o.floor {
-                                o.clr.max(c).max(board.item_gap(net, Some(o.own_net)))
+                                max_of(max_of(o.clr, c), board.item_gap(net, Some(o.own_net)))
                             } else if o.hole {
                                 board.hole_gap(net)
                             } else {
@@ -863,8 +998,8 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             } + w / 2.0
                                 + cfg.margin;
                             // cheap reject on the bounding box before the polygon distance
-                            let dx = (o.bbox.min.x - p.x).max(0.0).max(p.x - o.bbox.max.x);
-                            let dy = (o.bbox.min.y - p.y).max(0.0).max(p.y - o.bbox.max.y);
+                            let dx = max_of(max_of(0.0, o.bbox.min.x - p.x), p.x - o.bbox.max.x);
+                            let dy = max_of(max_of(0.0, o.bbox.min.y - p.y), p.y - o.bbox.max.y);
                             if surely_outside(dx, dy, need) || dx.hypot(dy) >= need {
                                 continue;
                             }
@@ -890,56 +1025,73 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             }
                         }
                         // vias of other nets
-                        let mut hits: Vec<u32> = Vec::new();
+                        let Sweep {
+                            anchor,
+                            list,
+                            near,
+                            vias: hits,
+                        } = sweep;
+                        hits.clear();
                         via_grid.for_each_near(p, w / 2.0 + max_clr + max_vr + cfg.margin + 0.01, |vi| {
                             let (vc, vr, vn, vclr) = vias[vi as usize];
                             let dv = p - vc;
+                            let reach = vr + max_of(max_of(vclr, c), item_max) + w / 2.0 + cfg.margin;
                             if vn != net
-                                && !surely_outside(dv.x, dv.y, vr + vclr.max(c).max(item_max) + w / 2.0 + cfg.margin)
+                                && !surely_outside(dv.x, dv.y, reach)
                                 && via_layer[vi as usize].is_none_or(|l| l == t.layer)
                             {
                                 hits.push(vi);
                             }
                         });
                         hits.sort_unstable();
-                        for &vi in &hits {
+                        for &vi in hits.iter() {
                             let (vc, vr, vn, vclr) = vias[vi as usize];
-                            let need = vr + vclr.max(c).max(board.item_gap(net, Some(vn))) + w / 2.0 + cfg.margin;
-                            let d = p.dist(vc);
+                            let need =
+                                vr + max_of(max_of(vclr, c), board.item_gap(net, Some(vn))) + w / 2.0 + cfg.margin;
+                            let v = p - vc;
+                            if surely_outside(v.x, v.y, need) {
+                                continue;
+                            }
+                            let d = v.len();
                             if d < need {
-                                push = push + (p - vc).norm() * ((need - d) * 0.5);
+                                let dir = if d > 0.0 { v * (1.0 / d) } else { v };
+                                push = push + dir * ((need - d) * 0.5);
                             }
                         }
                         // other tracks (they push back from their side, so take half)
                         // the pieces near one point serve the next points along the track too
-                        if (p - sweep.anchor).len2() >= SWEEP_SKIN * SWEEP_SKIN {
-                            sweep.anchor = p;
-                            sweep.list.clear();
+                        if (p - *anchor).len2() >= SWEEP_SKIN * SWEEP_SKIN {
+                            *anchor = p;
+                            list.clear();
                             let base = half_w(t) + cfg.margin + SWEEP_SKIN + 1e-6;
                             for tier in [&grid.fine, &grid.far] {
                                 let radius = base + nc.max(tier.max_clr) + tier.max_extent;
-                                tier.for_each_near(p, radius, |r| {
+                                tier.for_each_keyed(p, radius, |r, key| {
                                     let dm = p - r.mid;
-                                    let lim = base + nc.max(r.clr as f64) + r.extent as f64;
+                                    let lim = base + max_of(nc, r.clr as f64) + r.extent as f64;
                                     if r.net != net && !surely_outside(dm.x, dm.y, lim) {
-                                        sweep.list.push(*r);
+                                        list.push(Swept {
+                                            mid: r.mid,
+                                            extent: r.extent,
+                                            clr: r.clr,
+                                            key,
+                                        });
                                     }
                                 });
                             }
                         }
-                        let Sweep { near, list, .. } = sweep;
                         near.clear();
                         let base = w / 2.0 + cfg.margin;
                         for r in list.iter() {
                             let dm = p - r.mid;
-                            let lim = base + nc.max(r.clr as f64) + r.extent as f64;
+                            let lim = base + max_of(nc, r.clr as f64) + r.extent as f64;
                             if !surely_outside(dm.x, dm.y, lim) {
-                                near.push(grid.order_key(r));
+                                near.push(r.key);
                             }
                         }
                         near.sort_unstable();
-                        for &(_, pi) in near.iter() {
-                            let pc = &pieces[pi as usize];
+                        for &key in near.iter() {
+                            let pc = &pieces[key as u32 as usize];
                             let o = &geo.tracks[pc.track as usize];
                             let need = w / 2.0
                                 + o.piece_width(pc.a, pc.b) / 2.0
@@ -953,9 +1105,13 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                                 0.0
                             };
                             let q = pc.a + ab * tt;
-                            let d = p.dist(q);
+                            let v = p - q;
+                            if surely_outside(v.x, v.y, need) {
+                                continue;
+                            }
+                            let d = v.len();
                             if d < need {
-                                let dir = if d > 1e-9 { (p - q).norm() } else { ab.perp().norm() };
+                                let dir = if d > 1e-9 { v * (1.0 / d) } else { ab.perp().norm() };
                                 push = push + dir * ((need - d) * 0.5);
                             }
                         }
@@ -968,17 +1124,18 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             }
                             mv = mv + push;
                         }
-                        let l = mv.len();
-                        if l > cfg.max_step {
-                            mv = mv * (cfg.max_step / l);
+                        // most points move less than a step: then the length needs no root
+                        if !surely_within(mv.x, mv.y, cfg.max_step) {
+                            let l = mv.len();
+                            if l > cfg.max_step {
+                                mv = mv * (cfg.max_step / l);
+                            }
                         }
                         p + mv
                     })
                     .collect();
-                out[1..1 + inner.len()].copy_from_slice(&inner);
-                out
-            })
-            .collect();
+                track[1..1 + inner.len()].copy_from_slice(&inner);
+            });
         for (ti, ends) in rails.iter().enumerate().filter(|(ti, _)| awake[*ti]) {
             if let Some(r) = &ends[0] {
                 follow(r, &mut tracks[ti], false);
@@ -1011,11 +1168,17 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 pts[n - 1] = vias[*b].0;
             }
         }
-        dirty = before.map(|(old_tracks, old_vias)| {
+        dirty = before.map(|()| {
             let mut d = vec![false; cells.len()];
+            // the points that moved come in runs along their tracks: one mark per cell will do
+            let mut centre = vec![false; cells.len()];
             let k = ((reach_max + cfg.max_step) / cells.cell).ceil() as isize + 1;
             let mut mark = |p: Point| {
-                let c = cells.cell_of(p) as isize;
+                let c = cells.cell_of(p);
+                if std::mem::replace(&mut centre[c], true) {
+                    return;
+                }
+                let c = c as isize;
                 let (cx, cy) = (c % cells.nx as isize, c / cells.nx as isize);
                 for y in (cy - k).max(0)..=(cy + k).min(cells.ny as isize - 1) {
                     for x in (cx - k).max(0)..=(cx + k).min(cells.nx as isize - 1) {
@@ -1028,7 +1191,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     a.iter().chain(b).for_each(|p| mark(*p));
                 } else {
                     for (p, q) in a.iter().zip(b) {
-                        if p != q && p.dist(*q) > 1e-9 {
+                        if p != q && longer(*p - *q, 1e-9) {
                             mark(*p);
                             mark(*q);
                         }
@@ -1036,7 +1199,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 }
             }
             for (p, v) in old_vias.iter().zip(&vias) {
-                if *p != v.0 && p.dist(v.0) > 1e-9 {
+                if *p != v.0 && longer(*p - v.0, 1e-9) {
                     mark(*p);
                     mark(v.0);
                 }
@@ -1082,6 +1245,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             fitted: std::mem::take(&mut t.fitted),
         };
     }
+    true
 }
 
 /// Wake the sleeping copper that the waking copper violates. A sleeping track that only has
@@ -1097,8 +1261,12 @@ fn wake(
     ends: &[(Option<usize>, Option<usize>)],
     (awake, via_awake): (&mut [bool], &mut [bool]),
     (max_clr, max_vr): (f64, f64),
+    (net_clr, fitted_over): (&[f64], f64),
 ) {
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
+    // within `need`, from the offset to the nearest point; the root only where the squares
+    // cannot tell
+    let within = |v: Point, need: f64| !surely_outside(v.x, v.y, need) && v.len() < need;
     let mut woken: Vec<u32> = Vec::new();
     let mut woken_vias: Vec<u32> = Vec::new();
     for (ti, pts) in tracks.iter().enumerate() {
@@ -1107,20 +1275,27 @@ fn wake(
         }
         let t = &infos[ti];
         let c = clr(t.net);
+        let nc = net_clr[t.net as usize];
         let hw = t.width.max(t.neck_w) / 2.0;
         let g = &grids[t.layer as usize];
         for &p in pts {
+            let wp = t.width_at(p) / 2.0;
             for tier in [&g.fine, &g.far] {
                 let radius = hw + max_clr + tier.max_extent;
                 tier.for_each_near(p, radius, |r| {
+                    // no part of a piece comes nearer than its bounds allow
+                    let dm = p - r.mid;
+                    let reach = wp + max_of(nc, r.clr as f64) + r.extent as f64 + fitted_over;
+                    if r.net == t.net || surely_outside(dm.x, dm.y, reach) {
+                        return;
+                    }
                     let pc = &pieces[r.id as usize];
-                    if awake[pc.track as usize] || r.net == t.net {
+                    if awake[pc.track as usize] {
                         return;
                     }
                     let o = &infos[pc.track as usize];
-                    let need =
-                        t.width_at(p) / 2.0 + o.piece_width(pc.a, pc.b) / 2.0 + board.track_clearance(t.net, o.net);
-                    if point_seg_dist(p, pc.a, pc.b) < need {
+                    let need = wp + o.piece_width(pc.a, pc.b) / 2.0 + board.track_clearance(t.net, o.net);
+                    if within(point_seg_offset(p, pc.a, pc.b), need) {
                         woken.push(pc.track);
                     }
                 });
@@ -1130,7 +1305,7 @@ fn wake(
                 if !via_awake[vi as usize]
                     && vn != t.net
                     && via_layer[vi as usize].is_none_or(|l| l == t.layer)
-                    && p.dist(vc) < vr + vclr.max(c) + t.width_at(p) / 2.0
+                    && within(p - vc, vr + vclr.max(c) + wp)
                 {
                     woken_vias.push(vi);
                 }
@@ -1147,13 +1322,18 @@ fn wake(
             }
             for tier in [&g.fine, &g.far] {
                 tier.for_each_near(vc, vr + max_clr + tier.max_extent, |r| {
+                    let dm = vc - r.mid;
+                    let reach = vr + max_of(vclr, r.clr as f64) + r.extent as f64 + fitted_over;
+                    if r.net == vn || surely_outside(dm.x, dm.y, reach) {
+                        return;
+                    }
                     let pc = &pieces[r.id as usize];
-                    if awake[pc.track as usize] || r.net == vn {
+                    if awake[pc.track as usize] {
                         return;
                     }
                     let o = &infos[pc.track as usize];
                     let need = vr + o.piece_width(pc.a, pc.b) / 2.0 + vclr.max(clr(o.net));
-                    if point_seg_dist(vc, pc.a, pc.b) < need {
+                    if within(point_seg_offset(vc, pc.a, pc.b), need) {
                         woken.push(pc.track);
                     }
                 });
@@ -1164,7 +1344,7 @@ fn wake(
             if !via_awake[vj as usize]
                 && n2 != vn
                 && !matches!((via_layer[vi], via_layer[vj as usize]), (Some(a), Some(b)) if a != b)
-                && vc.dist(c2) < vr + r2 + vclr.max(clr2)
+                && within(vc - c2, vr + r2 + vclr.max(clr2))
             {
                 woken_vias.push(vj);
             }
@@ -1449,6 +1629,7 @@ fn env_usize(k: &str, d: usize) -> usize {
 struct CellLists {
     origin: Point,
     cell: f64,
+    inv: f64,
     nx: usize,
     ny: usize,
     start: Vec<u32>,
@@ -1460,7 +1641,7 @@ impl CellLists {
         let nx = ((bounds.width() / cell).ceil() as usize).max(1);
         let ny = ((bounds.height() / cell).ceil() as usize).max(1);
         let mut lists: Vec<Vec<u32>> = vec![Vec::new(); nx * ny];
-        let f = |v: f64, o: f64, n: usize| (((v - o) / cell).floor().max(0.0) as usize).min(n - 1);
+        let f = |v: f64, o: f64, n: usize| axis_cell(v, o, 1.0 / cell, n);
         for (i, b) in boxes.iter().enumerate().filter(|(i, _)| keep(*i)) {
             let g = b.grow(reach);
             for y in f(g.min.y, bounds.min.y, ny)..=f(g.max.y, bounds.min.y, ny) {
@@ -1478,6 +1659,7 @@ impl CellLists {
         CellLists {
             origin: bounds.min,
             cell,
+            inv: 1.0 / cell,
             nx,
             ny,
             start,
@@ -1490,8 +1672,7 @@ impl CellLists {
     }
 
     fn cell_of(&self, p: Point) -> usize {
-        let f = |v: f64, o: f64, n: usize| (((v - o) / self.cell).floor().max(0.0) as usize).min(n - 1);
-        f(p.y, self.origin.y, self.ny) * self.nx + f(p.x, self.origin.x, self.nx)
+        axis_cell(p.y, self.origin.y, self.inv, self.ny) * self.nx + axis_cell(p.x, self.origin.x, self.inv, self.nx)
     }
 
     /// The cell's rectangle and half its diagonal.

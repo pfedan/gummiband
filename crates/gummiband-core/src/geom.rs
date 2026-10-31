@@ -140,13 +140,18 @@ impl Rect {
 
 /// Distance from p to segment ab.
 pub fn point_seg_dist(p: Point, a: Point, b: Point) -> f64 {
+    point_seg_offset(p, a, b).len()
+}
+
+/// From the point of segment a-b nearest to p to p: its length is `point_seg_dist`.
+pub fn point_seg_offset(p: Point, a: Point, b: Point) -> Point {
     let ab = b - a;
     let l2 = ab.len2();
     if l2 == 0.0 {
-        return p.dist(a);
+        return p - a;
     }
     let t = ((p - a).dot(ab) / l2).clamp(0.0, 1.0);
-    p.dist(a + ab * t)
+    p - (a + ab * t)
 }
 
 /// Proper or touching intersection of segments ab and cd.
@@ -168,10 +173,19 @@ pub fn seg_seg_dist(a: Point, b: Point, c: Point, d: Point) -> f64 {
     if segs_intersect(a, b, c, d) {
         return 0.0;
     }
-    point_seg_dist(a, c, d)
-        .min(point_seg_dist(b, c, d))
-        .min(point_seg_dist(c, a, b))
-        .min(point_seg_dist(d, a, b))
+    let offs = [
+        point_seg_offset(a, c, d),
+        point_seg_offset(b, c, d),
+        point_seg_offset(c, a, b),
+        point_seg_offset(d, a, b),
+    ];
+    // the root only of those that can be the nearest: the squares tell the others apart
+    let sq = offs.map(|o| o.len2());
+    let least = sq[0].min(sq[1]).min(sq[2]).min(sq[3]);
+    offs.iter()
+        .zip(sq)
+        .filter(|&(_, q)| q <= least * (1.0 + 1e-9))
+        .fold(f64::NAN, |m, (o, _)| m.min(o.len()))
 }
 
 /// Closed polygon, vertices in either orientation, no repeated last vertex.
