@@ -53,6 +53,7 @@ because they fit only one board. *Defaults* brings back the values below.
 | Negotiation rounds | 0 | `--negotiate` | Experimental second search in which connections compete for room. 20 rounds work well and take about twice the time. |
 | Worker threads | 0 (all) | `--threads` | How many cores the run may use. The result does not depend on it. |
 | Relax on the GPU | off | `GB_GPU=1` | Experimental, macOS only: runs most of the track relaxation as a compute shader. Needs a binary built with `--features gpu`; with a normal binary the run stays on the CPU and the message box says so. Results differ between GPUs, so use the CPU for a final run. |
+| 45 degree tracks | off | `--angles 45` | Turns the any-angle tracks and arcs into conventional 45 degree routing at the end, with chamfered corners. A few percent more length, no new clearance violations; where no 45 degree path fits, a piece keeps its angle. See [Conventional 45 degree tracks](concepts.md#conventional-45-degree-tracks). |
 | Plane layers | | `--plane-layers` | Copper layers to treat as planes, on top of those of KiCad type *power*. |
 | Net widths file | | `--net-widths` | JSON file with a track width per net. |
 | Net priorities file | | `--net-priorities` | JSON file with a routing priority per net; lower routes first. |
@@ -115,6 +116,25 @@ This is the plugin's form of `gummiband route --keep-all --nets A,B --shove --gi
 button is new and not yet tested live in KiCad. Refill the zones (B) before you run the DRC:
 after vias moved, stale plane fills report errors that are not there. Moved vias lose their
 teardrop settings.
+
+## 45 degree tracks
+
+The button **45 degree tracks with Gummiband** turns a finished any-angle result into
+conventional 45 degree tracks without routing again, for example after you have looked at the
+any-angle routing and decided the reviewer wants 45 degrees after all:
+
+1. Select a track, via or pad of the nets to convert, or select nothing to convert all nets.
+2. Click the button. There is no dialog; it takes a second or two.
+3. The unlocked tracks of those nets get straight pieces in the eight directions of the 45
+   degree grid and chamfered corners. Vias, track ends, pads and locked tracks stay where they
+   are, and every new piece keeps the clearances: where no 45 degree path fits, a piece keeps its
+   angle. Tracks that do not change stay as they are.
+4. Everything arrives as one undo step, and a message gives the removed and created items and
+   the length before and after.
+
+This is the plugin's form of `gummiband angles45`. The same step can run at the end of routing
+with *45 degree tracks* under *Advanced*; see
+[Conventional 45 degree tracks](concepts.md#conventional-45-degree-tracks).
 
 ## Place with Gummiband
 

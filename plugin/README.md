@@ -117,6 +117,13 @@ venv, e.g. `~/Library/Caches/kicad/10.0/python-environments/com.github.pfedan.gu
 Debugging inside KiCad: start KiCad with `KICAD_ALLOC_CONSOLE=1 KICAD_ENABLE_WXTRACE=1
 WXTRACE=KICAD_API` to see the API trace and the plugin's stderr.
 
+## 45 degree tracks
+
+The button **45 degree tracks with Gummiband** runs `gummiband angles45` on the open board: the
+unlocked tracks of the selected nets (or of all nets, with nothing selected) become conventional
+45 degree tracks without routing again. Vias, track ends, pads and locked tracks stay, every new
+piece keeps the clearances, and what does not change stays as it is. One undo step.
+
 ## Finish selected nets (follow-me)
 
 The second button, **Finish selected nets with Gummiband**, routes what is missing on the nets of

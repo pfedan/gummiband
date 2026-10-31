@@ -11,7 +11,7 @@ import tempfile
 import threading
 from dataclasses import MISSING, dataclass, fields
 from pathlib import Path
-from typing import Callable, List, Mapping, Optional
+from typing import Callable, List, Mapping, Optional, Sequence
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 SETTINGS_FILE = PLUGIN_DIR / "settings.json"
@@ -65,6 +65,8 @@ class RouteOptions:
     until_stop: bool = True
     prefer_width: float = 0.0  # tracks of the default class grow up to this where there is room
     gpu: bool = False  # sets GB_GPU for the router, needs a binary built with the gpu feature
+    # turn the result into conventional 45 degree routing as a last step
+    angles_45: bool = False
 
 
 @dataclass
@@ -91,7 +93,8 @@ class PlaceOptions:
 # layer names, net files) starts empty every time.
 ROUTE_SAVED = ("keep_locked", "runs", "via_cost", "geometry_generations", "animate", "move_parts", "placements",
                "teardrops", "generations", "via_pitch", "layer_dirs", "via_pass", "negotiate", "threads", "pairs", "pair_pull",
-               "pair_skew", "pair_zdiff", "until_stop", "prefer_width", "gpu")
+               "pair_skew", "pair_zdiff", "until_stop", "prefer_width", "gpu",
+               "angles_45")
 PLACE_SAVED = ("starts", "gap", "halo", "seed", "iters", "margin", "threads")
 
 # Options of the command line that are left out at their default value.
@@ -245,6 +248,8 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
         cmd += ["--net-widths", str(opts.net_widths)]
     if opts.net_priorities:
         cmd += ["--net-priorities", str(opts.net_priorities)]
+    if opts.angles_45:
+        cmd += ["--angles", "45"]
     if open_ended(opts):
         cmd.append("--until-stop")
     if opts.frames_dir:
@@ -252,6 +257,22 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
     if opts.report:
         cmd += ["--report", str(opts.report)]
     return cmd + _global_flags(opts)
+
+
+def build_angles_command(binary: str, board: Path, output: Path, nets: Sequence[str] = (),
+                         opts: Optional[RouteOptions] = None) -> List[str]:
+    """``gummiband angles45``: the unlocked tracks of ``board`` (of ``nets``, or all) on the 45
+    degree grid, without routing again. ``opts`` gives the global flags (threads, planes)."""
+    cmd = [binary, "angles45", str(board), "-o", str(output)]
+    if nets:
+        cmd += ["--nets", ",".join(nets)]
+    return cmd + _global_flags(opts or RouteOptions())
+
+
+def angles_line(stdout: str) -> Optional[str]:
+    """The summary line of ``gummiband angles45``."""
+    m = re.search(r"^45 degrees: .*$", stdout, re.M)
+    return m.group(0) if m else None
 
 
 def build_place_command(binary: str, board: Path, output: Path, report: Path,

@@ -73,6 +73,33 @@ bench/run-ext.sh corne [route args]
 The plane layers are marked as *power* layers in the stripped files, so the boards describe
 themselves.
 
+## Conventional 45 degree tracks
+
+`--angles 45` on the same routing as without it (`--runs 14 --generations 1`, 2026-10-31, 4
+cores). Length is the track length of the drawn copper before and after the step; off the grid is
+what kept its angle because no 45 degree path fit (with the necks that a minimum width rule keeps
+as they are). KiCad DRC counts without the types that the unrouted board already has.
+
+| Board | Length | Off the grid | Vias | KiCad DRC any-angle | KiCad DRC 45 degrees | Time of the step |
+| --- | --- | --- | --- | --- | --- | --- |
+| Lichtschnitzel | 2387 to 2493 mm (+4.4 %) | 127 mm (5 %) | 278, same | 16 clearance | 16 clearance | 0.8 s |
+| Arty | 2813 to 2932 mm (+4.2 %) | 148 mm (5 %) | 136, same | 4 hole clearance, 1 edge, 1 sliver | 4 hole clearance, 1 edge | 0.4 s |
+| Corne | 7719 to 8082 mm (+4.7 %) | 328 mm (4 %) | 374, same | 499 clearance, 1 crossing, 1 short, 1 hole, 5 slivers | 499 clearance, 1 hole | 1.3 s |
+
+The step adds no DRC error on any of them; where an old piece already had one it can only stay or
+go away.
+
+`gummiband angles45` does the same afterwards on the written any-angle files of this table,
+without routing again. It sees the copper as the file has it: runs of track between vias,
+branches and pads, with the necks below a minimum width left alone, so the numbers differ a
+little from the step inside `route`.
+
+| Board | Length | Off the grid | Runs changed | Vias | KiCad DRC any-angle | KiCad DRC afterwards | Time |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Lichtschnitzel | 2348 to 2446 mm (+4.2 %) | 60 mm (2.5 %) | 606 of 626 | same | 16 clearance | 16 clearance | 1.1 s |
+| Arty | 2818 to 2934 mm (+4.1 %) | 148 mm (5 %) | 431 of 444 | same | 4 hole clearance, 1 edge, 1 sliver | 4 hole clearance, 1 edge | 2.0 s |
+| Corne | 7846 to 8086 mm (+3.1 %) | 308 mm (4 %) | 2511 of 3139 | same | 499 clearance, 1 crossing, 1 short, 1 hole, 5 slivers | 499 clearance, 1 hole | 2.8 s |
+
 ## Compare two versions
 
 ```bash

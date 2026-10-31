@@ -144,6 +144,7 @@ fn initialize_list_load_route() {
         [
             "add_locked_copper",
             "add_zone",
+            "angles_45",
             "drc",
             "list_nets",
             "load_board",

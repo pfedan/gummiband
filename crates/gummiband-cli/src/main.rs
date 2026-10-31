@@ -10,6 +10,16 @@ use gummiband_core::route::RouterConfig;
 use gummiband_core::topo::SubstrateConfig;
 use gummiband_kicad::{KeepCopper, ReadOptions, read_board, write};
 
+/// Track angles of a routed result.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Angles {
+    /// Any-angle tracks with arcs, as the rubber bands lie.
+    Any,
+    /// Conventional 45 degree routing.
+    #[value(name = "45")]
+    Deg45,
+}
+
 #[derive(Parser)]
 #[command(name = "gummiband", about = "Topological rubber band autorouter for KiCad")]
 struct Cli {
@@ -167,6 +177,12 @@ enum Cmd {
         /// that has an `opt` value grows to that one, also without this flag
         #[arg(long, default_value_t = 0.0)]
         prefer_width: f64,
+        /// Track angles of the result: `any` keeps the tight any-angle tracks with arcs, `45`
+        /// turns them into conventional 45 degree routing as a last step (straight pieces in
+        /// eight directions, chamfered corners). The step never adds a clearance violation;
+        /// where a 45 degree path does not fit, a piece keeps its angle.
+        #[arg(long, value_enum, default_value_t = Angles::Any)]
+        angles: Angles,
     },
     /// Place parts from the netlist: locked footprints, connectors, modules, mounting holes,
     /// buttons and test points stay, everything else gets a new position. Its current position
@@ -215,6 +231,20 @@ enum Cmd {
         /// wide nets and switch nodes count their full length.
         #[arg(long)]
         semantic: bool,
+        /// Write a machine readable JSON report.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+    /// Turn the unlocked tracks of a routed board into 45 degree tracks, without routing again.
+    /// Vias, track ends, pads and locked tracks stay where they are; every new piece keeps the
+    /// clearances, and a piece that finds no room on the grid keeps its angle.
+    Angles45 {
+        board: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Only the tracks of these nets, comma separated (default: all nets).
+        #[arg(long, value_delimiter = ',')]
+        nets: Vec<String>,
         /// Write a machine readable JSON report.
         #[arg(long)]
         report: Option<PathBuf>,
@@ -359,6 +389,7 @@ fn main() -> Result<()> {
             net_widths,
             teardrops,
             net_priorities,
+            angles,
         } => {
             if until_stop && (shove || give > 0.0 || pairs) {
                 anyhow::bail!("--until-stop does not work with --shove, --give or --pairs");
@@ -568,6 +599,7 @@ fn main() -> Result<()> {
                 }
             };
             let b = &routed_board;
+            let mut res = res;
             let dt = t0.elapsed();
             // the geometry belongs to the board with the shifted parts
             let shifted;
@@ -582,6 +614,18 @@ fn main() -> Result<()> {
                 shifted = b.with_offsets(&res.offsets);
                 &shifted
             };
+            let octo = (angles == Angles::Deg45).then(|| {
+                let before = gummiband_core::check::check(b, &res.geometry).len();
+                let t1 = std::time::Instant::now();
+                let st = gummiband_core::octo::octilinear(b, &mut res.geometry);
+                let secs = t1.elapsed().as_secs_f64();
+                let after = gummiband_core::check::check(b, &res.geometry).len();
+                println!(
+                    "45 degrees: {} tracks, {:.0} -> {:.0} mm, {} pieces off the grid ({:.1} mm), {} sharp corners, violations {before} -> {after}, {secs:.1} s",
+                    st.tracks, st.length_before, st.length_after, st.any_angle, st.any_angle_length, st.sharp_corners
+                );
+                st
+            });
             println!(
                 "substrate: {} vertices, {} triangles, {} via sites",
                 sub.m.iter().map(|m| m.verts.len()).sum::<usize>(),
@@ -835,6 +879,7 @@ fn main() -> Result<()> {
                     "vias": st.vias,
                     "length_mm": st.length,
                     "length_lower_bound_mm": gummiband_core::length_lower_bound(b),
+                    "angles_45": octo,
                     "items_written": items.len(),
                     "violations": viol.iter().map(|v| serde_json::json!({
                         "what": v.what,
@@ -972,6 +1017,53 @@ fn main() -> Result<()> {
                 std::fs::write(path, serde_json::to_string_pretty(&json)?)?;
             }
             println!("wrote {}", output.display());
+        }
+        Cmd::Angles45 {
+            board: input,
+            output,
+            nets,
+            report,
+        } => {
+            let t0 = std::time::Instant::now();
+            let kb = read_board(
+                &input,
+                &ReadOptions {
+                    keep: KeepCopper::All,
+                    plane_layers: cli.plane_layers.clone(),
+                    ..Default::default()
+                },
+            )?;
+            let (text, r) = gummiband_kicad::octo_write::angles_45(&kb, &nets)?;
+            std::fs::write(&output, text)?;
+            let secs = t0.elapsed().as_secs_f64();
+            let st = &r.stats;
+            println!(
+                "45 degrees: {} tracks, {} changed, {:.0} -> {:.0} mm, {} pieces off the grid ({:.1} mm), {} sharp corners, violations {} -> {}, {secs:.1} s",
+                st.tracks,
+                r.tracks_changed,
+                st.length_before,
+                st.length_after,
+                st.any_angle,
+                st.any_angle_length,
+                st.sharp_corners,
+                r.violations_before,
+                r.violations_after
+            );
+            println!(
+                "replaced {} items with {} items, wrote {}",
+                r.items_removed,
+                r.items_written,
+                output.display()
+            );
+            if let Some(path) = report {
+                let json = serde_json::json!({
+                    "board": input.display().to_string(),
+                    "output": output.display().to_string(),
+                    "seconds": secs,
+                    "angles_45": r,
+                });
+                std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
+            }
         }
         Cmd::Strip {
             board,

@@ -821,6 +821,35 @@ mod tests {
     }
 
     #[test]
+    fn the_45_degree_step_keeps_ends_and_clearances() {
+        let b = twisted_board();
+        let mut res = run_to(&b, 0);
+        assert_eq!(res.stats.routed, res.stats.conns, "{:?}", res.stats.unrouted);
+        let before = check::check(&b, &res.geometry).len();
+        let ends: Vec<_> = res
+            .geometry
+            .tracks
+            .iter()
+            .map(|t| (t.pts[0], *t.pts.last().unwrap()))
+            .collect();
+        let mut again = res.geometry.clone();
+        let st = crate::octo::octilinear(&b, &mut res.geometry);
+        crate::octo::octilinear(&b, &mut again);
+        assert!(check::check(&b, &res.geometry).len() <= before);
+        assert!(loose_ends(&b, &res.geometry).is_empty());
+        for (t, (a, z)) in res.geometry.tracks.iter().zip(ends) {
+            assert!(t.pts[0].dist(a) < 1e-9 && t.pts.last().unwrap().dist(z) < 1e-9);
+            assert!(t.elems.iter().all(|e| matches!(e, crate::realize::Elem::Line(..))));
+        }
+        // the crossing bundle has room: everything lies on the grid
+        assert!(st.any_angle_length < 0.05 * st.length_after, "{st:?}");
+        assert!(st.length_after >= st.length_before * 0.99, "{st:?}");
+        // the same input gives the same output
+        let pts = |g: &Geometry| g.tracks.iter().map(|t| t.pts.clone()).collect::<Vec<_>>();
+        assert_eq!(pts(&res.geometry), pts(&again));
+    }
+
+    #[test]
     fn the_open_end_improves_and_repeats() {
         let b = twisted_board();
         let start = run_to(&b, 0);

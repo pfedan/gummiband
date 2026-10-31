@@ -109,6 +109,13 @@ ROUTE_TABS: Tuple = (
                   "boards where the search does. Results differ between GPUs, so use the CPU for a "
                   "final run.", "check"),
         )),
+        ("Result", (
+            Field("angles_45", "45 degree tracks (conventional look)",
+                  "Turns the any-angle tracks and arcs into straight pieces in steps of 45 degrees "
+                  "with chamfered corners, as a last step. Tracks get a few percent longer. It "
+                  "never adds a clearance violation: where no 45 degree path fits, a piece keeps "
+                  "its angle.", "check"),
+        )),
         ("Board", (
             PLANE_LAYERS,
             Field("net_widths", "Net widths file:",

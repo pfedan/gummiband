@@ -45,6 +45,24 @@
             ]
         },
         {
+            "identifier": "angles45",
+            "name": "45 degree tracks with Gummiband",
+            "description": "Turn the unlocked tracks into conventional 45 degree tracks without routing again: the nets of the selection, or all nets; vias, track ends and locked tracks stay",
+            "show-button": true,
+            "scopes": [
+                "pcb"
+            ],
+            "entrypoint": "gummiband_angles.py",
+            "icons-light": [
+                "icons/angles-light-24.png",
+                "icons/angles-light-48.png"
+            ],
+            "icons-dark": [
+                "icons/angles-dark-24.png",
+                "icons/angles-dark-48.png"
+            ]
+        },
+        {
             "identifier": "place",
             "name": "Place with Gummiband",
             "description": "Place the parts from the netlist; locked parts, connectors, modules, mounting holes, buttons and test points stay",
