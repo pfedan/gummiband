@@ -291,7 +291,8 @@ what is missing, full at 0.03 mm, so a spot that gets better counts before it is
 neck width for 1 mm around the spot, where the rules allow it, and only those nets move.
 
 The search has converged when even bold changes do not help: `TOP_LEVEL` side branches in a row
-have failed, each bolder than the last, and no measure has gained meanwhile. There is no count of
+have failed, each bolder than the last. One more connection or fewer spots start that over, a gain
+in vias or length only holds it, because those can go on falling for hours. There is no count of
 generations. Meanwhile a front keeps the results at the level of the best one that no other beats
 in both vias and length; they are finished like the best one and written next to the output, for
 the user to choose, because the cost weighs vias against length once and for all.

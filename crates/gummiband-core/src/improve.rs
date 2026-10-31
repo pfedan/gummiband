@@ -1002,7 +1002,6 @@ pub(crate) fn run(
                 }
                 best = s;
                 wins += 1;
-                level = 0;
             } else if left == 0 {
                 level += 1;
             } else {
@@ -1024,14 +1023,18 @@ pub(crate) fn run(
                 }
             }
         }
-        if mark.beaten_by(&Mark::of(&best.cand)) {
-            mark = Mark::of(&best.cand);
+        // what the board still lacks resets the boldness, a via less only holds it: vias and length
+        // can go on falling by a little for hours after the search has found its level
+        let now = Mark::of(&best.cand);
+        if mark.beaten_by(&now) {
+            if now.routed > mark.routed || now.flaws < mark.flaws {
+                level = 0;
+            }
+            mark = now;
             stale = 0;
-            level = 0;
             on_better(&best.cand, generation);
         } else if record {
             stale = 0;
-            level = 0;
         } else {
             stale += 1;
         }
