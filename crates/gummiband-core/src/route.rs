@@ -1429,7 +1429,12 @@ impl<'a> Router<'a> {
                 return false;
             }
         }
-        if self.board.edge_dist(p) < r + self.board.rules.edge_clearance {
+        let edge = if s.edge.is_nan() {
+            self.board.edge_dist(p)
+        } else {
+            s.edge
+        };
+        if edge < r + self.board.rules.edge_clearance {
             return false;
         }
         let (cx, cy) = Self::via_cell(p);

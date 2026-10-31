@@ -67,6 +67,10 @@ pub struct Site {
     pub nbrs: Vec<SiteNeighbor>,
     /// Via in pad: the pin whose pad holds the site.
     pub pad: Option<u32>,
+    /// Distance to the board edge (0 outside), as `Board::edge_dist` gives it; NaN where it is not
+    /// known yet (the nodes of soft copper). A board with many cutouts makes that distance dear,
+    /// and the router asks for it at every via site of every search.
+    pub edge: f64,
 }
 
 /// Immutable data shared by all router runs.
@@ -170,6 +174,7 @@ impl Substrate {
             p: n.at,
             nbrs: Vec::new(),
             pad: None,
+            edge: f64::NAN,
         }));
         let nsites = shared.sites.len();
         let mut meshes: Vec<Mesh> = layers
@@ -738,7 +743,8 @@ fn build_sites(board: &Board, shared: &Shared, pitch: f64) -> Vec<Site> {
     candidates
         .par_iter()
         .filter_map(|&p| {
-            if board.edge_dist(p) < min_via_r + board.rules.edge_clearance {
+            let edge = board.edge_dist(p);
+            if edge < min_via_r + board.rules.edge_clearance {
                 return None;
             }
             let mut nbrs = Vec::new();
@@ -776,7 +782,12 @@ fn build_sites(board: &Board, shared: &Shared, pitch: f64) -> Vec<Site> {
             if nbrs.iter().any(|n| (n.dist as f64) < min_via_r && copper(n)) {
                 return None;
             }
-            Some(Site { p, nbrs, pad: None })
+            Some(Site {
+                p,
+                nbrs,
+                pad: None,
+                edge,
+            })
         })
         .collect()
 }
@@ -803,7 +814,8 @@ fn build_pad_sites(board: &Board, shared: &Shared) -> Vec<Site> {
             pts.push(pin.pos - dir * d);
         }
         for p in pts {
-            if board.edge_dist(p) < min_via_r + board.rules.edge_clearance {
+            let edge = board.edge_dist(p);
+            if edge < min_via_r + board.rules.edge_clearance {
                 continue;
             }
             let mut nbrs = Vec::new();
@@ -840,6 +852,7 @@ fn build_pad_sites(board: &Board, shared: &Shared) -> Vec<Site> {
                     p,
                     nbrs,
                     pad: Some(pi as u32),
+                    edge,
                 });
             }
         }
