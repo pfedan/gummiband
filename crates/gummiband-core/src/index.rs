@@ -55,9 +55,17 @@ impl Hasher for FastHasher {
 
 pub type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
 
+/// The cell along one axis, clamped to the grid: the cast truncates, which is the floor for
+/// positive values, and anything below the first cell (or NaN) lands in it. `inv` is 1 / cell;
+/// the cells of all grids here are powers of two, where the product is exactly the quotient.
+#[inline]
+pub fn axis_cell(v: f64, o: f64, inv: f64, n: usize) -> usize {
+    (((v - o) * inv) as i64).clamp(0, n as i64 - 1) as usize
+}
+
 pub struct GridIndex {
     origin: Point,
-    cell: f64,
+    inv: f64,
     nx: usize,
     ny: usize,
     cells: Vec<Vec<u32>>,
@@ -70,7 +78,7 @@ impl GridIndex {
         let ny = ((b.height() / cell).ceil() as usize).max(1);
         GridIndex {
             origin: b.min,
-            cell,
+            inv: 1.0 / cell,
             nx,
             ny,
             cells: vec![Vec::new(); nx * ny],
@@ -78,7 +86,7 @@ impl GridIndex {
     }
 
     fn range(&self, r: &Rect) -> (usize, usize, usize, usize) {
-        let f = |v: f64, o: f64, n: usize| (((v - o) / self.cell).floor().max(0.0) as usize).min(n - 1);
+        let f = |v: f64, o: f64, n: usize| axis_cell(v, o, self.inv, n);
         (
             f(r.min.x, self.origin.x, self.nx),
             f(r.max.x, self.origin.x, self.nx),
@@ -122,11 +130,18 @@ impl GridIndex {
 /// growing the query radius by their largest half size.
 pub struct PointGrid {
     origin: Point,
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     cell: f64,
+    inv: f64,
     nx: usize,
     ny: usize,
     start: Vec<u32>,
     ids: Vec<u32>,
+    /// The cell of every key, by key, and the buffer for the next keys.
+    cells: Vec<u32>,
+    next: Vec<u32>,
+    /// Scratch of `update`.
+    runs: Vec<(u32, u32)>,
 }
 
 impl PointGrid {
@@ -137,10 +152,14 @@ impl PointGrid {
         let mut g = PointGrid {
             origin: b.min,
             cell,
+            inv: 1.0 / cell,
             nx,
             ny,
             start: vec![0; nx * ny + 1],
             ids: Vec::new(),
+            cells: Vec::new(),
+            next: Vec::new(),
+            runs: Vec::new(),
         };
         g.rebuild(keys);
         g
@@ -148,11 +167,73 @@ impl PointGrid {
 
     /// New keys on the same grid, without new allocations once the buffers are large enough.
     pub fn rebuild(&mut self, keys: &[Point]) {
+        let mut cells = std::mem::take(&mut self.next);
+        cells.clear();
+        cells.extend(keys.iter().map(|&p| self.cell_of(p) as u32));
+        let old = std::mem::replace(&mut self.cells, cells);
+        // a relaxation moves few keys into other cells from round to round, and a large grid
+        // costs more to sum up than its keys: then only the cells between change
+        if old.len() != self.cells.len() || !self.update(&old) {
+            self.build();
+        }
+        self.next = old;
+    }
+
+    /// The grid after keys moved from their `old` cells to `cells`, the same as `build` makes:
+    /// only the cells from where a key leaves to where it enters change, and the keys there.
+    /// False, and nothing changed, if that is a large part of the grid.
+    fn update(&mut self, old: &[u32]) -> bool {
+        let mut runs = std::mem::take(&mut self.runs);
+        runs.clear();
+        runs.extend(
+            old.iter()
+                .zip(&self.cells)
+                .filter(|(a, b)| a != b)
+                .map(|(&a, &b)| (a.min(b), a.max(b))),
+        );
+        runs.sort_unstable();
+        // overlapping runs share keys: merge them
+        let mut n = 0;
+        for i in 0..runs.len() {
+            if n > 0 && runs[i].0 <= runs[n - 1].1 {
+                runs[n - 1].1 = runs[n - 1].1.max(runs[i].1);
+            } else {
+                runs[n] = runs[i];
+                n += 1;
+            }
+        }
+        runs.truncate(n);
+        let span: usize = runs.iter().map(|&(lo, hi)| (hi - lo) as usize + 1).sum();
+        let small = span <= self.start.len() / 8;
+        if small {
+            for &(lo, hi) in &runs {
+                let (lo, hi) = (lo as usize, hi as usize);
+                // the keys of these cells keep their places in `ids` as a whole
+                let (a, b) = (self.start[lo] as usize, self.start[hi + 1] as usize);
+                let cells = &self.cells;
+                let ids = &mut self.ids[a..b];
+                ids.sort_unstable_by_key(|&i| (cells[i as usize] as u64) << 32 | i as u64);
+                let mut j = 0;
+                for c in lo..=hi {
+                    self.start[c] = (a + j) as u32;
+                    while j < ids.len() && cells[ids[j] as usize] as usize == c {
+                        j += 1;
+                    }
+                }
+            }
+        }
+        self.runs = runs;
+        small
+    }
+
+    /// The grid of `cells` from scratch.
+    fn build(&mut self) {
+        let cells = &self.cells;
         self.start.fill(0);
-        // start[c + 1] counts cell c, the prefix sum then makes it the end of cell c
-        for p in keys {
-            let c = self.cell_of(*p);
-            self.start[c + 1] += 1;
+        // start[c] counts cell c, the prefix sum then makes it the end of cell c (and the
+        // entry behind the last cell the number of keys)
+        for &c in cells {
+            self.start[c as usize] += 1;
         }
         let mut sum = 0;
         for s in &mut self.start {
@@ -160,17 +241,19 @@ impl PointGrid {
             *s = sum;
         }
         self.ids.clear();
-        self.ids.resize(keys.len(), 0);
+        self.ids.resize(cells.len(), 0);
         // filling from the back keeps the ids of a cell ascending and leaves start[c] at the
         // begin of cell c
-        for (i, p) in keys.iter().enumerate().rev() {
-            let c = self.cell_of(*p) + 1;
-            self.start[c] -= 1;
-            self.ids[self.start[c] as usize] = i as u32;
+        for (i, &c) in cells.iter().enumerate().rev() {
+            let s = &mut self.start[c as usize];
+            *s -= 1;
+            self.ids[*s as usize] = i as u32;
         }
-        // cell c now begins at start[c + 1]: shift back by one
-        self.start.rotate_left(1);
-        *self.start.last_mut().unwrap() = keys.len() as u32;
+    }
+
+    /// The cell of every key of the last build, by key.
+    pub fn key_cells(&self) -> &[u32] {
+        &self.cells
     }
 
     /// The ids by cell, ascending within a cell.
@@ -191,7 +274,7 @@ impl PointGrid {
     }
 
     fn clamp(&self, v: f64, o: f64, n: usize) -> usize {
-        (((v - o) / self.cell).floor().max(0.0) as usize).min(n - 1)
+        axis_cell(v, o, self.inv, n)
     }
 
     pub fn cell_of(&self, p: Point) -> usize {
@@ -218,6 +301,52 @@ impl PointGrid {
         for y in y0..=y1 {
             let row = y * self.nx;
             f(self.start[row + x0] as usize, self.start[row + x1 + 1] as usize);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::pt;
+
+    /// Keys that move a little from round to round: the grid that follows them is the grid
+    /// built from scratch.
+    #[test]
+    fn point_grid_follows_moving_keys() {
+        let mut bounds = Rect::empty();
+        bounds.add(pt(0.0, 0.0));
+        // keys on a part of the grid, so that a few moves change a small part of it
+        bounds.add(pt(80.0, 40.0));
+        let mut seed = 7u64;
+        let mut unit = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut keys: Vec<Point> = (0..400).map(|_| pt(unit() * 20.0, unit() * 10.0)).collect();
+        let mut grid = PointGrid::new(bounds, 0.25, &keys);
+        for round in 0..60 {
+            // some rounds move a few keys, some many, some none
+            let share = [0.0, 0.01, 0.1, 1.0][round % 4];
+            for k in keys.iter_mut() {
+                if unit() < share {
+                    *k = pt(k.x + (unit() - 0.5) * 0.6, k.y + (unit() - 0.5) * 0.6);
+                }
+            }
+            let old = grid.cells.clone();
+            grid.rebuild(&keys);
+            if share == 0.01 {
+                assert_ne!(old, grid.cells, "round {round} moves keys to other cells");
+                let mut again = PointGrid::new(bounds, 0.25, &keys);
+                again.cells = old;
+                again.build();
+                again.cells = grid.cells.clone();
+                assert!(again.update(&grid.next), "round {round} updates in place");
+                assert_eq!(again.ids, grid.ids);
+            }
+            let fresh = PointGrid::new(bounds, 0.25, &keys);
+            assert_eq!(grid.ids, fresh.ids, "round {round}");
+            assert_eq!(grid.start, fresh.start, "round {round}");
         }
     }
 }
