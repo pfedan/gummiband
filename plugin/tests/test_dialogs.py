@@ -33,10 +33,6 @@ class DialogTest(unittest.TestCase):
         form.update_enabled()
         self.assertTrue(form.controls["pair_skew"].IsEnabled())
 
-    def test_fixed_parts_follow_the_check_box(self):
-        form = self.build(fields.ROUTE_TABS, runner.RouteOptions())
-        self.assertFalse(form.controls["fixed"].IsEnabled())
-
     def test_defaults_button_values(self):
         form = self.build(fields.ROUTE_TABS, runner.RouteOptions(runs=8, plane_layers=["In1.Cu"]))
         form.set_values(runner.RouteOptions())

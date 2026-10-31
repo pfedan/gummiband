@@ -243,6 +243,31 @@ open({str(self.out)!r}, "w").write("done")
         self.assertEqual(cmd[cmd.index("--prefer-width") + 1], "0.25")
 
 
+class GpuTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.out = self.dir / "o.kicad_pcb"
+        self.exe = make_exe(self.dir / "gb", f"""
+import os
+open({str(self.out)!r}, "w").write(os.environ.get("GB_GPU", "none"))
+""")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_environment_of_the_router(self):
+        runner.run_route([str(self.exe)], self.out, self.dir, gpu=True)
+        self.assertEqual(self.out.read_text(), "1")
+        runner.run_route([str(self.exe)], self.out, self.dir)
+        self.assertEqual(self.out.read_text(), "none")
+
+    def test_binary_without_gpu_is_reported(self):
+        line = "warning: GB_GPU has no effect, this binary is built without the gpu feature\n"
+        self.assertTrue(runner.RouteResult([], 0, STDOUT + line, "").gpu_missing())
+        self.assertFalse(runner.RouteResult([], 0, STDOUT, "").gpu_missing())
+
+
 class TailTest(unittest.TestCase):
     def test_tail(self):
         self.assertEqual(runner.tail(""), "(empty)")
