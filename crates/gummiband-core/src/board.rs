@@ -190,6 +190,12 @@ pub struct Board {
     pub courtyards: std::collections::HashMap<String, Rect>,
     /// Track to track clearances of custom rules, above the net class clearance (a < b).
     pub pair_clearance: crate::index::FastMap<(NetId, NetId), f64>,
+    /// Clearances of custom rules for copper of any kind, above the net class clearance (a < b).
+    #[serde(default)]
+    pub item_clearance: crate::index::FastMap<(NetId, NetId), f64>,
+    /// Hole clearances of custom rules per net, above the one of the board.
+    #[serde(default)]
+    pub net_hole_clearance: crate::index::FastMap<NetId, f64>,
     /// Obstacles (pads, holes, copper graphics) by footprint reference.
     #[serde(default)]
     pub footprint_obstacles: std::collections::HashMap<String, Vec<usize>>,
@@ -594,6 +600,21 @@ impl Board {
         let base = self.clearance(Some(a), Some(b));
         let key = (a.min(b), a.max(b));
         self.pair_clearance.get(&key).map_or(base, |&c| c.max(base))
+    }
+
+    /// Clearance of custom rules between any copper of two nets (0: none, the class decides).
+    pub fn item_gap(&self, a: NetId, b: Option<NetId>) -> f64 {
+        let Some(b) = b.filter(|_| !self.item_clearance.is_empty()) else {
+            return 0.0;
+        };
+        self.item_clearance.get(&(a.min(b), a.max(b))).copied().unwrap_or(0.0)
+    }
+
+    /// Clearance between copper of a net and a hole.
+    pub fn hole_gap(&self, net: NetId) -> f64 {
+        self.net_hole_clearance
+            .get(&net)
+            .map_or(self.rules.hole_clearance, |&c| c.max(self.rules.hole_clearance))
     }
 
     pub fn bbox(&self) -> Rect {

@@ -44,6 +44,10 @@ struct ItemProps<'a> {
 }
 
 pub fn parse_rules(text: &str) -> Vec<ClearanceRule> {
+    parse_constraints(text, "clearance")
+}
+
+fn parse_constraints(text: &str, what: &str) -> Vec<ClearanceRule> {
     // comments start with '#' and run to the end of the line
     let text: String = text
         .lines()
@@ -60,7 +64,7 @@ pub fn parse_rules(text: &str) -> Vec<ClearanceRule> {
         let Some(cond) = r.child_str("condition") else { continue };
         let Some(expr) = parse_expr(cond) else { continue };
         for c in r.children("constraint") {
-            if c.args().first().and_then(|x| x.as_str()) != Some("clearance") {
+            if c.args().first().and_then(|x| x.as_str()) != Some(what) {
                 continue;
             }
             if let Some(min) = constraint_min(c) {
@@ -214,6 +218,40 @@ fn quoted_after(s: &str, prefix: &str) -> Vec<String> {
 
 /// Track to track clearance per net pair (only pairs above the netclass clearance matter).
 pub fn pair_clearances(board: &Board, rules: &[ClearanceRule]) -> HashMap<(NetId, NetId), f64> {
+    clearances(board, rules, "Track")
+}
+
+/// The same for copper of any kind: a rule that asks for tracks does not hold here. Vias stand in
+/// for pads as well, the rules of a board do not tell them apart.
+pub fn item_clearances(board: &Board, rules: &[ClearanceRule]) -> HashMap<(NetId, NetId), f64> {
+    clearances(board, rules, "Via")
+}
+
+/// Hole clearance per net (`hole_clearance` constraints) above the one of the board.
+pub fn hole_clearances(board: &Board, text: &str) -> HashMap<NetId, f64> {
+    let mut out = HashMap::new();
+    for r in parse_constraints(text, "hole_clearance") {
+        for (i, net) in board.nets.iter().enumerate() {
+            let a = ItemProps {
+                kind: "Via",
+                net: &net.name,
+                class: &board.classes[net.class as usize].name,
+            };
+            let hole = ItemProps {
+                kind: "Hole",
+                net: "",
+                class: "",
+            };
+            if r.min > board.rules.hole_clearance && (eval(&r.cond, &a, &hole) || eval(&r.cond, &hole, &a)) {
+                let e = out.entry(i as NetId).or_insert(0.0_f64);
+                *e = e.max(r.min);
+            }
+        }
+    }
+    out
+}
+
+fn clearances(board: &Board, rules: &[ClearanceRule], kind: &str) -> HashMap<(NetId, NetId), f64> {
     let mut out = HashMap::new();
     if rules.is_empty() {
         return out;
@@ -229,12 +267,12 @@ pub fn pair_clearances(board: &Board, rules: &[ClearanceRule]) -> HashMap<(NetId
             let (na, nb) = (&board.nets[a], &board.nets[b]);
             let coupled = partners.contains(&(a as NetId, b as NetId));
             let pa = ItemProps {
-                kind: "Track",
+                kind,
                 net: &na.name,
                 class: &board.classes[na.class as usize].name,
             };
             let pb = ItemProps {
-                kind: "Track",
+                kind,
                 net: &nb.name,
                 class: &board.classes[nb.class as usize].name,
             };

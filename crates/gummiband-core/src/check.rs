@@ -173,8 +173,10 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
                 if o.net == Some(net) && o.kind != ObstacleKind::Hole {
                     continue;
                 }
+                // a via goes through all layers, also the planes
+                let via = matches!(p, Piece::Via { .. });
                 if !(o.layers.iter().any(|l| routing.has(l) && layer_has(l))
-                    || (o.hole.is_some() && matches!(p, Piece::Via { .. })))
+                    || (via && (o.hole.is_some() || matches!(o.kind, ObstacleKind::Keepout { vias: true, .. }))))
                 {
                     continue;
                 }
@@ -189,8 +191,8 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
                         }
                         crate::board::KEEPOUT_GAP
                     }
-                    ObstacleKind::Hole => board.rules.hole_clearance,
-                    _ => o.clearance.max(clr(net)),
+                    ObstacleKind::Hole => board.hole_gap(net),
+                    _ => o.clearance.max(clr(net)).max(board.item_gap(net, o.net)),
                 };
                 let d = o.shape.dist(&shape);
                 if d < need - 1e-4 {
@@ -254,7 +256,7 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
                 let need = if matches!((p, q), (Piece::Seg { .. }, Piece::Seg { .. })) {
                     board.track_clearance(net, qnet)
                 } else {
-                    clr(net).max(clr(qnet))
+                    clr(net).max(clr(qnet)).max(board.item_gap(net, Some(qnet)))
                 };
                 if d < need - 1e-4 {
                     out.push(Violation {

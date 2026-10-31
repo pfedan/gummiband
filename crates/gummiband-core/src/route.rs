@@ -508,15 +508,15 @@ impl<'a> Router<'a> {
     // ------------------------------------------------------------------ clearances
 
     /// Clearance a route of clearance `c` keeps from obstacle `obs`.
-    pub fn eff_clearance(&self, obs: u32, c: f64) -> f64 {
+    pub fn eff_clearance(&self, obs: u32, c: f64, net: NetId) -> f64 {
         if obs == OUTSIDE {
             return self.board.rules.edge_clearance;
         }
         let o = &self.board.obstacles[obs as usize];
         match o.kind {
             ObstacleKind::Keepout { .. } => crate::board::KEEPOUT_GAP,
-            ObstacleKind::Hole => self.board.rules.hole_clearance.max(o.clearance),
-            _ => o.clearance.max(c),
+            ObstacleKind::Hole => self.board.hole_gap(net).max(o.clearance),
+            _ => o.clearance.max(c).max(self.board.item_gap(net, o.net)),
         }
     }
 
@@ -545,7 +545,7 @@ impl<'a> Router<'a> {
         }))
     }
 
-    fn via_need(via: &ViaInfo, it: &Item) -> f64 {
+    fn via_need(board: &Board, via: &ViaInfo, it: &Item) -> f64 {
         if via.net == NetId::MAX {
             // phantom point: tracks on both sides together keep one clearance
             return it.c / 2.0 + it.w / 2.0;
@@ -553,7 +553,7 @@ impl<'a> Router<'a> {
         if via.net == it.net {
             0.0
         } else {
-            via.r + via.clearance.max(it.c) + it.w / 2.0
+            via.r + via.clearance.max(it.c).max(board.item_gap(it.net, Some(via.net))) + it.w / 2.0
         }
     }
 
@@ -565,10 +565,10 @@ impl<'a> Router<'a> {
             if self.obs_net(d.obs) == Some(it.net) {
                 continue;
             }
-            need = need.max((self.eff_clearance(d.obs, it.c) + it.w / 2.0) * d.factor as f64);
+            need = need.max((self.eff_clearance(d.obs, it.c, it.net) + it.w / 2.0) * d.factor as f64);
         }
         if let Some(via) = self.via_at(li, m.edges[e as usize][end]) {
-            need = need.max(Self::via_need(&via, it));
+            need = need.max(Self::via_need(self.board, &via, it));
         }
         need
     }
@@ -582,10 +582,10 @@ impl<'a> Router<'a> {
             if o == NONE || self.obs_net(o) == Some(it.net) {
                 continue;
             }
-            need = need.max(self.eff_clearance(o, it.c) + it.w / 2.0);
+            need = need.max(self.eff_clearance(o, it.c, it.net) + it.w / 2.0);
         }
         if let Some(via) = self.via_at(li, v) {
-            need = need.max(Self::via_need(&via, it));
+            need = need.max(Self::via_need(self.board, &via, it));
         }
         need
     }
@@ -839,11 +839,11 @@ impl<'a> Router<'a> {
         let mut need: f64 = 0.0;
         for &o in obs {
             if self.obs_net(o) != Some(it.net) {
-                need = need.max(self.eff_clearance(o, it.c) + it.w / 2.0);
+                need = need.max(self.eff_clearance(o, it.c, it.net) + it.w / 2.0);
             }
         }
         if let Some(via) = via_here {
-            need = need.max(Self::via_need(&via, it));
+            need = need.max(Self::via_need(self.board, &via, it));
         }
         if need <= 0.0 {
             return None;
@@ -985,7 +985,7 @@ impl<'a> Router<'a> {
         }
         let extra_end = |vert: u32, it: &Item| -> f64 {
             match extra_via {
-                Some((_, via)) if vert == via_vertex_here => Self::via_need(via, it),
+                Some((_, via)) if vert == via_vertex_here => Self::via_need(self.board, via, it),
                 _ => 0.0,
             }
         };
@@ -1410,7 +1410,7 @@ impl<'a> Router<'a> {
                     None => 0.0,
                 }
             } else {
-                r + self.eff_clearance(n.obs, clr) + self.cfg.margin
+                r + self.eff_clearance(n.obs, clr, net) + self.cfg.margin
             };
             if (n.dist as f64) < need {
                 return false;
@@ -1437,7 +1437,7 @@ impl<'a> Router<'a> {
                         let need = if o.net == net {
                             holes
                         } else {
-                            (r + o.r + clr.max(o.clearance)).max(holes)
+                            (r + o.r + clr.max(o.clearance).max(self.board.item_gap(net, Some(o.net)))).max(holes)
                         };
                         if d < need {
                             return false;
@@ -1530,7 +1530,7 @@ impl<'a> Router<'a> {
                         &items,
                         len,
                         |it| self.vertex_need(li, vi, it) + margin,
-                        |it| Self::via_need(&via, it) + margin,
+                        |it| Self::via_need(self.board, &via, it) + margin,
                         &[],
                         0.0,
                     );

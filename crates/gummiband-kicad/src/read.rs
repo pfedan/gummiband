@@ -71,6 +71,8 @@ pub fn read_board(path: &Path, opts: &ReadOptions) -> Result<KicadBoard> {
     if let Ok(dru) = std::fs::read_to_string(path.with_extension("kicad_dru")) {
         let rules = crate::dru::parse_rules(&dru);
         kb.board.pair_clearance = crate::dru::pair_clearances(&kb.board, &rules).into_iter().collect();
+        kb.board.item_clearance = crate::dru::item_clearances(&kb.board, &rules).into_iter().collect();
+        kb.board.net_hole_clearance = crate::dru::hole_clearances(&kb.board, &dru).into_iter().collect();
         crate::dru::apply_width_rules(&mut kb.board, &dru);
         crate::dru::apply_pair_rules(&mut kb.board, &dru);
     }
