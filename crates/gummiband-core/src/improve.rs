@@ -195,7 +195,7 @@ fn pick(s: &State, stale: usize, boldness: usize, bandit: Option<&Bandit>, rng: 
 /// A bold move for a side branch: a way for an open connection, while there are any, or a whole
 /// area, more of it with every branch that failed.
 fn bold(s: &State, level: usize, rng: &mut Rng) -> Move {
-    if !s.router.unrouted().is_empty() && rng.unit() < 0.8 {
+    if !s.router.unrouted().is_empty() && rng.unit() < ideas().bold_aim {
         return aim(s, 1 + level, rng);
     }
     let (at, _) = spot(s, rng);
@@ -1459,6 +1459,9 @@ struct Ideas {
     /// `GB_SPOT_FADE`: a clearance spot that many moves failed to clear gets fewer moves, see
     /// [`SpotFade`].
     spot_fade: bool,
+    /// `GB_BOLD_AIM=share`: that share of the bold moves that start a side branch aims at an open
+    /// connection while there is one; the rest take a whole area (default 0.8).
+    bold_aim: f64,
 }
 
 fn ideas() -> &'static Ideas {
@@ -1471,6 +1474,7 @@ fn ideas() -> &'static Ideas {
         merge: std::env::var("GB_MERGE").is_ok(),
         window: env("GB_WINDOW", 0.0),
         spot_fade: std::env::var("GB_SPOT_FADE").is_ok(),
+        bold_aim: env("GB_BOLD_AIM", 0.8),
     })
 }
 
