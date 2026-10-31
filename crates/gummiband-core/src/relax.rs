@@ -392,6 +392,18 @@ pub fn simplify(pts: &[Point], tol: f64) -> Vec<Point> {
 }
 
 pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConfig) {
+    relax_while(board, sub, geo, cfg, &|| true);
+}
+
+/// `relax`, as long as `go_on` says so before each round. False once it says no, and then `geo`
+/// is left half way: for a mutant of the open end that is no longer needed.
+pub fn relax_while(
+    board: &Board,
+    sub: &Substrate,
+    geo: &mut Geometry,
+    cfg: &RelaxConfig,
+    go_on: &dyn Fn() -> bool,
+) -> bool {
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
     let t_start = std::time::Instant::now();
     // coarse points while the bands move a lot, fine points for the final clearance work
@@ -635,6 +647,9 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
     let via_gain = 10.0;
     let starts_batch = |it: usize| it == 0 || it % 10 == 9;
     for it in 0..cfg.iterations {
+        if !go_on() {
+            return false;
+        }
         let on_gpu_now = it < gpu_end;
         // anneal: the last quarter only resolves clearances
         let tension = if annealing(it) { 0.0 } else { cfg.tension };
@@ -1230,6 +1245,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             fitted: std::mem::take(&mut t.fitted),
         };
     }
+    true
 }
 
 /// Wake the sleeping copper that the waking copper violates. A sleeping track that only has

@@ -588,7 +588,7 @@ fn first_through<'a, const N: usize>(
 }
 
 /// `go_on` tells a mutant whether it is still needed: a generation may have all it needs before
-/// the mutant is done, then it stops before its relaxation.
+/// the mutant is done, then it stops, also in the middle of its relaxation.
 #[allow(clippy::too_many_arguments)]
 fn mutant<'a>(
     board: &'a Board,
@@ -648,7 +648,9 @@ fn mutant<'a>(
     }
     let (fresh, segs, sites) = r.tagged_from(s.router.segs.len() as u32);
     let (mut geo, segs, sites) = warm_start(s, &r, fresh, &segs, &sites);
-    relax::relax(board, sub, &mut geo, relax_cfg);
+    if !relax::relax_while(board, sub, &mut geo, relax_cfg, go_on) || !go_on() {
+        return None;
+    }
     let mut cand = candidate(board, &r, geo, routed, s.cand.cfg.clone(), generation);
     judge(board, &mut cand);
     if !loose_ends(board, &cand.geo, &conns.iter().map(|&ci| r.conns[ci].net).collect::<Vec<_>>()).is_empty() {

@@ -244,8 +244,8 @@ fit in. Many moves come to nothing (the connections find their old ways again), 
 not start a fixed number of mutants and wait for all of them: every core takes the next move as soon
 as it is free, until the generation has its mutants (as many as the portfolio has runs, half of them
 for the side branch, if there is one). The first ones in the order of the moves count, not the first
-ones done, so the result does not depend on the threads; a mutant that is no longer needed stops
-before its relaxation.
+ones done, so the result does not depend on the threads; a mutant that is no longer needed stops,
+also in the middle of its relaxation.
 Every 24 generations the whole board is relaxed again, tension first, which also tightens
 what has been asleep. After 24 generations without a noticeable gain a side branch starts from the
 result with a bold change, from a handful of connections around a spot up to a quarter of the board
