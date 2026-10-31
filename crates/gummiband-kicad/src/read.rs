@@ -115,9 +115,8 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
                 }
             }
             Some("zone") => r.read_zone(n, opts),
-            Some("gr_rect") | Some("gr_line") | Some("gr_arc") | Some("gr_circle") | Some("gr_poly") => {
-                r.read_graphic(n, None)
-            }
+            Some("gr_rect") | Some("gr_line") | Some("gr_arc") | Some("gr_circle") | Some("gr_poly")
+            | Some("gr_curve") => r.read_graphic(n, None),
             Some("gr_text") => r.read_text(n, None),
             _ => {}
         }
@@ -944,6 +943,17 @@ impl Reader {
             "poly" => {
                 polyline = pts(g).into_iter().map(map).collect();
                 closed = true;
+            }
+            "curve" => {
+                if let [a, b, c, d] = pts(g)[..] {
+                    polyline = (0..=32)
+                        .map(|i| {
+                            let t = i as f64 / 32.0;
+                            let u = 1.0 - t;
+                            map(a * (u * u * u) + b * (3.0 * u * u * t) + c * (3.0 * u * t * t) + d * (t * t * t))
+                        })
+                        .collect();
+                }
             }
             _ => {}
         }

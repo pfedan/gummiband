@@ -30,9 +30,10 @@ pub struct RelaxConfig {
     pub max_step: f64,
     /// Experimental: run the tension rounds on the GPU (needs the `gpu` feature).
     pub gpu: bool,
-    /// The board edge pushes vias as well and a via stays in the plane it reaches. Off for the
-    /// search itself, where vias stay near the place the router gave them; passes that push hard
-    /// can shove a via over the edge rule, or out of the zone it hangs on.
+    /// The board edge pushes vias as well, a via stays in the plane it reaches, and tracks leave
+    /// fine pitch pads straight (see [`pin_rails`]). Off for the search itself, where vias stay
+    /// near the place the router gave them; passes that push hard can shove a via over the edge
+    /// rule, or out of the zone it hangs on.
     pub via_edge: bool,
     /// Finish with the shortcuts of [`taut`]. Off, the tracks stay chains of short pieces where
     /// the rounds left them, and a clearance check can say where it hurts.
@@ -61,6 +62,79 @@ struct Piece {
     a: Point,
     b: Point,
     track: u32,
+}
+
+/// The way a track leaves a fine pitch pad: on the middle of the pad, up to `len` from its centre.
+/// Next to a pin at 0.4 mm pitch there is room for the track and hardly more, and neighbours push
+/// each other sideways: a track that lies 20 um off the middle of its own pad breaks the clearance
+/// to the next one.
+#[derive(Debug, Clone, Copy)]
+struct Rail {
+    at: Point,
+    dir: Point,
+    len: f64,
+}
+
+/// Pads count as fine pitch up to this distance to the next pad of their part.
+const RAIL_PITCH: f64 = 0.65;
+/// How far a rail goes on beyond the end of the pad. Longer rails take the room to fan out.
+const RAIL_OUT: f64 = 0.1;
+
+fn pin_rails(board: &Board) -> crate::index::FastMap<u32, Vec<Rail>> {
+    let mut parts: crate::index::FastMap<&str, Vec<usize>> = Default::default();
+    for (i, p) in board.pins.iter().enumerate() {
+        parts.entry(p.footprint.as_str()).or_default().push(i);
+    }
+    let mut out: crate::index::FastMap<u32, Vec<Rail>> = Default::default();
+    for pins in parts.values().filter(|p| p.len() >= 4) {
+        let centre = pins.iter().map(|&p| board.pins[p].pos).fold(pt(0.0, 0.0), |a, b| a + b) * (1.0 / pins.len() as f64);
+        for &i in pins {
+            let pin = &board.pins[i];
+            let pitch = pins
+                .iter()
+                .filter(|&&j| j != i)
+                .map(|&j| board.pins[j].pos.dist(pin.pos))
+                .fold(f64::INFINITY, f64::min);
+            let Some(&o) = pin.obstacles.first().filter(|_| pitch <= RAIL_PITCH) else {
+                continue;
+            };
+            let bb = board.obstacles[o].shape.bbox();
+            let (w, h) = (bb.width(), bb.height());
+            let out_of_part = pin.pos - centre;
+            let (dir, along) = if w >= h {
+                (pt(out_of_part.x.signum(), 0.0), w)
+            } else {
+                (pt(0.0, out_of_part.y.signum()), h)
+            };
+            if dir.len2() > 0.0 {
+                out.entry(pin.net).or_default().push(Rail {
+                    at: pin.pos,
+                    dir,
+                    len: along / 2.0 + RAIL_OUT,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The rail a track end at index 0 of `pts` follows: a pad of its net, and the track goes that way.
+fn rail_of<'a>(rails: &[Rail], pts: impl Iterator<Item = &'a Point> + Clone) -> Option<Rail> {
+    let start = *pts.clone().next()?;
+    let r = *rails.iter().find(|r| r.at.dist(start) < 0.35)?;
+    let far = pts.map(|p| *p - r.at).find(|d| d.len() >= r.len)?;
+    (far.dot(r.dir) >= 0.5 * far.len()).then_some(r)
+}
+
+/// Pull the points of a track end onto its rail.
+fn follow<'a>(r: &Rail, pts: impl Iterator<Item = &'a mut Point>) {
+    for p in pts {
+        let s = (*p - r.at).dot(r.dir);
+        if s > r.len {
+            break;
+        }
+        *p = r.at + r.dir * s.max(0.0);
+    }
 }
 
 /// Squared distances are compared with this much slack, so that a rejection is certain and
@@ -238,6 +312,19 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         .and_then(|v| v.parse().ok())
         .unwrap_or((cfg.spacing * 2.0).max(0.1));
     let mut tracks: Vec<Vec<Point>> = geo.tracks.iter().map(|t| resample(&t.pts, coarse)).collect();
+    let rails: Vec<[Option<Rail>; 2]> = if cfg.via_edge {
+        let by_net = pin_rails(board);
+        geo.tracks
+            .iter()
+            .zip(&tracks)
+            .map(|(t, p)| match by_net.get(&t.net) {
+                Some(r) => [rail_of(r, p.iter()), rail_of(r, p.iter().rev())],
+                None => [None, None],
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     // custom rules between items of two nets are rare: most lookups below are cut short by this
     let item_max = board
         .item_clearance
@@ -876,6 +963,14 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 out
             })
             .collect();
+        for (ti, ends) in rails.iter().enumerate().filter(|(ti, _)| awake[*ti]) {
+            if let Some(r) = &ends[0] {
+                follow(r, tracks[ti].iter_mut());
+            }
+            if let Some(r) = &ends[1] {
+                follow(r, tracks[ti].iter_mut().rev());
+            }
+        }
         if let Some(moves) = gpu_moves {
             let mut at = 0;
             for p in &mut tracks {
@@ -940,7 +1035,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
     }
     let t_taut = std::time::Instant::now();
     let tracks: Vec<(Vec<Point>, Vec<Elem>)> = if cfg.taut {
-        prof::time(Slot::Taut, || taut(board, sub, geo, tracks, cfg, &awake))
+        prof::time(Slot::Taut, || taut(board, sub, geo, tracks, cfg, &awake, &rails))
     } else {
         tracks
             .into_iter()
@@ -1085,6 +1180,7 @@ fn taut(
     mut tracks: Vec<Vec<Point>>,
     cfg: &RelaxConfig,
     awake: &[bool],
+    rails: &[[Option<Rail>; 2]],
 ) -> Vec<(Vec<Point>, Vec<Elem>)> {
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
     let bounds = board.bbox().grow(5.0);
@@ -1167,7 +1263,7 @@ fn taut(
                 if vn == net {
                     continue;
                 }
-                let need = vr + c.max(clr(vn)) + w / 2.0 + m;
+                let need = vr + c.max(clr(vn)).max(board.item_gap(net, Some(vn))) + w / 2.0 + m;
                 let reach = need + 1e-9;
                 if vc.x >= r.min.x - reach
                     && vc.x <= r.max.x + reach
@@ -1201,9 +1297,22 @@ fn taut(
             result.push((p.clone(), p.windows(2).map(|w| Elem::Line(w[0], w[1])).collect()));
             continue;
         }
+        // a shortcut must not leave a rail before its end
+        let mut stops: Vec<usize> = Vec::new();
+        if let Some(ends) = rails.get(ti) {
+            let inside = |p: &Point, r: &Rail| (*p - r.at).dot(r.dir) <= r.len;
+            if let Some(r) = &ends[0] {
+                stops.push(pts.iter().take_while(|p| inside(p, r)).count().saturating_sub(1));
+            }
+            if let Some(r) = &ends[1] {
+                stops.push(n - pts.iter().rev().take_while(|p| inside(p, r)).count().max(1));
+            }
+            stops.sort_unstable();
+        }
         let mut out = vec![pts[0]];
         let mut i = 0;
         while i < n - 1 {
+            let n = stops.iter().find(|&&k| k > i).map_or(n, |&k| k + 1);
             // farthest visible point: exponential search, then bisection (visibility along a
             // band is close to monotone, so this needs a handful of checks instead of a scan)
             let mut good = i + 1;
