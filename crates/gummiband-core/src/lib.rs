@@ -466,7 +466,9 @@ pub fn route_board(
     let mut hot = best_score.2.clone();
     let mut rng = Rng(0x91ace);
     for round in 1..=rounds {
-        if (hot.is_empty() && best.1.stats.unrouted.is_empty()) || search.stopped() {
+        // GB_PLACE_AFTER_STOP: an open end that was stopped still gets the fast rounds below
+        let after_stop = search.open_end.is_some() && std::env::var("GB_PLACE_AFTER_STOP").is_ok();
+        if (hot.is_empty() && best.1.stats.unrouted.is_empty()) || (search.stopped() && !after_stop) {
             break;
         }
         let cur = board.with_offsets(&offsets);
@@ -509,7 +511,7 @@ pub fn route_board(
         // a full new search pays off only for a handful of local problems, and only on boards
         // where a search is not expensive; otherwise the fast path above is all there is.
         // By board size and not by the clock: the result must not depend on the machine.
-        if hot.len() > 20 || best.1.stats.conns > 400 {
+        if hot.len() > 20 || best.1.stats.conns > 400 || search.stopped() {
             continue;
         }
         let (sub, mut res) = route_search(&moved, sub_cfg, base, search);
@@ -930,6 +932,11 @@ pub fn route_fixed(
             if check::check(board, &best.geo).len() > check::check(board, &plain).len() {
                 best.geo = plain;
             }
+        }
+        if std::env::var("GB_TAPER").is_ok()
+            && let Some(g) = improve::taper_spots(board, &best.geo)
+        {
+            best.geo = g;
         }
         best
     };
