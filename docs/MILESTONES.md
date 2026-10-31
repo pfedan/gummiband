@@ -118,6 +118,31 @@ the violations are the price of the last connections through the pin rows. Origi
   the pin row before the fan-out. Longer necks and more reserve did not help, neither did leaving
   out the tightening in that pass. KiCad's DRC stops at 199 or 499 hits per type, so those are
   limits and not results. Solder mask openings are no obstacles for the router.
+- Aimed moves for open connections in the open end, 2026-10-31 (see ARCHITECTURE). The search did
+  find topologies with one more connection: on Corne 288 of 791 moves in one run, but only 3 of
+  84 in a closer look beat the result, the others brought 4 to 20 shorts. So most of the gain
+  comes from the start of the relaxation (new tracks between their real neighbours, new vias past
+  the tracks they lie behind) and from a side branch that works the shorts off, the move only
+  supplies the candidates. Measured with `--geometry-generations 1`, 4 threads, three runs side by
+  side, until convergence or 1500 s, before and after, routed, vias, spots:
+  - Corne seed 1: 473, 361, 24 and 479, 405, 39. Seed 2: 476, 383, 35 and 481, 391, 34. Seed 3:
+    481, 404, 36. KiCad reports 9 and 6 unconnected before, 3 and 1 after.
+  - Arty seed 1: 322, 137, 0 and 323, 117, 0 (one build before the last fixes). Seed 2: 322, 123,
+    0 (150 s, all cores) and 323, 119, 0. KiCad: 0 unconnected instead of 1, the 4 hole clearance
+    errors of the empty board stay.
+  - Lichtschnitzel seed 1: 348, 201, 1 and 348, 209, 2. Seed 2: 348, 191, 1 and 348, 176, 0, DRC
+    clean instead of 10 errors.
+  - Generations per second on Corne 0.25 to 0.41 instead of 0.42 to 0.46, because more mutants get
+    as far as the relaxation; Arty and Lichtschnitzel unchanged within the noise.
+  - Not proven, single seeds: the cheaper via (without it Corne seeds 1, 2: 482 and 480, with 433
+    vias, against 479 and 481 with about 400 vias) and the chain of `clear_ways` (without it
+    481 and 481). A run without the immediate side branch reached 480 on seed 2, but 846 s into
+    the open end against 38 s. The one complete Corne, 482/482 with 0 unconnected, came from the
+    run without the cheaper via; its clearance errors are as many as in the other runs.
+  - Open: Corne keeps its clearance errors (KiCad's limit of 499 is reached in most runs), and the
+    last connection on most seeds is `/right/D+` from `rR4.1`, whose pad lies in a pocket: it has
+    to leave through a via in the pad. A site that had a via once stays split, so a via in a pad
+    that was ripped up cannot come back to that site.
 - Negotiated routing: done as an option, `route --negotiate N` (see ARCHITECTURE). Measured on
   2026-10-30 with `--runs 14 --generations 1 --negotiate 20`, KiCad DRC against the plain run:
   `fine_pitch_mixed` 0 open and 0 errors instead of 8 and 7, `four_signal_layers` 0 open instead

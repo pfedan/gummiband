@@ -106,7 +106,7 @@ struct Wrap {
 }
 
 impl Router<'_> {
-    fn end_point(&self, e: End) -> Point {
+    pub(crate) fn end_point(&self, e: End) -> Point {
         match e {
             End::Pin(p) => self.board.pins[p].pos,
             End::Via(site) => self.site_point(site),
@@ -161,6 +161,70 @@ impl Router<'_> {
         let t = m.tris[c.from as usize];
         let a = t[m.local_edge(c.from, c.e)];
         if a == u { (shi, slo) } else { (slo, shi) }
+    }
+
+    /// The way of segment `sid` through a geometry that has moved on from the topology, as a taut
+    /// polyline: on every edge it crosses it goes between where its neighbours really are, so
+    /// that it starts on the right side of each of them. `vertex` says where a mesh vertex of
+    /// its layer is now, `place` where a segment crosses a line between two points, as a fraction
+    /// of it (None for a segment without a place, which shares the room with this one).
+    pub(crate) fn threaded(
+        &self,
+        sid: u32,
+        vertex: &dyn Fn(usize, u32) -> Point,
+        place: &dyn Fn(u32, Point, Point) -> Option<f64>,
+    ) -> Vec<Point> {
+        let s = self.segs[sid as usize].as_ref().unwrap();
+        let li = s.li as usize;
+        let m = &self.sub.m[li];
+        let (start, end) = (self.end_point(s.start), self.end_point(s.end));
+        let mut portals = vec![(start, start)];
+        for c in &s.crossings {
+            let list = &self.cross[li][c.e as usize];
+            let items = self.items_on(li, c.e);
+            let idx = list.iter().position(|&x| x == sid).unwrap();
+            let [u, v] = m.edges[c.e as usize];
+            let (pu, pv) = (vertex(li, u), vertex(li, v));
+            let len = pu.dist(pv).max(1e-9);
+            let dir = (pv - pu) * (1.0 / len);
+            let margin = self.cfg.margin;
+            let mut lo = (0.0, idx + 1, self.end_need(li, c.e, 0, &items[idx]) + margin);
+            for i in (0..idx).rev() {
+                if let Some(x) = place(list[i], pu, pv) {
+                    lo = (x * len, idx - i, Self::gap(self.board, &items[i], &items[idx]));
+                    break;
+                }
+            }
+            let mut hi = (len, list.len() - idx, self.end_need(li, c.e, 1, &items[idx]) + margin);
+            for i in idx + 1..list.len() {
+                if let Some(x) = place(list[i], pu, pv) {
+                    hi = (x * len, i - idx, Self::gap(self.board, &items[idx], &items[i]));
+                    break;
+                }
+            }
+            // this one and the others without a place share what is between those two
+            let (a, b) = (lo.0 + lo.2, hi.0 - hi.2);
+            let share = (lo.1 + hi.1 - 1) as f64;
+            let (x, y) = if a < b {
+                (a + (b - a) * (lo.1 - 1) as f64 / share, a + (b - a) * lo.1 as f64 / share)
+            } else {
+                let mid = (lo.0 + hi.0) * 0.5;
+                (mid, mid)
+            };
+            let (x, y) = (pu + dir * x, pu + dir * y);
+            // leaving triangle `from` (counter-clockwise) through edge a->b: b is on the left
+            let t = m.tris[c.from as usize];
+            portals.push(if t[m.local_edge(c.from, c.e)] == u { (y, x) } else { (x, y) });
+        }
+        portals.push((end, end));
+        let mut pts = vec![start];
+        pts.extend(funnel_bends(&portals).into_iter().map(|(i, left)| if left { portals[i].0 } else { portals[i].1 }));
+        pts.push(end);
+        pts.dedup_by(|a, b| a.dist(*b) < 1e-9);
+        if pts.len() < 2 {
+            pts.push(end);
+        }
+        pts
     }
 
     /// Rubber band of one segment: lines and arcs. Starts with the bends of the funnel, then
@@ -323,7 +387,12 @@ impl Router<'_> {
     /// The geometry of a router without soft copper, with the segment of each track and the
     /// site of each via.
     pub(crate) fn tagged_geometry(&self) -> (Geometry, Vec<u32>, Vec<u32>) {
-        let ids: Vec<u32> = (0..self.segs.len() as u32)
+        self.tagged_from(0)
+    }
+
+    /// The same with only the tracks of the segments from `first` on.
+    pub(crate) fn tagged_from(&self, first: u32) -> (Geometry, Vec<u32>, Vec<u32>) {
+        let ids: Vec<u32> = (first..self.segs.len() as u32)
             .filter(|&i| self.segs[i as usize].is_some())
             .collect();
         let (tracks, segs): (Vec<Track>, Vec<u32>) = ids
