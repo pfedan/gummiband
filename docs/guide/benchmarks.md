@@ -19,8 +19,9 @@ bench/run_suite.sh                 # all boards
 bench/run_suite.sh bus qfn_fanout  # some of them
 ```
 
-The script builds the CLI, routes every board into `bench/boards/out/` (4 runs, 1 generation, 4
-threads by default; override with `RUNS`, `GENERATIONS`, `RAYON_NUM_THREADS`, `ROUTE_ARGS`,
+The script builds the CLI, routes every board into `bench/boards/out/` (4 runs, 1 generation, no
+geometry generations, 4 threads by default; override with `RUNS`, `GENERATIONS`,
+`GEOMETRY_GENERATIONS`, `RAYON_NUM_THREADS`, `ROUTE_ARGS`,
 `TIMEOUT`), runs the KiCad DRC on each result and prints a table: connections routed, vias,
 length, wall time, the router's own violations and the DRC counts (unconnected, clearance,
 shorts, crossings, other). The table is also in `bench/boards/out/results.txt`, the router output
@@ -121,6 +122,8 @@ and test points fixed, 133 parts from nothing, original outline and inner planes
 | Seed 41 | 348/348 | 234 | 2167 mm | 2 slivers |
 | Seed 21 | 347/348 | 240 | 2077 mm | 2 unconnected, 1 sliver, 1 dangling via |
 | Seed 51 | 350/350 | 289 | 2044 mm | 8 clearance, 1 short, 1 crossing, 1 mask bridge |
+
+The seeds of this table are from before seeds stopped sharing starts.
 
 Fewer vias and shorter tracks than the hand placement, but the seeds differ, so try a few. The
 placer knows no datasheet layouts: switch nodes come out 3.4 to 7.4 mm long against 3.0 mm in the

@@ -107,11 +107,17 @@ the violations are the price of the last connections through the pin rows. Origi
 - Text on copper is an obstacle since 2026-10-30, as a box. Arty then has no routing errors in the
   DRC; the last connection `/CRVL_IO1` depends on the run: 323/323 after 5 minutes in one run,
   322/323 in others. The box is a little larger than the letters.
-- Corne, 10 minutes with `--geometry-generations 1`: 474/482, 393 vias, 7953 mm, against 452 vias
-  and 8352 mm of the complete original. DRC: 378 clearance errors at 19 spots, all between 0.15 and
-  0.189 mm against 0.19 mm, 199 solder mask bridges, 1 short, 1 crossing. Every short piece of track
-  counts as a violation of its own, so one spot weighs about 20. Solder mask openings are not
-  obstacles for the router.
+- Spots instead of pieces in the open end, 2026-10-30. Arty, 180 s with `--prefer-width 0.25`:
+  323/323, 123 vias, 2952 mm, 73 % at 0.25 mm, KiCad DRC clean but for the 4 errors of the empty
+  board. Lichtschnitzel, 180 s: 348/348, 236 vias, 2591 mm, 1 spot, 2 DRC errors.
+- Corne, 400 s with `--geometry-generations 1`: 476/482, 388 vias, 8086 mm, 41 spots, against 452
+  vias and 8352 mm of the complete original. Nearly all hits are tracks of 0.2 mm against tracks of
+  0.2 mm or pads, with a median of 0.010 mm missing against 0.19 mm. The QFN has a pitch of 0.4 mm,
+  which leaves 0.2 mm next to a track of 0.2 mm, and tracks that leave it in parallel lose that with
+  the angle, from about 13 degrees below the rule. Not proven yet; the idea is a straight exit from
+  the pin row before the fan-out. Longer necks and more reserve did not help, neither did leaving
+  out the tightening in that pass. KiCad's DRC stops at 199 or 499 hits per type, so those are
+  limits and not results. Solder mask openings are no obstacles for the router.
 - Negotiated routing: done as an option, `route --negotiate N` (see ARCHITECTURE). Measured on
   2026-10-30 with `--runs 14 --generations 1 --negotiate 20`, KiCad DRC against the plain run:
   `fine_pitch_mixed` 0 open and 0 errors instead of 8 and 7, `four_signal_layers` 0 open instead

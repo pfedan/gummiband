@@ -75,9 +75,10 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | --- | --- | --- |
 | `--runs N` | 14 | Portfolio size: routing attempts with different connection orders (and via costs) in every phase, spread over the worker threads. A constant by design, so results do not depend on the machine. |
 | `--generations N` | 3 | Rounds of the evolutionary order search after the portfolio. Each round mutates the best order (failed connections move forward, a few random moves) and tries `--runs` mutants. 0 means portfolio only. The search stops early when everything is routed. |
-| `--geometry-generations N` | 0 | Rounds that are judged after the tracks were drawn, by the clearance check. Slower (each round draws and checks every candidate) and cleaner. The plugin uses 3. |
+| `--geometry-generations N` | 3 | Rounds that are judged after the tracks were drawn, by the clearance check. Each round draws and checks every candidate, so 3 rounds take about 2 to 3 times as long as 0, and leave far fewer violations (Arty 32 to 1, ULX3S 54 to 4, Lichtschnitzel 18 to 4). 0 is the quick draft. The plugin and the MCP server use 3 as well. |
+| `--seed N` | `GB_EVO_SEED`, then fixed | Seed of the search. The same board, options and seed give the same result; another seed gives another attempt, often with a quite different violation count (Arty 32 or 1, Lichtschnitzel 18 or 14 at `--geometry-generations 0`). |
 | `--negotiate N` | 0 (off) | Experimental. A second search with up to N rounds of negotiated routing: connections may overfill channels and cross for a price that rises from round to round, until they have settled who goes where. Finds the last connections on dense boards, where the order alone does not. The better result of both searches counts, so a run takes about twice as long. 16 to 20 rounds work well; fewer leave conflicts that cost connections. |
-| `--until-stop` | off | Keeps improving the result after the search until a line arrives on stdin or stdin closes, then finishes the best result. A generation takes a few connections around one spot out (a violation, or a connection with vias or a long way) and lays them again, everything else stays; the longer nothing helps, the more it takes out, and side branches try bolder changes that may first make the result worse. It never gives up a connection. The same seed stopped at the same generation gives the same result. Other limits: no placement rounds with `--move-parts`, no plain search next to `--negotiate`, and it does not go with `--shove`, `--give` or `--pairs`. |
+| `--until-stop` | off | Keeps improving the result after the search until a line arrives on stdin or stdin closes, then finishes the best result. A generation takes a few connections around one spot out (a violation, or a connection with vias or a long way) and lays them again, everything else stays; the longer nothing helps, the more it takes out, and side branches try bolder changes that may first make the result worse. It never gives up a connection, and it counts a problem as one spot, however many pieces of track it touches. The same seed stopped at the same generation gives the same result. Other limits: no placement rounds with `--move-parts`, no plain search next to `--negotiate`, and it does not go with `--shove`, `--give` or `--pairs`. |
 | `--air MM` | 0, with `--until-stop` 0.03 | Reserve on top of the clearances that the finished copper gets where there is room. A rubber band lies right at the limit, this pushes it off and evens out the gaps in tight bundles. The result stays only if it brings no new violations. |
 | `--prefer-width W` | 0 (off) | At the very end tracks of the default net class first push aside what can give way, then grow up to W mm wherever there is room, with all clearances kept; tracks in a bundle share the room. Routing still works with the class width, so this costs no connections. They never get narrower than their class width, a short wider stretch is left out, and every change of width is a taper of 0.025 mm per piece. Other classes keep their width unless a `track_width` rule in the `.kicad_dru` gives them a target with `opt` (that also works without this option, see [Wider tracks where there is room](concepts.md#wider-tracks-where-there-is-room)); differential pairs always keep theirs. `--teardrops` can smooth that further. |
 | `--via-pass F` | 4 | After the search, connections with vias are routed once more with the via cost multiplied by F, and the result is kept only if completion, violations and shorts do not get worse. 0 switches the pass off. |
@@ -89,9 +90,10 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | `--pair-zdiff OHM` | none | With `--pairs`: target differential impedance, sets the track width per layer from the stackup (estimate after IPC-2141), the gap stays. |
 | `--layer-dirs W` | 0.5 | Weight of preferred directions per layer: the routing layers alternate horizontal and vertical, and running against the grain costs extra. A soft cost, used by every third run of the portfolio, so the search has candidates with and without it. 0 switches it off. |
 
-A good default for a real two layer board with a few hundred connections is the plain
-`--keep-locked`: 14 runs on all cores, 3 generations, no geometry generations, a minute or two. Add
-`--geometry-generations 3` for the final pass.
+A good default for a real board with a few hundred connections is the plain `--keep-locked`: 14
+runs on all cores, 3 generations, 3 geometry generations, a few minutes. `--geometry-generations 0`
+gives a quick draft in about a third of the time. For the final pass add `--until-stop` and stop
+when the progress reports `converged`.
 
 ### Degrees of freedom
 
@@ -99,7 +101,7 @@ A good default for a real two layer board with a few hundred connections is the 
 | --- | --- | --- |
 | `--move-parts` | off | During the geometry generations, parts next to clearance problems may shift a little to open a channel. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay (by footprint library name and by reference prefix J, P, CN, USB, H, MH, SW, TP). The output file has the moved footprints at their new positions, with the footprint's own zones (a keepout drawn inside the footprint) moved along, and the console lists every move. Footprints in a KiCad group form a block that moves as a whole with its kept tracks and vias (zones in the group do not move yet); a block with one fixed member stays put. Blocks are new and untested on a real board. |
 | `--fixed R1,U3` | none | More references that never move under `--move-parts` and `--placements`. |
-| `--placements N` | 0 | Place the board N times from the netlist (see [`gummiband place`](#gummiband-place), default scope), route each result with the settings of this command and keep the best: fewest open connections, then clearance violations, vias and length. Takes N + 1 routes, the last one writes the winner; `--until-stop` applies to that last one only. Not with `--keep-all`, `--nets` or `--pairs`, nor on a board with kept copper, since tracks do not follow the parts. The JSON report gets a `placement` block with every try. |
+| `--placements N` | 0 | Place the board N times from the netlist (see [`gummiband place`](#gummiband-place), default scope), route each result with the settings of this command and keep the best: fewest open connections, then clearance violations, vias and length. Takes N + 1 routes, the last one writes the winner; `--until-stop` applies to that last one only. Not with `--keep-all`, `--nets` or `--pairs`. The JSON report gets a `placement` block with every try. |
 | `--placement-seed S` | 1 | First seed of `--placements`. |
 | `--teardrops` | off | Switches on KiCad's teardrops for every via and connected pad in the output file, and the track end teardrops (the wedges where a track changes width, for example at a neck) in the output's project. KiCad builds the shapes itself: open the file and fill the zones once (B), then the teardrops appear. The plugin cannot set them through KiCad's API and opens *Edit Teardrops* instead. |
 | `--net-priorities prio.json` | none | Routing order per net from a JSON file `{"net name": priority, ...}`; lower numbers route first. Nets not in the file keep their net class priority. The MCP server does the same with `set_net_options`. |
@@ -110,7 +112,7 @@ A good default for a real two layer board with a few hundred connections is the 
 | Option | Effect |
 | --- | --- |
 | `--report out.json` | Machine readable report, see below. |
-| `--progress` | Prints a `progress {json}` line after every phase: `phase`, `routed`, `conns`, `vias`, `length`, `violations` (null before the geometry step), `generation`, `seconds`, and for `--until-stop` `stale` (generations since the last noticeable gain), `level` (side branches that failed since then) and `converged` (the search has found its level, taking the result now loses little). The plugin's progress window reads these lines. |
+| `--progress` | Prints a `progress {json}` line after every phase: `phase`, `routed`, `conns`, `vias`, `length`, `violations` (null before the geometry step; in the open end these are spots, see `--until-stop`), `generation`, `seconds`, and for `--until-stop` `stale` (generations since the last noticeable gain), `level` (side branches that failed since then) and `converged` (the search has found its level, taking the result now loses little). The plugin's progress window reads these lines. |
 | `--svg out.svg` | Debug drawing of the result: obstacles, tracks, vias and the violations. |
 | `--svg-tris` | Also draw the triangulation into that SVG. |
 | `--frames DIR` | One SVG (and PNG, if `rsvg-convert` is available) of the best candidate per generation into `DIR`, and `DIR/evolution.gif` if ImageMagick's `magick` is available. |
@@ -201,19 +203,23 @@ gummiband route placed.kicad_pcb -o routed.kicad_pcb
 | `--all-unlocked` | | place every unlocked part, connectors, modules and mounting holes too |
 | `--fixed U1,U2` | | these stay in any case |
 | `--free TP1` | | move these on top of the above (a test point, a button) |
-| `--seed N` | 1 | first seed |
-| `--starts N` | 4 | independent runs in parallel, the one with the fewest crossings is kept |
+| `--seed N` | 1 | another seed gives another set of starts, none shared with a neighbouring seed |
+| `--starts N` | 1 | independent runs in parallel, the one with the fewest crossings is kept. The crossings hardly predict the routed result (correlation about 0 over 12 seeds on Lichtschnitzel), so for another attempt change `--seed`, or let `route --placements N` route several placements |
 | `--iters N` | 3000000 | annealing moves per run |
 | `--gap MM` | 0.3 | spacing between courtyards |
 | `--margin MM` | 0.5 | distance of the courtyards from the outline |
 | `--halo MM` | 0.3 | extra room around parts with five or more pads, for their escape |
-| `--report FILE` | | JSON report: poses, decoupling assignment, crossings, every start |
+| `--semantic` | off | use the schematic beyond the netlist, see below |
+| `--report FILE` | | JSON report: poses, decoupling assignment, crossings, every start, with `--semantic` inductors and groups |
 
 Without a scope option, all parts move except locked footprints, connectors, modules, mounting
 holes, buttons and test points. Locked footprints never move. A KiCad group moves as a whole; a
 group with tracks stays, since tracks do not turn yet.
 
-Tracks and vias of the input do not follow; the console says how many there are. Keepouts of a
+Locked tracks and vias stay: parts keep the `--gap` distance from them on the layers the moving
+parts use, and a part with locked copper of its net on a pad stays where it is (the console and the
+report name it). Copper added after placing is not known to the placer, so lock your pre-routed
+copper first. Unlocked tracks and vias do not follow; the console says how many there are. Keepouts of a
 moved part follow it (a keepout counts as the part's if its courtyard covers at least half of it),
 other keepouts that forbid footprints or pads stay free of parts. All parts share one side as far
 as spacing goes, so a two sided board comes out less dense than it could be.
@@ -222,6 +228,27 @@ What it looks at: wire length per net (wide and differential nets double, switch
 nets with a plane over most of the board not at all), the pins of a net with a partial plane
 staying over that plane, decoupling capacitors next to a supply pin of an IC (bulk capacitors at
 the inductor of their rail) and the courtyards.
+
+`--semantic` adds what the schematic says beyond the netlist. It changes results, so it is off by
+default; without it the output is the same as before.
+
+- Each schematic sheet instance (from the footprint's `path`, named by `sheetname`) stays
+  together, weakly, as a box around its parts.
+- Inside a sheet, small signal nets (up to three parts) tie a cluster around one IC: a converter
+  with its feedback divider, boot capacitor and mode resistors. A chain of passives does not tie
+  two ICs together. Ground, planes and current paths tie nothing.
+- An inductor is pulled to the IC with the most pads on one of its nets (the switch node), pad to
+  pad.
+- Decoupling capacitors prefer an IC of their own sheet.
+- Current paths (classes of 0.5 mm and wider, switch nodes) count their spanning tree instead of a
+  box, at a weight that grows with the class width. A series chain such as connector, fuse,
+  shunt, eFuse then stays in order, and a TVS or input capacitor stays on the path instead of
+  anywhere inside its box.
+
+The console lists the inductors and groups. Connectors and power stages that matter still belong
+in `--fixed`. On the Lichtschnitzel controller (only connectors fixed, four seeds) the routed
+VBUS_F came out at 18 to 26 mm instead of 58 to 78 mm and every inductor sat 3.2 mm from its switch
+pins, at about the same via count and track length.
 
 ## `gummiband strip`
 
@@ -249,7 +276,7 @@ with default net classes.
 | Variable | Effect |
 | --- | --- |
 | `RAYON_NUM_THREADS` | Default for `--threads`. |
-| `GB_EVO_SEED` | Seed of the evolutionary search (default fixed). Same board, same options, same seed give the same result; another seed gives another attempt. |
+| `GB_EVO_SEED` | Seed of the evolutionary search when `route --seed` is not given (default fixed). Same board, same options, same seed give the same result; another seed gives another attempt. |
 | `GB_GPU=1` | Experimental, macOS only. Runs most of the track relaxation as a compute shader on the GPU (Metal). Needs a binary built with `cargo build --release -p gummiband-cli --features gpu`; without the variable such a binary behaves exactly like the normal one, and a binary without the feature prints a warning and stays on the CPU. Only the relaxation moves to the GPU, so the gain is bounded by its share of the work: about 30 percent of the core seconds in a default run on boards like the Lichtschnitzel controller, about 60 percent with `--geometry-generations 3 --move-parts`, and 1 to 5 percent on boards where the search dominates (Corne, ULX3S, dense BGAs), where the GPU gains nothing. In the quality run on Lichtschnitzel (4 seeds, 4 threads) it needed about 40 percent fewer core seconds than the CPU; when all cores are already busy the gain shrinks. Completion is the same; violation counts are comparable but vary more from seed to seed. Results repeat on one machine but not across GPUs or drivers, so for a final run use the CPU or try several seeds. |
 
 ## Exit status

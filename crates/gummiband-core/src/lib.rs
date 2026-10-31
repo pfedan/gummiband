@@ -61,21 +61,27 @@ impl RunStats {
 /// Share of the differential pair track length that runs next to its partner on the same
 /// layer, at most `near` mm away: (coupled mm, total mm).
 pub fn pair_coupling(board: &Board, geo: &Geometry, near: f64) -> (f64, f64) {
+    board.diff_pairs().into_iter().fold((0.0, 0.0), |(c, t), (a, b)| {
+        let (x, y) = pair_coupling_of(geo, a, b, near);
+        (c + x, t + y)
+    })
+}
+
+/// [`pair_coupling`] of one pair `a`, `b`: (coupled mm, total mm of both nets).
+pub fn pair_coupling_of(geo: &Geometry, a: NetId, b: NetId, near: f64) -> (f64, f64) {
     let (mut coupled, mut total) = (0.0, 0.0);
-    for (a, b) in board.diff_pairs() {
-        for (x, y) in [(a, b), (b, a)] {
-            for t in geo.tracks.iter().filter(|t| t.net == x) {
-                for w in t.pts.windows(2) {
-                    let (l, mid) = (w[0].dist(w[1]), (w[0] + w[1]) * 0.5);
-                    total += l;
-                    let close = geo
-                        .tracks
-                        .iter()
-                        .filter(|o| o.net == y && o.layer == t.layer)
-                        .any(|o| o.pts.windows(2).any(|v| geom::point_seg_dist(mid, v[0], v[1]) < near));
-                    if close {
-                        coupled += l;
-                    }
+    for (x, y) in [(a, b), (b, a)] {
+        for t in geo.tracks.iter().filter(|t| t.net == x) {
+            for w in t.pts.windows(2) {
+                let (l, mid) = (w[0].dist(w[1]), (w[0] + w[1]) * 0.5);
+                total += l;
+                let close = geo
+                    .tracks
+                    .iter()
+                    .filter(|o| o.net == y && o.layer == t.layer)
+                    .any(|o| o.pts.windows(2).any(|v| geom::point_seg_dist(mid, v[0], v[1]) < near));
+                if close {
+                    coupled += l;
                 }
             }
         }
@@ -230,6 +236,8 @@ struct Candidate {
     bad_nets: Vec<NetId>,
     /// Where the geometry step left clearance violations.
     hot: Vec<geom::Point>,
+    /// The open end's measure of them, see `improve::judge`.
+    flaw: f64,
     /// The configuration of this run.
     cfg: RouterConfig,
 }
@@ -329,6 +337,7 @@ fn candidate(
             .collect(),
         bad_nets: Vec::new(),
         hot: Vec::new(),
+        flaw: 0.0,
         cfg,
     }
 }

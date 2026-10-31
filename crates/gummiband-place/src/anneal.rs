@@ -155,7 +155,13 @@ pub struct NetTerm {
     pub weight: f64,
     pub pins: Vec<(usize, usize)>,
     pub fixed: Vec<Point>,
+    /// Spanning tree length instead of the half perimeter: for current paths, where every pin
+    /// inside the box still costs copper.
+    pub mst: bool,
 }
+
+/// Nets with more pins than this keep the half perimeter even with `mst`.
+const MST_PINS: usize = 24;
 
 /// Decoupling term: pin of a unit to a pin of another unit (or a fixed point).
 pub struct Decap {
@@ -232,6 +238,7 @@ impl Problem {
                 weight: net_weight(n),
                 pins: Vec::new(),
                 fixed: Vec::new(),
+                mst: false,
             })
             .collect();
         for (ui, g) in geoms.iter().enumerate() {
@@ -307,6 +314,38 @@ impl Problem {
     }
 }
 
+/// Length of the minimum spanning tree (Prim), Manhattan distances like the half perimeter.
+fn mst_len(q: &[Point]) -> f64 {
+    let n = q.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mut dist = [f64::INFINITY; MST_PINS];
+    let mut done = [false; MST_PINS];
+    let mut cur = 0;
+    done[0] = true;
+    let mut total = 0.0;
+    for _ in 1..n {
+        let mut best = (f64::INFINITY, 0);
+        for k in 0..n {
+            if done[k] {
+                continue;
+            }
+            let e = (q[k].x - q[cur].x).abs() + (q[k].y - q[cur].y).abs();
+            if e < dist[k] {
+                dist[k] = e;
+            }
+            if dist[k] < best.0 {
+                best = (dist[k], k);
+            }
+        }
+        total += best.0;
+        cur = best.1;
+        done[cur] = true;
+    }
+    total
+}
+
 #[derive(Clone)]
 pub struct State {
     pub pos: Vec<Point>,
@@ -340,6 +379,15 @@ impl<'a> Placer<'a> {
         let t = &self.p.nets[n];
         if t.weight == 0.0 {
             return 0.0;
+        }
+        let count = t.pins.len() + t.fixed.len();
+        if t.mst && count <= MST_PINS {
+            let mut q = [pt(0.0, 0.0); MST_PINS];
+            for (k, &(u, i)) in t.pins.iter().enumerate() {
+                q[k] = self.pin(u, i);
+            }
+            q[t.pins.len()..count].copy_from_slice(&t.fixed);
+            return t.weight * mst_len(&q[..count]);
         }
         let mut b = R::empty();
         let mut add = |q: Point| {
@@ -634,5 +682,21 @@ impl<'a> Placer<'a> {
             }
         }
         failed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spanning_tree_of_a_chain() {
+        // a chain in order: the tree follows it, the box would be 2 + 2
+        let q = [pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0), pt(2.0, 1.0), pt(2.0, 2.0)];
+        assert!((mst_len(&q) - 4.0).abs() < 1e-9);
+        // a detour costs the tree, not the box
+        let q = [pt(0.0, 0.0), pt(2.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.9)];
+        assert!((mst_len(&q) - 3.9).abs() < 1e-9);
+        assert_eq!(mst_len(&[pt(3.0, 3.0)]), 0.0);
     }
 }

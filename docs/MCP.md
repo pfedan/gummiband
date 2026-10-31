@@ -79,15 +79,15 @@ KiCad shows in the status bar. Optional arguments may be left out.
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
-| `load_board` | `path`, `keep_locked?` | board id, layers (plane flag), outline box and size, pins, nets, routable nets, connections, planes, net classes (priority, width, clearance, via), custom rule count, custom clearance net pairs, kept net options |
+| `load_board` | `path`, `keep_locked?` | board id, layers (plane flag), outline box and size, pins, nets, routable nets, connections, planes, net classes (priority, width, clearance, via), custom rule count, custom clearance net pairs, kept net options, recognised differential pairs |
 | `list_nets` | `board`, `filter?`, `include_single?` | nets with class, pin count, plane flag, effective priority, skip flag |
-| `part_info` | `board`, `reference` | pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
+| `part_info` | `board`, `reference` | value, position, rotation, locked, sheet, pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
 | `move_part` | `board`, `reference`, `x`, `y`, `rotation?` | id and path of the working copy with the footprint at its new position, `items_added`, `warnings` |
-| `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?` | id and path of the working copy, the new poses, decoupling assignment, crossings, smallest courtyard distance, pins off their plane, `warnings` |
+| `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?` | id and path of the working copy, the new poses, decoupling assignment, crossings, smallest courtyard distance, pins off their plane, with `semantic` inductors and groups, `warnings` |
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
-| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
+| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `air?`, `prefer_width?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?` | PNG (image content) and its path, region, pixels per mm |
 
@@ -98,6 +98,9 @@ the same base name. `keep_locked` (default false) keeps locked tracks and vias a
 whose ends join their nets; by default everything is routed from scratch, like
 `gummiband route`. `connections` is counted like `gummiband info` (pins - 1 per net with 2 or
 more pins); `route` counts plane nets per fan-out, so its total is lower on boards with planes.
+`diff_pairs` lists the differential pairs recognised by net name (`..P`/`..N`, `..+`/`..-`) with
+their class. They are routed as two independent nets unless `route` gets `pair_pull` or `pairs`;
+the summary says so.
 
 ```json
 {"name": "load_board", "arguments": {"path": "bench/work/lichtschnitzel/lichtschnitzel.kicad_pcb"}}
@@ -114,7 +117,8 @@ pins are left out unless `include_single` is true.
 
 ### part_info
 
-Everything an agent needs to plan copper around one footprint: its pads with name, net,
+Everything an agent needs to plan copper around one footprint: its value, position, rotation,
+lock state and schematic sheet, its pads with name, net,
 position, size and layers, the courtyard box `[x0, y0, x1, y1]` and the references of the
 footprints whose courtyard lies within 3 mm.
 
@@ -126,8 +130,9 @@ footprints whose courtyard lies within 3 mm.
 
 Preliminary. Moves a footprint to a new position in mm (and rotation in degrees, unchanged if
 left out) in the working copy `<input>.prerouted.kicad_pcb`; the input file stays untouched and
-the returned board id is the one to route. Courtyards and overlaps are not checked, so run `drc`
-or `render` on the result. Pads, their nets and the footprint's own copper move along. Without
+the returned board id is the one to route. `warnings` names the footprints whose courtyard box
+the moved part now overlaps, and an outline it leaves; boxes only, so run `drc` or `render` for
+the exact answer. Pads, their nets and the footprint's own copper move along. Without
 `rotation` only the position changes; with it the pads, the footprint's texts and its own zones
 turn with the footprint, so the part arrives as KiCad would place it.
 
@@ -141,15 +146,24 @@ Gives parts a position from the netlist in the working copy, see
 [`gummiband place`](guide/cli.md#gummiband-place). An agent with its own plan places the parts it
 cares about with `move_part` and leaves the rest to this tool: `fixed` names what stays, `only` what
 moves. `scope` is `unlocked` (the default: not locked and not mechanical), `all_unlocked` or
-`outside`. Locked footprints never move. `starts` (default 4) is the number of independent
+`outside`. Locked footprints never move. `starts` (default 1) is the number of independent
 placements, of which the one with the fewest crossings is kept; `gap` (0.3 mm) is the spacing
 between courtyards and `halo` (0.3 mm) the extra room around parts with five or more pads. The
 result names the working copy to route next, the new pose of every moved part (`placed`), which
 decoupling capacitor was assigned to which part, the `crossings` between the nets (a measure of
 the vias to expect), the smallest distance between two courtyards and the pins that ended up off
-the plane of their net (`off_plane`, routing reaches them with a via). Tracks and vias of the
-input do not follow, so call it before `route`. The tool places, it does not judge: `route` and
-`drc` tell how good the result is, another `seed` gives another try, and seeds differ a lot.
+the plane of their net (`off_plane`, routing reaches them with a via). Locked copper stays: parts
+keep `gap` away from it, and a part with locked copper of its net on a pad stays (`anchored`), so add
+pre-routed copper before this call, not after. Unlocked tracks and vias do not follow, so call it
+before `route`. The tool places, it does not judge: `route` and `drc` tell how good the result is,
+another `seed` gives another try, and seeds differ a lot. Neighbouring seeds share no starts. The
+crossing count is no forecast of the routed result.
+
+`semantic` (default false) uses the schematic beyond the netlist, as `gummiband place --semantic`
+does: sheets and clusters around an IC stay together, an inductor sits at the switch pins of its
+converter, decoupling capacitors prefer an IC of their own sheet, and current paths count their
+full length, so an input chain stays in order. The result then lists `coils` (inductor, IC) and
+`groups` (name, parts). Connectors and the power stages you care about still go in `fixed`.
 
 ```json
 {"name": "place_parts", "arguments": {"board": "b1", "fixed": ["U1", "L1"], "seed": 2}}
@@ -213,10 +227,11 @@ all unlocked copper). `reset: true` drops the net's options before applying the 
 Runs `gummiband_core::route_board` on the loaded board with the net options applied and writes
 the routed board (existing unlocked tracks and vias replaced; with `keep_locked` the locked ones
 stay). Defaults match the CLI: `runs` 14 (a constant, so results do not depend on the machine), `generations` 3,
-`geometry_generations` 0, `via_pitch` 0.5 mm, `via_cost` 3.0, `layer_dirs` 0.5 (preferred
+`geometry_generations` 3, `via_pitch` 0.5 mm, `via_cost` 3.0, `layer_dirs` 0.5 (preferred
 directions per layer for every third run, 0 = off), `pair_pull` 0 (experimental pull between the
 nets of a differential pair), `pairs` false (experimental: a pair as one wide track that is split
-in two, see the CLI guide), `pair_skew` 0.1 mm, `pair_zdiff` none. `seed` picks the search seed
+in two, see the CLI guide), `pair_skew` 0.1 mm, `pair_zdiff` none, `negotiate` 0 (experimental negotiated routing, 20 rounds
+work well and take about twice the time), `air` 0 mm, `prefer_width` 0 (off). `seed` picks the search seed
 (default fixed): the same seed gives the same result, another one a different try. `keep_all`
 keeps every track and via of the input and adds to it, like `--keep-all` on the command line;
 with `nets` only those nets are routed and everything else stays. Add `reroute` to replace
@@ -230,7 +245,10 @@ Result fields: `board`, `input`, `output`, `seconds`, `threads`, `connections`, 
 `violations_total`, `violations_by_kind`, `violations` (first `max_violations`, default 50:
 `what`, `x`, `y`, `actual_mm`, `required_mm`, `nets` [routed net, other net or null]),
 `portfolio` (per run: `generation`, `seed`, `fanout_first`, `routed`, `connections`, `vias`,
-`length_mm`, `violations`), `pairs` (with `pairs`), `nets` (per routed net, longest first: `net`,
+`length_mm`, `violations`), `pairs` (with `pairs`), `coupling` (every recognised pair, whatever
+the settings: `p`, `n`, `coupled_mm` within width + gap + 0.1 mm of the partner on the same layer,
+`length_mm` of both nets, `vias_p`, `vias_n`), `notes` (hints, such as pairs routed without
+`pair_pull` or `pairs`), `nets` (per routed net, longest first: `net`,
 `length_mm`, `vias`, `min_width_mm`, `max_width_mm`), `blocked` (per unrouted connection the
 `nets` that run in its way, a neighbourhood estimate rather than an exact analysis, meant for
 choosing what to prioritize, skip or move), `copied`.
@@ -311,10 +329,11 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
 
 ## Open points
 
-- `move_part` and `add_zone` are new and tested on small boards only; `move_part` checks no
-  courtyards, and a zone is not filled until KiCad fills it.
+- `move_part` and `add_zone` are new and tested on small boards only; `move_part` checks
+  courtyard boxes only, and a zone is not filled until KiCad fills it.
 - `place_parts` is new. It lacks the `--iters`, `--margin` and `--free` options of
-  `gummiband place`, knows no datasheet layouts (place and lock power stages with `move_part`),
+  `gummiband place`, knows no datasheet layouts (place and lock power stages with `move_part`;
+  `semantic` keeps an inductor at its converter, but no via arrays or copper),
   and treats both board sides as one space.
 - Not reachable through MCP yet: creating a board, `--move-parts`, `--shove` and `--give`, and per net widths and priorities
   from files (`--net-widths`, `--net-priorities`; priorities go through `set_net_options`).

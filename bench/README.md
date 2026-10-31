@@ -24,8 +24,8 @@ only unconnected items.
 | `diff_pairs` | 2 | 8 differential pairs (`_P`, `_N`) with a ground between them, 0.5 mm connectors at an angle, parts in the way |
 
 `run_suite.sh [board ...]` builds the CLI, routes every board into `boards/out/`
-one board after another (`--runs 4 --generations 1` with `RAYON_NUM_THREADS=4`, override with
-`RUNS`, `GENERATIONS`, `RAYON_NUM_THREADS`, `ROUTE_ARGS`, `TIMEOUT`), runs
+one board after another (`--runs 4 --generations 1 --geometry-generations 0` with `RAYON_NUM_THREADS=4`, override with
+`RUNS`, `GENERATIONS`, `GEOMETRY_GENERATIONS`, `RAYON_NUM_THREADS`, `ROUTE_ARGS`, `TIMEOUT`), runs
 `kicad-cli pcb drc --refill-zones` on each result (next to a copy of the board's `.kicad_pro`) and
 prints a table: connections routed, vias, length, router wall time, Gummiband's own clearance
 check, and the KiCad DRC counts (unconnected, clearance, shorts, crossings, other; silk and lib

@@ -35,7 +35,7 @@ because they fit only one board. *Defaults* brings back the values below.
 | Via cost (mm of track) | 3.0 | How much track a via is worth to the router. Lower values give more vias and shorter tracks, higher values fewer vias. The search also tries values around it. |
 | Generations | 3 | Rounds of the order search after the first runs, judged by routed connections, vias and length. |
 | Geometry generations | 3 | Extra search rounds judged by the clearance check of the drawn tracks, not only by the topology. 0 is fastest; each round costs about one full routing pass and removes violations. |
-| Placements to try | 0 | Places the parts that are not locked or mechanical from the netlist this many times, routes each result and keeps the best (`--placements`). Each one costs a full route. The parts, their keepouts and the tracks arrive in one undo step. Needs a board without locked tracks. |
+| Placements to try | 0 | Places the parts that are not locked or mechanical from the netlist this many times, routes each result and keeps the best (`--placements`). Each one costs a full route. The parts, their keepouts and the tracks arrive in one undo step. Locked tracks stay, parts keep clear of them and a part with locked copper on a pad stays. |
 | Keep improving until I accept the result | on | After the normal search the router keeps working on the result until you press *Accept current result*. Not together with pairs routed as one wide track. |
 | Preferred track width (mm) | 0 (off) | Tracks of the default net class push aside what can give way and grow up to this width where there is room, with a taper at every change of width. Other classes get a target of their own with a custom rule `track_width (opt ...)`, see [Wider tracks where there is room](concepts.md#wider-tracks-where-there-is-room). |
 | Let parts shift to open channels | off | The geometry generations may shift parts next to clearance problems (`--move-parts`), so at least one of them is needed. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay. The moved footprints arrive in the same undo step as the tracks, and the message box lists them. |
@@ -128,7 +128,7 @@ move:
 
 Locked footprints never move. *Also keep* takes references that should stay in addition. The
 other fields are *Parallel runs* (independent placements, the one with the fewest crossings
-wins, 4 by default), *Courtyard spacing* (0.3 mm), *Room around ICs* (0.3 mm extra for parts with
+wins, 1 by default: the crossings hardly predict how well the board routes), *Courtyard spacing* (0.3 mm), *Room around ICs* (0.3 mm extra for parts with
 five or more pads) and *Seed* (1); placements differ a lot from seed to seed, so for another attempt
 change it. The *Advanced* tab has *Release* (parts that may move although they count as mechanical),
 *Distance to the outline* (0.5 mm), *Annealing moves per run* (3,000,000), *Worker threads* and
