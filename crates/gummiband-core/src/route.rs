@@ -265,7 +265,9 @@ fn tri_bit(t: u32, li: u8) -> u64 {
     1 << (h >> 26) | 1 << ((h >> 20) & 63)
 }
 
-const BLOCK: u8 = 24;
+/// Short blocks keep the filters sparse: with two bits per triangle, a full block of 24 set
+/// almost half of the 64 and sent every fourth test through a whole block for nothing.
+const BLOCK: u8 = 12;
 
 /// An edge counts as over capacity from this overflow in mm on.
 const OVER_TOL: f64 = 1e-6;
@@ -275,11 +277,19 @@ const MAX_STALE: usize = 5;
 
 type Best = FastMap<(u8, u32, u32), f64>;
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct SearchBuf {
     nodes: Vec<Node>,
     best: Best,
     open: BinaryHeap<Open>,
+}
+
+/// A copy of a router starts with empty buffers: every search clears them first, and copying
+/// the large ones of the last search would cost a mutant more than growing its own.
+impl Clone for SearchBuf {
+    fn clone(&self) -> SearchBuf {
+        SearchBuf::default()
+    }
 }
 
 #[derive(PartialEq, Clone)]
@@ -2201,6 +2211,10 @@ impl<'a> Router<'a> {
         let tracing = self.trace.lock().unwrap().is_some();
         // via checks depend on the routes and the net only, so one per site and search will do
         let mut site_ok: FastMap<u32, bool> = FastMap::default();
+        // the sites of a triangle by distance (ties in the order of the triangle), and the vias
+        // of a path
+        let mut cand: Vec<(f64, u32, u32)> = Vec::new();
+        let mut own_vias: Vec<Point> = Vec::new();
         let mut vertex_ok: FastMap<u32, Option<bool>> = FastMap::default();
         let mut via_fits: FastMap<u32, bool> = FastMap::default();
         let mut expansions = 0;
@@ -2387,19 +2401,24 @@ impl<'a> Router<'a> {
                     if sites.is_empty() {
                         continue;
                     }
-                    let mut cand: Vec<(f64, u32)> = sites
-                        .iter()
-                        .filter(|&&s| match self.sub.shared.sites[s as usize].pad {
-                            None => true,
-                            // a via into a target pad ends the connection (last resort)
-                            Some(p) => self.cfg.via_in_pad && is_target(p as usize),
-                        })
-                        .map(|&s| (self.site_point(s).dist(node.pos), s))
-                        .collect();
-                    cand.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    cand.clear();
+                    cand.extend(
+                        sites
+                            .iter()
+                            .filter(|&&s| match self.sub.shared.sites[s as usize].pad {
+                                None => true,
+                                // a via into a target pad ends the connection (last resort)
+                                Some(p) => self.cfg.via_in_pad && is_target(p as usize),
+                            })
+                            .enumerate()
+                            .map(|(i, &s)| (self.site_point(s).dist(node.pos), i as u32, s)),
+                    );
+                    let order = |a: &(f64, u32, u32), b: &(f64, u32, u32)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
+                    // only the few nearest are tried: put them in order a few at a time
+                    let mut ordered = 0;
                     let mut tried = 0;
                     // vias of this path so far (hole to hole spacing within one connection)
-                    let mut own_vias: Vec<Point> = Vec::new();
+                    own_vias.clear();
                     {
                         let mut p = node.via_up;
                         while p != u32::MAX {
@@ -2411,10 +2430,20 @@ impl<'a> Router<'a> {
                     }
                     let (_, own_drill, _) = self.via_size(net);
                     let hole_gap = own_drill + self.board.rules.hole_to_hole;
-                    for (d, site) in cand {
+                    for at in 0..cand.len() {
                         if tried >= self.cfg.sites_per_tri {
                             break;
                         }
+                        if at == ordered {
+                            let rest = &mut cand[at..];
+                            let k = rest.len().min(4);
+                            if k < rest.len() {
+                                rest.select_nth_unstable_by(k - 1, order);
+                            }
+                            rest[..k].sort_unstable_by(order);
+                            ordered = at + k;
+                        }
+                        let (d, _, site) = cand[at];
                         let q = self.site_point(site);
                         if own_vias.iter().any(|v| v.dist(q) < hole_gap) {
                             continue;
