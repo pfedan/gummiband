@@ -154,14 +154,16 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
 - Spots instead of pieces in the open end, 2026-10-30. Arty, 180 s with `--prefer-width 0.25`:
   323/323, 123 vias, 2952 mm, 73 % at 0.25 mm, KiCad DRC clean but for the 4 errors of the empty
   board. Lichtschnitzel, 180 s: 348/348, 236 vias, 2591 mm, 1 spot, 2 DRC errors.
-- Corne, 400 s with `--geometry-generations 1`: 476/482, 388 vias, 8086 mm, 41 spots, against 452
-  vias and 8352 mm of the complete original. Nearly all hits are tracks of 0.2 mm against tracks of
-  0.2 mm or pads, with a median of 0.010 mm missing against 0.19 mm. The QFN has a pitch of 0.4 mm,
-  which leaves 0.2 mm next to a track of 0.2 mm, and tracks that leave it in parallel lose that with
-  the angle, from about 13 degrees below the rule. Not proven yet; the idea is a straight exit from
-  the pin row before the fan-out. Longer necks and more reserve did not help, neither did leaving
-  out the tightening in that pass. KiCad's DRC stops at 199 or 499 hits per type, so those are
-  limits and not results. Solder mask openings are no obstacles for the router.
+- Corne with tracks on the middle of their fine pitch pads and solder mask openings as obstacles,
+  `--geometry-generations 1`, 45 minutes, not converged: 477/482, 371 vias, 8106 mm, against 452
+  vias and 8352 mm of the complete original. DRC: no clearance errors, shorts or crossings, the 4
+  solder mask bridges of the unrouted board, 1 at the edge. Before: at least 378 clearance errors,
+  at least 199 bridges. Nearly all hits had been within 0.5 mm of a pad centre: neighbours pushed a
+  track 20 um off the middle of its own pad, next to the 10 um that a 0.2 mm track has at 0.4 mm
+  pitch. Rails 0.8 mm beyond the pad were worse, they take the room to fan out. Neck extensions, more
+  reserve and leaving out the tightening did little. Open: the own check reports 4 spots at
+  `D+`/`D-` against GND that KiCad accepts, not understood.
+- KiCad's DRC stops at 199 or 499 hits per type, so those are limits and not results.
 - Negotiated routing: done as an option, `route --negotiate N` (see ARCHITECTURE). Measured on
   2026-10-30 with `--runs 14 --generations 1 --negotiate 20`, KiCad DRC against the plain run:
   `fine_pitch_mixed` 0 open and 0 errors instead of 8 and 7, `four_signal_layers` 0 open instead
