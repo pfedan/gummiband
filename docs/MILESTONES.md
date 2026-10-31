@@ -164,6 +164,9 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   reserve and leaving out the tightening did little. Open: the own check reports 4 spots at
   `D+`/`D-` against GND that KiCad accepts, not understood.
 - KiCad's DRC stops at 199 or 499 hits per type, so those are limits and not results.
+- Idea to keep: a strict convergence, where every gain in vias or length starts the boldness over
+  as well. Arty then still lost a via every few minutes after 18 minutes and never converged, but
+  for a long overnight run that may be what one wants, as an option.
 - Corne, 400 s with `--geometry-generations 1`: 476/482, 388 vias, 8086 mm, 41 spots, against 452
   vias and 8352 mm of the complete original. Nearly all hits are tracks of 0.2 mm against tracks of
   0.2 mm or pads, with a median of 0.010 mm missing against 0.19 mm. The QFN has a pitch of 0.4 mm,
