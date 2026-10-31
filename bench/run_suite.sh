@@ -4,6 +4,7 @@
 # Usage: bench/run_suite.sh [board ...]          (default: all boards in bench/boards)
 # Environment:
 #   RUNS=4 GENERATIONS=1     router portfolio size and evolutionary generations
+#   GEOMETRY_GENERATIONS=0   geometry generations (0 keeps the suite quick and comparable)
 #   RAYON_NUM_THREADS=4      worker threads per router run (boards always run one after another)
 #   TIMEOUT=900              seconds per board for the router (killed afterwards)
 #   ROUTE_ARGS="..."         extra arguments for `gummiband route`
@@ -31,6 +32,7 @@ os.makedirs(out, exist_ok=True)
 gb = os.path.join(root, "target", "release", "gummiband")
 runs = os.environ.get("RUNS", "4")
 gens = os.environ.get("GENERATIONS", "1")
+geo = os.environ.get("GEOMETRY_GENERATIONS", "0")
 timeout = float(os.environ.get("TIMEOUT", "900"))
 extra = os.environ.get("ROUTE_ARGS", "").split()
 
@@ -54,7 +56,7 @@ for name in names:
         if os.path.exists(f):
             os.remove(f)
     shutil.copy(os.path.join(boards_dir, name + ".kicad_pro"), os.path.join(out, name + ".kicad_pro"))
-    cmd = [gb, "route", src, "-o", dst, "--runs", runs, "--generations", gens] + extra
+    cmd = [gb, "route", src, "-o", dst, "--runs", runs, "--generations", gens, "--geometry-generations", geo] + extra
     if os.environ.get("SVG") == "1":
         cmd += ["--svg", os.path.join(out, name + ".svg")]
     row = dict(board=name, status="ok", routed="-", vias="-", length="-", time="-", core="-",
@@ -128,7 +130,7 @@ for r in rows:
 report = "\n".join(lines)
 if notes:
     report += "\n\nNotes:\n" + "\n".join("- " + n for n in notes)
-report += (f"\n\nrouter: --runs {runs} --generations {gens} {' '.join(extra)}, RAYON_NUM_THREADS={os.environ.get('RAYON_NUM_THREADS')};"
+report += (f"\n\nrouter: --runs {runs} --generations {gens} --geometry-generations {geo} {' '.join(extra)}, RAYON_NUM_THREADS={os.environ.get('RAYON_NUM_THREADS')};"
            " time = wall clock of `gummiband route`;"
            "\ncore viol = Gummiband's own clearance check; unconn/clearance/short/crossing/other = kicad-cli pcb drc"
            " (silk*/lib_* ignored)")

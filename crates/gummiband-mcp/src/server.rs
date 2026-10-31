@@ -216,7 +216,8 @@ pub struct PlacePartsIn {
     pub fixed: Vec<String>,
     /// First seed (default 1); another seed gives another placement.
     pub seed: Option<u64>,
-    /// Independent runs (default 4); the one with the fewest crossings is kept.
+    /// Independent runs (default 1); the one with the fewest crossings is kept. The crossings
+    /// hardly predict the routed result: for another attempt change the seed instead.
     pub starts: Option<usize>,
     /// Spacing between courtyards in mm (default 0.3).
     pub gap: Option<f64>,
@@ -318,8 +319,8 @@ pub struct RouteIn {
     pub layer_dirs: Option<f64>,
     /// Generations of the evolutionary order search after the portfolio (default 3).
     pub generations: Option<usize>,
-    /// Generations that select by clearance violations after the geometry step (default 0,
-    /// slower).
+    /// Generations that select by clearance violations after the geometry step (default 3, as
+    /// the CLI and the plugin; 0 is about three times faster and leaves many more violations).
     pub geometry_generations: Option<usize>,
     /// Keep locked tracks and vias as fixed copper (default: as given to load_board).
     pub keep_locked: Option<bool>,
@@ -332,6 +333,15 @@ pub struct RouteIn {
     pub via_pitch: Option<f64>,
     /// Via cost in mm of track (default 3, as the CLI).
     pub via_cost: Option<f64>,
+    /// Experimental: rounds of negotiated routing in a second search (default 0: off; 20 works
+    /// well and takes about twice the time).
+    pub negotiate: Option<usize>,
+    /// Reserve in mm on top of the clearances that the finished copper gets where there is room
+    /// (default 0). The result stays only if it brings no new violation.
+    pub air: Option<f64>,
+    /// Tracks of the default net class grow up to this width in mm where there is room, at the
+    /// end (default 0: off; a track_width rule with opt sets it per class).
+    pub prefer_width: Option<f64>,
     /// Maximum number of violations listed (default 50; the total is always given).
     pub max_violations: Option<usize>,
 }
@@ -1191,18 +1201,19 @@ fn route_blocking(
         via_cost: p.via_cost.unwrap_or(3.0),
         pair_pull: p.pair_pull.unwrap_or(0.0),
         layer_dirs: p.layer_dirs.unwrap_or(0.5),
+        negotiate: p.negotiate.unwrap_or(0),
         ..Default::default()
     };
     let search_cfg = gummiband_core::SearchConfig {
         population: runs,
         generations: p.generations.unwrap_or(3),
-        geometry_generations: p.geometry_generations.unwrap_or(0),
+        geometry_generations: p.geometry_generations.unwrap_or(3),
         frames: false,
         progress: None,
         seed: p.seed,
         open_end: None,
-        air: 0.0,
-        prefer_width: 0.0,
+        air: p.air.unwrap_or(0.0),
+        prefer_width: p.prefer_width.unwrap_or(0.0),
     };
     let (res, pair_reports) = if p.pairs == Some(true) {
         let cfg = gummiband_core::pairs::PairConfig {
