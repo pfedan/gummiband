@@ -69,7 +69,10 @@ Units: millimetres as `f64` in the core. The writer rounds to KiCad's nanometre 
 - `Layer`: copper layers by name and index; a routing layer set (default F.Cu and B.Cu).
 - `Obstacle`: a polygon on a set of layers with a net (or none), a clearance class and a kind
   (pad, locked track, locked via, keepout, zone, edge). Pads, track capsules and circles are
-  converted to polygons with a bounded error (`max_error`, default 5 um outward).
+  converted to polygons with a bounded error (`max_error`, default 5 um outward). A solder mask
+  opening of its own is a keepout, with the net of the copper in it if there is one: that net
+  must be able to draw track there, so the triangles stay free and only close to other nets
+  (`Mesh::opening`). A pad's own opening is simply its clearance.
 - `Pin`: a pad that a net must connect, with its position, layers and the polygon.
 - `Net`: name, net class, pins, priority. Net class gives width, clearance, via size.
 - Locked tracks and vias are obstacles of their net; their endpoints join the net's pin set, so a

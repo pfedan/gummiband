@@ -30,6 +30,7 @@ than 45 degree stairs.
 | Board outline (`Edge.Cuts`) | the routable area, with the edge clearance of the board rules. Open or broken outlines fall back to the bounding box with the edge lines as obstacles. |
 | Copper layers | routing happens on all copper layers that are not planes. Layers of KiCad type *power* (and `--plane-layers`) are planes. |
 | Footprints and pads | every pad is an obstacle for other nets and a pin for its own net. Overlapping pads of one net count as one pin. Non-plated holes are obstacles with the hole clearance. |
+| Solder mask | openings are obstacles for other nets, see [Solder mask openings](#solder-mask-openings). |
 | Locked tracks and vias | kept as fixed copper of their net (`--keep-locked`, the plugin default); their ends are pins. Unlocked ones are removed. |
 | Zones | pours on plane layers define the planes; a pin of the plane net is connected by a via into the plane outline (or by a through-hole pad). Keepout zones are obstacles on their layers. Other zones stay in the file and are not refilled by the router. |
 | Net classes (`.kicad_pro`) | track width, clearance, via diameter and drill, priority, per net. |
@@ -58,6 +59,35 @@ Gummiband honours a subset of KiCad's custom design rules:
 
 Everything else in the `.kicad_dru` is ignored. Run the KiCad DRC on the result to catch what the
 router could not see.
+
+## Solder mask openings
+
+KiCad's DRC reports `solder_mask_bridge` when a mask opening shows copper of two nets, so nothing
+but mask keeps them apart. The router keeps tracks and vias out of the openings of other nets, by
+the rule KiCad 10 applies:
+
+- **Pads.** The opening of a pad with a mask layer is the pad plus its margin: the
+  `solder_mask_margin` of the pad, else of the footprint, else the board's
+  `pad_to_mask_clearance`. KiCad compares copper against this margin and not against the
+  clearance, so a pad's margin, plus 0.01 mm against rounding and plus
+  `solder_mask_to_copper_clearance`, counts as its clearance wherever it is the larger one. The
+  own net gets to its pad as ever. That is the whole story on Corne: no shapes on the mask layers,
+  a margin of 0.2 mm around a clearance of 0.19 mm, and every track that hugged a pad lay in its
+  opening.
+- **Shapes and text on `F.Mask` or `B.Mask`**, in a footprint or on the board, are obstacles on the
+  outer copper layer below, and so are pads without copper and non-plated pads wider than their
+  drill (a bare drill opens no mask for the check). A drawn shape reaches as far as the board's
+  margin beyond its edge, also in a footprint with a margin of its own: that is what KiCad
+  measures, although the mask itself does not grow. The net of the pads and copper graphics in an
+  opening may enter it and route through it. Over bare board an opening is closed to all nets,
+  even though KiCad would accept one net. An opening with several nets in it is a bridge by itself
+  and stays out of the routing.
+- **Footprints** with the attribute *Allow bridged solder mask apertures between pads*
+  (`allow_soldermask_bridges`) have no openings for the router, as for KiCad.
+
+Boards without margin and without such shapes route exactly as before. What the router cannot
+change are bridges in the footprints themselves: two pads too close for their openings, four of
+them on Corne.
 
 ## Track width and necking
 
@@ -162,8 +192,8 @@ thread count: the portfolio size is a constant (14 runs), and threads only chang
 
 After the geometry step the router checks every track and via against every obstacle and every
 other net with the class and rule clearances, the edge clearance and the hole clearances, and
-reports the violations by kind and position. With `--geometry-generations` this check also
-drives the search. KiCad's DRC uses the same rules with its own geometry; its numbers are close
+reports the violations by kind and position; `mask` is copper in a solder mask opening. With
+`--geometry-generations` this check also drives the search. KiCad's DRC uses the same rules with its own geometry; its numbers are close
 but not identical, and it is the final judge.
 
 ## Parallelism
@@ -204,6 +234,10 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
   and can leave DRC errors near pads and vias. `--pair-pull` is the lighter variant: the second
   net is pulled towards the first, spacing only roughly kept. Length matching between pairs and
   polarity awareness are not there yet.
+- **Solder mask.** A through-hole pad keeps its mask margin on all layers, also where the mask
+  does not open. Vias count as tented: a board that leaves them open gets no room around them for
+  the openings of pads. Which net may enter an opening is settled when the board is read, also if
+  `--move-parts` moves a part below it later. Zones on mask layers are not read.
 - **Teardrops.** Gummiband draws none itself. `--teardrops` (command line only) switches on
   KiCad's own teardrop feature for the vias and pads of the output and for the track ends at
   width changes; fill the zones once (B) after opening the file and KiCad builds the shapes.

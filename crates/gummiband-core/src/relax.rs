@@ -30,9 +30,10 @@ pub struct RelaxConfig {
     pub max_step: f64,
     /// Experimental: run the tension rounds on the GPU (needs the `gpu` feature).
     pub gpu: bool,
-    /// The board edge pushes vias as well and a via stays in the plane it reaches. Off for the
-    /// search itself, where vias stay near the place the router gave them; passes that push hard
-    /// can shove a via over the edge rule, or out of the zone it hangs on.
+    /// The board edge pushes vias as well, a via stays in the plane it reaches, and tracks leave
+    /// fine pitch pads straight (see [`pin_rails`]). Off for the search itself, where vias stay
+    /// near the place the router gave them; passes that push hard can shove a via over the edge
+    /// rule, or out of the zone it hangs on.
     pub via_edge: bool,
     /// Finish with the shortcuts of [`taut`]. Off, the tracks stay chains of short pieces where
     /// the rounds left them, and a clearance check can say where it hurts.
@@ -61,6 +62,79 @@ struct Piece {
     a: Point,
     b: Point,
     track: u32,
+}
+
+/// The way a track leaves a fine pitch pad: on the middle of the pad, up to `len` from its centre.
+/// Next to a pin at 0.4 mm pitch there is room for the track and hardly more, and neighbours push
+/// each other sideways: a track that lies 20 um off the middle of its own pad breaks the clearance
+/// to the next one.
+#[derive(Debug, Clone, Copy)]
+struct Rail {
+    at: Point,
+    dir: Point,
+    len: f64,
+}
+
+/// Pads count as fine pitch up to this distance to the next pad of their part.
+const RAIL_PITCH: f64 = 0.65;
+/// How far a rail goes on beyond the end of the pad. Longer rails take the room to fan out.
+const RAIL_OUT: f64 = 0.1;
+
+fn pin_rails(board: &Board) -> crate::index::FastMap<u32, Vec<Rail>> {
+    let mut parts: crate::index::FastMap<&str, Vec<usize>> = Default::default();
+    for (i, p) in board.pins.iter().enumerate() {
+        parts.entry(p.footprint.as_str()).or_default().push(i);
+    }
+    let mut out: crate::index::FastMap<u32, Vec<Rail>> = Default::default();
+    for pins in parts.values().filter(|p| p.len() >= 4) {
+        let centre = pins.iter().map(|&p| board.pins[p].pos).fold(pt(0.0, 0.0), |a, b| a + b) * (1.0 / pins.len() as f64);
+        for &i in pins {
+            let pin = &board.pins[i];
+            let pitch = pins
+                .iter()
+                .filter(|&&j| j != i)
+                .map(|&j| board.pins[j].pos.dist(pin.pos))
+                .fold(f64::INFINITY, f64::min);
+            let Some(&o) = pin.obstacles.first().filter(|_| pitch <= RAIL_PITCH) else {
+                continue;
+            };
+            let bb = board.obstacles[o].shape.bbox();
+            let (w, h) = (bb.width(), bb.height());
+            let out_of_part = pin.pos - centre;
+            let (dir, along) = if w >= h {
+                (pt(out_of_part.x.signum(), 0.0), w)
+            } else {
+                (pt(0.0, out_of_part.y.signum()), h)
+            };
+            if dir.len2() > 0.0 {
+                out.entry(pin.net).or_default().push(Rail {
+                    at: pin.pos,
+                    dir,
+                    len: along / 2.0 + RAIL_OUT,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The rail a track end at index 0 of `pts` follows: a pad of its net, and the track goes that way.
+fn rail_of<'a>(rails: &[Rail], pts: impl Iterator<Item = &'a Point> + Clone) -> Option<Rail> {
+    let start = *pts.clone().next()?;
+    let r = *rails.iter().find(|r| r.at.dist(start) < 0.35)?;
+    let far = pts.map(|p| *p - r.at).find(|d| d.len() >= r.len)?;
+    (far.dot(r.dir) >= 0.5 * far.len()).then_some(r)
+}
+
+/// Pull the points of a track end onto its rail.
+fn follow<'a>(r: &Rail, pts: impl Iterator<Item = &'a mut Point>) {
+    for p in pts {
+        let s = (*p - r.at).dot(r.dir);
+        if s > r.len {
+            break;
+        }
+        *p = r.at + r.dir * s.max(0.0);
+    }
 }
 
 /// Squared distances are compared with this much slack, so that a rejection is certain and
@@ -184,6 +258,7 @@ struct NearObstacle {
     /// Clearance it demands; `floor` means at least the clearance of the track's net.
     clr: f64,
     floor: bool,
+    hole: bool,
 }
 
 fn resample(pts: &[Point], spacing: f64) -> Vec<Point> {
@@ -237,6 +312,26 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         .and_then(|v| v.parse().ok())
         .unwrap_or((cfg.spacing * 2.0).max(0.1));
     let mut tracks: Vec<Vec<Point>> = geo.tracks.iter().map(|t| resample(&t.pts, coarse)).collect();
+    let rails: Vec<[Option<Rail>; 2]> = if cfg.via_edge {
+        let by_net = pin_rails(board);
+        geo.tracks
+            .iter()
+            .zip(&tracks)
+            .map(|(t, p)| match by_net.get(&t.net) {
+                Some(r) => [rail_of(r, p.iter()), rail_of(r, p.iter().rev())],
+                None => [None, None],
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // custom rules between items of two nets are rare: most lookups below are cut short by this
+    let item_max = board
+        .item_clearance
+        .values()
+        .chain(board.net_hole_clearance.values())
+        .copied()
+        .fold(0.0, f64::max);
     // how far any push can reach: largest clearance plus the widest track
     let max_clr = board
         .classes
@@ -245,7 +340,8 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
         .fold(board.rules.min_clearance, f64::max)
         .max(board.pair_clearance.values().copied().fold(0.0, f64::max))
         .max(board.obstacles.iter().map(|o| o.clearance).fold(0.0, f64::max))
-        .max(board.rules.hole_clearance);
+        .max(board.rules.hole_clearance)
+        .max(item_max);
     let max_w = geo.tracks.iter().map(|t| t.width).fold(0.0, f64::max);
     let n_layers = geo.tracks.iter().map(|t| t.layer as usize + 1).max().unwrap_or(0);
     let half_w = |t: &Track| if t.necks.is_empty() { t.width } else { t.width.max(t.neck_w) } / 2.0;
@@ -327,6 +423,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 },
                 clr,
                 floor,
+                hole: o.kind == ObstacleKind::Hole,
             }
         })
         .collect();
@@ -532,7 +629,8 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 let mut push = pt(0.0, 0.0);
                 for oi in sub.shared.obs_index.query_point(vc, vr + 1.0) {
                     let o = &board.obstacles[oi as usize];
-                    if !o.layers.intersects(routing) && o.hole.is_none() {
+                    let keeps_vias = matches!(o.kind, ObstacleKind::Keepout { vias: true, .. });
+                    if !o.layers.intersects(routing) && o.hole.is_none() && !keeps_vias {
                         continue;
                     }
                     if via_layer[vi].is_some_and(|l| !o.layers.has(l)) {
@@ -542,7 +640,9 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         continue;
                     }
                     let need = match o.kind {
-                        ObstacleKind::Keepout { vias: no_vias, tracks } => {
+                        ObstacleKind::Keepout {
+                            vias: no_vias, tracks, ..
+                        } => {
                             // a via outside a track keepout still needs room for the ends of
                             // its tracks on that layer (they end at the via centre)
                             let ends = via_tracks[vi]
@@ -556,8 +656,8 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             }
                             crate::board::KEEPOUT_GAP + r
                         }
-                        ObstacleKind::Hole => board.rules.hole_clearance + vr,
-                        _ => o.clearance.max(vclr) + vr,
+                        ObstacleKind::Hole => board.hole_gap(vn) + vr,
+                        _ => o.clearance.max(vclr).max(board.item_gap(vn, o.net)) + vr,
                     } + cfg.margin;
                     let poly = &sub.shared.obs_polys[oi as usize];
                     let inside = poly.contains(vc);
@@ -606,7 +706,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                     let need = if n2 == vn {
                         holes
                     } else {
-                        (vr + r2 + vclr.max(clr2) + cfg.margin).max(holes)
+                        (vr + r2 + vclr.max(clr2).max(board.item_gap(vn, Some(n2))) + cfg.margin).max(holes)
                     };
                     let dv = vc - c2;
                     if surely_outside(dv.x, dv.y, need) {
@@ -629,10 +729,10 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         continue;
                     }
                     for tier in [&g.fine, &g.far] {
-                        let radius = vr + vclr.max(tier.max_clr) + cfg.margin + tier.max_extent;
+                        let radius = vr + vclr.max(tier.max_clr).max(item_max) + cfg.margin + tier.max_extent;
                         tier.for_each_near(vc, radius, |r| {
                             let dm = vc - r.mid;
-                            let lim = vr + vclr.max(r.clr as f64) + cfg.margin + r.extent as f64;
+                            let lim = vr + vclr.max(r.clr as f64).max(item_max) + cfg.margin + r.extent as f64;
                             if r.net != vn && !surely_outside(dm.x, dm.y, lim) {
                                 near.push(g.order_key(r));
                             }
@@ -643,7 +743,10 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 for &(_, pi) in &near {
                     let pc = &pieces[pi as usize];
                     let o = &geo.tracks[pc.track as usize];
-                    let need = vr + o.piece_width(pc.a, pc.b) / 2.0 + vclr.max(clr(o.net)) + cfg.margin;
+                    let need = vr
+                        + o.piece_width(pc.a, pc.b) / 2.0
+                        + vclr.max(clr(o.net)).max(board.item_gap(vn, Some(o.net)))
+                        + cfg.margin;
                     let ab = pc.b - pc.a;
                     let l2 = ab.len2();
                     let tt = if l2 > 0.0 {
@@ -737,7 +840,14 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             if o.own_net == net {
                                 continue;
                             }
-                            let need = if o.floor { o.clr.max(c) } else { o.clr } + w / 2.0 + cfg.margin;
+                            let need = if o.floor {
+                                o.clr.max(c).max(board.item_gap(net, Some(o.own_net)))
+                            } else if o.hole {
+                                board.hole_gap(net)
+                            } else {
+                                o.clr
+                            } + w / 2.0
+                                + cfg.margin;
                             // cheap reject on the bounding box before the polygon distance
                             let dx = (o.bbox.min.x - p.x).max(0.0).max(p.x - o.bbox.max.x);
                             let dy = (o.bbox.min.y - p.y).max(0.0).max(p.y - o.bbox.max.y);
@@ -771,7 +881,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                             let (vc, vr, vn, vclr) = vias[vi as usize];
                             let dv = p - vc;
                             if vn != net
-                                && !surely_outside(dv.x, dv.y, vr + vclr.max(c) + w / 2.0 + cfg.margin)
+                                && !surely_outside(dv.x, dv.y, vr + vclr.max(c).max(item_max) + w / 2.0 + cfg.margin)
                                 && via_layer[vi as usize].is_none_or(|l| l == t.layer)
                             {
                                 hits.push(vi);
@@ -779,8 +889,8 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                         });
                         hits.sort_unstable();
                         for &vi in &hits {
-                            let (vc, vr, _, vclr) = vias[vi as usize];
-                            let need = vr + vclr.max(c) + w / 2.0 + cfg.margin;
+                            let (vc, vr, vn, vclr) = vias[vi as usize];
+                            let need = vr + vclr.max(c).max(board.item_gap(net, Some(vn))) + w / 2.0 + cfg.margin;
                             let d = p.dist(vc);
                             if d < need {
                                 push = push + (p - vc).norm() * ((need - d) * 0.5);
@@ -855,6 +965,14 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
                 out
             })
             .collect();
+        for (ti, ends) in rails.iter().enumerate().filter(|(ti, _)| awake[*ti]) {
+            if let Some(r) = &ends[0] {
+                follow(r, tracks[ti].iter_mut());
+            }
+            if let Some(r) = &ends[1] {
+                follow(r, tracks[ti].iter_mut().rev());
+            }
+        }
         if let Some(moves) = gpu_moves {
             let mut at = 0;
             for p in &mut tracks {
@@ -919,7 +1037,7 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
     }
     let t_taut = std::time::Instant::now();
     let tracks: Vec<(Vec<Point>, Vec<Elem>)> = if cfg.taut {
-        prof::time(Slot::Taut, || taut(board, sub, geo, tracks, cfg, &awake))
+        prof::time(Slot::Taut, || taut(board, sub, geo, tracks, cfg, &awake, &rails))
     } else {
         tracks
             .into_iter()
@@ -1064,6 +1182,7 @@ fn taut(
     mut tracks: Vec<Vec<Point>>,
     cfg: &RelaxConfig,
     awake: &[bool],
+    rails: &[[Option<Rail>; 2]],
 ) -> Vec<(Vec<Point>, Vec<Elem>)> {
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
     let bounds = board.bbox().grow(5.0);
@@ -1117,8 +1236,8 @@ fn taut(
                         }
                         crate::board::KEEPOUT_GAP
                     }
-                    ObstacleKind::Hole => board.rules.hole_clearance,
-                    _ => o.clearance.max(c),
+                    ObstacleKind::Hole => board.hole_gap(net),
+                    _ => o.clearance.max(c).max(board.item_gap(net, o.net)),
                 } + w / 2.0
                     + m;
                 if sub.shared.obs_polys[oi as usize].dist_to_seg(a, b) < need {
@@ -1146,7 +1265,7 @@ fn taut(
                 if vn == net {
                     continue;
                 }
-                let need = vr + c.max(clr(vn)) + w / 2.0 + m;
+                let need = vr + c.max(clr(vn)).max(board.item_gap(net, Some(vn))) + w / 2.0 + m;
                 let reach = need + 1e-9;
                 if vc.x >= r.min.x - reach
                     && vc.x <= r.max.x + reach
@@ -1180,9 +1299,22 @@ fn taut(
             result.push((p.clone(), p.windows(2).map(|w| Elem::Line(w[0], w[1])).collect()));
             continue;
         }
+        // a shortcut must not leave a rail before its end
+        let mut stops: Vec<usize> = Vec::new();
+        if let Some(ends) = rails.get(ti) {
+            let inside = |p: &Point, r: &Rail| (*p - r.at).dot(r.dir) <= r.len;
+            if let Some(r) = &ends[0] {
+                stops.push(pts.iter().take_while(|p| inside(p, r)).count().saturating_sub(1));
+            }
+            if let Some(r) = &ends[1] {
+                stops.push(n - pts.iter().rev().take_while(|p| inside(p, r)).count().max(1));
+            }
+            stops.sort_unstable();
+        }
         let mut out = vec![pts[0]];
         let mut i = 0;
         while i < n - 1 {
+            let n = stops.iter().find(|&&k| k > i).map_or(n, |&k| k + 1);
             // farthest visible point: exponential search, then bisection (visibility along a
             // band is close to monotone, so this needs a handful of checks instead of a scan)
             let mut good = i + 1;
@@ -1438,15 +1570,17 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
                         }
                         crate::board::KEEPOUT_GAP
                     }
-                    ObstacleKind::Hole => board.rules.hole_clearance,
-                    _ => o.clearance.max(c),
+                    ObstacleKind::Hole => board.hole_gap(net),
+                    _ => o.clearance.max(c).max(board.item_gap(net, o.net)),
                 };
                 if sub.shared.obs_polys[oi as usize].dist_to_seg(a, b) < need + w / 2.0 + margin {
                     return false;
                 }
             }
             for v in &geo.vias {
-                if v.net != net && point_seg_dist(v.at, a, b) < v.diameter / 2.0 + w / 2.0 + c.max(clr(v.net)) + margin
+                if v.net != net
+                    && point_seg_dist(v.at, a, b)
+                        < v.diameter / 2.0 + w / 2.0 + c.max(clr(v.net)).max(board.item_gap(net, Some(v.net))) + margin
                 {
                     return false;
                 }
@@ -1592,15 +1726,16 @@ pub fn prefer_width(
                             }
                             crate::board::KEEPOUT_GAP
                         }
-                        ObstacleKind::Hole => board.rules.hole_clearance,
-                        _ => o.clearance.max(c),
+                        ObstacleKind::Hole => board.hole_gap(net),
+                        _ => o.clearance.max(c).max(board.item_gap(net, o.net)),
                     };
                     sub.shared.obs_polys[oi as usize].dist_to_seg(a, b) >= need + w / 2.0 + margin
                 })
                 && geo.vias.iter().all(|v| {
                     v.net == net
                         || v.layer.is_some_and(|l| l != layer)
-                        || point_seg_dist(v.at, a, b) >= v.diameter / 2.0 + w / 2.0 + c.max(clr(v.net)) + margin
+                        || point_seg_dist(v.at, a, b)
+                            >= v.diameter / 2.0 + w / 2.0 + c.max(clr(v.net)).max(board.item_gap(net, Some(v.net))) + margin
                 })
                 && idx.query(&rr).into_iter().all(|pi| {
                     let (p, q, uj) = pieces[pi as usize];

@@ -245,6 +245,33 @@ impl Polygon {
             .fold(f64::INFINITY, f64::min)
     }
 
+    /// The polygon with its sides moved out by d. Corners stay sharp, so they reach further than
+    /// d (up to four times at a spike).
+    pub fn grown(&self, d: f64) -> Polygon {
+        let mut pts: Vec<Point> = Vec::with_capacity(self.pts.len());
+        for &p in &self.pts {
+            if pts.last().is_none_or(|q| q.dist(p) > 1e-9) {
+                pts.push(p);
+            }
+        }
+        if pts.len() > 1 && pts[0].dist(pts[pts.len() - 1]) <= 1e-9 {
+            pts.pop();
+        }
+        let out = self.signed_area().signum();
+        let n = pts.len();
+        let normal = |a: Point, b: Point| {
+            let e = (b - a).norm();
+            pt(e.y, -e.x) * out
+        };
+        let moved = (0..n)
+            .map(|i| {
+                let (n1, n2) = (normal(pts[(i + n - 1) % n], pts[i]), normal(pts[i], pts[(i + 1) % n]));
+                pts[i] + (n1 + n2) * (d / (1.0 + n1.dot(n2)).max(0.125))
+            })
+            .collect();
+        Polygon::new(moved)
+    }
+
     pub fn dist_to_poly(&self, o: &Polygon) -> f64 {
         if o.pts.iter().any(|&p| self.contains(p)) || self.pts.iter().any(|&p| o.contains(p)) {
             return 0.0;
@@ -283,6 +310,15 @@ impl Shape {
                 r: *r,
             },
             Shape::Polygon(p) => Shape::Polygon(Polygon::new(p.pts.iter().map(|q| *q + d).collect())),
+        }
+    }
+
+    /// The shape grown by d on all sides.
+    pub fn grown(&self, d: f64) -> Shape {
+        match self {
+            Shape::Circle { c, r } => Shape::Circle { c: *c, r: r + d },
+            Shape::Capsule { a, b, r } => Shape::Capsule { a: *a, b: *b, r: r + d },
+            Shape::Polygon(p) => Shape::Polygon(p.grown(d)),
         }
     }
 
@@ -467,6 +503,27 @@ pub fn arc_polyline(a: Point, m: Point, b: Point, max_error: f64) -> Vec<Point> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn polygons_grow_outwards_in_both_directions() {
+        // a repeated point at the end, as files may have it, and an inner corner
+        let l = vec![
+            pt(0., 0.),
+            pt(4., 0.),
+            pt(4., 2.),
+            pt(2., 2.),
+            pt(2., 4.),
+            pt(0., 4.),
+            pt(0., 0.),
+        ];
+        for pts in [l.clone(), l.into_iter().rev().collect()] {
+            let g = Polygon::new(pts).grown(0.5);
+            assert_eq!(g.pts.len(), 6);
+            let bb = g.bbox();
+            assert_eq!((bb.min.x, bb.min.y, bb.max.x, bb.max.y), (-0.5, -0.5, 4.5, 4.5));
+            assert!(!g.contains(pt(2.7, 2.7)) && g.contains(pt(2.3, 2.3)));
+        }
+    }
 
     #[test]
     fn polygon_contains_and_distance() {

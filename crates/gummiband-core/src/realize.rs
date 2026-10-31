@@ -301,7 +301,10 @@ impl Router<'_> {
         };
         let own = |p: Point| {
             self.sub.shared.obs_index.query_point(p, 0.0).iter().any(|&o| {
-                self.board.obstacles[o as usize].net == Some(s.net) && self.sub.shared.obs_polys[o as usize].contains(p)
+                let ob = &self.board.obstacles[o as usize];
+                ob.net == Some(s.net)
+                    && !matches!(ob.kind, ObstacleKind::Keepout { .. })
+                    && self.sub.shared.obs_polys[o as usize].contains(p)
             })
         };
         path.windows(2).all(|w| {
@@ -851,7 +854,9 @@ impl Router<'_> {
             }
             let own = |p: Point| {
                 self.sub.shared.obs_index.query_point(p, 0.0).iter().any(|&o| {
-                    self.board.obstacles[o as usize].net == Some(s.net)
+                    let ob = &self.board.obstacles[o as usize];
+                    ob.net == Some(s.net)
+                        && !matches!(ob.kind, ObstacleKind::Keepout { .. })
                         && self.sub.shared.obs_polys[o as usize].contains(p)
                 })
             };

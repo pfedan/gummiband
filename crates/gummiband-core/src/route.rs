@@ -508,15 +508,15 @@ impl<'a> Router<'a> {
     // ------------------------------------------------------------------ clearances
 
     /// Clearance a route of clearance `c` keeps from obstacle `obs`.
-    pub fn eff_clearance(&self, obs: u32, c: f64) -> f64 {
+    pub fn eff_clearance(&self, obs: u32, c: f64, net: NetId) -> f64 {
         if obs == OUTSIDE {
             return self.board.rules.edge_clearance;
         }
         let o = &self.board.obstacles[obs as usize];
         match o.kind {
             ObstacleKind::Keepout { .. } => crate::board::KEEPOUT_GAP,
-            ObstacleKind::Hole => self.board.rules.hole_clearance.max(o.clearance),
-            _ => o.clearance.max(c),
+            ObstacleKind::Hole => self.board.hole_gap(net).max(o.clearance),
+            _ => o.clearance.max(c).max(self.board.item_gap(net, o.net)),
         }
     }
 
@@ -545,7 +545,7 @@ impl<'a> Router<'a> {
         }))
     }
 
-    fn via_need(via: &ViaInfo, it: &Item) -> f64 {
+    fn via_need(board: &Board, via: &ViaInfo, it: &Item) -> f64 {
         if via.net == NetId::MAX {
             // phantom point: tracks on both sides together keep one clearance
             return it.c / 2.0 + it.w / 2.0;
@@ -553,7 +553,7 @@ impl<'a> Router<'a> {
         if via.net == it.net {
             0.0
         } else {
-            via.r + via.clearance.max(it.c) + it.w / 2.0
+            via.r + via.clearance.max(it.c).max(board.item_gap(it.net, Some(via.net))) + it.w / 2.0
         }
     }
 
@@ -565,10 +565,10 @@ impl<'a> Router<'a> {
             if self.obs_net(d.obs) == Some(it.net) {
                 continue;
             }
-            need = need.max((self.eff_clearance(d.obs, it.c) + it.w / 2.0) * d.factor as f64);
+            need = need.max((self.eff_clearance(d.obs, it.c, it.net) + it.w / 2.0) * d.factor as f64);
         }
         if let Some(via) = self.via_at(li, m.edges[e as usize][end]) {
-            need = need.max(Self::via_need(&via, it));
+            need = need.max(Self::via_need(self.board, &via, it));
         }
         need
     }
@@ -582,10 +582,10 @@ impl<'a> Router<'a> {
             if o == NONE || self.obs_net(o) == Some(it.net) {
                 continue;
             }
-            need = need.max(self.eff_clearance(o, it.c) + it.w / 2.0);
+            need = need.max(self.eff_clearance(o, it.c, it.net) + it.w / 2.0);
         }
         if let Some(via) = self.via_at(li, v) {
-            need = need.max(Self::via_need(&via, it));
+            need = need.max(Self::via_need(self.board, &via, it));
         }
         need
     }
@@ -839,11 +839,11 @@ impl<'a> Router<'a> {
         let mut need: f64 = 0.0;
         for &o in obs {
             if self.obs_net(o) != Some(it.net) {
-                need = need.max(self.eff_clearance(o, it.c) + it.w / 2.0);
+                need = need.max(self.eff_clearance(o, it.c, it.net) + it.w / 2.0);
             }
         }
         if let Some(via) = via_here {
-            need = need.max(Self::via_need(&via, it));
+            need = need.max(Self::via_need(self.board, &via, it));
         }
         if need <= 0.0 {
             return None;
@@ -985,7 +985,7 @@ impl<'a> Router<'a> {
         }
         let extra_end = |vert: u32, it: &Item| -> f64 {
             match extra_via {
-                Some((_, via)) if vert == via_vertex_here => Self::via_need(via, it),
+                Some((_, via)) if vert == via_vertex_here => Self::via_need(self.board, via, it),
                 _ => 0.0,
             }
         };
@@ -1410,7 +1410,7 @@ impl<'a> Router<'a> {
                     None => 0.0,
                 }
             } else {
-                r + self.eff_clearance(n.obs, clr) + self.cfg.margin
+                r + self.eff_clearance(n.obs, clr, net) + self.cfg.margin
             };
             if (n.dist as f64) < need {
                 return false;
@@ -1437,7 +1437,7 @@ impl<'a> Router<'a> {
                         let need = if o.net == net {
                             holes
                         } else {
-                            (r + o.r + clr.max(o.clearance)).max(holes)
+                            (r + o.r + clr.max(o.clearance).max(self.board.item_gap(net, Some(o.net)))).max(holes)
                         };
                         if d < need {
                             return false;
@@ -1530,7 +1530,7 @@ impl<'a> Router<'a> {
                         &items,
                         len,
                         |it| self.vertex_need(li, vi, it) + margin,
-                        |it| Self::via_need(&via, it) + margin,
+                        |it| Self::via_need(self.board, &via, it) + margin,
                         &[],
                         0.0,
                     );
@@ -2028,7 +2028,7 @@ impl<'a> Router<'a> {
                 return;
             }
             let s2 = m.status[t2 as usize];
-            if !Substrate::passable(self.board, s2, net) {
+            if !Substrate::passable(self.board, s2, net) || m.closed(t2, net) {
                 return;
             }
             let free = m.status[t as usize] == NONE;
@@ -2467,7 +2467,7 @@ impl<'a> Router<'a> {
                     let Some(&v) = m.site_vert.get(&site) else { continue };
                     for &t in &m.vert_tris[v as usize] {
                         let status = m.status[t as usize];
-                        if !Substrate::passable(self.board, status, net) {
+                        if !Substrate::passable(self.board, status, net) || m.closed(t, net) {
                             continue;
                         }
                         let i = m.tris[t as usize].iter().position(|&x| x == v).unwrap() as u8;
@@ -3459,6 +3459,103 @@ mod tests {
             b.pins.push(p);
         }
         b
+    }
+
+    /// Net A from pad to pad on F.Cu, and a solder mask opening across the board between them.
+    fn opening_board(net: Option<NetId>) -> Board {
+        let mut b = crate::topo::tests::two_pad_board();
+        let mut other = b.nets[0].clone();
+        other.name = "B".into();
+        other.pins = Vec::new();
+        b.nets.push(other);
+        b.obstacles.push(crate::board::Obstacle {
+            shape: Shape::Polygon(crate::geom::Polygon::new(vec![
+                pt(4.5, -1.),
+                pt(5.5, -1.),
+                pt(5.5, 11.),
+                pt(4.5, 11.),
+            ])),
+            layers: crate::board::LayerSet::single(0),
+            net,
+            kind: ObstacleKind::Keepout {
+                vias: true,
+                tracks: true,
+                mask: true,
+            },
+            hole: None,
+            clearance: 0.0,
+            pin: None,
+            locked: true,
+        });
+        b
+    }
+
+    fn route_all(b: &Board) -> crate::realize::Geometry {
+        let sub = Substrate::build(b, &SubstrateConfig::default());
+        let mut r = Router::new(b, &sub, RouterConfig::default());
+        r.plan();
+        assert_eq!(r.run(), 1);
+        r.geometry()
+    }
+
+    fn crosses_on_top(geo: &crate::realize::Geometry) -> bool {
+        let top = geo.tracks.iter().filter(|t| t.layer == 0);
+        top.flat_map(|t| t.pts.windows(2))
+            .any(|w| w[0].x.min(w[1].x) < 5.0 && w[0].x.max(w[1].x) > 5.0)
+    }
+
+    /// The net of the copper in an opening routes through it with real track.
+    #[test]
+    fn its_own_net_routes_through_an_opening() {
+        let b = opening_board(Some(0));
+        let geo = route_all(&b);
+        assert!(crosses_on_top(&geo));
+        assert!(geo.vias.is_empty());
+        assert!(crate::check::check(&b, &geo).is_empty());
+    }
+
+    /// For another net, or none, an opening is closed: tracks change the layer below it, and
+    /// vias stay out.
+    #[test]
+    fn other_nets_stay_out_of_an_opening() {
+        for net in [Some(1), None] {
+            let b = opening_board(net);
+            let geo = route_all(&b);
+            assert!(!crosses_on_top(&geo));
+            assert!(
+                geo.vias
+                    .iter()
+                    .all(|v| v.drill == 0.0 || (v.at.x - 5.0).abs() > 0.5 + v.diameter / 2.0)
+            );
+            assert!(crate::check::check(&b, &geo).is_empty());
+        }
+    }
+
+    /// The check reports copper of another net in an opening, and in the margin of a pad.
+    #[test]
+    fn the_check_sees_mask_openings() {
+        let geo = route_all(&opening_board(Some(0)));
+        let hit = crate::check::check(&opening_board(Some(1)), &geo);
+        assert!(!hit.is_empty() && hit.iter().all(|v| v.what == "mask A~B" && v.nets == (0, Some(1))));
+        // a pad of B beside the track, clear of the copper rule of 0.2 but with a margin of 0.5
+        let mut b = opening_board(Some(0));
+        b.obstacles.push(crate::board::Obstacle {
+            shape: Shape::Circle { c: pt(5., 5.6), r: 0.2 },
+            layers: crate::board::LayerSet::single(0),
+            net: Some(1),
+            kind: ObstacleKind::Pad,
+            hole: None,
+            clearance: 0.5,
+            pin: None,
+            locked: true,
+        });
+        let hit = crate::check::check(&b, &geo);
+        assert!(
+            !hit.is_empty()
+                && hit
+                    .iter()
+                    .all(|v| v.what == "mask A~B" && (v.required - 0.5).abs() < 1e-9)
+        );
     }
 
     #[test]
