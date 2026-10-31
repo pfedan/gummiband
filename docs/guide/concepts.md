@@ -103,6 +103,33 @@ every change of width. A track never gets narrower than its class width this way
 without room stays at the old width while the rest of the track is wide. KiCad's teardrops
 (`--teardrops`) can smooth that further, but the taper does not depend on them.
 
+## Conventional 45 degree tracks
+
+Rubber band tracks are fine for every fab and electrically at least as good as 45 degree routing,
+but many reviewers and company guidelines expect 45 degrees, and KiCad's push and shove tools
+are made for them. `--angles 45` (in the plugin *45 degree tracks* under *Advanced*, in the MCP
+`route` with `angles: "45"`) turns the finished result into conventional routing as the very last
+step:
+
+- Every track is walked from its start. From where it stands it reaches as far along its old
+  path as one or two straight legs in the eight directions of the 45 degree grid allow (or three,
+  as a Z that stays closer to the old line), then goes on from there.
+- Corners of 90 and 135 degrees get 45 degree chamfers where they fit; there are no arcs.
+- Vias and track ends do not move, so connectivity stays as it was.
+- Every new piece is checked against the pads, keepouts, board edge, vias and the current
+  tracks of all other nets, with the same rules as Gummiband's own check, so the step never adds
+  a clearance violation. Tracks are done one after another, in four passes: a bundle frees its
+  room from the outside in, and what got room since the last pass straightens out.
+- A piece keeps the width it had, and gets narrower only inside the router's neck zones. Under a
+  minimum width rule the narrow pieces at the pins keep their angle or take the full width,
+  because the rule allows a neck only where it touches the courtyard.
+- Where no 45 degree path fits, typically inside tight bundles at an odd angle, the piece keeps
+  its angle. The output counts these pieces and their length.
+
+Expect tracks about 4 to 5 % longer and a few percent of the length left off the grid on dense
+boards (see [benchmarks](benchmarks.md#conventional-45-degree-tracks)). The step takes a second
+or less.
+
 ## Vias
 
 Vias are placed on a grid of candidate positions (`--via-pitch`, 0.5 mm by default) wherever

@@ -237,6 +237,12 @@ open({str(self.out)!r}, "w").write("done")
         pairs = runner.RouteOptions(until_stop=True, pairs=True)
         self.assertNotIn("--until-stop", runner.build_command("gb", Path("b"), Path("o"), pairs))
 
+    def test_angles_flag(self):
+        cmd = runner.build_command("gb", Path("b"), Path("o"), runner.RouteOptions(angles_45=True))
+        self.assertEqual(cmd[cmd.index("--angles") + 1], "45")
+        plain = runner.build_command("gb", Path("b"), Path("o"), runner.RouteOptions())
+        self.assertNotIn("--angles", plain)
+
     def test_prefer_width_flag(self):
         opts = runner.RouteOptions(prefer_width=0.25)
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)

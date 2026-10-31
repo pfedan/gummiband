@@ -368,6 +368,11 @@ pub struct RouteIn {
     /// Tracks of the default net class grow up to this width in mm where there is room, at the
     /// end (default 0: off; a track_width rule with opt sets it per class).
     pub prefer_width: Option<f64>,
+    /// Track angles of the result: "any" (default) keeps the any-angle tracks with arcs, "45"
+    /// turns them into conventional 45 degree routing as a last step (straight pieces in eight
+    /// directions, chamfered corners, a few percent more length). It never adds a clearance
+    /// violation; where no 45 degree path fits, a piece keeps its angle (see `angles_45`).
+    pub angles: Option<String>,
     /// Maximum number of violations listed (default 50; the total is always given).
     pub max_violations: Option<usize>,
 }
@@ -620,6 +625,20 @@ pub struct RouteOut {
     pub nets: Vec<NetStatOut>,
     /// Project files copied next to the output.
     pub copied: Vec<String>,
+    /// What the 45 degree step did, with `angles` "45".
+    pub angles_45: Option<AnglesOut>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AnglesOut {
+    /// Track length before and after the step.
+    pub length_before_mm: f64,
+    pub length_after_mm: f64,
+    /// Pieces that kept an angle off the 45 degree grid because nothing else fit, and their length.
+    pub off_grid_pieces: usize,
+    pub off_grid_mm: f64,
+    /// Corners of 90 or 135 degrees that could not be chamfered.
+    pub sharp_corners: usize,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1292,6 +1311,11 @@ fn route_blocking(
         }
         _ => b,
     };
+    let angles_45 = match p.angles.as_deref() {
+        None | Some("any") => false,
+        Some("45") => true,
+        Some(other) => bail!("angles must be \"any\" or \"45\", not {other:?}"),
+    };
     let sub_cfg = SubstrateConfig {
         via_pitch: p.via_pitch.unwrap_or(0.5),
         ..Default::default()
@@ -1327,6 +1351,17 @@ fn route_blocking(
             Vec::new(),
         )
     };
+    let mut res = res;
+    let angles_45 = angles_45.then(|| {
+        let st = gummiband_core::octo::octilinear(b, &mut res.geometry);
+        AnglesOut {
+            length_before_mm: r3(st.length_before),
+            length_after_mm: r3(st.length_after),
+            off_grid_pieces: st.any_angle,
+            off_grid_mm: r3(st.any_angle_length),
+            sharp_corners: st.sharp_corners,
+        }
+    });
     let seconds = t0.elapsed().as_secs_f64();
     let viol = gummiband_core::check::check(b, &res.geometry);
 
@@ -1434,6 +1469,7 @@ fn route_blocking(
     }
     let st = &res.stats;
     let out = RouteOut {
+        angles_45,
         coupling,
         notes,
         nets: nets_out,
