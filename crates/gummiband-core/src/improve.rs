@@ -319,7 +319,7 @@ fn warm_start(s: &State, r: &Router, fresh: Geometry, segs: &[u32], sites: &[u32
         tags.push(sid);
     }
     if thread {
-        place_new_vias(&mut tracks, &mut vias, &r.board.planes);
+        place_new_vias(&mut tracks, &mut vias, &r.board.planes, ideas().plane_hold);
     }
     (crate::realize::Geometry { tracks, vias }, tags, sites.to_vec())
 }
@@ -380,7 +380,7 @@ fn from_point(way: &[Point], p: Point) -> Vec<Point> {
 /// wrong side of a track that runs past it. Its track then crosses that track once, and no push
 /// gets it back. The way of the track is right, so the via goes along it, past the crossing, if
 /// that leaves fewer such crossings on all its tracks.
-fn place_new_vias(tracks: &mut [Track], vias: &mut [Via], planes: &[crate::board::Plane]) {
+fn place_new_vias(tracks: &mut [Track], vias: &mut [Via], planes: &[crate::board::Plane], hold: bool) {
     let boxes: Vec<Rect> = tracks
         .iter()
         .map(|t| {
@@ -423,11 +423,13 @@ fn place_new_vias(tracks: &mut [Track], vias: &mut [Via], planes: &[crate::board
             }
         }
         let Some(p) = to else { continue };
-        // a via that reaches the plane of its net must not leave it: its connection counts as
-        // made through that plane (GB_PLANE_HOLD; GB_PLANE_LOG says when it would happen)
+        // a via with tracks on one layer only connects them to the plane of its net: it must not
+        // leave that plane, its connection counts as made through it (GB_PLANE_HOLD; GB_PLANE_LOG
+        // says when it would happen)
         let r = v.diameter / 2.0;
+        let one_layer = ends.windows(2).all(|w| tracks[w[0].0].layer == tracks[w[1].0].layer);
         let home = planes.iter().find(|pl| pl.net == v.net && pl.outline.contains(v.at));
-        if let Some(pl) = home {
+        if let Some(pl) = home.filter(|_| one_layer) {
             let floor = (r + 0.3).min(pl.outline.boundary_dist(v.at));
             let stays = pl.outline.contains(p) && pl.outline.boundary_dist(p) >= floor;
             if !stays {
@@ -439,10 +441,10 @@ fn place_new_vias(tracks: &mut [Track], vias: &mut [Via], planes: &[crate::board
                         v.at.y,
                         p.x,
                         p.y,
-                        if ideas().plane_hold { ", held" } else { "" }
+                        if hold { ", held" } else { "" }
                     );
                 }
-                if ideas().plane_hold {
+                if hold {
                     continue;
                 }
             }
@@ -2394,13 +2396,29 @@ mod tests {
             origin: None,
             resting: false,
         }];
-        place_new_vias(&mut tracks, &mut vias, &[]);
+        place_new_vias(&mut tracks, &mut vias, &[], true);
         assert!(vias[0].at.y > 1.0 && vias[0].at.y < 5.0, "{:?}", vias[0].at);
         assert_eq!(tracks[1].pts[0], vias[0].at);
         // a via on the right side stays where it is
         let at = vias[0].at;
-        place_new_vias(&mut tracks, &mut vias, &[]);
+        place_new_vias(&mut tracks, &mut vias, &[], true);
         assert_eq!(vias[0].at, at);
+        // the same via in the plane of its net, whose border runs just past the sleeping track:
+        // the way out leaves the plane, so with the hold it stays
+        let plane = crate::board::Plane {
+            net: 2,
+            layer: 1,
+            outline: crate::geom::Polygon::new(vec![pt(-5.0, -5.0), pt(15.0, -5.0), pt(15.0, 1.2), pt(-5.0, 1.2)]),
+        };
+        let mut tracks = vec![
+            track(1, vec![pt(0.0, 1.0), pt(10.0, 1.0)], true),
+            track(2, vec![site, pt(5.0, 5.0)], false),
+        ];
+        vias[0].at = site;
+        place_new_vias(&mut tracks, &mut vias, std::slice::from_ref(&plane), true);
+        assert_eq!(vias[0].at, site);
+        place_new_vias(&mut tracks, &mut vias, std::slice::from_ref(&plane), false);
+        assert!(vias[0].at.y > 1.2, "{:?}", vias[0].at);
     }
 
     #[test]
