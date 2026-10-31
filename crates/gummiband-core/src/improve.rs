@@ -553,6 +553,9 @@ fn mutant<'a>(
     relax::relax(board, sub, &mut geo, relax_cfg);
     let mut cand = candidate(board, &r, geo, routed, s.cand.cfg.clone(), generation);
     judge(board, &mut cand);
+    if !loose_ends(board, &cand.geo, &conns.iter().map(|&ci| r.conns[ci].net).collect::<Vec<_>>()).is_empty() {
+        return None;
+    }
     let mut next = State {
         router: r,
         cand,
@@ -889,6 +892,38 @@ fn rebuild<'a>(board: &'a Board, sub: &Substrate, c: &Candidate) -> Option<State
     Some(s)
 }
 
+/// Track ends of these nets that sit on nothing of their net, and vias with no track.
+fn loose_ends(board: &Board, geo: &Geometry, nets: &[u32]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (ti, t) in geo.tracks.iter().enumerate().filter(|(_, t)| nets.contains(&t.net)) {
+        for p in [t.pts[0], *t.pts.last().unwrap()] {
+            let on_via = geo.vias.iter().any(|v| v.net == t.net && v.at.dist(p) < 1e-4);
+            let on_pad = board.pins.iter().any(|pin| {
+                pin.net == t.net
+                    && pin.obstacles.iter().any(|&o| board.obstacles[o].shape.dist_to_point(p) < 0.01)
+            });
+            let on_track = geo.tracks.iter().enumerate().any(|(tj, o)| {
+                tj != ti && o.net == t.net && o.pts.iter().any(|q| q.dist(p) < 1e-4)
+            });
+            if !on_via && !on_pad && !on_track {
+                out.push(format!("track {ti} net {} ends free at {:.3} {:.3}", board.nets[t.net as usize].name, p.x, p.y));
+            }
+        }
+    }
+    for v in geo.vias.iter().filter(|v| nets.contains(&v.net)) {
+        let ends = geo.tracks.iter().filter(|t| t.net == v.net && (t.pts[0].dist(v.at) < 1e-4 || t.pts.last().unwrap().dist(v.at) < 1e-4)).count();
+        let plane = board.planes.iter().any(|p| p.net == v.net);
+        // a via in a pad needs only the track on the other side
+        let on_pad = board.pins.iter().any(|pin| {
+            pin.net == v.net && pin.obstacles.iter().any(|&o| board.obstacles[o].shape.dist_to_point(v.at) < 0.01)
+        });
+        if (ends == 0 || (ends == 1 && !plane && !on_pad)) && v.drill > 0.0 {
+            out.push(format!("via net {} at {:.3} {:.3} has no track", board.nets[v.net as usize].name, v.at.x, v.at.y));
+        }
+    }
+    out
+}
+
 /// Mutate `start` until the search is stopped and return the best result.
 pub(crate) fn run(
     board: &Board,
@@ -1088,32 +1123,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Debugging: track ends that sit on nothing of their net, and vias with no track.
-    fn loose_ends(board: &Board, geo: &Geometry) -> Vec<String> {
-        let mut out = Vec::new();
-        for (ti, t) in geo.tracks.iter().enumerate() {
-            for p in [t.pts[0], *t.pts.last().unwrap()] {
-                let on_via = geo.vias.iter().any(|v| v.net == t.net && v.at.dist(p) < 1e-4);
-                let on_pad = board.pins.iter().any(|pin| {
-                    pin.net == t.net
-                        && pin.obstacles.iter().any(|&o| board.obstacles[o].shape.dist_to_point(p) < 0.01)
-                });
-                let on_track = geo.tracks.iter().enumerate().any(|(tj, o)| {
-                    tj != ti && o.net == t.net && o.pts.iter().any(|q| q.dist(p) < 1e-4)
-                });
-                if !on_via && !on_pad && !on_track {
-                    out.push(format!("track {ti} net {} ends free at {:.3} {:.3}", board.nets[t.net as usize].name, p.x, p.y));
-                }
-            }
-        }
-        for v in &geo.vias {
-            let ends = geo.tracks.iter().filter(|t| t.net == v.net && (t.pts[0].dist(v.at) < 1e-4 || t.pts.last().unwrap().dist(v.at) < 1e-4)).count();
-            let plane = board.planes.iter().any(|p| p.net == v.net);
-            if (ends == 0 || (ends == 1 && !plane)) && v.drill > 0.0 {
-                out.push(format!("via net {} at {:.3} {:.3} has no track", board.nets[v.net as usize].name, v.at.x, v.at.y));
-            }
-        }
-        out
+    fn all_nets(b: &Board) -> Vec<u32> {
+        (0..b.nets.len() as u32).collect()
     }
 
     /// Nets that all have to cross each other: the pins of one side come in reverse order.
@@ -1223,7 +1234,7 @@ mod tests {
         let st = crate::octo::octilinear(&b, &mut res.geometry);
         crate::octo::octilinear(&b, &mut again);
         assert!(check::check(&b, &res.geometry).len() <= before);
-        assert!(loose_ends(&b, &res.geometry).is_empty());
+        assert!(loose_ends(&b, &res.geometry, &all_nets(&b)).is_empty());
         for (t, (a, z)) in res.geometry.tracks.iter().zip(ends) {
             assert!(t.pts[0].dist(a) < 1e-9 && t.pts.last().unwrap().dist(z) < 1e-9);
             assert!(t.elems.iter().all(|e| matches!(e, crate::realize::Elem::Line(..))));
@@ -1244,7 +1255,7 @@ mod tests {
         assert_eq!(res.stats.routed, res.stats.conns, "{:?}", res.stats.unrouted);
         let cost = |r: &crate::RouteResult| r.stats.cost() + check::check(&b, &r.geometry).len() as f64 * 1000.0;
         assert!(cost(&res) <= cost(&start), "{} > {}", cost(&res), cost(&start));
-        assert!(loose_ends(&b, &res.geometry).is_empty(), "{:?}", loose_ends(&b, &res.geometry));
+        assert!(loose_ends(&b, &res.geometry, &all_nets(&b)).is_empty());
         let again_router = rebuild_pieces(&b);
         assert_eq!(again_router, 1);
         let again = run_to(&b, 60);
@@ -1391,7 +1402,7 @@ mod tests {
         // the victim went around the tunnel
         let a = (0..2).find(|&ci| m.router.conns[ci].net == 0).unwrap();
         assert!(m.places[a].iter().any(|p| p.y > 16.0), "{:?}", m.places[a]);
-        assert!(loose_ends(&b, &m.cand.geo).is_empty(), "{:?}", loose_ends(&b, &m.cand.geo));
+        assert!(loose_ends(&b, &m.cand.geo, &all_nets(&b)).is_empty());
     }
 
     #[test]

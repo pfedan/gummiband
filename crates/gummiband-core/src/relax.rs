@@ -126,14 +126,28 @@ fn rail_of<'a>(rails: &[Rail], pts: impl Iterator<Item = &'a Point> + Clone) -> 
     (far.dot(r.dir) >= 0.5 * far.len()).then_some(r)
 }
 
-/// Pull the points of a track end onto its rail.
-fn follow<'a>(r: &Rail, pts: impl Iterator<Item = &'a mut Point>) {
-    for p in pts {
-        let s = (*p - r.at).dot(r.dir);
-        if s > r.len {
-            break;
+impl Rail {
+    /// Still on the rail: a track that turns away has left it, wherever it goes then.
+    fn holds(&self, p: Point) -> bool {
+        let d = p - self.at;
+        d.dot(self.dir) <= self.len && d.len() <= self.len + 0.05
+    }
+}
+
+/// Pull the points of a track end onto its rail, up to where it leaves it. The far end stays.
+fn follow(r: &Rail, pts: &mut [Point], from_end: bool) {
+    let last = pts.len() - 1;
+    let mut pull = |p: &mut Point| {
+        let on = r.holds(*p);
+        if on {
+            *p = r.at + r.dir * (*p - r.at).dot(r.dir).max(0.0);
         }
-        *p = r.at + r.dir * s.max(0.0);
+        on
+    };
+    if from_end {
+        pts[1..].iter_mut().rev().all(&mut pull);
+    } else {
+        pts[..last].iter_mut().all(&mut pull);
     }
 }
 
@@ -967,10 +981,10 @@ pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConf
             .collect();
         for (ti, ends) in rails.iter().enumerate().filter(|(ti, _)| awake[*ti]) {
             if let Some(r) = &ends[0] {
-                follow(r, tracks[ti].iter_mut());
+                follow(r, &mut tracks[ti], false);
             }
             if let Some(r) = &ends[1] {
-                follow(r, tracks[ti].iter_mut().rev());
+                follow(r, &mut tracks[ti], true);
             }
         }
         if let Some(moves) = gpu_moves {
@@ -1302,12 +1316,11 @@ fn taut(
         // a shortcut must not leave a rail before its end
         let mut stops: Vec<usize> = Vec::new();
         if let Some(ends) = rails.get(ti) {
-            let inside = |p: &Point, r: &Rail| (*p - r.at).dot(r.dir) <= r.len;
             if let Some(r) = &ends[0] {
-                stops.push(pts.iter().take_while(|p| inside(p, r)).count().saturating_sub(1));
+                stops.push(pts.iter().take_while(|p| r.holds(**p)).count().saturating_sub(1));
             }
             if let Some(r) = &ends[1] {
-                stops.push(n - pts.iter().rev().take_while(|p| inside(p, r)).count().max(1));
+                stops.push(n - pts.iter().rev().take_while(|p| r.holds(**p)).count().max(1));
             }
             stops.sort_unstable();
         }
@@ -1810,5 +1823,37 @@ pub fn prefer_width(
             r.add(m);
             t.fitted.push((r.grow(1e-6), u.w));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rail_lets_go_of_a_track_that_turns_away() {
+        let r = Rail {
+            at: pt(0.0, 0.0),
+            dir: pt(0.0, -1.0),
+            len: 0.6,
+        };
+        // out of the pad a little off the middle, then far to the side at the height of the rail
+        let mut pts = vec![pt(0.0, 0.0), pt(0.02, -0.1), pt(0.02, -0.2), pt(-1.0, -0.2), pt(-4.0, -0.2)];
+        follow(&r, &mut pts, false);
+        assert_eq!(pts[2], pt(0.0, -0.2));
+        assert_eq!(pts[3], pt(-1.0, -0.2));
+        assert_eq!(pts[4], pt(-4.0, -0.2));
+    }
+
+    #[test]
+    fn the_far_end_of_a_short_track_stays() {
+        let r = Rail {
+            at: pt(0.0, 0.0),
+            dir: pt(0.0, -1.0),
+            len: 0.6,
+        };
+        let mut pts = vec![pt(0.0, 0.0), pt(0.1, -0.2)];
+        follow(&r, &mut pts, false);
+        assert_eq!(pts[1], pt(0.1, -0.2));
     }
 }
