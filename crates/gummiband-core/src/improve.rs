@@ -573,6 +573,66 @@ fn better_or_same(a: &Candidate, b: &Candidate) -> bool {
     a.stats.routed >= b.stats.routed && a.flaw <= b.flaw && a.stats.shorts <= b.stats.shorts
 }
 
+/// Side branches that have to fail in a row, each bolder than the last, before the search counts
+/// as converged. From here on they take a stretch of 15 mm of the board and more than 50
+/// connections at a time.
+pub(crate) const TOP_LEVEL: usize = 12;
+
+/// The results that no other beats in both vias and length, at the level of the best one. The
+/// cost weighs vias against length once and for all, the user may see it differently.
+#[derive(Default)]
+struct Front {
+    items: Vec<Candidate>,
+}
+
+impl Front {
+    /// Take `c` if it holds its own next to `best`. True if it sets a noticeable record.
+    fn offer(&mut self, c: &Candidate, best: &Candidate) -> bool {
+        if c.stats.routed < best.stats.routed || c.stats.shorts > best.stats.shorts || c.flaw > best.flaw {
+            return false;
+        }
+        let beats = |a: &Candidate, b: &Candidate| {
+            a.stats.routed >= b.stats.routed
+                && a.flaw <= b.flaw
+                && a.stats.vias <= b.stats.vias
+                && a.stats.length <= b.stats.length
+        };
+        if self.items.iter().any(|o| beats(o, c)) {
+            return false;
+        }
+        let fewest = self.items.iter().map(|o| o.stats.vias).min();
+        let shortest = self.items.iter().map(|o| o.stats.length).fold(f64::INFINITY, f64::min);
+        let record = fewest.is_none_or(|v| c.stats.vias < v) || c.stats.length < shortest * 0.998;
+        self.items.retain(|o| !beats(c, o));
+        self.items.push(c.clone());
+        self.thin(8);
+        record
+    }
+
+    /// Keep the ends and the most different ones.
+    fn thin(&mut self, keep: usize) {
+        self.items.sort_by_key(|c| c.stats.vias);
+        while self.items.len() > keep.max(2) {
+            let tightest = (1..self.items.len() - 1)
+                .min_by_key(|&i| self.items[i + 1].stats.vias - self.items[i - 1].stats.vias)
+                .unwrap();
+            self.items.remove(tightest);
+        }
+    }
+
+    /// What is on offer next to `best` at the end: as complete and as clean, and different.
+    fn others(mut self, best: &Candidate) -> Vec<Candidate> {
+        self.items.retain(|c| {
+            c.stats.routed >= best.stats.routed
+                && c.stats.shorts <= best.stats.shorts
+                && c.flaw <= best.flaw
+                && (c.stats.vias, c.stats.length.to_bits()) != (best.stats.vias, best.stats.length.to_bits())
+        });
+        self.thin(3);
+        self.items
+    }
+}
+
 /// The level of a result, to tell a noticeable gain from a small one.
 #[derive(Clone, Copy)]
 struct Mark {
@@ -837,10 +897,10 @@ pub(crate) fn run(
     first: usize,
     rng: &mut Rng,
     on_better: &mut dyn FnMut(&Candidate, usize),
-) -> Candidate {
+) -> (Candidate, Vec<Candidate>) {
     let Some(mut best) = rebuild(board, sub, &start) else {
         eprintln!("open end: the run does not repeat, nothing to improve on");
-        return start;
+        return (start, Vec::new());
     };
     let pop = search.population.max(1);
     let local = relax::RelaxConfig {
@@ -855,8 +915,8 @@ pub(crate) fn run(
     let tighten_every = env("GB_TIGHTEN", 24.0) as usize;
     let log = std::env::var("GB_OPEN_LOG").is_ok();
     let t0 = std::time::Instant::now();
-    // every connection had its turn a few times, and side branches did not help either
-    let settled = (3 * best.cand.stats.conns / pop).max(100);
+    let mut front = Front::default();
+    front.offer(&best.cand, &best.cand);
     let mut mark = Mark::of(&best.cand);
     let mut stale = 0;
     let mut generation = first;
@@ -878,6 +938,9 @@ pub(crate) fn run(
                 .flatten()
                 .min_by(|a, b| open_cost(&a.cand).total_cmp(&open_cost(&b.cand)))
                 .map(|s| (s, branch_life));
+            if side.is_none() {
+                level += 1;
+            }
         }
         let shared = if side.is_some() { pop / 2 } else { 0 };
         let moves: Vec<(bool, Move)> = (0..pop)
@@ -907,8 +970,10 @@ pub(crate) fn run(
         let mut wins = 0;
         // one more connection, at the price of shorts for now
         let mut promising: Option<State> = None;
+        let mut record = false;
         for (on_side, c) in next {
             let Some(c) = c else { continue };
+            record |= front.offer(&c.cand, &best.cand);
             if on_side {
                 if let Some(side) = side.as_mut().filter(|s| better(&c.cand, &s.0.cand)) {
                     if Mark::of(&side.0.cand).beaten_by(&Mark::of(&c.cand)) {
@@ -964,6 +1029,9 @@ pub(crate) fn run(
             stale = 0;
             level = 0;
             on_better(&best.cand, generation);
+        } else if record {
+            stale = 0;
+            level = 0;
         } else {
             stale += 1;
         }
@@ -995,11 +1063,13 @@ pub(crate) fn run(
                 generation,
                 stale,
                 level,
-                converged: stale >= settled,
+                top: TOP_LEVEL,
+                converged: level >= TOP_LEVEL,
             },
         );
     }
-    best.cand
+    let others = front.others(&best.cand);
+    (best.cand, others)
 }
 
 #[cfg(test)]
@@ -1201,7 +1271,7 @@ mod tests {
             shape: Shape::Polygon(Polygon::new(vec![pt(x0, y0), pt(x1, y0), pt(x1, y1), pt(x0, y1)])),
             layers: LayerSet::single(0),
             net: None,
-            kind: ObstacleKind::Keepout { vias: true, tracks: true },
+            kind: ObstacleKind::Keepout { vias: true, tracks: true, mask: false },
             hole: None,
             clearance: 0.0,
             pin: None,
@@ -1350,7 +1420,7 @@ mod tests {
                 shape: Shape::Polygon(Polygon::new(vec![lo, pt(hi.x, lo.y), hi, pt(lo.x, hi.y)])),
                 layers: LayerSet::single(0),
                 net: None,
-                kind: ObstacleKind::Keepout { vias: false, tracks: true },
+                kind: ObstacleKind::Keepout { vias: false, tracks: true, mask: false },
                 hole: None,
                 clearance: 0.0,
                 pin: None,
@@ -1506,6 +1576,38 @@ mod tests {
         assert_eq!(spots.len(), 3);
         assert!((spots[0].missing - 0.05).abs() < 1e-9 && spots[0].at.x == 0.5);
         assert!(spots[2].short && !spots[0].short);
+    }
+
+    #[test]
+    fn the_front_keeps_what_differs() {
+        let cand = |vias: usize, length: f64| Candidate {
+            stats: crate::RunStats {
+                vias,
+                length,
+                routed: 5,
+                conns: 5,
+                ..Default::default()
+            },
+            geo: Geometry {
+                tracks: Vec::new(),
+                vias: Vec::new(),
+            },
+            order: Vec::new(),
+            failed: Vec::new(),
+            bad_nets: Vec::new(),
+            hot: Vec::new(),
+            flaw: 0.0,
+            cfg: RouterConfig::default(),
+        };
+        let best = cand(10, 100.0);
+        let mut f = Front::default();
+        assert!(f.offer(&best, &best));
+        assert!(f.offer(&cand(8, 110.0), &best), "fewer vias");
+        assert!(!f.offer(&cand(9, 111.0), &best), "beaten in both");
+        assert!(f.offer(&cand(12, 90.0), &best), "shorter");
+        let others = f.others(&best);
+        let vias: Vec<usize> = others.iter().map(|c| c.stats.vias).collect();
+        assert_eq!(vias, vec![8, 12]);
     }
 
     #[test]

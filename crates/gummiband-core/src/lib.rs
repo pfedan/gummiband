@@ -129,6 +129,9 @@ pub struct RouteResult {
     /// Footprints the router shifted (reference, offset in mm); the geometry belongs to the
     /// shifted board, see [`Board::with_offsets`].
     pub offsets: HashMap<String, geom::Point>,
+    /// Results of the open end that are as complete and as clean as this one but differ in vias
+    /// and length, for the user to choose.
+    pub alternatives: Vec<(RunStats, Geometry)>,
 }
 
 /// A progress report of the search: the best candidate after a phase.
@@ -157,7 +160,9 @@ pub struct Search {
     pub stale: usize,
     /// Side branches of the open end that failed since then; each one is bolder.
     pub level: usize,
-    /// The open end has found its level: taking the result now loses little.
+    /// As many as have to fail for the search to count as converged.
+    pub top: usize,
+    /// Even bold changes do not help any more: taking the result now loses little.
     pub converged: bool,
 }
 
@@ -479,6 +484,7 @@ pub fn route_board(
                 portfolio: Vec::new(),
                 frames: Vec::new(),
                 offsets: next.clone(),
+                alternatives: Vec::new(),
             };
             relax::relax(&moved, &sub, &mut res.geometry, &relax::RelaxConfig::default());
             (sub, res)
@@ -698,6 +704,7 @@ pub fn route_fixed(
                 portfolio,
                 frames,
                 offsets: HashMap::new(),
+                alternatives: Vec::new(),
             },
         );
     }
@@ -859,8 +866,9 @@ pub fn route_fixed(
         }
     }
     // the open end: from here on the result only changes where a mutant makes it better
+    let mut others = Vec::new();
     if open {
-        best = improve::run(board, &sub, search, best, done, &mut rng, &mut |c, generation| {
+        (best, others) = improve::run(board, &sub, search, best, done, &mut rng, &mut |c, generation| {
             if search.frames {
                 frames.push((
                     label(c, &format!("generation {generation}")),
@@ -870,54 +878,69 @@ pub fn route_fixed(
             }
         });
     }
-    if search.air > 0.0 {
-        if let Some(c) = improve::give_air(board, &sub, &best, search.air) {
-            best = c;
-            search.report("air", &best.stats);
-        }
-    }
     // a class of its own grows only to the target its rules give it, and the width of a pair
     // is its impedance
     let pairs: Vec<NetId> = board.diff_pairs().into_iter().flat_map(|(a, b)| [a, b]).collect();
     let target = |n: NetId| board.target_width(n, search.prefer_width, &pairs);
     let grows = (0..board.nets.len() as NetId).any(|n| target(n) > 0.0);
-    if grows {
-        if let Some(c) = improve::make_room(board, &sub, &best, target, search.air / 2.0) {
-            best = c;
-            search.report("room", &best.stats);
+    let finish = |mut best: Candidate, report: bool| -> Candidate {
+        if search.air > 0.0 {
+            if let Some(c) = improve::give_air(board, &sub, &best, search.air) {
+                best = c;
+                if report {
+                    search.report("air", &best.stats);
+                }
+            }
         }
-    }
-    // tracks as wide as the surroundings allow; a net that gets a new violation by it falls back
-    let plain = best.geo.clone();
-    let known: std::collections::HashSet<(NetId, Option<NetId>)> =
-        check::check(board, &plain).iter().map(|v| v.nets).collect();
-    relax::widen_necks(board, &sub, &mut best.geo);
-    for _ in 0..4 {
-        let bad: Vec<NetId> = check::check(board, &best.geo)
-            .iter()
-            .filter(|v| !known.contains(&v.nets))
-            .flat_map(|v| [Some(v.nets.0), v.nets.1])
-            .flatten()
-            .collect();
-        if bad.is_empty() {
-            break;
+        if grows {
+            if let Some(c) = improve::make_room(board, &sub, &best, target, search.air / 2.0) {
+                best = c;
+                if report {
+                    search.report("room", &best.stats);
+                }
+            }
         }
-        for t in best.geo.tracks.iter_mut().filter(|t| bad.contains(&t.net)) {
-            let neck = t.neck_w;
-            t.fitted.iter_mut().for_each(|f| f.1 = neck);
-        }
-    }
-    // the known pairs above may have got more spots; the open end does not give back what it won
-    if open && check::check(board, &best.geo).len() > check::check(board, &plain).len() {
-        best.geo = plain;
-    }
-    if grows {
+        // tracks as wide as the surroundings allow; a net that gets a new violation by it falls back
         let plain = best.geo.clone();
-        relax::prefer_width(board, &sub, &mut best.geo, target, search.air / 2.0);
-        if check::check(board, &best.geo).len() > check::check(board, &plain).len() {
+        let known: std::collections::HashSet<(NetId, Option<NetId>)> =
+            check::check(board, &plain).iter().map(|v| v.nets).collect();
+        relax::widen_necks(board, &sub, &mut best.geo);
+        for _ in 0..4 {
+            let bad: Vec<NetId> = check::check(board, &best.geo)
+                .iter()
+                .filter(|v| !known.contains(&v.nets))
+                .flat_map(|v| [Some(v.nets.0), v.nets.1])
+                .flatten()
+                .collect();
+            if bad.is_empty() {
+                break;
+            }
+            for t in best.geo.tracks.iter_mut().filter(|t| bad.contains(&t.net)) {
+                let neck = t.neck_w;
+                t.fitted.iter_mut().for_each(|f| f.1 = neck);
+            }
+        }
+        // the known pairs above may have got more spots; the open end does not give back what it won
+        if open && check::check(board, &best.geo).len() > check::check(board, &plain).len() {
             best.geo = plain;
         }
-    }
+        if grows {
+            let plain = best.geo.clone();
+            relax::prefer_width(board, &sub, &mut best.geo, target, search.air / 2.0);
+            if check::check(board, &best.geo).len() > check::check(board, &plain).len() {
+                best.geo = plain;
+            }
+        }
+        best
+    };
+    let best = finish(best, true);
+    let alternatives = others
+        .into_iter()
+        .map(|c| {
+            let c = finish(c, false);
+            (c.stats, c.geo)
+        })
+        .collect();
     (
         sub,
         RouteResult {
@@ -926,6 +949,7 @@ pub fn route_fixed(
             portfolio,
             frames,
             offsets: HashMap::new(),
+            alternatives,
         },
     )
 }

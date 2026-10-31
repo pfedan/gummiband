@@ -290,6 +290,12 @@ what is missing, full at 0.03 mm, so a spot that gets better counts before it is
 5000 on top. Before every tightening a pass works on the spots: the tracks there stay at their
 neck width for 1 mm around the spot, where the rules allow it, and only those nets move.
 
+The search has converged when even bold changes do not help: `TOP_LEVEL` side branches in a row
+have failed, each bolder than the last, and no measure has gained meanwhile. There is no count of
+generations. Meanwhile a front keeps the results at the level of the best one that no other beats
+in both vias and length; they are finished like the best one and written next to the output, for
+the user to choose, because the cost weighs vias against length once and for all.
+
 `--air` then relaxes the whole board without tension and with a larger margin. Where that leaves
 new violations, the nets involved go back to the normal margin. These passes and the open end
 also let the board edge push vias and keep a via in the plane it reaches (`RelaxConfig::via_edge`).

@@ -49,6 +49,9 @@ class ConsoleUi:
     def run_with_metrics(self, fn, open_end: bool = False):
         return fn(None, None)
 
+    def choose_result(self, best: str, others):
+        return None
+
     def info(self, text: str):
         print(text)
 
@@ -214,6 +217,18 @@ class WxUi:
         finally:
             window.Destroy()
 
+    def choose_result(self, best: str, others):
+        """The file of the result the user prefers over the best one, or None."""
+        labels = [f"Best: {best}"] + [summary for _, summary in others]
+        dlg = wx.SingleChoiceDialog(None, "These results are all as complete and as clean as the "
+                                    "best one. Which one do you want?", self.title, labels)
+        try:
+            if dlg.ShowModal() != wx.ID_OK or dlg.GetSelection() == 0:
+                return None
+            return others[dlg.GetSelection() - 1][0]
+        finally:
+            dlg.Destroy()
+
     def info(self, text: str):
         wx.MessageBox(text, self.title, wx.OK | wx.ICON_INFORMATION)
 
@@ -320,10 +335,11 @@ class MetricsWindow(wx.Frame if wx is not None else object):
         count = p.get("violations")
         v["violations"].SetLabel("-" if count is None else str(count))
         v["stale"].SetLabel(f"{p.get('stale', 0)} generations")
-        v["level"].SetLabel(str(p.get("level", 0)))
+        v["level"].SetLabel(f"{p.get('level', 0)} of {p.get('top', 0)}" if p.get("top") else "0")
         if p.get("generation", 0) > 0 and not self.take:
             self.accept_button.Enable()
-            self.hint.SetLabel("The search has settled. Accepting the result now is recommended."
+            self.hint.SetLabel("Even bold changes do not help any more. Accepting the result is "
+                               "recommended."
                                if runner.converged(p) else "")
         self.course.Refresh()
 
@@ -465,6 +481,9 @@ def main() -> int:
             opts, report=str(report_file) if opts.placements else None))
         res = ui.run_with_metrics(lambda keep_going, accept: runner.run_route(
             cmd, out, work, keep_going, accept, gpu=opts.gpu), runner.open_ended(opts))
+        chosen = res.alternatives() and ui.choose_result(res.best_line() or "", res.alternatives())
+        if chosen:
+            out = Path(chosen)
         before, after = src.read_text(encoding="utf-8"), out.read_text(encoding="utf-8")
         plan = bf.plan_from_texts(before, after, opts.keep_locked)
         moves = bf.plan_moves(before, after) if opts.move_parts or opts.placements else None

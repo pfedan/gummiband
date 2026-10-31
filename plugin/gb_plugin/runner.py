@@ -11,7 +11,7 @@ import tempfile
 import threading
 from dataclasses import MISSING, dataclass, fields
 from pathlib import Path
-from typing import Callable, List, Mapping, Optional, Sequence
+from typing import Callable, List, Mapping, Optional, Sequence, Tuple
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 SETTINGS_FILE = PLUGIN_DIR / "settings.json"
@@ -332,6 +332,10 @@ class RouteResult:
     def animation(self) -> Optional[str]:
         m = re.search(r"^frames: \d+ images, animation (.*)$", self.stdout, re.M)
         return m.group(1).strip() if m else None
+
+    def alternatives(self) -> List[Tuple[str, str]]:
+        """(file, summary) of the results the open end leaves to choose from."""
+        return re.findall(r"^alternative: (.*): (\d+/\d+ routed.*)$", self.stdout, re.M)
 
     def violations(self) -> Optional[int]:
         m = re.search(r"^clearance check: (\d+) violations", self.stdout, re.M)

@@ -75,8 +75,9 @@ the board as it was.
 With *Keep improving* on, the result gets better for as long as you let it: fewer vias, fewer
 violations, sometimes the last connections. *Accept current result* takes the best result so far
 at any time after the first geometry generation, and it takes a moment to finish it. Once the
-search has settled, the window recommends to accept. You can also let it go on: side branches
-keep trying bolder changes, and the count of failed ones shows how far it has gone.
+search has converged, the window recommends to accept: 12 side branches in a row, each bolder than
+the last, did not help. You can also let it go on. If results remain that differ in vias and
+length, a list offers them before the result is taken over.
 
 ## After the run
 
