@@ -14,7 +14,7 @@ use crate::index::FastMap;
 use crate::realize::Geometry;
 use crate::route::Router;
 use crate::topo::Substrate;
-use crate::{Candidate, Genome, Rng, Search, SearchConfig, candidate, check, full_cost, relax};
+use crate::{Candidate, Genome, Rng, Search, SearchConfig, candidate, check, relax};
 
 /// The result so far: its topology and its relaxed geometry.
 #[derive(Clone)]
@@ -186,16 +186,25 @@ fn same_routes(a: &Router, b: &Router, conns: &[usize]) -> bool {
         .all(|&ci| a.conn_vias[ci] == b.conn_vias[ci] && path(a, ci) == path(b, ci))
 }
 
-/// Judge the geometry of a candidate.
+/// Judge the geometry of a candidate. Here a violation is a spot and not a piece of track, and
+/// a spot weighs by how much is missing there, so that a search does not chase the number of
+/// pieces in a curve, and a spot that gets better counts before it is gone.
 fn judge(board: &Board, c: &mut Candidate) {
     let v = check::check(board, &c.geo);
+    let spots = check::spots(&v);
     let mut nets: Vec<_> = v.iter().flat_map(|x| [Some(x.nets.0), x.nets.1]).flatten().collect();
     nets.sort_unstable();
     nets.dedup();
-    c.stats.violations = Some(v.len());
-    c.stats.shorts = Some(v.iter().filter(|x| x.actual <= 0.0).count());
+    c.stats.violations = Some(spots.len());
+    c.stats.shorts = Some(spots.iter().filter(|s| s.short).count());
     c.bad_nets = nets;
-    c.hot = v.iter().map(|x| x.at).collect();
+    c.hot = spots.iter().map(|s| s.at).collect();
+    c.flaw = spots.iter().map(|s| 300.0 + 700.0 * (s.missing / 0.03).min(1.0)).sum();
+}
+
+/// The cost of the open end.
+fn open_cost(c: &Candidate) -> f64 {
+    c.stats.cost() + c.flaw + c.stats.shorts.unwrap_or(0) as f64 * 5000.0
 }
 
 fn mutant<'a>(
@@ -264,7 +273,12 @@ fn mutant<'a>(
 /// A connection is never given up. One more counts only if it does not bring two shorts: a
 /// connection that shorts other nets is not worth more than an open one.
 fn better(a: &Candidate, b: &Candidate) -> bool {
-    a.stats.routed >= b.stats.routed && full_cost(a) < full_cost(b)
+    a.stats.routed >= b.stats.routed && open_cost(a) < open_cost(b)
+}
+
+/// A pass that pushes may cost length, but no clearance.
+fn better_or_same(a: &Candidate, b: &Candidate) -> bool {
+    a.stats.routed >= b.stats.routed && a.flaw <= b.flaw && a.stats.shorts <= b.stats.shorts
 }
 
 /// The level of a result, to tell a noticeable gain from a small one.
@@ -272,6 +286,7 @@ fn better(a: &Candidate, b: &Candidate) -> bool {
 struct Mark {
     routed: usize,
     flaws: usize,
+    flaw: f64,
     cost: f64,
 }
 
@@ -280,6 +295,7 @@ impl Mark {
         Mark {
             routed: c.stats.routed,
             flaws: c.stats.violations.unwrap_or(0) + c.stats.shorts.unwrap_or(0),
+            flaw: c.flaw,
             cost: c.stats.cost(),
         }
     }
@@ -288,7 +304,7 @@ impl Mark {
     /// gains go on for long after the search has found its level.
     fn beaten_by(&self, n: &Mark) -> bool {
         n.routed > self.routed
-            || (n.routed == self.routed && n.flaws < self.flaws)
+            || (n.routed == self.routed && (n.flaws < self.flaws || n.flaw < self.flaw * 0.95))
             || (n.routed == self.routed && n.flaws == self.flaws && n.cost < self.cost * 0.998)
     }
 }
@@ -330,7 +346,7 @@ fn settle(board: &Board, sub: &Substrate, c: &mut Candidate, best: &Candidate, c
         ..cfg.clone()
     };
     for _ in 0..4 {
-        if c.stats.violations <= best.stats.violations {
+        if c.flaw <= best.flaw {
             break;
         }
         let bad = c.bad_nets.clone();
@@ -340,6 +356,54 @@ fn settle(board: &Board, sub: &Substrate, c: &mut Candidate, best: &Candidate, c
         measure_length(c);
         judge(board, c);
     }
+}
+
+/// Work on the spots themselves. At fine pitch most of them are tracks that take their full width
+/// back before the bundle has spread: there they stay at their neck width for a while longer, where
+/// the rules allow it. Only the nets there move, and what they touch wakes up.
+fn clean_spots(board: &Board, sub: &Substrate, best: &Candidate, log: bool) -> Option<Candidate> {
+    if best.flaw == 0.0 {
+        return None;
+    }
+    let cfg = relax::RelaxConfig {
+        iterations: env("GB_AIR_IT", 120.0) as usize,
+        tension: 0.0,
+        via_edge: true,
+        ..Default::default()
+    };
+    let mut c = best.clone();
+    for _ in 0..3 {
+        for s in check::spots(&check::check(board, &c.geo)) {
+            let mut zone = crate::geom::Rect::empty();
+            zone.add(s.at);
+            let zone = zone.grow(1.0);
+            let nets = [Some(s.nets.0), s.nets.1];
+            for t in c.geo.tracks.iter_mut().filter(|t| {
+                nets.contains(&Some(t.net)) && t.neck_w < t.width && board.class_of(t.net).min_width.is_none()
+            }) {
+                t.necks.push(zone);
+            }
+        }
+        let bad = c.bad_nets.clone();
+        c.geo.tracks.iter_mut().for_each(|t| t.resting = !bad.contains(&t.net));
+        c.geo.vias.iter_mut().for_each(|v| v.resting = !bad.contains(&v.net));
+        relax::relax(board, sub, &mut c.geo, &cfg);
+        measure_length(&mut c);
+        judge(board, &mut c);
+        if log {
+            eprintln!(
+                "clean: {} spots flaw {:.0}, from {} spots flaw {:.0}",
+                c.stats.violations.unwrap_or(0),
+                c.flaw,
+                best.stats.violations.unwrap_or(0),
+                best.flaw
+            );
+        }
+        if c.flaw == 0.0 {
+            break;
+        }
+    }
+    better(&c, best).then_some(c)
 }
 
 /// Make room for wider tracks: the tracks push as if they were as wide as `target` of their net
@@ -354,7 +418,9 @@ pub(crate) fn make_room(
     target: impl Fn(u32) -> f64,
     reserve: f64,
 ) -> Option<Candidate> {
-    let mut c = best.clone();
+    let mut before = best.clone();
+    judge(board, &mut before);
+    let mut c = before.clone();
     let plain: Vec<(f64, Vec<crate::geom::Rect>)> =
         c.geo.tracks.iter().map(|t| (t.width, t.necks.clone())).collect();
     c.geo.tracks.iter_mut().for_each(|t| t.width = t.width.max(target(t.net)));
@@ -396,7 +462,7 @@ pub(crate) fn make_room(
         t.necks = necks;
     }
     judge(board, &mut c);
-    settle(board, sub, &mut c, best, &cfg);
+    settle(board, sub, &mut c, &before, &cfg);
     if std::env::var("GB_OPEN_LOG").is_ok() {
         eprintln!(
             "room: {} violations, {} shorts, {:.0} mm",
@@ -405,8 +471,7 @@ pub(crate) fn make_room(
             c.stats.length
         );
     }
-    let fine = c.stats.violations <= best.stats.violations && c.stats.shorts <= best.stats.shorts;
-    fine.then_some(c)
+    better_or_same(&c, &before).then_some(c)
 }
 
 /// A rubber band lies at the limit: tension pulls it up to the clearance of whatever it passes,
@@ -414,7 +479,9 @@ pub(crate) fn make_room(
 /// moves the copper away from the limit where there is room, and evens out the gaps where there
 /// is none. It stays if it costs nothing.
 pub(crate) fn give_air(board: &Board, sub: &Substrate, best: &Candidate, air: f64) -> Option<Candidate> {
-    let mut c = best.clone();
+    let mut before = best.clone();
+    judge(board, &mut before);
+    let mut c = before.clone();
     let base = relax::RelaxConfig::default();
     let cfg = relax::RelaxConfig {
         iterations: env("GB_AIR_IT", 120.0) as usize,
@@ -424,7 +491,7 @@ pub(crate) fn give_air(board: &Board, sub: &Substrate, best: &Candidate, air: f6
         ..base
     };
     relax_all(board, sub, &mut c, &cfg);
-    settle(board, sub, &mut c, best, &cfg);
+    settle(board, sub, &mut c, &before, &cfg);
     if std::env::var("GB_OPEN_LOG").is_ok() {
         let probe = roomier(board, air / 2.0);
         eprintln!(
@@ -437,8 +504,7 @@ pub(crate) fn give_air(board: &Board, sub: &Substrate, best: &Candidate, air: f6
             check::check(&probe, &c.geo).len()
         );
     }
-    let fine = c.stats.violations <= best.stats.violations && c.stats.shorts <= best.stats.shorts;
-    fine.then_some(c)
+    better_or_same(&c, &before).then_some(c)
 }
 
 /// The router state of `c`, whose run is repeated, and its geometry tagged. None if the run does
@@ -518,7 +584,7 @@ pub(crate) fn run(
                 .collect::<Vec<_>>()
                 .into_iter()
                 .flatten()
-                .min_by(|a, b| full_cost(&a.cand).total_cmp(&full_cost(&b.cand)))
+                .min_by(|a, b| open_cost(&a.cand).total_cmp(&open_cost(&b.cand)))
                 .map(|s| (s, branch_life));
         }
         let shared = if side.is_some() { pop / 2 } else { 0 };
@@ -567,6 +633,10 @@ pub(crate) fn run(
         }
         // now and then the whole board, also what has been asleep all the time
         if generation % tighten_every == 0 {
+            if let Some(c) = clean_spots(board, sub, &best.cand, log) {
+                best.cand = c;
+                wins += 1;
+            }
             for tension in [full.tension, 0.0] {
                 let mut c = best.cand.clone();
                 relax_all(board, sub, &mut c, &relax::RelaxConfig { tension, ..full.clone() });
@@ -587,21 +657,22 @@ pub(crate) fn run(
         if log {
             let st = &best.cand.stats;
             eprintln!(
-                "open {generation} {:.1}s tried {tried} wins {wins} stale {stale} level {level}{}: {}/{} {} vias {:.0} mm {} viol {} shorts",
+                "open {generation} {:.1}s tried {tried} wins {wins} stale {stale} level {level}{}: {}/{} {} vias {:.0} mm {} viol {} shorts flaw {:.0}",
                 t0.elapsed().as_secs_f64(),
                 side.as_ref().map_or(String::new(), |(s, left)| format!(
                     " side {} left {} cost {:.0} of {:.0}",
                     s.cand.stats.vias,
                     left,
-                    full_cost(&s.cand),
-                    full_cost(&best.cand)
+                    open_cost(&s.cand),
+                    open_cost(&best.cand)
                 )),
                 st.routed,
                 st.conns,
                 st.vias,
                 st.length,
                 st.violations.unwrap_or(0),
-                st.shorts.unwrap_or(0)
+                st.shorts.unwrap_or(0),
+                best.cand.flaw
             );
         }
         search.report_at(
@@ -833,6 +904,21 @@ mod tests {
     }
 
     #[test]
+    fn the_pieces_of_a_curve_are_one_spot() {
+        let v = |x: f64, net: u32, actual: f64| check::Violation {
+            what: String::new(),
+            nets: (net, Some(9)),
+            at: pt(x, 0.0),
+            actual,
+            required: 0.2,
+        };
+        let spots = check::spots(&[v(0.0, 1, 0.19), v(0.5, 1, 0.15), v(1.0, 1, 0.18), v(9.0, 1, 0.19), v(0.2, 2, 0.0)]);
+        assert_eq!(spots.len(), 3);
+        assert!((spots[0].missing - 0.05).abs() < 1e-9 && spots[0].at.x == 0.5);
+        assert!(spots[2].short && !spots[0].short);
+    }
+
+    #[test]
     fn air_moves_tracks_off_the_limit() {
         let b = twisted_board();
         let (sub, res) = crate::route_fixed(
@@ -858,6 +944,7 @@ mod tests {
             failed: Vec::new(),
             bad_nets: Vec::new(),
             hot: Vec::new(),
+            flaw: 0.0,
             cfg: RouterConfig::default(),
         };
         let probe = roomier(&b, 0.015);

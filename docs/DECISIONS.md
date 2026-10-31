@@ -43,6 +43,8 @@ Standing decisions of the project owner, kept here so that they survive any sess
 - Wider tracks are a step after the routing (`--prefer-width`), not a higher class width: the
   topology keeps the narrow capacity, so the search is not harder, and a track only grows where
   the finished copper leaves room. Classes other than the default are left alone.
+- In the open end a violation is a spot, weighed by what is missing. Counting pieces of track
+  made the search chase the number of pieces in a curve. Plain runs keep their count.
 - Copper does not have to lie at the limit: `--air` gives it a reserve where there is room. On by
   default only in open ended runs, so that plain runs stay as they are.
 - Defaults aim at a usable board, not at the quickest run: CLI, MCP server and plugin route

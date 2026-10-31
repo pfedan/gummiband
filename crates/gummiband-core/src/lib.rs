@@ -230,6 +230,8 @@ struct Candidate {
     bad_nets: Vec<NetId>,
     /// Where the geometry step left clearance violations.
     hot: Vec<geom::Point>,
+    /// The open end's measure of them, see `improve::judge`.
+    flaw: f64,
     /// The configuration of this run.
     cfg: RouterConfig,
 }
@@ -329,6 +331,7 @@ fn candidate(
             .collect(),
         bad_nets: Vec::new(),
         hot: Vec::new(),
+        flaw: 0.0,
         cfg,
     }
 }
