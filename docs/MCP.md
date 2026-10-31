@@ -87,7 +87,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
-| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
+| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `air?`, `prefer_width?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?` | PNG (image content) and its path, region, pixels per mm |
 
@@ -141,7 +141,7 @@ Gives parts a position from the netlist in the working copy, see
 [`gummiband place`](guide/cli.md#gummiband-place). An agent with its own plan places the parts it
 cares about with `move_part` and leaves the rest to this tool: `fixed` names what stays, `only` what
 moves. `scope` is `unlocked` (the default: not locked and not mechanical), `all_unlocked` or
-`outside`. Locked footprints never move. `starts` (default 4) is the number of independent
+`outside`. Locked footprints never move. `starts` (default 1) is the number of independent
 placements, of which the one with the fewest crossings is kept; `gap` (0.3 mm) is the spacing
 between courtyards and `halo` (0.3 mm) the extra room around parts with five or more pads. The
 result names the working copy to route next, the new pose of every moved part (`placed`), which
@@ -213,10 +213,11 @@ all unlocked copper). `reset: true` drops the net's options before applying the 
 Runs `gummiband_core::route_board` on the loaded board with the net options applied and writes
 the routed board (existing unlocked tracks and vias replaced; with `keep_locked` the locked ones
 stay). Defaults match the CLI: `runs` 14 (a constant, so results do not depend on the machine), `generations` 3,
-`geometry_generations` 0, `via_pitch` 0.5 mm, `via_cost` 3.0, `layer_dirs` 0.5 (preferred
+`geometry_generations` 3, `via_pitch` 0.5 mm, `via_cost` 3.0, `layer_dirs` 0.5 (preferred
 directions per layer for every third run, 0 = off), `pair_pull` 0 (experimental pull between the
 nets of a differential pair), `pairs` false (experimental: a pair as one wide track that is split
-in two, see the CLI guide), `pair_skew` 0.1 mm, `pair_zdiff` none. `seed` picks the search seed
+in two, see the CLI guide), `pair_skew` 0.1 mm, `pair_zdiff` none, `negotiate` 0 (experimental negotiated routing, 20 rounds
+work well and take about twice the time), `air` 0 mm, `prefer_width` 0 (off). `seed` picks the search seed
 (default fixed): the same seed gives the same result, another one a different try. `keep_all`
 keeps every track and via of the input and adds to it, like `--keep-all` on the command line;
 with `nets` only those nets are routed and everything else stays. Add `reroute` to replace

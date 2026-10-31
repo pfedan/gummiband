@@ -74,7 +74,7 @@ class PlaceOptions:
     only: Optional[List[str]] = None
     # references that stay in any case
     fixed: Optional[List[str]] = None
-    starts: int = 4
+    starts: int = 1  # the crossings hardly predict the routed result: change the seed instead
     gap: float = 0.3
     halo: float = 0.3
     # the defaults of the advanced options are those of the command line
@@ -229,9 +229,9 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
         cmd += ["--keep-all", "--nets", ",".join(opts.finish_nets), "--shove", "--give", "8"]
     elif opts.keep_locked:
         cmd.append("--keep-locked")
-    cmd += ["--runs", str(int(opts.runs)), "--via-cost", repr(float(opts.via_cost))]
-    if opts.geometry_generations > 0:
-        cmd += ["--geometry-generations", str(int(opts.geometry_generations))]
+    # always passed, so that 0 stays 0 whatever the default of the router is
+    cmd += ["--runs", str(int(opts.runs)), "--via-cost", repr(float(opts.via_cost)),
+            "--geometry-generations", str(int(opts.geometry_generations))]
     cmd += _changed(opts, ROUTE_FLAGS)
     if opts.move_parts:
         cmd.append("--move-parts")

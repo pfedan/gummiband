@@ -136,7 +136,9 @@ PLACE_TABS: Tuple = (
               "Parts that stay in addition to the locked ones, separated by commas or spaces. "
               "Not remembered.", "refs"),
         int_field("starts", "Parallel runs:",
-                  "Independent placements; the one with the fewest crossings wins.", 1, 64),
+                  "Independent placements; the one with the fewest crossings wins. The crossings "
+                  "hardly predict how well the board routes, so one run is the default: for "
+                  "another attempt, change the seed.", 1, 64),
         float_field("gap", "Courtyard spacing (mm):", "Spacing between courtyards.", 0, 5, 0.05),
         float_field("halo", "Room around ICs (mm):",
                     "Extra room around parts with five or more pads, for their escape.",

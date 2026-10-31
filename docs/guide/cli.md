@@ -75,7 +75,8 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | --- | --- | --- |
 | `--runs N` | 14 | Portfolio size: routing attempts with different connection orders (and via costs) in every phase, spread over the worker threads. A constant by design, so results do not depend on the machine. |
 | `--generations N` | 3 | Rounds of the evolutionary order search after the portfolio. Each round mutates the best order (failed connections move forward, a few random moves) and tries `--runs` mutants. 0 means portfolio only. The search stops early when everything is routed. |
-| `--geometry-generations N` | 0 | Rounds that are judged after the tracks were drawn, by the clearance check. Slower (each round draws and checks every candidate) and cleaner. The plugin uses 3. |
+| `--geometry-generations N` | 3 | Rounds that are judged after the tracks were drawn, by the clearance check. Each round draws and checks every candidate, so 3 rounds take about 2 to 3 times as long as 0, and leave far fewer violations (Arty 32 to 1, ULX3S 54 to 4, Lichtschnitzel 18 to 4). 0 is the quick draft. The plugin and the MCP server use 3 as well. |
+| `--seed N` | `GB_EVO_SEED`, then fixed | Seed of the search. The same board, options and seed give the same result; another seed gives another attempt, often with a quite different violation count (Arty 32 or 1, Lichtschnitzel 18 or 14 at `--geometry-generations 0`). |
 | `--negotiate N` | 0 (off) | Experimental. A second search with up to N rounds of negotiated routing: connections may overfill channels and cross for a price that rises from round to round, until they have settled who goes where. Finds the last connections on dense boards, where the order alone does not. The better result of both searches counts, so a run takes about twice as long. 16 to 20 rounds work well; fewer leave conflicts that cost connections. |
 | `--until-stop` | off | Keeps improving the result after the search until a line arrives on stdin or stdin closes, then finishes the best result. A generation takes a few connections around one spot out (a violation, or a connection with vias or a long way) and lays them again, everything else stays; the longer nothing helps, the more it takes out, and side branches try bolder changes that may first make the result worse. It never gives up a connection. The same seed stopped at the same generation gives the same result. Other limits: no placement rounds with `--move-parts`, no plain search next to `--negotiate`, and it does not go with `--shove`, `--give` or `--pairs`. |
 | `--air MM` | 0, with `--until-stop` 0.03 | Reserve on top of the clearances that the finished copper gets where there is room. A rubber band lies right at the limit, this pushes it off and evens out the gaps in tight bundles. The result stays only if it brings no new violations. |
@@ -89,9 +90,10 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | `--pair-zdiff OHM` | none | With `--pairs`: target differential impedance, sets the track width per layer from the stackup (estimate after IPC-2141), the gap stays. |
 | `--layer-dirs W` | 0.5 | Weight of preferred directions per layer: the routing layers alternate horizontal and vertical, and running against the grain costs extra. A soft cost, used by every third run of the portfolio, so the search has candidates with and without it. 0 switches it off. |
 
-A good default for a real two layer board with a few hundred connections is the plain
-`--keep-locked`: 14 runs on all cores, 3 generations, no geometry generations, a minute or two. Add
-`--geometry-generations 3` for the final pass.
+A good default for a real board with a few hundred connections is the plain `--keep-locked`: 14
+runs on all cores, 3 generations, 3 geometry generations, a few minutes. `--geometry-generations 0`
+gives a quick draft in about a third of the time. For the final pass add `--until-stop` and stop
+when the progress reports `converged`.
 
 ### Degrees of freedom
 
@@ -202,7 +204,7 @@ gummiband route placed.kicad_pcb -o routed.kicad_pcb
 | `--fixed U1,U2` | | these stay in any case |
 | `--free TP1` | | move these on top of the above (a test point, a button) |
 | `--seed N` | 1 | first seed |
-| `--starts N` | 4 | independent runs in parallel, the one with the fewest crossings is kept |
+| `--starts N` | 1 | independent runs in parallel, the one with the fewest crossings is kept. The crossings hardly predict the routed result (correlation about 0 over 12 seeds on Lichtschnitzel), so for another attempt change `--seed`, or let `route --placements N` route several placements |
 | `--iters N` | 3000000 | annealing moves per run |
 | `--gap MM` | 0.3 | spacing between courtyards |
 | `--margin MM` | 0.5 | distance of the courtyards from the outline |
@@ -249,7 +251,7 @@ with default net classes.
 | Variable | Effect |
 | --- | --- |
 | `RAYON_NUM_THREADS` | Default for `--threads`. |
-| `GB_EVO_SEED` | Seed of the evolutionary search (default fixed). Same board, same options, same seed give the same result; another seed gives another attempt. |
+| `GB_EVO_SEED` | Seed of the evolutionary search when `route --seed` is not given (default fixed). Same board, same options, same seed give the same result; another seed gives another attempt. |
 | `GB_GPU=1` | Experimental, macOS only. Runs most of the track relaxation as a compute shader on the GPU (Metal). Needs a binary built with `cargo build --release -p gummiband-cli --features gpu`; without the variable such a binary behaves exactly like the normal one. Only the relaxation moves to the GPU, so the gain is bounded by its share of the work: about 30 percent of the core seconds in a default run on boards like the Lichtschnitzel controller, about 60 percent with `--geometry-generations 3 --move-parts`, and 1 to 5 percent on boards where the search dominates (Corne, ULX3S, dense BGAs), where the GPU gains nothing. In the quality run on Lichtschnitzel (4 seeds, 4 threads) it needed about 40 percent fewer core seconds than the CPU; when all cores are already busy the gain shrinks. Completion is the same; violation counts are comparable but vary more from seed to seed. Results repeat on one machine but not across GPUs or drivers, so for a final run use the CPU or try several seeds. |
 
 ## Exit status

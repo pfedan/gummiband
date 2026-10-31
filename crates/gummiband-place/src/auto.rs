@@ -48,7 +48,8 @@ pub struct PlaceOptions {
     pub free: Vec<String>,
     /// First seed; the starts use `seed .. seed + starts`.
     pub seed: u64,
-    /// Independent annealing runs, the best one is kept.
+    /// Independent annealing runs, the one with the fewest crossings is kept. The crossings hardly
+    /// predict the routed result, so one run is the default.
     pub starts: usize,
     /// Annealing moves of one run.
     pub iters: usize,
@@ -68,7 +69,7 @@ impl Default for PlaceOptions {
             fixed: Vec::new(),
             free: Vec::new(),
             seed: 1,
-            starts: 4,
+            starts: 1,
             iters: 3_000_000,
             gap: 0.3,
             margin: 0.5,

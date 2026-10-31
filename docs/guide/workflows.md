@@ -20,7 +20,7 @@ steps, the plugin is installed ([Installation](installation.md)).
 
 6. Refill zones, run the DRC, look at the unrouted connections.
 7. Iterate: lock what is good, fix the rest by hand or route again with more effort
-   (`--geometry-generations 3`).
+   (`--until-stop`, or more `--geometry-generations`).
 
 ## Finish a partly routed board (experimental)
 
@@ -127,7 +127,7 @@ Effort knobs, from cheap to expensive:
 | --- | --- |
 | more orders tried per phase | `--runs 28` (the default 14 is a constant; runs are spread over the threads) |
 | better order | `--generations 6` |
-| fewer violations in the drawn tracks | `--geometry-generations 3` (the plugin default) or more |
+| fewer violations in the drawn tracks | `--until-stop`, or more than the default 3 `--geometry-generations` |
 | fewer vias | `--via-cost 5` |
 | shorter tracks, more vias | `--via-cost 1.5` |
 | tidier two layer boards, one direction per layer | `--layer-dirs 1` (0 switches the preference off) |

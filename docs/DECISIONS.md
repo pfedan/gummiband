@@ -45,6 +45,10 @@ Standing decisions of the project owner, kept here so that they survive any sess
   the finished copper leaves room. Classes other than the default are left alone.
 - Copper does not have to lie at the limit: `--air` gives it a reserve where there is room. On by
   default only in open ended runs, so that plain runs stay as they are.
+- Defaults aim at a usable board, not at the quickest run: CLI, MCP server and plugin route
+  with 3 geometry generations, which cost about 2 to 3 times the time of none and remove most
+  clearance violations. 0 stays available as the quick draft. `place` makes one placement by
+  default, because the crossings it selects by say almost nothing about the routed result.
 - A block is a group of parts with its locked copper that moves only as a whole.
 - Layer preferred directions are a portfolio dimension, not only an option.
 - Teardrops come from KiCad's built-in feature.
