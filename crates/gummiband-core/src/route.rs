@@ -167,6 +167,9 @@ struct Prices {
     /// leaves the geometry step its room.
     tight: f64,
     reserve: f64,
+    /// An edge with no room for the track even without any other track stays closed: nothing
+    /// that could move is in the way there.
+    solid: bool,
 }
 
 /// Mutable routing state. Owns its copy of the meshes, because vias split triangles.
@@ -2164,6 +2167,9 @@ impl<'a> Router<'a> {
                 let (lo, hi) = match (Self::slot_interval(view, item.sides, j, &mut scratch), soft) {
                     (Some(i), _) => i,
                     (None, Some(s)) => {
+                        if s.solid && self.pack(lu, e, &[item], None).is_none() {
+                            continue;
+                        }
                         let (over, at) = Self::slot_overflow(view, item.sides, j, &mut scratch);
                         price += s.crossing + s.overflow * over;
                         conflict = true;
@@ -2964,6 +2970,7 @@ impl<'a> Router<'a> {
             history: self.cross.iter().map(|l| vec![0.0; l.len()]).collect(),
             tight: env("GB_NEG_TIGHT", 3.0),
             reserve: env("GB_NEG_RESERVE", 0.05),
+            solid: false,
         });
         for ci in 0..self.conns.len() {
             self.route_one(ci);
@@ -3191,6 +3198,60 @@ impl<'a> Router<'a> {
         out
     }
 
+    /// What really stands in the way of open connection `ci`, where [`Router::blockers`] can only
+    /// guess from the straight line: it looks for its way as in a negotiation, through whatever
+    /// is there at the price `crossing`, and names the connections it ran into, in the order along
+    /// the way, with the points of the way. All on a copy: a via leaves its mark in the mesh even
+    /// when it is gone, and a via in a pad needs its site unused. None if there is no way even so.
+    pub(crate) fn way_through(&self, ci: usize, crossing: f64) -> Option<(Vec<usize>, Vec<Point>)> {
+        let mut r = self.clone();
+        r.prices = Some(Prices {
+            soft: true,
+            overflow: 2.0 * crossing,
+            crossing,
+            history: vec![Vec::new(); self.nl()],
+            tight: 0.0,
+            reserve: 0.0,
+            solid: true,
+        });
+        r.route_one(ci).then(|| (r.in_the_way(ci), r.conn_points(ci)))
+    }
+
+    /// What connection `ci`, laid through everything, runs into.
+    fn in_the_way(&self, ci: usize) -> Vec<usize> {
+        let net = self.conns[ci].net;
+        let mut hit = Vec::new();
+        for &sid in &self.conn_segs[ci] {
+            let s = self.segs[sid as usize].as_ref().unwrap();
+            let li = s.li as usize;
+            for c in &s.crossings {
+                self.on_full_edge(li, c.e, net, &mut hit);
+            }
+            for &t in &s.chord_tris {
+                for (a, b) in self.tri_crossings(li, t) {
+                    if a == ci && !hit.contains(&b) {
+                        hit.push(b);
+                    } else if b == ci && !hit.contains(&a) {
+                        hit.push(a);
+                    }
+                }
+            }
+        }
+        // its vias take room from what passes them, also on the layers it does not use
+        for &site in &self.conn_vias[ci] {
+            for li in 0..self.nl() {
+                let m = self.m(li);
+                let Some(&v) = m.site_vert.get(&site) else { continue };
+                for &t in &m.vert_tris[v as usize] {
+                    for &e in &m.tri_edges[t as usize] {
+                        self.on_full_edge(li, e, net, &mut hit);
+                    }
+                }
+            }
+        }
+        hit
+    }
+
     /// In how many pieces the routed copper holds the pins of `net` together. A connection may
     /// end on any via of its net, so one that is laid again can end on its own side of the net
     /// and leave it in two pieces, although every connection counts as routed.
@@ -3227,6 +3288,14 @@ impl<'a> Router<'a> {
                 if let [Some(a), Some(b)] = nodes {
                     join(a, b);
                 }
+                // a via in a pad holds its pad
+                for e in [s.start, s.end] {
+                    if let End::Via(v) = e
+                        && let Some(p) = self.sub.shared.sites[v as usize].pad
+                    {
+                        join(site(v), pin(p as usize));
+                    }
+                }
                 if c.goal == Goal::Plane {
                     join(nodes[0].unwrap_or(pin(c.from)), PLANE);
                 }
@@ -3240,6 +3309,37 @@ impl<'a> Router<'a> {
         roots.sort_unstable();
         roots.dedup();
         roots.len()
+    }
+
+    /// Add to `hit` what takes up an edge over capacity, but for `net`: the connections on it and
+    /// those with a via at its ends or opposite of it.
+    fn on_full_edge(&self, li: usize, e: u32, net: NetId, hit: &mut Vec<usize>) {
+        if self.edge_overflow(li, e) <= OVER_TOL {
+            return;
+        }
+        let mut add = |cj: usize| {
+            if !hit.contains(&cj) {
+                hit.push(cj);
+            }
+        };
+        let others = self.cross[li][e as usize].iter().map(|&o| self.segs[o as usize].as_ref().unwrap());
+        others.filter(|o| o.net != net).for_each(|o| add(o.conn as usize));
+        let m = self.m(li);
+        for &t in m.edge_tris[e as usize].iter().filter(|&&t| t != NONE) {
+            for &v in &m.tris[t as usize] {
+                let site = m.vert_site[v as usize];
+                if self.vias.get(&site).is_some_and(|via| via.net != net) {
+                    (0..self.conns.len()).filter(|&cj| self.conn_vias[cj].contains(&site)).for_each(&mut add);
+                }
+            }
+        }
+    }
+
+    /// The pieces of `net` that no open connection accounts for: 1 when its copper holds together
+    /// as far as it is routed. An open connection is a piece more, but no split.
+    pub(crate) fn net_splits(&self, net: NetId) -> usize {
+        let open = (0..self.conns.len()).filter(|&ci| self.conns[ci].net == net && self.conn_segs[ci].is_empty());
+        self.net_pieces(net).saturating_sub(open.count())
     }
 
     /// Where connection `ci` runs: its pin and the middle of every mesh edge it crosses.
@@ -3329,7 +3429,7 @@ fn line_params(a: Point, b: Point, c: Point, d: Point) -> (f64, f64) {
 
 /// Intersection of segments ab and cd: (parameter on ab, parameter on cd).
 #[allow(dead_code)]
-fn seg_param_intersection(a: Point, b: Point, c: Point, d: Point) -> Option<(f64, f64)> {
+pub(crate) fn seg_param_intersection(a: Point, b: Point, c: Point, d: Point) -> Option<(f64, f64)> {
     let r = b - a;
     let s = d - c;
     let den = r.cross(s);
@@ -3589,6 +3689,7 @@ mod tests {
             history: r.cross.iter().map(|l| vec![0.0; l.len()]).collect(),
             tight: 0.0,
             reserve: 0.05,
+            solid: false,
         });
         assert!(r.route_one(0) && r.route_one(1));
         assert_eq!(r.conflicts(0.0).2, 1);

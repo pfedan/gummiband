@@ -2,17 +2,20 @@
 //! connection in the routing order would route the whole board again, so a mutant here works on
 //! the result itself: it takes a few connections around one spot out, lays them again against
 //! everything else and relaxes what that touches, the rest sleeps (see [`relax::relax`]). What
-//! is better replaces the result; now and then the whole board gets tightened. When nothing
-//! helps any more, side branches start from the result with a bold change that may make it
-//! worse and repair it on their own for a while. At the end the copper gets some air.
+//! is better replaces the result; now and then the whole board gets tightened. An open connection
+//! gets moves of its own: what really stands in its way goes, it is laid first, the others after
+//! it. When nothing helps any more, side branches start from the result with a bold change that
+//! may make it worse and repair it on their own for a while. A mutant with one more connection
+//! that brings too many shorts for now starts such a branch as well. At the end the copper gets
+//! some air.
 
 use rayon::prelude::*;
 
 use crate::board::Board;
-use crate::geom::Point;
+use crate::geom::{Point, Rect};
 use crate::index::FastMap;
-use crate::realize::Geometry;
-use crate::route::Router;
+use crate::realize::{Geometry, Track, Via};
+use crate::route::{Router, seg_param_intersection};
 use crate::topo::Substrate;
 use crate::{Candidate, Genome, Rng, Search, SearchConfig, candidate, check, relax};
 
@@ -40,6 +43,24 @@ struct Move {
     conns: Vec<usize>,
     via_cost: f64,
     hot: Option<(Point, f64)>,
+    aim: Option<Aim>,
+}
+
+/// A move that gets an open connection through: what lies on its way goes, the connection is
+/// laid first, then the others.
+struct Aim {
+    ci: usize,
+    /// The price of running into something on the way, in mm of track.
+    crossing: f64,
+    /// The via cost of the connection itself.
+    via_cost: f64,
+    /// What lies at most this far from the way goes too, up to `extra` connections.
+    reach: f64,
+    extra: usize,
+    /// How many connections that lost their way may in turn clear theirs.
+    chain: usize,
+    /// For the choice of the others.
+    seed: u64,
 }
 
 fn env(key: &str, default: f64) -> f64 {
@@ -52,15 +73,14 @@ fn shuffle<T>(v: &mut [T], rng: &mut Rng) {
     }
 }
 
-/// The spot of a mutant: an open connection, a clearance problem, or an expensive connection.
+/// The spot of a mutant: a clearance problem or an expensive connection.
 fn spot(s: &State, rng: &mut Rng) -> (Point, bool) {
     let r = &s.router;
-    let open = r.unrouted();
     let hot = &s.cand.hot;
+    let shorts = s.cand.stats.shorts.unwrap_or(0).min(hot.len());
     let roll = rng.unit();
-    if !open.is_empty() && roll < 0.5 {
-        let ci = open[(rng.next() % open.len() as u64) as usize];
-        return (r.board.pins[r.conns[ci].from].pos, false);
+    if shorts > 0 && roll < 0.4 {
+        return (hot[(rng.next() % shorts as u64) as usize], true);
     }
     if !hot.is_empty() && roll < 0.8 {
         return (hot[(rng.next() % hot.len() as u64) as usize], true);
@@ -81,8 +101,35 @@ fn spot(s: &State, rng: &mut Rng) -> (Point, bool) {
     (p[(rng.next() % p.len() as u64) as usize], false)
 }
 
+/// A move for an open connection of `s`. The bolder, the more goes around its way, the less
+/// running into something costs and the longer the chain of connections that clear their way.
+fn aim(s: &State, bold: usize, rng: &mut Rng) -> Move {
+    let r = &s.router;
+    let open = r.unrouted();
+    let ci = open[(rng.next() % open.len() as u64) as usize];
+    let boldness = bold as f64;
+    let factor = [0.5, 0.7, 1.0, 1.0, 1.4][(rng.next() % 5) as usize];
+    Move {
+        conns: Vec::new(),
+        via_cost: r.cfg.via_cost * factor,
+        hot: None,
+        aim: Some(Aim {
+            ci,
+            crossing: [0.5, 1.5, 4.0][(rng.next() % 3) as usize] / (1.0 + 0.25 * boldness),
+            via_cost: r.cfg.via_cost * [0.1, 0.25, 0.5, 1.0][(rng.next() % 4) as usize],
+            reach: 0.3 + rng.unit() * (0.7 + 0.5 * boldness).min(5.0),
+            extra: (rng.next() % (2 + 2 * bold as u64).min(24)) as usize,
+            chain: 1 + bold.min(5),
+            seed: rng.next(),
+        }),
+    }
+}
+
 /// A move for `s`. The longer nothing helped, the more it takes out.
-fn pick(s: &State, stale: usize, rng: &mut Rng) -> Move {
+fn pick(s: &State, stale: usize, boldness: usize, rng: &mut Rng) -> Move {
+    if !s.router.unrouted().is_empty() && rng.unit() < 0.5 {
+        return aim(s, boldness, rng);
+    }
     let (at, hot) = spot(s, rng);
     let r = &s.router;
     let reach = 0.4 + rng.unit() * (1.0 + stale as f64 * 0.05).min(5.0);
@@ -100,18 +147,25 @@ fn pick(s: &State, stale: usize, rng: &mut Rng) -> Move {
         conns: near,
         via_cost: r.cfg.via_cost * factor,
         hot: hot.then(|| (at, 0.05 + 0.25 * rng.unit())),
+        aim: None,
     }
 }
 
-/// A bold move for a side branch: a whole area, more of it with every branch that failed.
+/// A bold move for a side branch: a way for an open connection, while there are any, or a whole
+/// area, more of it with every branch that failed.
 fn bold(s: &State, level: usize, rng: &mut Rng) -> Move {
+    if !s.router.unrouted().is_empty() && rng.unit() < 0.8 {
+        return aim(s, 1 + level, rng);
+    }
     let (at, _) = spot(s, rng);
     let r = &s.router;
-    let reach = (2.0 + level as f64 + rng.unit() * 2.0).min(15.0);
-    let want = (6 + 4 * level + (rng.next() % 6) as usize).min(r.conns.len());
-    let mut near: Vec<usize> = (0..r.conns.len())
-        .filter(|&ci| s.places[ci].iter().any(|p| p.dist(at) < reach))
-        .collect();
+    // from a handful up to a quarter of the board, whatever its size
+    let quarter = (r.conns.len() / 4).max(6);
+    let want = 6 + level.min(TOP_LEVEL) * (quarter - 6) / TOP_LEVEL + (rng.next() % 6) as usize;
+    let distance = |ci: usize| s.places[ci].iter().map(|p| p.dist(at)).fold(f64::INFINITY, f64::min);
+    let mut by_way: Vec<(f64, usize)> = (0..r.conns.len()).map(|ci| (distance(ci), ci)).collect();
+    by_way.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut near: Vec<usize> = by_way.iter().take(want * 3 / 2).map(|x| x.1).collect();
     shuffle(&mut near, rng);
     near.truncate(want);
     near.sort_by_key(|&ci| !r.conn_segs[ci].is_empty());
@@ -120,14 +174,66 @@ fn bold(s: &State, level: usize, rng: &mut Rng) -> Move {
         conns: near,
         via_cost: r.cfg.via_cost * factor,
         hot: None,
+        aim: None,
     }
 }
 
+/// Add to `conns` from `from` on what shares a via with them: a connection can end on the via of
+/// another one, and that one must not walk away.
+fn with_shared_vias(r: &Router, conns: &mut Vec<usize>, from: usize) {
+    let mut i = from;
+    while i < conns.len() {
+        for &v in &r.conn_vias[conns[i]] {
+            for cj in 0..r.conns.len() {
+                if r.conn_vias[cj].contains(&v) && !conns.contains(&cj) {
+                    conns.push(cj);
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Where segment `sid` of `s` crosses the line from `a` to `b`, as a fraction of it, or where it
+/// comes closest to it.
+fn place_on(s: &State, sid: u32, a: Point, b: Point) -> Option<f64> {
+    let first = s.segs.partition_point(|&x| x < sid);
+    let tracks = s.cand.geo.tracks[first..].iter().zip(&s.segs[first..]);
+    let tracks = || tracks.clone().take_while(|t| *t.1 == sid).map(|t| t.0);
+    for t in tracks() {
+        for w in t.pts.windows(2) {
+            if let Some((x, _)) = seg_param_intersection(a, b, w[0], w[1]) {
+                return Some(x);
+            }
+        }
+    }
+    let line = b - a;
+    let near = tracks().flat_map(|t| t.pts.iter()).map(|&p| {
+        let x = ((p - a).dot(line) / line.len2().max(1e-12)).clamp(0.0, 1.0);
+        (p.dist(a + line * x), x)
+    });
+    near.min_by(|p, q| p.0.total_cmp(&q.0)).map(|p| p.1)
+}
+
 /// `geo` of a mutant of `s`: what is left of `s` as it lies, asleep, and the new tracks and vias
-/// awake, with their ends on the vias where those are now.
+/// awake. A new track starts between its neighbours where those really are, with its ends on the
+/// vias where those are now: a track that starts on the wrong side of one of them stays there,
+/// and that is a short.
 fn warm_start(s: &State, r: &Router, fresh: Geometry, segs: &[u32], sites: &[u32]) -> (Geometry, Vec<u32>, Vec<u32>) {
     let old_vias: FastMap<u32, usize> = s.sites.iter().enumerate().map(|(i, &v)| (v, i)).collect();
     let new_seg = |sid: u32| sid as usize >= s.router.segs.len();
+    let vertex = |li: usize, v: u32| {
+        let m = &r.sub.m[li];
+        let site = m.vert_site[v as usize];
+        old_vias.get(&site).map_or(m.verts[v as usize], |&i| s.cand.geo.vias[i].at)
+    };
+    let place = |sid: u32, a: Point, b: Point| {
+        if new_seg(sid) {
+            return None;
+        }
+        place_on(s, sid, a, b)
+    };
+    let thread = !r.has_kept && !r.soft_on;
     let mut tracks = Vec::with_capacity(fresh.tracks.len());
     let mut tags = Vec::with_capacity(fresh.tracks.len());
     for (t, &sid) in s.cand.geo.tracks.iter().zip(&s.segs) {
@@ -157,6 +263,9 @@ fn warm_start(s: &State, r: &Router, fresh: Geometry, segs: &[u32], sites: &[u32
         if !new_seg(sid) {
             continue;
         }
+        if thread {
+            t.pts = r.threaded(sid, &vertex, &place);
+        }
         let n = t.pts.len();
         for i in [0, n - 1] {
             if let Some(&p) = moved.get(&grid(t.pts[i])) {
@@ -167,7 +276,120 @@ fn warm_start(s: &State, r: &Router, fresh: Geometry, segs: &[u32], sites: &[u32
         tracks.push(t);
         tags.push(sid);
     }
+    if thread {
+        place_new_vias(&mut tracks, &mut vias);
+    }
     (crate::realize::Geometry { tracks, vias }, tags, sites.to_vec())
+}
+
+/// The sleeping tracks that `way` of the track `t` crosses an odd number of times (with `whole`
+/// false only those in its first half): its start lies on their wrong side. Their number, and
+/// how far along the way the last of them is.
+fn wrong_sides(way: &[Point], t: &Track, tracks: &[Track], boxes: &[Rect], whole: bool) -> (usize, f64) {
+    let mut bbox = Rect::empty();
+    way.iter().for_each(|&p| bbox.add(p));
+    let lens: Vec<f64> = way.windows(2).map(|w| w[0].dist(w[1])).collect();
+    let total: f64 = lens.iter().sum();
+    let (mut count, mut past) = (0, 0.0_f64);
+    for (o, b) in tracks.iter().zip(boxes) {
+        if !o.resting || o.layer != t.layer || o.net == t.net || !b.overlaps(&bbox) {
+            continue;
+        }
+        let (mut hits, mut last, mut run) = (0, 0.0, 0.0);
+        for (w, len) in way.windows(2).zip(&lens) {
+            for q in o.pts.windows(2) {
+                if let Some((x, _)) = seg_param_intersection(w[0], w[1], q[0], q[1]) {
+                    hits += 1;
+                    last = run + x * len;
+                }
+            }
+            run += len;
+        }
+        if hits % 2 == 1 && (whole || last < total * 0.5) {
+            count += 1;
+            past = past.max(last);
+        }
+    }
+    (count, past)
+}
+
+/// The point at arc length `at` of `way`.
+fn along(way: &[Point], at: f64) -> Point {
+    let mut left = at;
+    for w in way.windows(2) {
+        let len = w[0].dist(w[1]);
+        if left <= len {
+            return w[0] + (w[1] - w[0]) * (left / len.max(1e-9));
+        }
+        left -= len;
+    }
+    *way.last().unwrap()
+}
+
+/// `way` from `p` on: what lies before it goes if it is on the way.
+fn from_point(way: &[Point], p: Point) -> Vec<Point> {
+    let cut = (0..way.len() - 1).find(|&i| crate::geom::point_seg_dist(p, way[i], way[i + 1]) < 1e-9);
+    let mut out = vec![p];
+    out.extend_from_slice(&way[cut.map_or(1, |i| i + 1)..]);
+    out
+}
+
+/// The sleeping copper has moved since the mesh was made, so the site of a new via can lie on the
+/// wrong side of a track that runs past it. Its track then crosses that track once, and no push
+/// gets it back. The way of the track is right, so the via goes along it, past the crossing, if
+/// that leaves fewer such crossings on all its tracks.
+fn place_new_vias(tracks: &mut [Track], vias: &mut [Via]) {
+    let boxes: Vec<Rect> = tracks
+        .iter()
+        .map(|t| {
+            let mut b = Rect::empty();
+            t.pts.iter().for_each(|&p| b.add(p));
+            b
+        })
+        .collect();
+    let fresh: Vec<Point> = vias.iter().filter(|v| !v.resting).map(|v| v.at).collect();
+    for v in vias.iter_mut().filter(|v| !v.resting) {
+        // the tracks that end here, each as a way from here, and is its far end fixed?
+        let mut ends: Vec<(usize, bool, Vec<Point>, bool)> = Vec::new();
+        for (ti, t) in tracks.iter().enumerate().filter(|(_, t)| !t.resting && t.net == v.net) {
+            for last in [false, true] {
+                let mut way = t.pts.clone();
+                if last {
+                    way.reverse();
+                }
+                if way[0].dist(v.at) < 1e-6 {
+                    let far = *way.last().unwrap();
+                    ends.push((ti, last, way, !fresh.iter().any(|f| f.dist(far) < 1e-6)));
+                }
+            }
+        }
+        let wrong = |p: Option<Point>| {
+            let ways = ends.iter().map(|e| (e, p.map_or(e.2.clone(), |p| from_point(&e.2, p))));
+            ways.map(|(e, way)| wrong_sides(&way, &tracks[e.0], tracks, &boxes, e.3).0).sum::<usize>()
+        };
+        let mut least = wrong(None);
+        let mut to = None;
+        for e in &ends {
+            let (count, past) = wrong_sides(&e.2, &tracks[e.0], tracks, &boxes, e.3);
+            if count == 0 || least == 0 {
+                continue;
+            }
+            let p = along(&e.2, past + v.diameter / 2.0 + 0.2);
+            let left = wrong(Some(p));
+            if left < least {
+                (least, to) = (left, Some(p));
+            }
+        }
+        let Some(p) = to else { continue };
+        for (ti, last, way, _) in &ends {
+            let mut way = from_point(way, p);
+            if *last {
+                way.reverse();
+            }
+            tracks[*ti].pts = way;
+        }
+        v.at = p;
+    }
 }
 
 /// Same connections, same way: nothing to look at.
@@ -198,13 +420,80 @@ fn judge(board: &Board, c: &mut Candidate) {
     c.stats.violations = Some(spots.len());
     c.stats.shorts = Some(spots.iter().filter(|s| s.short).count());
     c.bad_nets = nets;
-    c.hot = spots.iter().map(|s| s.at).collect();
+    // the shorts first
+    c.hot = spots.iter().filter(|s| s.short).chain(spots.iter().filter(|s| !s.short)).map(|s| s.at).collect();
     c.flaw = spots.iter().map(|s| 300.0 + 700.0 * (s.missing / 0.03).min(1.0)).sum();
 }
 
 /// The cost of the open end.
 fn open_cost(c: &Candidate) -> f64 {
     c.stats.cost() + c.flaw + c.stats.shorts.unwrap_or(0) as f64 * 5000.0
+}
+
+/// What has to go for `aim`: what its connection runs into, and at random what lies around its way.
+/// A pad in a pocket has no way out but a via in the pad, the last resort of a run as well.
+fn around_way(r: &mut Router, s: &State, aim: &Aim) -> Option<Vec<usize>> {
+    let (mut hit, way) = r.way_through(aim.ci, aim.crossing).or_else(|| {
+        r.cfg.via_in_pad = true;
+        let found = r.way_through(aim.ci, aim.crossing);
+        r.cfg.via_in_pad = false;
+        found
+    })?;
+    let mut near: Vec<usize> = (0..r.conns.len())
+        .filter(|&cj| cj != aim.ci && !hit.contains(&cj))
+        .filter(|&cj| s.places[cj].iter().any(|p| way.iter().any(|q| q.dist(*p) < aim.reach)))
+        .collect();
+    shuffle(&mut near, &mut Rng(aim.seed));
+    near.truncate(aim.extra);
+    hit.extend(near);
+    Some(hit)
+}
+
+/// The open connection itself, at its own prices.
+fn lay_open(r: &mut Router, aim: &Aim) -> bool {
+    let via_cost = r.cfg.via_cost;
+    r.cfg.via_cost = aim.via_cost;
+    let mut ok = r.route_one(aim.ci);
+    if !ok {
+        r.cfg.via_in_pad = true;
+        ok = r.route_one(aim.ci);
+        r.cfg.via_in_pad = false;
+    }
+    r.cfg.via_cost = via_cost;
+    ok
+}
+
+/// A connection that lost its way clears its own: what stands in it goes and comes back after it,
+/// as long as `aim` allows and never at the expense of the connections that already cleared theirs.
+fn clear_ways(r: &mut Router, aim: &Aim, conns: &mut Vec<usize>, lost: &mut Vec<usize>) {
+    let mut kept = vec![aim.ci];
+    for _ in 0..aim.chain {
+        let Some(ci) = lost.pop() else { return };
+        let Some((mut hit, _)) = r.way_through(ci, aim.crossing) else {
+            lost.insert(0, ci);
+            continue;
+        };
+        hit.retain(|cj| !r.conn_segs[*cj].is_empty());
+        let mut todo = vec![ci];
+        todo.extend(hit);
+        with_shared_vias(r, &mut todo, 1);
+        if todo.iter().any(|cj| kept.contains(cj)) {
+            lost.insert(0, ci);
+            continue;
+        }
+        for &cj in &todo {
+            r.rip_up(cj);
+            if !conns.contains(&cj) {
+                conns.push(cj);
+            }
+        }
+        if r.route_one(ci) {
+            kept.push(ci);
+        } else {
+            lost.insert(0, ci);
+        }
+        lost.extend(todo[1..].iter().copied().filter(|&cj| !r.route_one(cj)));
+    }
 }
 
 fn mutant<'a>(
@@ -216,24 +505,17 @@ fn mutant<'a>(
     generation: usize,
     floor: usize,
 ) -> Option<State<'a>> {
-    if mv.conns.is_empty() {
+    if mv.conns.is_empty() && mv.aim.is_none() {
         return None;
     }
     let mut r = s.router.clone();
     let normal = (r.cfg.via_cost, r.cfg.hotspots.clone());
-    // a connection can end on the via of another one: that one must not walk away
     let mut conns = mv.conns.clone();
-    let mut i = 0;
-    while i < conns.len() {
-        for v in r.conn_vias[conns[i]].clone() {
-            for cj in 0..r.conns.len() {
-                if r.conn_vias[cj].contains(&v) && !conns.contains(&cj) {
-                    conns.push(cj);
-                }
-            }
-        }
-        i += 1;
+    if let Some(aim) = &mv.aim {
+        conns = vec![aim.ci];
+        conns.extend(around_way(&mut r, s, aim)?);
     }
+    with_shared_vias(&r, &mut conns, 0);
     for &ci in &conns {
         r.rip_up(ci);
     }
@@ -241,24 +523,39 @@ fn mutant<'a>(
     if let Some(h) = mv.hot {
         r.cfg.hotspots = std::sync::Arc::new(vec![h]);
     }
-    let mut lost: Vec<usize> = conns.iter().copied().filter(|&ci| !r.route_one(ci)).collect();
+    let rest = match &mv.aim {
+        Some(aim) => {
+            if !lay_open(&mut r, aim) {
+                return None;
+            }
+            1
+        }
+        None => 0,
+    };
+    let mut lost: Vec<usize> = conns[rest..].iter().copied().filter(|&ci| !r.route_one(ci)).collect();
     (r.cfg.via_cost, r.cfg.hotspots) = normal;
     lost.retain(|&ci| !r.route_one(ci));
+    if let Some(aim) = &mv.aim {
+        clear_ways(&mut r, aim, &mut conns, &mut lost);
+    }
     let routed = r.conn_segs.iter().filter(|c| !c.is_empty()).count();
     if routed < floor || (routed == s.cand.stats.routed && same_routes(&s.router, &r, &conns)) {
         return None;
     }
     if conns.iter().any(|&ci| {
         let net = r.conns[ci].net;
-        r.net_pieces(net) > s.router.net_pieces(net)
+        r.net_splits(net) > s.router.net_splits(net)
     }) {
         return None;
     }
-    let (fresh, segs, sites) = r.tagged_geometry();
+    let (fresh, segs, sites) = r.tagged_from(s.router.segs.len() as u32);
     let (mut geo, segs, sites) = warm_start(s, &r, fresh, &segs, &sites);
     relax::relax(board, sub, &mut geo, relax_cfg);
     let mut cand = candidate(board, &r, geo, routed, s.cand.cfg.clone(), generation);
     judge(board, &mut cand);
+    if !loose_ends(board, &cand.geo, &conns.iter().map(|&ci| r.conns[ci].net).collect::<Vec<_>>()).is_empty() {
+        return None;
+    }
     let mut next = State {
         router: r,
         cand,
@@ -279,6 +576,65 @@ fn better(a: &Candidate, b: &Candidate) -> bool {
 /// A pass that pushes may cost length, but no clearance.
 fn better_or_same(a: &Candidate, b: &Candidate) -> bool {
     a.stats.routed >= b.stats.routed && a.flaw <= b.flaw && a.stats.shorts <= b.stats.shorts
+}
+
+/// Side branches that have to fail in a row, each bolder than the last, before the search counts
+/// as converged. The last ones take a quarter of the connections of the board at a time.
+pub(crate) const TOP_LEVEL: usize = 12;
+
+/// The results that no other beats in both vias and length, at the level of the best one. The
+/// cost weighs vias against length once and for all, the user may see it differently.
+#[derive(Default)]
+struct Front {
+    items: Vec<Candidate>,
+}
+
+impl Front {
+    /// Take `c` if it holds its own next to `best`. True if it sets a noticeable record.
+    fn offer(&mut self, c: &Candidate, best: &Candidate) -> bool {
+        if c.stats.routed < best.stats.routed || c.stats.shorts > best.stats.shorts || c.flaw > best.flaw {
+            return false;
+        }
+        let beats = |a: &Candidate, b: &Candidate| {
+            a.stats.routed >= b.stats.routed
+                && a.flaw <= b.flaw
+                && a.stats.vias <= b.stats.vias
+                && a.stats.length <= b.stats.length
+        };
+        if self.items.iter().any(|o| beats(o, c)) {
+            return false;
+        }
+        let fewest = self.items.iter().map(|o| o.stats.vias).min();
+        let shortest = self.items.iter().map(|o| o.stats.length).fold(f64::INFINITY, f64::min);
+        let record = fewest.is_none_or(|v| c.stats.vias < v) || c.stats.length < shortest * 0.998;
+        self.items.retain(|o| !beats(c, o));
+        self.items.push(c.clone());
+        self.thin(8);
+        record
+    }
+
+    /// Keep the ends and the most different ones.
+    fn thin(&mut self, keep: usize) {
+        self.items.sort_by_key(|c| c.stats.vias);
+        while self.items.len() > keep.max(2) {
+            let tightest = (1..self.items.len() - 1)
+                .min_by_key(|&i| self.items[i + 1].stats.vias - self.items[i - 1].stats.vias)
+                .unwrap();
+            self.items.remove(tightest);
+        }
+    }
+
+    /// What is on offer next to `best` at the end: as complete and as clean, and different.
+    fn others(mut self, best: &Candidate) -> Vec<Candidate> {
+        self.items.retain(|c| {
+            c.stats.routed >= best.stats.routed
+                && c.stats.shorts <= best.stats.shorts
+                && c.flaw <= best.flaw
+                && (c.stats.vias, c.stats.length.to_bits()) != (best.stats.vias, best.stats.length.to_bits())
+        });
+        self.thin(3);
+        self.items
+    }
 }
 
 /// The level of a result, to tell a noticeable gain from a small one.
@@ -536,6 +892,38 @@ fn rebuild<'a>(board: &'a Board, sub: &Substrate, c: &Candidate) -> Option<State
     Some(s)
 }
 
+/// Track ends of these nets that sit on nothing of their net, and vias with no track.
+fn loose_ends(board: &Board, geo: &Geometry, nets: &[u32]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (ti, t) in geo.tracks.iter().enumerate().filter(|(_, t)| nets.contains(&t.net)) {
+        for p in [t.pts[0], *t.pts.last().unwrap()] {
+            let on_via = geo.vias.iter().any(|v| v.net == t.net && v.at.dist(p) < 1e-4);
+            let on_pad = board.pins.iter().any(|pin| {
+                pin.net == t.net
+                    && pin.obstacles.iter().any(|&o| board.obstacles[o].shape.dist_to_point(p) < 0.01)
+            });
+            let on_track = geo.tracks.iter().enumerate().any(|(tj, o)| {
+                tj != ti && o.net == t.net && o.pts.iter().any(|q| q.dist(p) < 1e-4)
+            });
+            if !on_via && !on_pad && !on_track {
+                out.push(format!("track {ti} net {} ends free at {:.3} {:.3}", board.nets[t.net as usize].name, p.x, p.y));
+            }
+        }
+    }
+    for v in geo.vias.iter().filter(|v| nets.contains(&v.net)) {
+        let ends = geo.tracks.iter().filter(|t| t.net == v.net && (t.pts[0].dist(v.at) < 1e-4 || t.pts.last().unwrap().dist(v.at) < 1e-4)).count();
+        let plane = board.planes.iter().any(|p| p.net == v.net);
+        // a via in a pad needs only the track on the other side
+        let on_pad = board.pins.iter().any(|pin| {
+            pin.net == v.net && pin.obstacles.iter().any(|&o| board.obstacles[o].shape.dist_to_point(v.at) < 0.01)
+        });
+        if (ends == 0 || (ends == 1 && !plane && !on_pad)) && v.drill > 0.0 {
+            out.push(format!("via net {} at {:.3} {:.3} has no track", board.nets[v.net as usize].name, v.at.x, v.at.y));
+        }
+    }
+    out
+}
+
 /// Mutate `start` until the search is stopped and return the best result.
 pub(crate) fn run(
     board: &Board,
@@ -545,10 +933,10 @@ pub(crate) fn run(
     first: usize,
     rng: &mut Rng,
     on_better: &mut dyn FnMut(&Candidate, usize),
-) -> Candidate {
+) -> (Candidate, Vec<Candidate>) {
     let Some(mut best) = rebuild(board, sub, &start) else {
         eprintln!("open end: the run does not repeat, nothing to improve on");
-        return start;
+        return (start, Vec::new());
     };
     let pop = search.population.max(1);
     let local = relax::RelaxConfig {
@@ -563,8 +951,8 @@ pub(crate) fn run(
     let tighten_every = env("GB_TIGHTEN", 24.0) as usize;
     let log = std::env::var("GB_OPEN_LOG").is_ok();
     let t0 = std::time::Instant::now();
-    // every connection had its turn a few times, and side branches did not help either
-    let settled = (3 * best.cand.stats.conns / pop).max(100);
+    let mut front = Front::default();
+    front.offer(&best.cand, &best.cand);
     let mut mark = Mark::of(&best.cand);
     let mut stale = 0;
     let mut generation = first;
@@ -586,12 +974,15 @@ pub(crate) fn run(
                 .flatten()
                 .min_by(|a, b| open_cost(&a.cand).total_cmp(&open_cost(&b.cand)))
                 .map(|s| (s, branch_life));
+            if side.is_none() {
+                level += 1;
+            }
         }
         let shared = if side.is_some() { pop / 2 } else { 0 };
         let moves: Vec<(bool, Move)> = (0..pop)
             .map(|i| match &side {
-                Some((s, _)) if i < shared => (true, pick(s, 0, rng)),
-                _ => (false, pick(&best, stale, rng)),
+                Some((s, _)) if i < shared => (true, pick(s, 0, level, rng)),
+                _ => (false, pick(&best, stale, stale / 16, rng)),
             })
             .collect();
         let next: Vec<(bool, Option<State>)> = moves
@@ -605,17 +996,40 @@ pub(crate) fn run(
             })
             .collect();
         let tried = next.iter().filter(|n| n.1.is_some()).count();
+        let aimed: Vec<_> = moves.iter().zip(&next).filter(|(m, _)| m.1.aim.is_some()).collect();
+        let laid = aimed.iter().filter(|(_, n)| n.1.is_some()).count();
+        let more = aimed.iter().filter(|(m, n)| {
+            let parent = if m.0 { side.as_ref().map(|s| &s.0) } else { None }.unwrap_or(&best);
+            n.1.as_ref().is_some_and(|c| c.cand.stats.routed > parent.cand.stats.routed)
+        });
+        let (aimed, more) = (aimed.len(), more.count());
         let mut wins = 0;
+        // one more connection, at the price of shorts for now
+        let mut promising: Option<State> = None;
+        let mut record = false;
         for (on_side, c) in next {
             let Some(c) = c else { continue };
+            record |= front.offer(&c.cand, &best.cand);
             if on_side {
                 if let Some(side) = side.as_mut().filter(|s| better(&c.cand, &s.0.cand)) {
+                    if Mark::of(&side.0.cand).beaten_by(&Mark::of(&c.cand)) {
+                        side.1 = branch_life;
+                    }
                     side.0 = c;
                 }
             } else if better(&c.cand, &best.cand) {
                 best = c;
                 wins += 1;
+            } else if c.cand.stats.routed > best.cand.stats.routed
+                && promising.as_ref().is_none_or(|p| open_cost(&c.cand) < open_cost(&p.cand))
+            {
+                promising = Some(c);
             }
+        }
+        if let Some(p) = promising.filter(|p| p.cand.stats.routed > best.cand.stats.routed)
+            && side.as_ref().is_none_or(|s| better(&p.cand, &s.0.cand))
+        {
+            side = Some((p, branch_life));
         }
         if let Some((s, left)) = side.take() {
             if better(&s.cand, &best.cand) {
@@ -624,7 +1038,6 @@ pub(crate) fn run(
                 }
                 best = s;
                 wins += 1;
-                level = 0;
             } else if left == 0 {
                 level += 1;
             } else {
@@ -646,18 +1059,25 @@ pub(crate) fn run(
                 }
             }
         }
-        if mark.beaten_by(&Mark::of(&best.cand)) {
-            mark = Mark::of(&best.cand);
+        // what the board still lacks resets the boldness, a via less only holds it: vias and length
+        // can go on falling by a little for hours after the search has found its level
+        let now = Mark::of(&best.cand);
+        if mark.beaten_by(&now) {
+            if now.routed > mark.routed || now.flaws < mark.flaws {
+                level = 0;
+            }
+            mark = now;
             stale = 0;
-            level = 0;
             on_better(&best.cand, generation);
+        } else if record {
+            stale = 0;
         } else {
             stale += 1;
         }
         if log {
             let st = &best.cand.stats;
             eprintln!(
-                "open {generation} {:.1}s tried {tried} wins {wins} stale {stale} level {level}{}: {}/{} {} vias {:.0} mm {} viol {} shorts flaw {:.0}",
+                "open {generation} {:.1}s tried {tried} aimed {aimed} laid {laid} more {more} wins {wins} stale {stale} level {level}{}: {}/{} {} vias {:.0} mm {} viol {} shorts flaw {:.0}",
                 t0.elapsed().as_secs_f64(),
                 side.as_ref().map_or(String::new(), |(s, left)| format!(
                     " side {} left {} cost {:.0} of {:.0}",
@@ -682,11 +1102,13 @@ pub(crate) fn run(
                 generation,
                 stale,
                 level,
-                converged: stale >= settled,
+                top: TOP_LEVEL,
+                converged: level >= TOP_LEVEL,
             },
         );
     }
-    best.cand
+    let others = front.others(&best.cand);
+    (best.cand, others)
 }
 
 #[cfg(test)]
@@ -701,32 +1123,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Debugging: track ends that sit on nothing of their net, and vias with no track.
-    fn loose_ends(board: &Board, geo: &Geometry) -> Vec<String> {
-        let mut out = Vec::new();
-        for (ti, t) in geo.tracks.iter().enumerate() {
-            for p in [t.pts[0], *t.pts.last().unwrap()] {
-                let on_via = geo.vias.iter().any(|v| v.net == t.net && v.at.dist(p) < 1e-4);
-                let on_pad = board.pins.iter().any(|pin| {
-                    pin.net == t.net
-                        && pin.obstacles.iter().any(|&o| board.obstacles[o].shape.dist_to_point(p) < 0.01)
-                });
-                let on_track = geo.tracks.iter().enumerate().any(|(tj, o)| {
-                    tj != ti && o.net == t.net && o.pts.iter().any(|q| q.dist(p) < 1e-4)
-                });
-                if !on_via && !on_pad && !on_track {
-                    out.push(format!("track {ti} net {} ends free at {:.3} {:.3}", board.nets[t.net as usize].name, p.x, p.y));
-                }
-            }
-        }
-        for v in &geo.vias {
-            let ends = geo.tracks.iter().filter(|t| t.net == v.net && (t.pts[0].dist(v.at) < 1e-4 || t.pts.last().unwrap().dist(v.at) < 1e-4)).count();
-            let plane = board.planes.iter().any(|p| p.net == v.net);
-            if (ends == 0 || (ends == 1 && !plane)) && v.drill > 0.0 {
-                out.push(format!("via net {} at {:.3} {:.3} has no track", board.nets[v.net as usize].name, v.at.x, v.at.y));
-            }
-        }
-        out
+    fn all_nets(b: &Board) -> Vec<u32> {
+        (0..b.nets.len() as u32).collect()
     }
 
     /// Nets that all have to cross each other: the pins of one side come in reverse order.
@@ -836,7 +1234,7 @@ mod tests {
         let st = crate::octo::octilinear(&b, &mut res.geometry);
         crate::octo::octilinear(&b, &mut again);
         assert!(check::check(&b, &res.geometry).len() <= before);
-        assert!(loose_ends(&b, &res.geometry).is_empty());
+        assert!(loose_ends(&b, &res.geometry, &all_nets(&b)).is_empty());
         for (t, (a, z)) in res.geometry.tracks.iter().zip(ends) {
             assert!(t.pts[0].dist(a) < 1e-9 && t.pts.last().unwrap().dist(z) < 1e-9);
             assert!(t.elems.iter().all(|e| matches!(e, crate::realize::Elem::Line(..))));
@@ -857,13 +1255,261 @@ mod tests {
         assert_eq!(res.stats.routed, res.stats.conns, "{:?}", res.stats.unrouted);
         let cost = |r: &crate::RouteResult| r.stats.cost() + check::check(&b, &r.geometry).len() as f64 * 1000.0;
         assert!(cost(&res) <= cost(&start), "{} > {}", cost(&res), cost(&start));
-        assert!(loose_ends(&b, &res.geometry).is_empty(), "{:?}", loose_ends(&b, &res.geometry));
+        assert!(loose_ends(&b, &res.geometry, &all_nets(&b)).is_empty());
         let again_router = rebuild_pieces(&b);
         assert_eq!(again_router, 1);
         let again = run_to(&b, 60);
         assert_eq!(res.geometry.vias.len(), again.geometry.vias.len());
         let pts = |r: &crate::RouteResult| r.geometry.tracks.iter().flat_map(|t| t.pts.clone()).collect::<Vec<_>>();
         assert_eq!(pts(&res), pts(&again));
+    }
+
+    /// One layer. Net A may go through a tunnel with room for one track or around it; net B has
+    /// its pins in two pockets that open into the tunnel and no other way.
+    fn tunnel_board() -> Board {
+        let mut b = Board::default();
+        b.rules.min_clearance = 0.1;
+        b.layers = vec![Layer {
+            name: "F.Cu".into(),
+            is_plane: false,
+        }];
+        b.outline = vec![Polygon::new(vec![pt(0., 0.), pt(40., 0.), pt(40., 24.), pt(0., 24.)])];
+        b.classes = vec![NetClass {
+            name: "Default".into(),
+            track_width: 0.2,
+            clearance: 0.1,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            ..Default::default()
+        }];
+        let wall = |x0: f64, y0: f64, x1: f64, y1: f64| Obstacle {
+            shape: Shape::Polygon(Polygon::new(vec![pt(x0, y0), pt(x1, y0), pt(x1, y1), pt(x0, y1)])),
+            layers: LayerSet::single(0),
+            net: None,
+            kind: ObstacleKind::Keepout { vias: true, tracks: true, mask: false },
+            hole: None,
+            clearance: 0.0,
+            pin: None,
+            locked: false,
+        };
+        // under the tunnel, with a slit into each pocket, over it, and between the pockets
+        b.obstacles = vec![
+            wall(-1.0, 14.0, 14.0, 14.7),
+            wall(15.0, 14.0, 25.0, 14.7),
+            wall(26.0, 14.0, 41.0, 14.7),
+            wall(10.0, 15.1, 30.0, 16.0),
+            wall(19.0, -1.0, 21.0, 14.0),
+        ];
+        for (net, name, pins) in [
+            (0, "A", [pt(5.0, 14.9), pt(35.0, 14.9)]),
+            (1, "B", [pt(14.5, 8.0), pt(25.5, 8.0)]),
+        ] {
+            let mut n = Net {
+                name: name.into(),
+                class: 0,
+                pins: Vec::new(),
+                planes: LayerSet::default(),
+                priority: 0,
+            };
+            for at in pins {
+                let (id, o) = (b.pins.len(), b.obstacles.len());
+                let (lo, hi) = (at + pt(-0.3, -0.2), at + pt(0.3, 0.2));
+                b.obstacles.push(Obstacle {
+                    shape: Shape::Polygon(Polygon::new(vec![lo, pt(hi.x, lo.y), hi, pt(lo.x, hi.y)])),
+                    layers: LayerSet::single(0),
+                    net: Some(net),
+                    kind: ObstacleKind::Pad,
+                    hole: None,
+                    clearance: 0.1,
+                    pin: Some(id),
+                    locked: false,
+                });
+                b.pins.push(Pin {
+                    name: format!("{name}{}", id % 2),
+                    footprint: name.into(),
+                    net,
+                    pos: at,
+                    layers: LayerSet::single(0),
+                    obstacles: vec![o],
+                    size: (0.4, 0.6),
+                });
+                n.pins.push(id);
+            }
+            b.nets.push(n);
+        }
+        b
+    }
+
+    /// A state of `b`, with the connections routed in this order of their nets, without rip-up,
+    /// or with nothing routed.
+    fn state_of<'a>(b: &'a Board, sub: &Substrate, first: Option<u32>) -> State<'a> {
+        let cfg = RouterConfig {
+            ripup_passes: 0,
+            ..Default::default()
+        };
+        let mut r = Router::new(b, sub, cfg.clone());
+        r.plan();
+        if let Some(first) = first {
+            r.reorder(|c| if c.net == first { 0.0 } else { 1.0 });
+            r.run();
+        }
+        let (geo, segs, sites) = r.tagged_geometry();
+        let routed = r.conn_segs.iter().filter(|c| !c.is_empty()).count();
+        let mut cand = candidate(b, &r, geo, routed, cfg, 0);
+        judge(b, &mut cand);
+        let mut s = State {
+            router: r,
+            cand,
+            segs,
+            sites,
+            places: Vec::new(),
+        };
+        s.locate();
+        s
+    }
+
+    #[test]
+    fn the_way_through_names_what_is_in_the_way() {
+        let b = tunnel_board();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let s = state_of(&b, &sub, Some(0));
+        let open = s.router.unrouted();
+        assert_eq!(open.len(), 1, "B must find the tunnel taken");
+        assert_eq!(s.router.conns[open[0]].net, 1);
+        let r = &s.router;
+        let (hit, way) = r.way_through(open[0], 1.5).unwrap();
+        assert_eq!(hit.iter().map(|&c| r.conns[c].net).collect::<Vec<_>>(), [0]);
+        assert!(way.iter().any(|p| p.y > 14.6 && p.y < 15.2 && p.x > 15.0 && p.x < 25.0), "{way:?}");
+    }
+
+    #[test]
+    fn an_aimed_move_gets_the_open_connection_through() {
+        let b = tunnel_board();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let s = state_of(&b, &sub, Some(0));
+        let relax_cfg = relax::RelaxConfig {
+            iterations: 40,
+            via_edge: true,
+            ..Default::default()
+        };
+        let mut rng = Rng(1);
+        let mv = aim(&s, 0, &mut rng);
+        let m = mutant(&b, &sub, &s, &mv, &relax_cfg, 1, s.cand.stats.routed).expect("a way for B");
+        assert_eq!(m.cand.stats.routed, 2);
+        assert!(m.router.unrouted().is_empty());
+        assert!(m.router.validate().is_empty(), "{:?}", m.router.validate());
+        assert!(better(&m.cand, &s.cand));
+        // the victim went around the tunnel
+        let a = (0..2).find(|&ci| m.router.conns[ci].net == 0).unwrap();
+        assert!(m.places[a].iter().any(|p| p.y > 16.0), "{:?}", m.places[a]);
+        assert!(loose_ends(&b, &m.cand.geo, &all_nets(&b)).is_empty());
+    }
+
+    #[test]
+    fn a_pad_in_a_pocket_leaves_through_a_via_in_the_pad() {
+        let mut b = tunnel_board();
+        b.layers.push(Layer {
+            name: "B.Cu".into(),
+            is_plane: false,
+        });
+        // B alone, and a wall around its pad on the top layer
+        b.nets.truncate(1);
+        b.pins.truncate(2);
+        b.obstacles.retain(|o| o.pin.is_some_and(|p| p < 2));
+        b.obstacles.iter_mut().enumerate().for_each(|(i, o)| {
+            o.pin = Some(i);
+        });
+        let net_pins: Vec<usize> = b.nets[0].pins.clone();
+        for (i, &p) in net_pins.iter().enumerate() {
+            b.pins[p].obstacles = vec![i];
+            b.pins[p].size = (0.8, 0.8);
+        }
+        let at = b.pins[0].pos;
+        for (lo, hi) in [
+            (at + pt(-1.0, -1.0), at + pt(1.0, -0.45)),
+            (at + pt(-1.0, 0.45), at + pt(1.0, 1.0)),
+            (at + pt(-1.0, -1.0), at + pt(-0.45, 1.0)),
+            (at + pt(0.45, -1.0), at + pt(1.0, 1.0)),
+        ] {
+            b.obstacles.push(Obstacle {
+                shape: Shape::Polygon(Polygon::new(vec![lo, pt(hi.x, lo.y), hi, pt(lo.x, hi.y)])),
+                layers: LayerSet::single(0),
+                net: None,
+                kind: ObstacleKind::Keepout { vias: false, tracks: true, mask: false },
+                hole: None,
+                clearance: 0.0,
+                pin: None,
+                locked: false,
+            });
+        }
+        let sub_cfg = SubstrateConfig {
+            via_pitch: 3.0,
+            ..Default::default()
+        };
+        let sub = Substrate::build(&b, &sub_cfg);
+        let s = state_of(&b, &sub, None);
+        assert!(s.router.way_through(0, 1.5).is_none());
+        let relax_cfg = relax::RelaxConfig {
+            iterations: 40,
+            via_edge: true,
+            ..Default::default()
+        };
+        let mv = aim(&s, 0, &mut Rng(1));
+        let m = mutant(&b, &sub, &s, &mv, &relax_cfg, 1, 0).expect("a way through the pad");
+        assert_eq!(m.cand.stats.routed, 1);
+        assert!(m.router.vias.keys().any(|&v| m.router.site_point(v).dist(at) < 1e-6));
+    }
+
+    #[test]
+    fn a_new_via_goes_past_the_track_it_lies_behind() {
+        let track = |net: u32, pts: Vec<Point>, resting: bool| Track {
+            pts,
+            elems: Vec::new(),
+            width: 0.2,
+            layer: 0,
+            net,
+            necks: Vec::new(),
+            neck_w: 0.2,
+            origin: None,
+            resting,
+            fitted: Vec::new(),
+        };
+        // the site lies under a sleeping track, the way of the new track leads over it
+        let site = pt(5.0, 0.5);
+        let mut tracks = vec![
+            track(1, vec![pt(0.0, 1.0), pt(10.0, 1.0)], true),
+            track(2, vec![site, pt(5.0, 5.0)], false),
+        ];
+        let mut vias = vec![Via {
+            at: site,
+            diameter: 0.6,
+            drill: 0.3,
+            net: 2,
+            layer: None,
+            origin: None,
+            resting: false,
+        }];
+        place_new_vias(&mut tracks, &mut vias);
+        assert!(vias[0].at.y > 1.0 && vias[0].at.y < 5.0, "{:?}", vias[0].at);
+        assert_eq!(tracks[1].pts[0], vias[0].at);
+        // a via on the right side stays where it is
+        let at = vias[0].at;
+        place_new_vias(&mut tracks, &mut vias);
+        assert_eq!(vias[0].at, at);
+    }
+
+    #[test]
+    fn an_open_connection_is_no_split() {
+        let b = twisted_board();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        r.run();
+        let ci = (0..r.conns.len()).find(|&ci| !r.conn_segs[ci].is_empty()).unwrap();
+        let net = r.conns[ci].net;
+        assert_eq!(r.net_splits(net), 1);
+        r.rip_up(ci);
+        assert_eq!((r.net_pieces(net), r.net_splits(net)), (2, 1));
     }
 
     #[test]
@@ -945,6 +1591,38 @@ mod tests {
         assert_eq!(spots.len(), 3);
         assert!((spots[0].missing - 0.05).abs() < 1e-9 && spots[0].at.x == 0.5);
         assert!(spots[2].short && !spots[0].short);
+    }
+
+    #[test]
+    fn the_front_keeps_what_differs() {
+        let cand = |vias: usize, length: f64| Candidate {
+            stats: crate::RunStats {
+                vias,
+                length,
+                routed: 5,
+                conns: 5,
+                ..Default::default()
+            },
+            geo: Geometry {
+                tracks: Vec::new(),
+                vias: Vec::new(),
+            },
+            order: Vec::new(),
+            failed: Vec::new(),
+            bad_nets: Vec::new(),
+            hot: Vec::new(),
+            flaw: 0.0,
+            cfg: RouterConfig::default(),
+        };
+        let best = cand(10, 100.0);
+        let mut f = Front::default();
+        assert!(f.offer(&best, &best));
+        assert!(f.offer(&cand(8, 110.0), &best), "fewer vias");
+        assert!(!f.offer(&cand(9, 111.0), &best), "beaten in both");
+        assert!(f.offer(&cand(12, 90.0), &best), "shorter");
+        let others = f.others(&best);
+        let vias: Vec<usize> = others.iter().map(|c| c.stats.vias).collect();
+        assert_eq!(vias, vec![8, 12]);
     }
 
     #[test]
