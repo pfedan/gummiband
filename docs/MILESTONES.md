@@ -163,6 +163,15 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   pitch. Rails 0.8 mm beyond the pad were worse, they take the room to fan out. Neck extensions, more
   reserve and leaving out the tightening did little. Open: the own check reports 4 spots at
   `D+`/`D-` against GND that KiCad accepts, not understood.
+- All of it together, 2026-10-31, all cores, one board after the other, default seed:
+  Corne `--geometry-generations 1`: 482/482, 391 vias, 8526 mm, KiCad DRC 0 open, 0 clearance, 0
+  shorts, 1 edge error, the 4 mask bridges of the unrouted board, stopped at 90 minutes at level
+  10 of 12. The original has 452 vias and 8352 mm. Arty `--geometry-generations 3 --prefer-width 0.25`:
+  323/323, 106 vias, 2927 mm, 69 % at 0.25 mm, DRC clean but for the 4 errors of the empty board,
+  converged in 9 minutes. The original has 147 vias and 3073 mm. Lichtschnitzel
+  `--geometry-generations 3`: 348/348, 200 vias, 2523 mm, converged in 9 minutes, 2 clearance hits at
+  one spot. The original has 294 vias and 2633 mm. Each also leaves results that differ in vias and
+  length to choose from.
 - KiCad's DRC stops at 199 or 499 hits per type, so those are limits and not results.
 - Idea to keep: a strict convergence, where every gain in vias or length starts the boldness over
   as well. Arty then still lost a via every few minutes after 18 minutes and never converged, but
