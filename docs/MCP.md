@@ -87,7 +87,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
-| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `air?`, `prefer_width?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
+| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `air?`, `prefer_width?`, `angles?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?` | PNG (image content) and its path, region, pixels per mm |
 
@@ -231,7 +231,8 @@ stay). Defaults match the CLI: `runs` 14 (a constant, so results do not depend o
 directions per layer for every third run, 0 = off), `pair_pull` 0 (experimental pull between the
 nets of a differential pair), `pairs` false (experimental: a pair as one wide track that is split
 in two, see the CLI guide), `pair_skew` 0.1 mm, `pair_zdiff` none, `negotiate` 0 (experimental negotiated routing, 20 rounds
-work well and take about twice the time), `air` 0 mm, `prefer_width` 0 (off). `seed` picks the search seed
+work well and take about twice the time), `air` 0 mm, `prefer_width` 0 (off), `angles` `"any"` (`"45"` turns the result into
+conventional 45 degree routing as a last step, like `--angles 45`). `seed` picks the search seed
 (default fixed): the same seed gives the same result, another one a different try. `keep_all`
 keeps every track and via of the input and adds to it, like `--keep-all` on the command line;
 with `nets` only those nets are routed and everything else stays. Add `reroute` to replace
@@ -251,7 +252,9 @@ the settings: `p`, `n`, `coupled_mm` within width + gap + 0.1 mm of the partner 
 `pair_pull` or `pairs`), `nets` (per routed net, longest first: `net`,
 `length_mm`, `vias`, `min_width_mm`, `max_width_mm`), `blocked` (per unrouted connection the
 `nets` that run in its way, a neighbourhood estimate rather than an exact analysis, meant for
-choosing what to prioritize, skip or move), `copied`.
+choosing what to prioritize, skip or move), `copied`, `angles_45` (with `angles` `"45"`:
+`length_before_mm`, `length_after_mm`, `off_grid_pieces` and `off_grid_mm` that kept their angle
+because no 45 degree path fit, `sharp_corners` left unchamfered).
 
 ```json
 {"name": "route", "arguments": {"board": "b1", "runs": 2, "generations": 0}}

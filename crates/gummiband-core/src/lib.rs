@@ -6,6 +6,7 @@ pub mod geom;
 pub mod import;
 mod improve;
 pub mod index;
+pub mod octo;
 pub mod pairs;
 pub mod prof;
 pub mod realize;

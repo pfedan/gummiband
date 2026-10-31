@@ -54,6 +54,9 @@ Standing decisions of the project owner, kept here so that they survive any sess
 - A block is a group of parts with its locked copper that moves only as a whole.
 - Layer preferred directions are a portfolio dimension, not only an option.
 - Teardrops come from KiCad's built-in feature.
+- Any-angle tracks with arcs stay the default. Conventional 45 degree routing is an optional
+  last step (`--angles 45`, plugin and MCP alike) that never adds a clearance violation and
+  leaves a piece at its angle where no 45 degree path fits.
 - Follow-me stays "route the selected nets" for now; no live completion while drawing a track.
 
 ## License

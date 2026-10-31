@@ -187,6 +187,13 @@ vias of the other nets are no obstacles but part of the topology (`gummiband-cor
 4. Fillets: every corner is rounded with the largest arc that keeps all clearances; the output
    uses real KiCad arcs.
 5. Clearance check in the core; the KiCad DRC is the final judge in the benchmark.
+6. Optional, `--angles 45` (`octo.rs`): the finished tracks become conventional 45 degree
+   routing. Per track a greedy walk along its path: the farthest point reachable with two legs on
+   the grid (or a Z of three), else a staircase or the old piece; then 45 degree chamfers on the
+   90 and 135 degree corners. Every leg is tested with the clearance rules of `check` against the
+   current copper, with its own width (the old width, a neck only where the router had one), so
+   no violation is added. Four passes over all tracks, because a tight bundle only gets room from
+   the outside in. Vias and track ends stay.
 
 ## Differential pairs
 
