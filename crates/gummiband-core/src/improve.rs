@@ -319,7 +319,7 @@ fn warm_start(s: &State, r: &Router, fresh: Geometry, segs: &[u32], sites: &[u32
         tags.push(sid);
     }
     if thread {
-        place_new_vias(&mut tracks, &mut vias);
+        place_new_vias(&mut tracks, &mut vias, &r.board.planes);
     }
     (crate::realize::Geometry { tracks, vias }, tags, sites.to_vec())
 }
@@ -380,7 +380,7 @@ fn from_point(way: &[Point], p: Point) -> Vec<Point> {
 /// wrong side of a track that runs past it. Its track then crosses that track once, and no push
 /// gets it back. The way of the track is right, so the via goes along it, past the crossing, if
 /// that leaves fewer such crossings on all its tracks.
-fn place_new_vias(tracks: &mut [Track], vias: &mut [Via]) {
+fn place_new_vias(tracks: &mut [Track], vias: &mut [Via], planes: &[crate::board::Plane]) {
     let boxes: Vec<Rect> = tracks
         .iter()
         .map(|t| {
@@ -423,6 +423,30 @@ fn place_new_vias(tracks: &mut [Track], vias: &mut [Via]) {
             }
         }
         let Some(p) = to else { continue };
+        // a via that reaches the plane of its net must not leave it: its connection counts as
+        // made through that plane (GB_PLANE_HOLD; GB_PLANE_LOG says when it would happen)
+        let r = v.diameter / 2.0;
+        let home = planes.iter().find(|pl| pl.net == v.net && pl.outline.contains(v.at));
+        if let Some(pl) = home {
+            let floor = (r + 0.3).min(pl.outline.boundary_dist(v.at));
+            let stays = pl.outline.contains(p) && pl.outline.boundary_dist(p) >= floor;
+            if !stays {
+                if ideas().plane_log {
+                    eprintln!(
+                        "plane via of net {} would leave its plane: ({:.3}, {:.3}) to ({:.3}, {:.3}){}",
+                        v.net,
+                        v.at.x,
+                        v.at.y,
+                        p.x,
+                        p.y,
+                        if ideas().plane_hold { ", held" } else { "" }
+                    );
+                }
+                if ideas().plane_hold {
+                    continue;
+                }
+            }
+        }
         for (ti, last, way, _) in &ends {
             let mut way = from_point(way, p);
             if *last {
@@ -1462,6 +1486,11 @@ struct Ideas {
     /// `GB_BOLD_AIM=share`: that share of the bold moves that start a side branch aims at an open
     /// connection while there is one; the rest take a whole area (default 0.8).
     bold_aim: f64,
+    /// `GB_PLANE_HOLD`: a new via that reaches the plane of its net stays in it when it is moved
+    /// past a sleeping track (see `place_new_vias`).
+    plane_hold: bool,
+    /// `GB_PLANE_LOG`: say on stderr when such a via would leave its plane.
+    plane_log: bool,
 }
 
 fn ideas() -> &'static Ideas {
@@ -1475,6 +1504,8 @@ fn ideas() -> &'static Ideas {
         window: env("GB_WINDOW", 0.0),
         spot_fade: std::env::var("GB_SPOT_FADE").is_ok(),
         bold_aim: env("GB_BOLD_AIM", 0.8),
+        plane_hold: std::env::var("GB_PLANE_HOLD").is_ok(),
+        plane_log: std::env::var("GB_PLANE_LOG").is_ok(),
     })
 }
 
@@ -2363,12 +2394,12 @@ mod tests {
             origin: None,
             resting: false,
         }];
-        place_new_vias(&mut tracks, &mut vias);
+        place_new_vias(&mut tracks, &mut vias, &[]);
         assert!(vias[0].at.y > 1.0 && vias[0].at.y < 5.0, "{:?}", vias[0].at);
         assert_eq!(tracks[1].pts[0], vias[0].at);
         // a via on the right side stays where it is
         let at = vias[0].at;
-        place_new_vias(&mut tracks, &mut vias);
+        place_new_vias(&mut tracks, &mut vias, &[]);
         assert_eq!(vias[0].at, at);
     }
 
