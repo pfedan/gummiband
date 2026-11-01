@@ -2922,7 +2922,11 @@ impl<'a> Router<'a> {
         if let Some(pat) = &self.cfg.patterns {
             if self.cfg.share_fanouts {
                 let only = std::env::var("GB_SHARE_KIND").ok();
-                for s in pat.shares.iter().filter(|s| only.as_deref().is_none_or(|k| k == s.kind)) {
+                for s in pat
+                    .shares
+                    .iter()
+                    .filter(|s| only.as_deref().is_none_or(|k| k == s.kind))
+                {
                     for &o in &s.others {
                         leader.insert(o, (s.leader, s.kind == "decap" && self.cfg.decaps_first));
                     }
@@ -3410,7 +3414,10 @@ impl<'a> Router<'a> {
             return true;
         }
         let from = self.board.pins[c.from].pos;
-        let straight = t.iter().map(|&p| self.board.pins[p].pos.dist(from)).fold(f64::INFINITY, f64::min);
+        let straight = t
+            .iter()
+            .map(|&p| self.board.pins[p].pos.dist(from))
+            .fold(f64::INFINITY, f64::min);
         let way: f64 = self.conn_points(ci).windows(2).map(|w| w[0].dist(w[1])).sum();
         way > 2.0 * straight + 1.0
     }
