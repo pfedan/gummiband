@@ -55,7 +55,7 @@ gummiband route board.kicad_pcb -o routed.kicad_pcb [options]
 ```
 
 Writes a copy of the board with the routed tracks, arcs and vias. Nothing but tracks and vias
-changes in the file (footprints move only with `--move-parts`).
+changes in the file but the footprints that `--move-parts` shifts (on by default, see below).
 
 ### What is kept and what is replaced
 
@@ -101,7 +101,7 @@ when the progress reports `converged`.
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `--move-parts` | off | During the geometry generations, parts next to clearance problems may shift a little to open a channel. The routed copper goes along like rubber bands, as in [`move-part`](#gummiband-move-part): the parts move in small steps and the tracks give way; a shift stops where the copper cannot give way any more. Only if that keeps the problems does a new search on the shifted board follow (on boards up to 400 connections). Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay (by footprint library name and by reference prefix J, P, CN, USB, H, MH, SW, TP). The output file has the moved footprints at their new positions, with the footprint's own zones (a keepout drawn inside the footprint) moved along, and the console lists every move. Footprints in a KiCad group form a block that moves as a whole with its kept tracks and vias (zones in the group do not move yet); a block with one fixed member stays put. Blocks are new and untested on a real board. |
+| `--move-parts` / `--no-move-parts` | on, off with `--keep-all` | During the geometry generations, parts next to clearance problems and next to the pins of open connections may shift a little to open a channel. At an open connection the part with that pin stays and its neighbours step aside. The routed copper goes along like rubber bands, as in [`move-part`](#gummiband-move-part): the parts move in small steps and the tracks give way; a shift stops where the copper cannot give way any more. Only if that keeps the problems does a new search on the shifted board follow (on boards up to 400 connections). Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay (by footprint library name and by reference prefix J, P, CN, USB, H, MH, SW, TP). The output file has the moved footprints at their new positions, with the footprint's own zones (a keepout drawn inside the footprint) moved along, and the console lists every move. Footprints in a KiCad group form a block that moves as a whole with its kept tracks and vias (zones in the group do not move yet); a block with one fixed member stays put. Blocks are new and untested on a real board. |
 | `--fixed R1,U3` | none | More references that never move under `--move-parts` and `--placements`. |
 | `--placements N` | 0 | Place the board N times from the netlist (see [`gummiband place`](#gummiband-place), default scope), route each result with the settings of this command and keep the best: fewest open connections, then clearance violations, vias and length. Takes N + 1 routes, the last one writes the winner; `--until-stop` applies to that last one only. Not with `--keep-all`, `--nets` or `--pairs`. The JSON report gets a `placement` block with every try. |
 | `--placement-seed S` | 1 | First seed of `--placements`. |

@@ -316,12 +316,21 @@ class AdvancedCommandTest(unittest.TestCase):
             self.assertEqual(cmd[cmd.index(flag) + 1], value)
 
     def test_move_parts(self):
+        # on by default: the router's default, only the fixed parts are passed
         opts = runner.RouteOptions(fixed=["U1", "U2"])
-        self.assertNotIn("--fixed", runner.build_command("gb", Path("b"), Path("o"), opts))
-        opts.move_parts = True
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
-        self.assertIn("--move-parts", cmd)
+        self.assertNotIn("--no-move-parts", cmd)
         self.assertEqual(cmd[cmd.index("--fixed") + 1], "U1,U2")
+        opts.move_parts = False
+        cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
+        self.assertIn("--no-move-parts", cmd)
+        self.assertNotIn("--fixed", cmd)
+        # finishing nets keeps the parts in place, the router's default there
+        opts = runner.RouteOptions(finish_nets=["A"], fixed=["U1"])
+        cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
+        self.assertNotIn("--no-move-parts", cmd)
+        self.assertNotIn("--move-parts", cmd)
+        self.assertNotIn("--fixed", cmd)
 
     def test_pair_options_need_pairs(self):
         opts = runner.RouteOptions(pair_skew=0.2, pair_zdiff=90.0, pair_pull=1.0)

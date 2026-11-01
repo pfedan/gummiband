@@ -38,7 +38,7 @@ because they fit only one board. *Defaults* brings back the values below.
 | Placements to try | 0 | Places the parts that are not locked or mechanical from the netlist this many times, routes each result and keeps the best (`--placements`). Each one costs a full route. The parts, their keepouts and the tracks arrive in one undo step. Locked tracks stay, parts keep clear of them and a part with locked copper on a pad stays. |
 | Keep improving until I accept the result | on | After the normal search the router keeps working on the result until you press *Accept current result*. Not together with pairs routed as one wide track. |
 | Preferred track width (mm) | 0 (off) | Tracks of the default net class push aside what can give way and grow up to this width where there is room, with a taper at every change of width. Other classes get a target of their own with a custom rule `track_width (opt ...)`, see [Wider tracks where there is room](concepts.md#wider-tracks-where-there-is-room). |
-| Let parts shift to open channels | off | The geometry generations may shift parts next to clearance problems (`--move-parts`), so at least one of them is needed. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay. The moved footprints arrive in the same undo step as the tracks, and the message box lists them. |
+| Let parts shift to open channels | on | The geometry generations may shift parts next to clearance problems and open connections (`--move-parts`), so at least one of them is needed; the routed tracks follow like rubber bands. A setting remembered from an earlier version stays as it was: tick it once. Finishing nets leaves the parts where they are. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay. The moved footprints arrive in the same undo step as the tracks, and the message box lists them. |
 | Parts that never move | | With the option above: references that stay in addition (`--fixed`). |
 | Open Edit Teardrops after routing | off | Opens KiCad's *Edit Teardrops* dialog after the run. Enable the teardrops there: the plugin cannot do it itself, see below. |
 | Save an animation of the generations | off | Writes one image per generation and an `evolution.gif` into `gummiband-evolution/` next to the project. Needs `rsvg-convert` and ImageMagick. |
@@ -179,5 +179,3 @@ later). Use the [command line](cli.md) for full control in that case.
   copper you want to keep. *Finish selected nets* adds to existing copper but is experimental.
 - Set per net priorities or skip nets. Priorities come from the net classes; the MCP server and
   the CLI report offer more control, see [workflows](workflows.md#route-by-priority).
-- Move parts. `--move-parts` is a command line option for now, because moved footprints have to
-  be written back to the board file.
