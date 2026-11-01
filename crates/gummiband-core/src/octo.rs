@@ -158,7 +158,7 @@ impl<'a> Env<'a> {
             necks: geo.tracks.iter().map(|t| (t.net, t.necks.clone())).collect(),
         };
         for (ti, t) in geo.tracks.iter().enumerate() {
-            let (start, parts) = parts(board, t);
+            let (start, parts) = parts(board, t, &|_| false);
             env.add(ti, start, &flat(&parts));
         }
         env
@@ -330,7 +330,7 @@ fn elem_points(e: Elem) -> Vec<Point> {
 /// ends), cut into parts. Under a minimum width rule the router's necks stay as they are: the
 /// rule allows them only where the element itself touches a courtyard, and a neck cut into
 /// pieces or moved could leave it.
-fn parts(board: &Board, t: &crate::realize::Track) -> (Point, Vec<Part>) {
+fn parts(board: &Board, t: &crate::realize::Track, hold: &dyn Fn(usize) -> bool) -> (Point, Vec<Part>) {
     let start = t.pts.first().copied().unwrap_or_default();
     if t.elems.is_empty() {
         let path = t.pts.windows(2).map(|w| (w[1], t.piece_width(w[0], w[1]))).collect();
@@ -338,10 +338,10 @@ fn parts(board: &Board, t: &crate::realize::Track) -> (Point, Vec<Part>) {
     }
     let ruled = board.class_of(t.net).min_width.is_some();
     let mut out: Vec<Part> = Vec::new();
-    for &e in &t.elems {
+    for (i, &e) in t.elems.iter().enumerate() {
         let (a, b) = ends(e);
         let w = t.piece_width(a, b);
-        if ruled && w < t.width - 1e-9 {
+        if (ruled && w < t.width - 1e-9) || hold(i) {
             match out.last_mut() {
                 Some(Part::Fixed(v)) => v.push((e, w)),
                 _ => out.push(Part::Fixed(vec![(e, w)])),
@@ -721,16 +721,33 @@ const PASSES: usize = 4;
 /// Turn the routed tracks of `geo` into 45 degree routing, see the module documentation.
 /// Imported copper (`origin` set) stays as it is.
 pub fn octilinear(board: &Board, geo: &mut Geometry) -> OctoStats {
+    octilinear_only(board, geo, &|_| true, &|_, _| false)
+}
+
+/// [`octilinear`] for the tracks that `take` holds (the wide tracks of the pairs before they are
+/// split, and afterwards everything but the two tracks they became); the elements that `hold`
+/// names (track index, element index) stay as they are.
+pub fn octilinear_only(
+    board: &Board,
+    geo: &mut Geometry,
+    take: &dyn Fn(&Track) -> bool,
+    hold: &dyn Fn(usize, usize) -> bool,
+) -> OctoStats {
     let mut stats = OctoStats::default();
     let todo: Vec<usize> = (0..geo.tracks.len())
-        .filter(|&ti| geo.tracks[ti].origin.is_none() && geo.tracks[ti].pts.len() >= 2)
+        .filter(|&ti| geo.tracks[ti].origin.is_none() && geo.tracks[ti].pts.len() >= 2 && take(&geo.tracks[ti]))
         .collect();
     stats.tracks = todo.len();
     stats.length_before = todo.iter().map(|&ti| length(&geo.tracks[ti].pts)).sum();
     let mut env = Env::new(board, geo);
     let mut sharp = vec![0usize; geo.tracks.len()];
     // every track as the router left it, cut into what may change and what stays
-    let mut tracks: Vec<(Point, Vec<Part>)> = geo.tracks.iter().map(|t| parts(board, t)).collect();
+    let mut tracks: Vec<(Point, Vec<Part>)> = geo
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(ti, t)| parts(board, t, &|ei| hold(ti, ei)))
+        .collect();
     for pass in 0..PASSES {
         let last = pass + 1 == PASSES;
         let mut changed = false;
