@@ -163,6 +163,12 @@ fn pick(s: &State, stale: usize, boldness: usize, bandit: Option<&Bandit>, rng: 
     {
         return m;
     }
+    if s.router.cfg.row_moves > 0.0
+        && rng.unit() < s.router.cfg.row_moves
+        && let Some(m) = row_move(s, rng)
+    {
+        return m;
+    }
     let (at, hot) = spot(s, rng);
     let r = &s.router;
     let reach = 0.4 + rng.unit() * (1.0 + stale as f64 * 0.05).min(5.0);
@@ -191,6 +197,58 @@ fn pick(s: &State, stale: usize, boldness: usize, bandit: Option<&Bandit>, rng: 
         aim: None,
         arm,
     }
+}
+
+/// A move that lays the connections of one pin row again in the order of their pins (from one
+/// end, from the other, from the middle out or from the ends in), the way a person fans out a
+/// row of pins: a track that leaves the row early takes the room of its neighbours.
+fn row_move(s: &State, rng: &mut Rng) -> Option<Move> {
+    let r = &s.router;
+    let rows = &r.cfg.patterns.as_ref()?.rows;
+    if rows.is_empty() {
+        return None;
+    }
+    let row = &rows[(rng.next() % rows.len() as u64) as usize];
+    let board = r.board;
+    // the place of each connection at a pin of the row: where its way starts or ends
+    let at_pin = |ci: usize| -> Option<usize> {
+        let c = &r.conns[ci];
+        if let Some(k) = row.pins.iter().position(|&p| p == c.from) {
+            return Some(k);
+        }
+        let ends = [s.places[ci].first(), s.places[ci].last()];
+        row.pins.iter().position(|&p| {
+            let pin = &board.pins[p];
+            let near = pin.size.0.max(pin.size.1) * 0.5 + 0.05;
+            pin.net == c.net && ends.iter().flatten().any(|q| q.dist(pin.pos) < near)
+        })
+    };
+    let mut on: Vec<(usize, usize)> = (0..r.conns.len())
+        .filter_map(|ci| at_pin(ci).map(|k| (k, ci)))
+        .collect();
+    if on.len() < 3 {
+        return None;
+    }
+    let n = row.pins.len() as f64;
+    let key = |k: usize, mode: u64| -> f64 {
+        let x = k as f64;
+        match mode {
+            0 => x,
+            1 => -x,
+            2 => (x - (n - 1.0) / 2.0).abs(),
+            _ => -(x - (n - 1.0) / 2.0).abs(),
+        }
+    };
+    let mode = rng.next() % 4;
+    on.sort_by(|a, b| key(a.0, mode).total_cmp(&key(b.0, mode)).then(a.1.cmp(&b.1)));
+    let factor = [0.5, 0.7, 1.0, 1.0, 1.4, 2.0][(rng.next() % 6) as usize];
+    Some(Move {
+        conns: on.into_iter().map(|x| x.1).collect(),
+        via_cost: r.cfg.via_cost * factor,
+        hot: None,
+        aim: None,
+        arm: None,
+    })
 }
 
 /// A bold move for a side branch: a way for an open connection, while there are any, or a whole

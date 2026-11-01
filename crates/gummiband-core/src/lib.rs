@@ -10,6 +10,7 @@ pub mod index;
 pub mod matching;
 pub mod octo;
 pub mod pairs;
+pub mod patterns;
 pub mod prof;
 pub mod realize;
 pub mod relax;
@@ -827,6 +828,14 @@ pub fn route_fixed(
     base: &RouterConfig,
     search: &SearchConfig,
 ) -> (Substrate, RouteResult) {
+    let mut with_patterns;
+    let base = if base.patterns.is_none() && (base.share_fanouts || base.decaps_first || base.row_moves > 0.0) {
+        with_patterns = base.clone();
+        with_patterns.patterns = Some(std::sync::Arc::new(patterns::find(board)));
+        &with_patterns
+    } else {
+        base
+    };
     let sub = Substrate::build(board, sub_cfg);
     // experiment `GB_VIP_EARLY`: a via in a pad at any time, decided before the generations, for
     // the nets that need one; `=empty` asks the empty board (see `Router::pocket_nets`), `=1` the
