@@ -401,7 +401,10 @@ fn power_copper_pours_a_path_before_routing() {
     assert_eq!(c["check"]["paths"][0]["verdict"], "ok", "{c}");
     let work = dir.join("tiny.prerouted.kicad_pcb");
     let text = std::fs::read_to_string(&work).unwrap();
-    assert!(text.contains("(name \"gb:power A\")") && text.contains("(connect_pads yes"), "{text}");
+    assert!(
+        text.contains("(name \"gb:power A\")") && text.contains("(connect_pads yes"),
+        "{text}"
+    );
 
     // the pour joins A already: only B is left to route, and it keeps out of the pour
     let r = s.call("route", json!({"board": c["board"], "runs": 1, "generations": 0}));
