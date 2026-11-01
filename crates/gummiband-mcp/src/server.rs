@@ -206,6 +206,11 @@ pub struct MovePartIn {
     pub y: f64,
     /// New rotation in degrees (default: unchanged).
     pub rotation: Option<f64>,
+    /// Let the tracks around the part follow like rubber bands (default true): its own tracks
+    /// stretch, tracks of other nets give way within their clearances, nothing is routed again.
+    /// The part stops short where the copper cannot give way any more or its courtyard meets
+    /// another part or the edge; the message says where. Only for a move without rotation.
+    pub follow: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1108,8 +1113,34 @@ impl Gummiband {
     }
 
     fn do_move_part(&self, p: MovePartIn) -> Result<(String, AddLockedOut)> {
+        let follow = p.follow.unwrap_or(true) && p.rotation.is_none();
+        let mut no_rules = None;
+        // all copper, not only the locked: the tracks are what follows
+        let all = if follow {
+            let path = self.with_entry(&p.board, |e| Ok(e.path.clone()))?;
+            let work = Self::working_copy(&path);
+            let from = if work.is_file() { work } else { path };
+            if !from.with_extension("kicad_pro").is_file() {
+                no_rules = Some(from.with_extension("kicad_pro").display().to_string());
+            }
+            Some(read_board(
+                &from,
+                &ReadOptions {
+                    keep: KeepCopper::All,
+                    ..Default::default()
+                },
+            )?)
+        } else {
+            None
+        };
+        let mut followed = None;
         let (id, path) = self.edit_copy(&p.board, |_, text| {
-            write::place_footprint(text, &p.reference, p.x, p.y, p.rotation)
+            let Some(all) = &all else {
+                return write::place_footprint(text, &p.reference, p.x, p.y, p.rotation);
+            };
+            let (text, r) = gummiband_kicad::follow_write::move_part_following(all, &p.reference, p.x, p.y)?;
+            followed = Some(r);
+            Ok(text)
         })?;
         // courtyard boxes after the move: a quick look, drc has the exact answer
         let warnings = self.with_entry(&id, |e| {
@@ -1135,13 +1166,42 @@ impl Gummiband {
             }
             Ok(w)
         })?;
+        let mut warnings = warnings;
+        if let Some(pro) = no_rules {
+            warnings.push(format!(
+                "no {pro} next to the board: the tracks gave way by default clearances and widths"
+            ));
+        }
+        let msg = match &followed {
+            None => format!("moved {} to {}, {}", p.reference, p.x, p.y),
+            Some(r) => {
+                if let Some(why) = &r.stats.stopped {
+                    warnings.push(format!(
+                        "{} stopped at {:.3}, {:.3} instead of {}, {}: {why}",
+                        p.reference, r.to.0, r.to.1, p.x, p.y
+                    ));
+                }
+                format!(
+                    "moved {} to {:.3}, {:.3}; {} tracks and {} vias of {} nets followed (at most {:.3} mm), clearance spots {} -> {}",
+                    p.reference,
+                    r.to.0,
+                    r.to.1,
+                    r.stats.tracks_moved,
+                    r.stats.vias_moved,
+                    r.stats.nets_moved,
+                    r.stats.max_shift,
+                    r.stats.spots_before,
+                    r.stats.spots_after
+                )
+            }
+        };
         let out = AddLockedOut {
             board: id,
             path,
-            items_added: 1,
+            items_added: followed.as_ref().map_or(1, |r| r.items_written),
             warnings,
         };
-        Ok((format!("moved {} to {}, {}", p.reference, p.x, p.y), out))
+        Ok((msg, out))
     }
 
     fn do_place_parts(&self, p: PlacePartsIn) -> Result<(String, PlacePartsOut)> {
@@ -1784,7 +1844,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Move a part to a new position (and rotation) in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. `warnings` names courtyard boxes it now overlaps (boxes only: drc has the exact answer).",
+        description = "Move a part to a new position (and rotation) in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. Without rotation the tracks around it follow like rubber bands (follow: false switches that off): its own tracks stretch, other nets give way within their clearances, and the part stops short where nothing can give way any more (a warning says where). `warnings` also names courtyard boxes it now overlaps (boxes only: drc has the exact answer).",
         output_schema = schema_for_output::<AddLockedOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]

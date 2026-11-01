@@ -146,7 +146,10 @@ gummiband route board.kicad_pcb -o out.kicad_pcb --keep-locked \
 ```
 
 With `--move-parts` the geometry generations may shift unlocked parts that sit next to clearance
-problems by a small amount to open a channel, then rerun the search on the shifted board.
+problems by a small amount to open a channel. The routed copper goes along like rubber bands:
+the parts move in small steps, the tracks give way within their clearances, and a shift stops
+where nothing can give way any more. Only if that does not solve the problems is the search run
+again on the shifted board.
 Connectors, modules, mounting holes, switches, jumpers and test points never move, nor do locked
 footprints or the references in `--fixed`. The console lists every move
 (`moved R8 by 0.30, 0.00 mm`) and the output file has the footprints at the new positions. This

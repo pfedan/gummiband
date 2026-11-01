@@ -201,6 +201,19 @@ vias of the other nets are no obstacles but part of the topology (`gummiband-cor
    runs between vias, branches and pads, each run is one track, and `soft_changes` names the
    file items to replace; runs that did not change stay in the file.
 
+## Moving parts with the copper
+
+`follow::follow_steps` moves parts from one set of footprint offsets to another in steps no
+longer than the smallest clearance (0.02 to 0.1 mm), so that no pad can pass a track within one
+step. Per step: `follow_parts` takes the track ends and vias on moved pads along (spread over
+the first millimetre of the track, so it does not kink), `wake_near` wakes the sleeping copper of
+other nets that the moved pads now come too close to, and `relax` lets it give way; the
+relaxation wakes what that copper touches in turn. A step that leaves a clearance spot of a net
+pair that had none within reach, or a worse one (`is_new`), a courtyard that runs into another part or leaves the board, ends the move at the
+last clean step. Copper that stays asleep keeps its exact shape. `move_with_copper` runs this on
+the soft copper of a routed file (`gummiband move-part`, MCP `move_part`); `route_board` runs it
+for the shifts of `--move-parts`, with all routed copper awake, before it considers a new search.
+
 ## Differential pairs
 
 With `--pairs` (`gummiband_core::pairs`, experimental, off by default) a pair is routed as one wide

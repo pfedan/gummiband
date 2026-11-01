@@ -250,6 +250,26 @@ enum Cmd {
         #[arg(long)]
         report: Option<PathBuf>,
     },
+    /// Move a part on a routed board and let the tracks around it follow like rubber bands:
+    /// its own tracks stretch, those of other nets give way within their clearances. The part
+    /// moves in small steps and stops where the copper cannot give way any more, or where its
+    /// courtyard meets another part or the board edge. Nothing is routed again.
+    MovePart {
+        board: PathBuf,
+        /// Footprint reference, e.g. C12.
+        reference: String,
+        /// New position in mm (KiCad board coordinates).
+        x: f64,
+        y: f64,
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Write a machine readable JSON report.
+        #[arg(long)]
+        report: Option<PathBuf>,
+        /// Draw the result with its clearance problems into an SVG.
+        #[arg(long)]
+        svg: Option<PathBuf>,
+    },
     /// Remove tracks, vias and outer copper zones (benchmark preparation).
     Strip {
         board: PathBuf,
@@ -1080,6 +1100,68 @@ fn main() -> Result<()> {
                     "output": output.display().to_string(),
                     "seconds": secs,
                     "angles_45": r,
+                });
+                std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
+            }
+        }
+        Cmd::MovePart {
+            board: input,
+            reference,
+            x,
+            y,
+            output,
+            report,
+            svg: svg_out,
+        } => {
+            let t0 = std::time::Instant::now();
+            let kb = read_board(
+                &input,
+                &ReadOptions {
+                    keep: KeepCopper::All,
+                    plane_layers: cli.plane_layers.clone(),
+                    ..Default::default()
+                },
+            )?;
+            if !input.with_extension("kicad_pro").is_file() {
+                println!(
+                    "warning: no {} next to the board: default clearances and widths, the copper may give way to the wrong rules",
+                    input.with_extension("kicad_pro").display()
+                );
+            }
+            let (text, r) = gummiband_kicad::follow_write::move_part_following(&kb, &reference, x, y)?;
+            std::fs::write(&output, text)?;
+            let secs = t0.elapsed().as_secs_f64();
+            let st = &r.stats;
+            println!(
+                "moved {} from ({:.3}, {:.3}) to ({:.3}, {:.3}), {} of {} steps; {} tracks and {} vias of {} nets followed, at most {:.3} mm; clearance spots {} -> {}, {secs:.1} s",
+                r.reference, r.from.0, r.from.1, r.to.0, r.to.1, st.steps, st.steps_planned,
+                st.tracks_moved, st.vias_moved, st.nets_moved, st.max_shift, st.spots_before, st.spots_after
+            );
+            if let Some(why) = &st.stopped {
+                println!("stopped short: {why}");
+            }
+            println!("replaced {} items with {} items, wrote {}", r.items_removed, r.items_written, output.display());
+            if let Some(path) = svg_out {
+                let mut ob = read_board(
+                    &output,
+                    &ReadOptions {
+                        keep: KeepCopper::All,
+                        plane_layers: cli.plane_layers.clone(),
+                        ..Default::default()
+                    },
+                )?
+                .board;
+                ob.soften(&[]);
+                let geo = gummiband_core::follow::soft_geometry(&ob);
+                let viol = gummiband_core::check::check(&ob, &geo);
+                std::fs::write(&path, svg::render(&ob, None, &geo, &viol, false))?;
+            }
+            if let Some(path) = report {
+                let json = serde_json::json!({
+                    "board": input.display().to_string(),
+                    "output": output.display().to_string(),
+                    "seconds": secs,
+                    "move_part": r,
                 });
                 std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
             }
