@@ -4,6 +4,7 @@ pub mod dru;
 pub mod follow_write;
 pub mod octo_write;
 pub mod place_write;
+pub mod power;
 pub mod read;
 pub mod sexpr;
 pub mod write;

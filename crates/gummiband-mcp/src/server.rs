@@ -20,6 +20,7 @@ use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 
 use crate::external;
+use crate::practice;
 
 const INSTRUCTIONS: &str = "Gummiband is a topological (any-angle, rubber band) autorouter for \
 KiCad boards. Typical loop: load_board (gives a board id) -> list_nets -> optionally \
@@ -29,7 +30,10 @@ the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board 
 look at problems. To pre-route a critical part by hand (datasheet layout): part_info -> \
 add_locked_copper -> route the returned board id. move_part and add_zone edit the same working \
 copy. To change one net on a routed board: load the routed file -> route with keep_all, nets and \
-reroute (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short), add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
+reroute (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short), add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Good practice around routing (the prompt good_practice walks through a whole board): \
+power_plan before routing (currents -> widths, planes, vias; apply stores the widths), \
+current_check after routing (narrowest cross-section of every current path), ground_pour (GND \
+pours and stitching vias), then drc. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
 Routing is CPU heavy (seconds to minutes); routes run one at a time.";
 
 // ------------------------------------------------------------------------------ session
@@ -82,6 +86,9 @@ pub struct NetOption {
     pub priority: Option<i32>,
     /// The net is left out of routing.
     pub skip: bool,
+    /// Track width in mm for this net, also its minimum width (no necking below it outside the
+    /// courtyards the custom rules name), from set_net_options or power_plan with apply.
+    pub width: Option<f64>,
 }
 
 struct Entry {
@@ -120,6 +127,11 @@ fn read(path: &Path, keep_locked: bool) -> Result<KicadBoard> {
 fn apply_options(b: &Board, options: &BTreeMap<String, NetOption>, only: &[String]) -> (Board, Vec<String>) {
     let mut b = b.clone();
     let mut skipped = Vec::new();
+    for (name, o) in options {
+        if let (Some(w), Some(id)) = (o.width, b.net_id(name)) {
+            set_width(&mut b, id, w);
+        }
+    }
     for n in b.nets.iter_mut() {
         let o = options.get(&n.name);
         if let Some(p) = o.and_then(|o| o.priority) {
@@ -132,6 +144,31 @@ fn apply_options(b: &Board, options: &BTreeMap<String, NetOption>, only: &[Strin
         }
     }
     (b, skipped)
+}
+
+/// Give a net its own class with track width and minimum width `w`.
+fn set_width(b: &mut Board, net: gummiband_core::board::NetId, w: f64) {
+    let ci = b.nets[net as usize].class as usize;
+    let mut c = b.classes[ci].clone();
+    c.name = format!("{}@{w}", c.name);
+    c.track_width = w;
+    c.min_width = Some(c.min_width.map_or(w, |m| m.max(w)));
+    c.target_width = c.target_width.filter(|t| *t > w);
+    // pads narrower than the track: the track may neck inside their part's courtyard
+    for &pin in &b.nets[net as usize].pins {
+        let p = &b.pins[pin];
+        if p.size.0.min(p.size.1) < w && !c.neck_refs.contains(&p.footprint) {
+            c.neck_refs.push(p.footprint.clone());
+        }
+    }
+    let i = match b.classes.iter().position(|k| k.name == c.name) {
+        Some(i) => i,
+        None => {
+            b.classes.push(c);
+            b.classes.len() - 1
+        }
+    };
+    b.nets[net as usize].class = i as gummiband_core::board::ClassId;
 }
 
 fn connections(b: &Board) -> usize {
@@ -317,6 +354,8 @@ pub struct SetNetOptionsIn {
     pub skip: Option<bool>,
     /// true: drop all options of this net first.
     pub reset: Option<bool>,
+    /// Track width in mm for this net, also used as its minimum width (no necking); 0 clears it.
+    pub width: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -455,6 +494,9 @@ pub struct RenderIn {
     pub background: Option<String>,
     /// Where to write the PNG (default: a file in the server's temp folder).
     pub output: Option<String>,
+    /// Fill the zones with kicad-cli before plotting (default true when the file has a zone
+    /// without fill, e.g. after add_zone or ground_pour); the file itself stays as it is.
+    pub refill: Option<bool>,
 }
 
 // ------------------------------------------------------------------------------ results
@@ -1344,8 +1386,11 @@ impl Gummiband {
             if let Some(s) = p.skip {
                 o.skip = s;
             }
+            if let Some(w) = p.width {
+                o.width = (w > 0.0).then_some(w);
+            }
             let priority = o.priority.unwrap_or(b.nets[id as usize].priority);
-            if o.priority.is_none() && !o.skip {
+            if o.priority.is_none() && !o.skip && o.width.is_none() {
                 e.options.remove(&p.net);
             } else {
                 e.options.insert(p.net.clone(), o.clone());
@@ -1361,7 +1406,7 @@ impl Gummiband {
                     " (class default)"
                 },
                 if o.skip { ", skipped" } else { "" }
-            );
+            ) + &o.width.map(|w| format!(" Width {w} mm.")).unwrap_or_default();
             Ok((
                 summary,
                 SetNetOptionsOut {
@@ -1431,7 +1476,11 @@ fn route_blocking(
         let movable = read_board(
             &path,
             &ReadOptions {
-                keep: if keep_locked { KeepCopper::Locked } else { KeepCopper::None },
+                keep: if keep_locked {
+                    KeepCopper::Locked
+                } else {
+                    KeepCopper::None
+                },
                 move_parts: true,
                 fixed: p.fixed.clone(),
                 ..Default::default()
@@ -1781,6 +1830,20 @@ fn render_blocking(p: RenderIn) -> Result<(String, RenderOut, Vec<u8>)> {
         }
     };
     let width_px = p.width_px.unwrap_or(1000).clamp(16, 4000);
+    // unfilled zones plot as nothing: fill them in a temp copy first
+    let unfilled = gummiband_kicad::power::zones(&kb).iter().any(|z| !z.filled);
+    let mut note = String::new();
+    let plotted = if p.refill.unwrap_or(unfilled) {
+        match external::refilled(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                note = format!(" Zones not filled ({e:#}).");
+                path.clone()
+            }
+        }
+    } else {
+        path.clone()
+    };
     let png = match &p.output {
         Some(o) => abs_path(o),
         None => {
@@ -1789,7 +1852,7 @@ fn render_blocking(p: RenderIn) -> Result<(String, RenderOut, Vec<u8>)> {
         }
     };
     let r = external::render(
-        &path,
+        &plotted,
         &layers,
         region,
         width_px,
@@ -1806,7 +1869,7 @@ fn render_blocking(p: RenderIn) -> Result<(String, RenderOut, Vec<u8>)> {
         scale: r.width_px as f64 / (region.2 - region.0),
     };
     let summary = format!(
-        "Rendered {} ({}) region x {:.2}..{:.2}, y {:.2}..{:.2} mm at {}x{} px ({:.1} px/mm) to {}.",
+        "Rendered {} ({}) region x {:.2}..{:.2}, y {:.2}..{:.2} mm at {}x{} px ({:.1} px/mm) to {}.{note}",
         path.file_name().and_then(|s| s.to_str()).unwrap_or(""),
         out.layers.join(","),
         region.0,
@@ -2041,6 +2104,110 @@ impl Gummiband {
     }
 
     #[tool(
+        description = "Plan the power copper before routing (IPC-2221): for the given currents per net (glob patterns; left out: estimated from the class widths) the required width per copper layer from the stackup, the track width to route with, vias per layer change, the planes and zones the net has, and advice (widen, pour instead of track, plane vias, necking rules). board_notes cover the GND plane, plane layers and reference planes; dru_rules has the widths as KiCad custom rules. apply=true stores the widths as net options (width and minimum width) for the next route.",
+        output_schema = schema_for_output::<practice::PowerPlanOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn power_plan(&self, Parameters(p): Parameters<practice::PowerPlanIn>) -> Result<CallToolResult, ErrorData> {
+        let res = self.with_entry(&p.board, |e| {
+            let (out, applied) = practice::power_plan(&e.kb, &p.board, &p)?;
+            for (net, w) in &applied {
+                e.options.entry(net.clone()).or_default().width = Some(*w);
+            }
+            Ok(out)
+        });
+        match res {
+            Ok(out) => {
+                let flagged = out.nets.iter().filter(|n| n.action).count();
+                let s = format!(
+                    "Power plan for board {} at {} K rise: {} nets, {} need a change, {} widths applied. {}",
+                    out.board,
+                    out.temp_rise,
+                    out.nets.len(),
+                    flagged,
+                    out.applied.len(),
+                    out.board_notes.join("; ")
+                );
+                ok(s, &out)
+            }
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Check the current carrying capacity of a routed .kicad_pcb (IPC-2221): per current path the track segments below the required width, and with from/to pads (automatic for two pin nets) the narrowest cross-section between them, measured on a raster over tracks, pours and vias of the net together, with the position of the neck. Also vias against the current. Refills zones with kicad-cli when needed. Verdict ok or FLAG per path.",
+        output_schema = schema_for_output::<practice::CurrentCheckOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn current_check(
+        &self,
+        Parameters(mut p): Parameters<practice::CurrentCheckIn>,
+    ) -> Result<CallToolResult, ErrorData> {
+        p.path = abs_path(&p.path).display().to_string();
+        match blocking(move || practice::current_check(&p)).await {
+            Ok(out) => {
+                let lines: Vec<String> = out
+                    .paths
+                    .iter()
+                    .map(|q| format!("{} {} A: {}", q.name, q.amps, q.verdict))
+                    .collect();
+                let s = format!(
+                    "Current check of {}: {} paths, {} flagged. {}",
+                    out.path,
+                    out.paths.len(),
+                    out.flagged,
+                    lines.join("; ")
+                );
+                ok(s, &out)
+            }
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Pour ground after routing: adds zones of the ground net (default GND) over the board outline on the outer layers (default) and locked stitching vias on a grid and along the board edge where they are clear of other nets, holes, rule areas, other nets' pours and courtyards. Writes <input>.gnd.kicad_pcb and loads it; KiCad fills the zones (drc refills them).",
+        output_schema = schema_for_output::<practice::GroundPourOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn ground_pour(
+        &self,
+        Parameters(mut p): Parameters<practice::GroundPourIn>,
+    ) -> Result<CallToolResult, ErrorData> {
+        p.path = abs_path(&p.path).display().to_string();
+        let me = self.clone();
+        let res = blocking(move || {
+            let (path, mut out) = practice::ground_pour(&p)?;
+            let (_, loaded) = me.load(LoadBoardIn {
+                path: path.display().to_string(),
+                keep_locked: Some(true),
+            })?;
+            out.board = loaded.board;
+            Ok(out)
+        })
+        .await;
+        match res {
+            Ok(out) => {
+                let s = format!(
+                    "{} pours on {} and {} stitching vias ({} along the edge) in {} (board {}). {}",
+                    out.net,
+                    if out.zones_added.is_empty() {
+                        "no layer".to_string()
+                    } else {
+                        out.zones_added.join(", ")
+                    },
+                    out.vias_added,
+                    out.edge_vias,
+                    out.path,
+                    out.board,
+                    out.warnings.join(" ")
+                );
+                ok(s, &out)
+            }
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
         description = "Run KiCad's DRC (kicad-cli pcb drc --refill-zones) on a .kicad_pcb and summarize it: violation counts per type (silkscreen and library checks left out), unconnected items, a deficit histogram and the worst clearance violations with positions. The full report is written next to the board as <name>.drc.json.",
         output_schema = schema_for_output::<external::DrcOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -2083,10 +2250,65 @@ impl Gummiband {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Gummiband {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().enable_prompts().build())
             .with_server_info(
                 Implementation::new("gummiband-mcp", env!("CARGO_PKG_VERSION")).with_title("Gummiband autorouter"),
             )
             .with_instructions(INSTRUCTIONS)
+    }
+
+    #[allow(clippy::field_reassign_with_default)]
+    async fn list_prompts(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListPromptsResult, ErrorData> {
+        let arg = |name: &str, desc: &str, required: bool| {
+            let mut a = rmcp::model::PromptArgument::new(name);
+            a.description = Some(desc.into());
+            a.required = Some(required);
+            a
+        };
+        let mut r = rmcp::model::ListPromptsResult::default();
+        r.prompts = vec![rmcp::model::Prompt::new(
+            practice::PROMPT_NAME,
+            Some(practice::PROMPT_DESCRIPTION),
+            Some(vec![
+                arg("path", "Path of the .kicad_pcb to route", true),
+                arg(
+                    "currents",
+                    "Known currents, e.g. 'VBUS 4.1 A from J1 to U6, +5V 8 A'",
+                    false,
+                ),
+                arg(
+                    "notes",
+                    "Anything else the router should know (keep-outs, parts that stay, impedances)",
+                    false,
+                ),
+            ]),
+        )];
+        Ok(r)
+    }
+
+    async fn get_prompt(
+        &self,
+        request: rmcp::model::GetPromptRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::GetPromptResponse, ErrorData> {
+        if request.name != practice::PROMPT_NAME {
+            return Err(ErrorData::invalid_params(format!("no prompt {:?}", request.name), None));
+        }
+        let args = request.arguments.unwrap_or_default();
+        let get = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        let path = get("path").unwrap_or_else(|| "<path of the .kicad_pcb>".into());
+        let text = practice::prompt_text(&path, get("currents").as_deref(), get("notes").as_deref());
+        Ok(
+            rmcp::model::GetPromptResult::new(vec![rmcp::model::PromptMessage::new_text(
+                rmcp::model::Role::User,
+                text,
+            )])
+            .with_description(practice::PROMPT_DESCRIPTION)
+            .into(),
+        )
     }
 }

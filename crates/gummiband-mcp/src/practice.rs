@@ -1,0 +1,1179 @@
+//! Good practice around routing: power planning before (`power_plan`), current carrying checks
+//! (`current_check`) and ground pours with stitching vias (`ground_pour`) after, and the
+//! `good_practice` prompt that walks an agent through a whole board.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use gummiband_core::board::{Board, LayerId, NetId, ObstacleKind};
+use gummiband_core::geom::{Point, Shape};
+use gummiband_kicad::power::{self, ZoneFill};
+use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
+use rmcp::schemars::{self, JsonSchema};
+use serde::{Deserialize, Serialize};
+
+use crate::external;
+
+/// Widths above this go into a pour or plane rather than a track.
+pub const POUR_ABOVE_MM: f64 = 2.5;
+pub const DEFAULT_RISE: f64 = 20.0;
+
+fn r3(x: f64) -> f64 {
+    (x * 1000.0).round() / 1000.0
+}
+
+fn up05(x: f64) -> f64 {
+    (x / 0.05 - 1e-6).ceil() * 0.05
+}
+
+fn layer_name(b: &Board, l: LayerId) -> String {
+    b.layers[l as usize].name.clone()
+}
+
+fn read_all(path: &Path) -> Result<KicadBoard> {
+    read_board(
+        path,
+        &ReadOptions {
+            keep: KeepCopper::All,
+            ..Default::default()
+        },
+    )
+}
+
+// ------------------------------------------------------------------------------- inputs
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct CurrentIn {
+    /// Net name or glob pattern (`*` any run, `?` one character), e.g. "*VBUS_P" or "/Power/SW_?".
+    pub net: String,
+    /// Continuous current in A.
+    pub amps: f64,
+    /// Short term current in A (a short or inrush the copper must survive), optional.
+    pub short_amps: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PowerPlanIn {
+    /// Board id from load_board.
+    pub board: String,
+    /// Currents of the power nets. Left out: estimated from the net class widths (a class wider
+    /// than the default one is taken to carry what its width carries on an outer layer).
+    pub currents: Option<Vec<CurrentIn>>,
+    /// Allowed temperature rise in K (default 20).
+    pub temp_rise: Option<f64>,
+    /// true: store the recommended track width (and the same minimum width, no necking) as a net
+    /// option for the following routes, for every net whose class is too narrow.
+    pub apply: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct PathIn {
+    /// Exact net name, or a glob pattern when neither `from` nor `to` is given.
+    pub net: String,
+    /// Continuous current in A.
+    pub amps: f64,
+    pub short_amps: Option<f64>,
+    /// Source terminals: pads as "REF.PAD" ("R110.*" = every pad of R110 on the net); pins in
+    /// parallel join with "+" ("J1.A4+J1.B9"). Several terminals share the current evenly.
+    pub from: Option<Vec<String>>,
+    /// Sink pads, same syntax; any of them may take the current.
+    pub to: Option<Vec<String>>,
+    /// A name for the table, optional.
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CurrentCheckIn {
+    /// Path of a routed .kicad_pcb.
+    pub path: String,
+    /// Current paths. With `from` and `to` the narrowest cross-section between them is measured
+    /// (tracks, pours and vias together); a net with two pins gets that automatically. Left out:
+    /// the nets whose class is wider than the default class, with the current their class width
+    /// carries.
+    pub paths: Option<Vec<PathIn>>,
+    /// Allowed temperature rise in K (default 20).
+    pub temp_rise: Option<f64>,
+    /// Refill the zones with kicad-cli first (default true when the file has unfilled zones of
+    /// a checked net and kicad-cli is found). Without fill the zone outlines are used, which is
+    /// optimistic.
+    pub refill: Option<bool>,
+    /// How many narrow segments to list per path (default 5).
+    pub max_segments: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GroundPourIn {
+    /// Path of a routed .kicad_pcb.
+    pub path: String,
+    /// Net of the pours and vias (default "GND").
+    pub net: Option<String>,
+    /// Layers for the pours (default: the outer copper layers). A layer that already has a zone
+    /// of the net is left as it is.
+    pub layers: Option<Vec<String>>,
+    /// Grid pitch of the stitching vias in mm (default 5, 0 = no grid).
+    pub pitch: Option<f64>,
+    /// Spacing of the via row along the board edge in mm (default 3, 0 = no edge row).
+    pub edge_pitch: Option<f64>,
+    /// Distance of the edge row from the outline in mm (default 1).
+    pub edge_inset: Option<f64>,
+    /// Keep the vias out of part courtyards (default true).
+    pub avoid_courtyards: Option<bool>,
+    /// Via size, default the net class.
+    pub via_diameter: Option<f64>,
+    pub via_drill: Option<f64>,
+    /// Zone priority of the pours (default 0, below the power pours).
+    pub priority: Option<u32>,
+    /// Output file (default <input>.gnd.kicad_pcb).
+    pub output: Option<String>,
+}
+
+// ------------------------------------------------------------------------------ outputs
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CopperLayerOut {
+    pub layer: String,
+    pub copper_um: f64,
+    pub outer: bool,
+    pub plane: bool,
+    /// Nets with a zone on this layer.
+    pub zone_nets: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WidthOut {
+    pub layer: String,
+    pub width_mm: f64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct NetPlanOut {
+    pub net: String,
+    pub class: String,
+    pub amps: f64,
+    pub short_amps: Option<f64>,
+    /// "given" or "class width" (estimated).
+    pub source: String,
+    pub class_width_mm: f64,
+    /// Width the custom rules let the net neck down to.
+    pub class_min_width_mm: Option<f64>,
+    /// IPC-2221 width per copper layer for `amps`.
+    pub required: Vec<WidthOut>,
+    /// Track width to route with on the outer routing layers (rounded up to 0.05 mm).
+    pub track_width_mm: f64,
+    /// Inner planes of the net.
+    pub planes: Vec<String>,
+    /// Zones of the net in the file: "layer w x h".
+    pub zones: Vec<String>,
+    pub via_drill_mm: f64,
+    pub via_amps: f64,
+    /// Vias wherever the current changes layer (and per pin that takes the full current from a plane).
+    pub vias_per_transition: usize,
+    /// The plan asks for a change: a wider track, a pour or a plane.
+    pub action: bool,
+    pub advice: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AppliedOut {
+    pub net: String,
+    pub width_mm: f64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PowerPlanOut {
+    pub board: String,
+    pub temp_rise: f64,
+    pub layers: Vec<CopperLayerOut>,
+    pub nets: Vec<NetPlanOut>,
+    /// Board level findings: ground plane, plane layers, reference planes.
+    pub board_notes: Vec<String>,
+    /// Width options stored with apply.
+    pub applied: Vec<AppliedOut>,
+    /// The minimum widths as KiCad custom rules, to append to the project's .kicad_dru: KiCad's
+    /// DRC then enforces them, and Gummiband reads them on the next load_board.
+    pub dru_rules: String,
+    pub next_steps: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SegmentOut {
+    pub layer: String,
+    pub width_mm: f64,
+    pub required_mm: f64,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct NeckOut {
+    pub connected: bool,
+    /// Narrowest cross-section in mm, as a width on the reference layer.
+    pub width_mm: f64,
+    /// Required width on the reference layer.
+    pub required_mm: f64,
+    pub reference_layer: String,
+    /// Where the band breaks first.
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub layer: Option<String>,
+    /// Smallest total cross-section (parallel copper and vias added up, a min cut on the
+    /// raster), up to twice the required width; a cut at an angle counts a little short.
+    pub cross_section_mm: Option<f64>,
+    /// Where that cut lies, when it is below the limit.
+    pub cut_x: Option<f64>,
+    pub cut_y: Option<f64>,
+    pub cut_layer: Option<String>,
+    pub step_mm: f64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PathOut {
+    pub name: String,
+    pub net: String,
+    pub amps: f64,
+    pub short_amps: Option<f64>,
+    /// Required width per layer the net has copper on.
+    pub required: Vec<WidthOut>,
+    /// Track segments narrower than required (outside pours of the net), narrowest first.
+    pub narrow_segments: usize,
+    pub segments: Vec<SegmentOut>,
+    pub narrowest_track_mm: Option<f64>,
+    pub neck: Option<NeckOut>,
+    pub vias: usize,
+    pub via_amps: f64,
+    pub vias_per_transition: usize,
+    /// "ok" or "FLAG: ..." (with a neck measurement the neck decides; narrow stubs to sense pins
+    /// then do not count).
+    pub verdict: String,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CurrentCheckOut {
+    pub path: String,
+    /// The refilled copy that was measured, if any.
+    pub measured: String,
+    pub temp_rise: f64,
+    pub paths: Vec<PathOut>,
+    pub flagged: usize,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GroundPourOut {
+    pub board: String,
+    pub path: String,
+    pub net: String,
+    pub zones_added: Vec<String>,
+    pub vias_added: usize,
+    pub edge_vias: usize,
+    pub warnings: Vec<String>,
+}
+
+// ----------------------------------------------------------------------------- power plan
+
+/// The ground net: "GND" if there is one, else the net with the most pins whose name holds GND.
+pub fn ground_net(b: &Board) -> Option<NetId> {
+    b.net_id("GND").or_else(|| {
+        b.nets
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.name.to_uppercase().contains("GND"))
+            .max_by_key(|(_, n)| n.pins.len())
+            .map(|(i, _)| i as NetId)
+    })
+}
+
+/// The default class: the one named "Default", else the narrowest.
+fn default_width(b: &Board) -> f64 {
+    b.classes
+        .iter()
+        .find(|c| c.name == "Default")
+        .map(|c| c.track_width)
+        .unwrap_or_else(|| b.classes.iter().map(|c| c.track_width).fold(f64::INFINITY, f64::min))
+}
+
+fn outer_ref(b: &Board) -> LayerId {
+    (0..b.layers.len() as LayerId)
+        .find(|&l| power::is_outer(b, l) && !b.layers[l as usize].is_plane)
+        .unwrap_or(0)
+}
+
+/// Currents for nets of clearly wide classes (twice the default width and at least 0.5 mm):
+/// what their class width carries on an outer layer.
+fn estimated(b: &Board, dt: f64) -> Vec<(NetId, f64)> {
+    let dw = default_width(b);
+    let r = outer_ref(b);
+    let cu = power::copper_mm(b, r);
+    b.routable_nets()
+        .filter(|&n| b.class_of(n).track_width >= (2.0 * dw).max(0.5) - 1e-6)
+        .map(|n| {
+            // a minimum width from the custom rules is the designer's own sizing
+            let c = b.class_of(n);
+            (n, power::ipc_amps(c.min_width.unwrap_or(c.track_width), cu, true, dt))
+        })
+        .collect()
+}
+
+fn zone_text(z: &ZoneFill, b: &Board) -> String {
+    let mut r = gummiband_core::geom::Rect::empty();
+    for p in &z.polys {
+        let q = p.bbox();
+        r.add(q.min);
+        r.add(q.max);
+    }
+    format!("{} {:.1} x {:.1}", layer_name(b, z.layer), r.width(), r.height())
+}
+
+pub fn power_plan(kb: &KicadBoard, id: &str, p: &PowerPlanIn) -> Result<(PowerPlanOut, Vec<(String, f64)>)> {
+    let b = &kb.board;
+    let dt = p.temp_rise.unwrap_or(DEFAULT_RISE);
+    let zf = power::zones(kb);
+    let nl = b.layers.len() as LayerId;
+    let mut wanted: Vec<(NetId, f64, Option<f64>, &str)> = Vec::new();
+    match &p.currents {
+        Some(cs) => {
+            for c in cs {
+                let hits: Vec<NetId> = (0..b.nets.len() as NetId)
+                    .filter(|&n| power::glob(&c.net, &b.nets[n as usize].name))
+                    .collect();
+                if hits.is_empty() {
+                    bail!("no net matches {:?} (see list_nets)", c.net);
+                }
+                for n in hits {
+                    if !wanted.iter().any(|w| w.0 == n) {
+                        wanted.push((n, c.amps, c.short_amps, "given"));
+                    }
+                }
+            }
+        }
+        None => {
+            for (n, a) in estimated(b, dt) {
+                wanted.push((n, (a * 10.0).floor() / 10.0, None, "class width"));
+            }
+        }
+    }
+    let mut notes = Vec::new();
+    if p.currents.is_none() {
+        let hint = |name: &str| {
+            let u = name.rsplit('/').next().unwrap_or(name).to_uppercase();
+            ["VBUS", "VIN", "VCC", "VDD", "VBAT", "VSYS", "PWR", "VMOT", "VLED"]
+                .iter()
+                .any(|k| u.contains(k))
+                || (u.starts_with('+') && u.contains('V'))
+        };
+        let narrow: Vec<String> = b
+            .routable_nets()
+            .filter(|n| !wanted.iter().any(|w| w.0 == *n))
+            .filter(|&n| hint(&b.nets[n as usize].name) && b.nets[n as usize].planes.is_empty())
+            .map(|n| b.nets[n as usize].name.clone())
+            .collect();
+        if !narrow.is_empty() {
+            notes.push(format!(
+                "no currents given; these look like supplies but have a narrow class, give their currents: {}",
+                narrow.join(", ")
+            ));
+        }
+    }
+    let mut nets = Vec::new();
+    let mut applied = Vec::new();
+    let mut rules = String::new();
+    for &(n, amps, short, source) in &wanted {
+        let c = b.class_of(n);
+        let net = &b.nets[n as usize];
+        let required: Vec<(LayerId, f64)> = (0..nl)
+            .map(|l| {
+                // a short until the fuse or PTC trips heats the copper like a continuous current
+                let a = amps.max(short.unwrap_or(0.0));
+                let w = power::ipc_width(a, power::copper_mm(b, l), power::is_outer(b, l), dt);
+                (l, w)
+            })
+            .collect();
+        let outer_routing: Vec<f64> = required
+            .iter()
+            .filter(|(l, _)| power::is_outer(b, *l) && !b.layers[*l as usize].is_plane)
+            .map(|x| x.1)
+            .collect();
+        let need = outer_routing.iter().copied().fold(0.0, f64::max);
+        let track = up05(need).max(c.track_width);
+        let planes: Vec<String> = net.planes.iter().map(|l| layer_name(b, l)).collect();
+        let zones: Vec<String> = zf
+            .iter()
+            .filter(|z| z.net == Some(n))
+            .map(|z| zone_text(z, b))
+            .collect();
+        let via_amps = power::via_amps(c.via_drill.max(0.1), dt);
+        let vias = (amps.max(short.unwrap_or(0.0)) / via_amps).ceil().max(1.0) as usize;
+        let mut advice = Vec::new();
+        let pours: Vec<&ZoneFill> = zf
+            .iter()
+            .filter(|z| z.net == Some(n) && !b.layers[z.layer as usize].is_plane)
+            .collect();
+        let carried = !planes.is_empty() || !pours.is_empty();
+        if !pours.is_empty() {
+            advice.push(format!(
+                "carried by {} pour(s) on {}: route only the short pin connections into them, then current_check from/to across the pours",
+                pours.len(),
+                pours.iter().map(|z| layer_name(b, z.layer)).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !planes.is_empty() {
+            advice.push(format!(
+                "carried by the plane on {}: give every pin that takes the full current {} vias into it",
+                planes.join(", "),
+                vias
+            ));
+        }
+        // a wide track into fine pins blocks the router around them: a pour does it better
+        let narrow_pad = net
+            .pins
+            .iter()
+            .map(|&i| b.pins[i].size.0.min(b.pins[i].size.1))
+            .fold(f64::INFINITY, f64::min);
+        let pour = need > POUR_ABOVE_MM || (need > 1.0 && narrow_pad < need / 2.0);
+        if carried {
+            // fan-out tracks into the plane or pour: their width matters only where they are long
+        } else if pour {
+            advice.push(format!(
+                "{need:.2} mm is too wide for a track{}: draw a pour (add_zone on an outer layer, priority above the GND pour) or a plane, pre-route the pins into it with add_locked_copper, then skip the net or route it with keep_locked",
+                if need > POUR_ABOVE_MM { String::new() } else { format!(" into pins of {narrow_pad:.2} mm") }
+            ));
+        } else if need > c.track_width + 1e-6 {
+            advice.push(format!(
+                "class {} routes {:.2} mm, {:.2} mm needed outside: route it with {track:.2} mm (apply)",
+                c.name, c.track_width, need
+            ));
+        }
+        if let Some(m) = c.min_width
+            && m + 1e-6 < need
+            && !carried
+        {
+            advice.push(format!(
+                "custom rules let it neck to {m:.2} mm; apply sets the minimum width to {track:.2} mm (narrower only inside the courtyards of parts whose pads are narrower)"
+            ));
+        }
+        let inner: Vec<String> = required
+            .iter()
+            .filter(|(l, _)| !power::is_outer(b, *l) && !b.layers[*l as usize].is_plane)
+            .filter(|(_, w)| *w > track + 1e-6)
+            .map(|(l, w)| format!("{} {:.2} mm", layer_name(b, *l), w))
+            .collect();
+        if !inner.is_empty() && !pour {
+            advice.push(format!(
+                "keep it off the inner routing layers or widen it there: {}",
+                inner.join(", ")
+            ));
+        }
+        if let Some(s) = short {
+            let ws = power::ipc_width(s, power::copper_mm(b, outer_ref(b)), true, dt);
+            advice.push(format!(
+                "sized for the short term {s} A ({ws:.2} mm outside): the copper has to carry it until the fuse or PTC trips"
+            ));
+        }
+        if vias > 1 {
+            advice.push(format!(
+                "{vias} vias of {:.2} mm drill ({via_amps:.2} A each) wherever it changes layer",
+                c.via_drill
+            ));
+        }
+        if advice.is_empty() {
+            advice.push("class width is enough".into());
+        }
+        let wants_width =
+            !carried && !pour && (need > c.track_width + 1e-6 || c.min_width.is_some_and(|m| m + 1e-6 < need));
+        let action = wants_width || (!carried && pour);
+        let tautology = source == "class width" && c.min_width.is_none_or(|m| m + 1e-6 >= need);
+        if !carried && !tautology && !pour && need > 0.0 && net.pins.len() >= 2 {
+            // pads narrower than the width: the part's courtyard is exempt
+            let mut refs: Vec<&str> = net
+                .pins
+                .iter()
+                .map(|&i| &b.pins[i])
+                .filter(|q| q.size.0.min(q.size.1) < need)
+                .map(|q| q.footprint.as_str())
+                .collect();
+            refs.sort();
+            refs.dedup();
+            let ex: String = refs
+                .iter()
+                .map(|r| format!(" && !A.intersectsCourtyard('{r}')"))
+                .collect();
+            rules.push_str(&format!(
+                "(rule \"{} {amps} A: min {:.2} mm\"\n  (constraint track_width (min {:.2}mm) (opt {:.2}mm))\n  (condition \"A.Type == 'Track' && A.NetName == '{}'{ex}\"))\n",
+                net.name.replace('"', ""),
+                (need * 100.0).ceil() / 100.0,
+                (need * 100.0).ceil() / 100.0,
+                track,
+                net.name.replace('\'', "")
+            ));
+        }
+        if p.apply == Some(true) && wants_width && net.pins.len() >= 2 && planes.is_empty() {
+            applied.push((net.name.clone(), track));
+        }
+        nets.push(NetPlanOut {
+            net: net.name.clone(),
+            class: c.name.clone(),
+            amps,
+            short_amps: short,
+            source: source.into(),
+            class_width_mm: c.track_width,
+            class_min_width_mm: c.min_width,
+            required: required
+                .iter()
+                .map(|(l, w)| WidthOut {
+                    layer: layer_name(b, *l),
+                    width_mm: r3(*w),
+                })
+                .collect(),
+            track_width_mm: r3(track),
+            planes,
+            zones,
+            via_drill_mm: c.via_drill,
+            via_amps: r3(via_amps),
+            vias_per_transition: vias,
+            action,
+            advice,
+        });
+    }
+    nets.sort_by(|a, b| b.amps.total_cmp(&a.amps));
+    // board level
+    let layers: Vec<CopperLayerOut> = (0..nl)
+        .map(|l| {
+            let mut zn: Vec<String> = zf
+                .iter()
+                .filter(|z| z.layer == l)
+                .filter_map(|z| z.net.map(|n| b.nets[n as usize].name.clone()))
+                .collect();
+            zn.sort();
+            zn.dedup();
+            CopperLayerOut {
+                layer: layer_name(b, l),
+                copper_um: power::copper_mm(b, l) * 1000.0,
+                outer: power::is_outer(b, l),
+                plane: b.layers[l as usize].is_plane,
+                zone_nets: zn,
+            }
+        })
+        .collect();
+    let gnd = ground_net(b);
+    match gnd {
+        None => notes.push("no ground net found (GND)".into()),
+        Some(g) => {
+            let gname = &b.nets[g as usize].name;
+            let gplanes: Vec<String> = b.nets[g as usize].planes.iter().map(|l| layer_name(b, l)).collect();
+            if gplanes.is_empty() {
+                if nl >= 4 {
+                    notes.push(format!(
+                        "{gname} has no plane: before routing, make an inner layer next to the outer signal layer a {gname} plane (add_zone {gname} on In1.Cu over the whole board; KiCad layer type power)"
+                    ));
+                } else {
+                    notes.push(format!(
+                        "two layer board without a {gname} plane: keep B.Cu mostly free for a {gname} pour (ground_pour after routing) and route the long signals on F.Cu"
+                    ));
+                }
+            } else {
+                notes.push(format!("{gname} plane on {}", gplanes.join(", ")));
+            }
+            for l in 0..nl {
+                if b.layers[l as usize].is_plane {
+                    continue;
+                }
+                // nearest plane in the stackup and its net
+                let near = (0..nl)
+                    .filter(|&m| b.layers[m as usize].is_plane)
+                    .min_by_key(|&m| (m as i32 - l as i32).abs());
+                if let Some(m) = near {
+                    let pn: Vec<String> = b
+                        .planes
+                        .iter()
+                        .filter(|p| p.layer == m)
+                        .map(|p| b.nets[p.net as usize].name.clone())
+                        .collect();
+                    if !pn.iter().any(|n| n == gname) && !b.diff_pairs().is_empty() {
+                        notes.push(format!(
+                            "{} has {} ({}) as its nearest plane, not {gname}: fast signals and differential pairs there have no ground reference; route them on a layer next to the {gname} plane",
+                            layer_name(b, l),
+                            layer_name(b, m),
+                            pn.join(", ")
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for l in 0..nl {
+        if b.layers[l as usize].is_plane && !b.planes.iter().any(|p| p.layer == l) {
+            notes.push(format!(
+                "{} is a plane layer without a zone: add one with add_zone (GND or the main supply)",
+                layer_name(b, l)
+            ));
+        }
+    }
+    let next_steps = vec![
+        "add the zones and pre-routed copper the advice asks for (add_zone, part_info + add_locked_copper), then route the returned board id".into(),
+        "route; then current_check on the routed file with from/to for every power path".into(),
+        "ground_pour on the routed file, then drc and render the power areas".into(),
+    ];
+    Ok((
+        PowerPlanOut {
+            board: id.to_string(),
+            temp_rise: dt,
+            layers,
+            nets,
+            board_notes: notes,
+            applied: applied
+                .iter()
+                .map(|(n, w)| AppliedOut {
+                    net: n.clone(),
+                    width_mm: r3(*w),
+                })
+                .collect(),
+            dru_rules: rules,
+            next_steps,
+        },
+        applied,
+    ))
+}
+
+// ---------------------------------------------------------------------------- current check
+
+/// Pins of `net` named by "REF.PAD" or "REF.*".
+fn pins_of(b: &Board, net: NetId, spec: &str) -> Result<Vec<usize>> {
+    let (r, pad) = spec
+        .rsplit_once('.')
+        .with_context(|| format!("pad {spec:?} is not REF.PAD"))?;
+    let hits: Vec<usize> = b
+        .pins
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.net == net && p.footprint == r)
+        .filter(|(_, p)| power::glob(pad, p.name.rsplit_once('.').map_or("", |x| x.1)))
+        .map(|(i, _)| i)
+        .collect();
+    if hits.is_empty() {
+        bail!("no pad {spec:?} on net {}", b.nets[net as usize].name);
+    }
+    Ok(hits)
+}
+
+fn layer_of_shape_net(b: &Board, net: NetId) -> Vec<LayerId> {
+    let mut ls: Vec<LayerId> = Vec::new();
+    for o in b.obstacles.iter().filter(|o| o.net == Some(net)) {
+        for l in o.layers.iter() {
+            if !ls.contains(&l) {
+                ls.push(l);
+            }
+        }
+    }
+    ls.sort();
+    ls
+}
+
+pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
+    let path = PathBuf::from(&p.path);
+    if !path.is_file() {
+        bail!("{} does not exist", path.display());
+    }
+    let dt = p.temp_rise.unwrap_or(DEFAULT_RISE);
+    let max_seg = p.max_segments.unwrap_or(5);
+    let mut notes = Vec::new();
+    let first = read_all(&path)?;
+    // which paths
+    let mut paths: Vec<PathIn> = match &p.paths {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => {
+            notes.push(
+                "no paths given: nets wider than the default class, with the current their class width carries".into(),
+            );
+            estimated(&first.board, dt)
+                .into_iter()
+                .map(|(n, a)| PathIn {
+                    net: first.board.nets[n as usize].name.clone(),
+                    amps: (a * 10.0).floor() / 10.0,
+                    short_amps: None,
+                    from: None,
+                    to: None,
+                    name: None,
+                })
+                .collect()
+        }
+    };
+    // glob patterns without terminals expand to their nets
+    let mut expanded = Vec::new();
+    for q in paths.drain(..) {
+        if q.from.is_none() && q.to.is_none() && first.board.net_id(&q.net).is_none() {
+            let hits: Vec<String> = first
+                .board
+                .nets
+                .iter()
+                .filter(|n| power::glob(&q.net, &n.name) && n.pins.len() >= 2)
+                .map(|n| n.name.clone())
+                .collect();
+            if hits.is_empty() {
+                bail!("no net matches {:?}", q.net);
+            }
+            for h in hits {
+                expanded.push(PathIn { net: h, ..q.clone() });
+            }
+        } else {
+            expanded.push(q);
+        }
+    }
+    let paths = expanded;
+    // refill zones if needed
+    let zf0 = power::zones(&first);
+    let checked: Vec<Option<NetId>> = paths.iter().map(|q| first.board.net_id(&q.net)).collect();
+    let unfilled = zf0.iter().any(|z| !z.filled && checked.contains(&z.net));
+    let mut measured = path.clone();
+    let kb = if p.refill.unwrap_or(unfilled) {
+        match external::refilled(&path) {
+            Ok(f) => {
+                measured = f;
+                read_all(&measured)?
+            }
+            Err(e) => {
+                notes.push(format!(
+                    "zones not refilled ({e:#}); unfilled zones count with their outline, which is optimistic"
+                ));
+                first
+            }
+        }
+    } else {
+        first
+    };
+    let b = &kb.board;
+    let zf = power::zones(&kb);
+    let ref_layer = outer_ref(b);
+    let mut out = Vec::new();
+    let mut flagged = 0;
+    for q in &paths {
+        let net = b.net_id(&q.net).with_context(|| format!("no net named {:?}", q.net))?;
+        let c = b.class_of(net);
+        // a short until the fuse or PTC trips heats the copper like a continuous current
+        let amps = q.amps.max(q.short_amps.unwrap_or(0.0));
+        let req = |l: LayerId| power::ipc_width(amps, power::copper_mm(b, l), power::is_outer(b, l), dt);
+        let layers = layer_of_shape_net(b, net);
+        let mut pnotes = Vec::new();
+        // narrow segments outside the net's own fill on that layer
+        let mut segs: Vec<SegmentOut> = Vec::new();
+        let mut narrowest: Option<f64> = None;
+        for o in b
+            .obstacles
+            .iter()
+            .filter(|o| o.net == Some(net) && o.kind == ObstacleKind::Track)
+        {
+            let Shape::Capsule { a, b: e, r } = o.shape else {
+                continue;
+            };
+            let Some(l) = o.layers.iter().next() else { continue };
+            let w = 2.0 * r;
+            narrowest = Some(narrowest.map_or(w, |m: f64| m.min(w)));
+            let need = req(l);
+            if w + 1e-6 >= need {
+                continue;
+            }
+            let in_fill = |p: Point| {
+                zf.iter()
+                    .filter(|z| z.net == Some(net) && z.layer == l && z.filled)
+                    .any(|z| z.polys.iter().any(|poly| poly.contains(p)))
+            };
+            if in_fill(a) && in_fill(e) {
+                continue;
+            }
+            let m = (a + e) * 0.5;
+            segs.push(SegmentOut {
+                layer: layer_name(b, l),
+                width_mm: r3(w),
+                required_mm: r3(need),
+                x: r3(m.x),
+                y: r3(m.y),
+            });
+        }
+        segs.sort_by(|x, y| x.width_mm.total_cmp(&y.width_mm));
+        let narrow = segs.len();
+        segs.truncate(max_seg);
+        // terminals
+        let net_pins: Vec<usize> = b.nets[net as usize].pins.clone();
+        let terms: Option<(Vec<Vec<usize>>, Vec<usize>)> = match (&q.from, &q.to) {
+            (Some(f), Some(t)) => {
+                let mut src = Vec::new();
+                for s in f {
+                    let mut g = Vec::new();
+                    for part in s.split('+') {
+                        g.extend(pins_of(b, net, part.trim())?);
+                    }
+                    src.push(g);
+                }
+                let mut dst = Vec::new();
+                for s in t {
+                    dst.extend(pins_of(b, net, s)?);
+                }
+                Some((src, dst))
+            }
+            (None, None) if net_pins.len() == 2 => Some((vec![vec![net_pins[0]]], vec![net_pins[1]])),
+            (None, None) => None,
+            _ => bail!("{}: give both from and to", q.net),
+        };
+        let ref_req = req(ref_layer);
+        let mut changes_layer = true;
+        let neck = terms.map(|(src, dst)| {
+            let share = amps / src.len().max(1) as f64;
+            let factor: Vec<f64> = (0..b.layers.len() as LayerId)
+                .map(|l| if layers.contains(&l) { req(l) / ref_req } else { 0.0 })
+                .collect();
+            let nk = power::neck(
+                &kb,
+                &zf,
+                net,
+                &src,
+                &dst,
+                &power::NeckOptions {
+                    layer_factor: factor,
+                    step: 0.05,
+                    max_width: (ref_req * 3.0).max(2.0),
+                    end_reach: 0.3,
+                    temp_rise: dt,
+                    ref_copper_mm: power::copper_mm(b, ref_layer),
+                    ref_outer: power::is_outer(b, ref_layer),
+                    required: power::ipc_width(share, power::copper_mm(b, ref_layer), true, dt),
+                },
+            );
+            if nk.unfilled_zones > 0 {
+                pnotes.push(format!(
+                    "{} zones of the net unfilled: their outline was used",
+                    nk.unfilled_zones
+                ));
+            }
+            if src.len() > 1 {
+                pnotes.push(format!("{} source terminals, {share:.2} A each", src.len()));
+            }
+            let need = power::ipc_width(share, power::copper_mm(b, ref_layer), true, dt);
+            changes_layer = nk.changes_layer;
+            NeckOut {
+                connected: nk.connected,
+                width_mm: r3(nk.width_mm),
+                required_mm: r3(need),
+                reference_layer: layer_name(b, ref_layer),
+                x: nk.at.map(|a| r3(a.0.x)),
+                y: nk.at.map(|a| r3(a.0.y)),
+                layer: nk.at.map(|a| layer_name(b, a.1)),
+                cross_section_mm: nk.cut_mm.map(r3),
+                cut_x: nk.cut_at.map(|a| r3(a.0.x)),
+                cut_y: nk.cut_at.map(|a| r3(a.0.y)),
+                cut_layer: nk.cut_at.map(|a| layer_name(b, a.1)),
+                step_mm: r3(nk.step),
+            }
+        });
+        let vias = b
+            .obstacles
+            .iter()
+            .filter(|o| o.net == Some(net) && o.kind == ObstacleKind::Via)
+            .count();
+        let via_amps = power::via_amps(c.via_drill.max(0.1), dt);
+        let per = (amps / via_amps).ceil().max(1.0) as usize;
+        let verdict = match &neck {
+            Some(n) if !n.connected => "FLAG: terminals not connected".to_string(),
+            // the cross-section decides: a band of the full width, or narrower copper in
+            // parallel, and through every via barrel on the way; without it the single band
+            Some(n) if n.cross_section_mm.map_or(n.width_mm, |c| c) + n.step_mm / 2.0 < n.required_mm => {
+                let (x, y, l, w) = match n.cross_section_mm {
+                    Some(c) => (
+                        n.cut_x.or(n.x),
+                        n.cut_y.or(n.y),
+                        n.cut_layer.clone().or(n.layer.clone()),
+                        c,
+                    ),
+                    None => (n.x, n.y, n.layer.clone(), n.width_mm),
+                };
+                let at_via = match (x, y) {
+                    (Some(x), Some(y)) => b.obstacles.iter().any(|o| {
+                        o.net == Some(net)
+                            && o.kind == ObstacleKind::Via
+                            && o.shape.bbox().center().dist(Point { x, y }) < o.shape.bbox().width() / 2.0 + 0.1
+                    }),
+                    _ => false,
+                };
+                format!(
+                    "FLAG: {} {:.2} mm < {:.2} mm at {}, {} on {}",
+                    match (n.cross_section_mm.is_some(), at_via) {
+                        (_, true) => "via, cross-section",
+                        (true, false) => "cross-section",
+                        _ => "neck",
+                    },
+                    w,
+                    n.required_mm,
+                    x.unwrap_or(0.0),
+                    y.unwrap_or(0.0),
+                    l.unwrap_or_default()
+                )
+            }
+            Some(_) => "ok".into(),
+            None if narrow > 0 => format!(
+                "FLAG: {narrow} segments below the required width (give from/to to tell stubs from the current path)"
+            ),
+            None => "ok".into(),
+        };
+        if verdict.starts_with("FLAG") {
+            flagged += 1;
+        }
+        if ((neck.is_some() && changes_layer) || (neck.is_none() && vias > 0)) && vias < per {
+            pnotes.push(format!(
+                "{vias} vias on the net, {per} needed wherever the current changes layer{}",
+                if neck.is_some() {
+                    " (the path changes layer)"
+                } else {
+                    ""
+                }
+            ));
+        }
+        out.push(PathOut {
+            name: q.name.clone().unwrap_or_else(|| q.net.clone()),
+            net: q.net.clone(),
+            amps: q.amps,
+            short_amps: q.short_amps,
+            required: layers
+                .iter()
+                .map(|&l| WidthOut {
+                    layer: layer_name(b, l),
+                    width_mm: r3(req(l)),
+                })
+                .collect(),
+            narrow_segments: narrow,
+            segments: segs,
+            narrowest_track_mm: narrowest.map(r3),
+            neck,
+            vias,
+            via_amps: r3(via_amps),
+            vias_per_transition: per,
+            verdict,
+            notes: pnotes,
+        });
+    }
+    if flagged > 0 {
+        notes.push("fix a neck: reroute the net wider (set_net_options width, route with keep_all, nets and reroute), add a pour over the neck (add_zone) or locked copper, then check again".into());
+    }
+    Ok(CurrentCheckOut {
+        path: path.display().to_string(),
+        measured: measured.display().to_string(),
+        temp_rise: dt,
+        paths: out,
+        flagged,
+        notes,
+    })
+}
+
+// ----------------------------------------------------------------------------- ground pour
+
+pub fn ground_pour(p: &GroundPourIn) -> Result<(PathBuf, GroundPourOut)> {
+    let path = PathBuf::from(&p.path);
+    if !path.is_file() {
+        bail!("{} does not exist", path.display());
+    }
+    let kb = read_all(&path)?;
+    let b = &kb.board;
+    let net = match &p.net {
+        Some(n) => b.net_id(n).with_context(|| format!("no net named {n:?}"))?,
+        None => ground_net(b).context("no ground net found; name it with net")?,
+    };
+    let nname = b.nets[net as usize].name.clone();
+    let outline = b
+        .outline
+        .iter()
+        .max_by(|x, y| x.signed_area().abs().total_cmp(&y.signed_area().abs()))
+        .context("the board has no closed outline (Edge.Cuts)")?;
+    let zf = power::zones(&kb);
+    let layers: Vec<LayerId> = match &p.layers {
+        Some(ls) => ls
+            .iter()
+            .map(|n| b.layer_id(n).with_context(|| format!("no layer {n:?}")))
+            .collect::<Result<_>>()?,
+        None => (0..b.layers.len() as LayerId)
+            .filter(|&l| power::is_outer(b, l))
+            .collect(),
+    };
+    let prio = p.priority.unwrap_or(0);
+    let mut warnings = Vec::new();
+    let mut zone_layers = Vec::new();
+    for &l in &layers {
+        if zf.iter().any(|z| z.net == Some(net) && z.layer == l) {
+            warnings.push(format!(
+                "{} already has a {nname} zone, left as it is",
+                layer_name(b, l)
+            ));
+            continue;
+        }
+        let low: Vec<String> = zf
+            .iter()
+            .filter(|z| z.layer == l && z.net != Some(net) && z.priority <= prio as i64)
+            .filter_map(|z| z.net.map(|n| b.nets[n as usize].name.clone()))
+            .collect();
+        if !low.is_empty() {
+            warnings.push(format!(
+                "zones of {} on {} have a priority no higher than the {nname} pour ({prio}): raise theirs so they win",
+                low.join(", "),
+                layer_name(b, l)
+            ));
+        }
+        zone_layers.push(l);
+    }
+    let c = b.class_of(net);
+    let opts = power::StitchOptions {
+        net,
+        pitch: p.pitch.unwrap_or(5.0),
+        edge_pitch: p.edge_pitch.unwrap_or(3.0),
+        edge_inset: p.edge_inset.unwrap_or(1.0),
+        diameter: p.via_diameter.unwrap_or(c.via_diameter),
+        drill: p.via_drill.unwrap_or(c.via_drill),
+        margin: 0.3,
+        avoid_courtyards: p.avoid_courtyards.unwrap_or(true),
+    };
+    let pour_layers = zf
+        .iter()
+        .filter(|z| z.net == Some(net))
+        .map(|z| z.layer)
+        .chain(zone_layers.iter().copied())
+        .chain(b.nets[net as usize].planes.iter())
+        .collect::<std::collections::BTreeSet<_>>();
+    let spots = if pour_layers.len() >= 2 {
+        power::stitch_spots(b, &zf, &opts)
+    } else {
+        warnings.push(format!("{nname} has copper area on one layer only: no stitching vias"));
+        Vec::new()
+    };
+    let edge = if opts.edge_pitch > 0.0 {
+        spots
+            .iter()
+            .filter(|s| {
+                b.outline
+                    .iter()
+                    .map(|q| q.boundary_dist(**s))
+                    .fold(f64::INFINITY, f64::min)
+                    < opts.edge_inset + 0.5
+            })
+            .count()
+    } else {
+        0
+    };
+    let items: Vec<write::Item> = spots
+        .iter()
+        .map(|&at| write::Item::Via {
+            at,
+            diameter: opts.diameter,
+            drill: opts.drill,
+            net,
+        })
+        .collect();
+    let mut text = if items.is_empty() {
+        kb.text.clone()
+    } else {
+        write::add_locked(&kb, &items)
+    };
+    for (i, &l) in zone_layers.iter().enumerate() {
+        text = write::add_zone(&kb, &text, net, l, &outline.pts, prio, 0x9d0 + i as u64);
+    }
+    let out_path = match &p.output {
+        Some(o) => PathBuf::from(o),
+        None => {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("board");
+            path.with_file_name(format!("{stem}.gnd.kicad_pcb"))
+        }
+    };
+    std::fs::write(&out_path, text).with_context(|| format!("writing {}", out_path.display()))?;
+    external::copy_project_files(&path, &out_path);
+    // hand back a filled board, so a render or KiCad shows the pours right away
+    match external::refilled(&out_path).and_then(|f| std::fs::copy(&f, &out_path).map_err(anyhow::Error::from)) {
+        Ok(_) => {}
+        Err(e) => warnings.push(format!(
+            "zones not filled ({e:#}): KiCad fills them (B), drc refills them"
+        )),
+    }
+    Ok((
+        out_path.clone(),
+        GroundPourOut {
+            board: String::new(),
+            path: out_path.display().to_string(),
+            net: nname,
+            zones_added: zone_layers.iter().map(|&l| layer_name(b, l)).collect(),
+            vias_added: spots.len(),
+            edge_vias: edge,
+            warnings,
+        },
+    ))
+}
+
+// --------------------------------------------------------------------------------- prompt
+
+pub const PROMPT_NAME: &str = "good_practice";
+
+pub const PROMPT_DESCRIPTION: &str = "Route a KiCad board end to end the way a careful layouter would: \
+plan power planes and track widths from the currents first, route with Gummiband, then check current \
+carrying capacity, pour ground with stitching vias and finish with KiCad's DRC.";
+
+pub fn prompt_text(path: &str, currents: Option<&str>, notes: Option<&str>) -> String {
+    let currents = currents.map(|c| format!("Known currents: {c}\n")).unwrap_or_default();
+    let notes = notes
+        .map(|n| format!("Notes from the designer: {n}\n"))
+        .unwrap_or_default();
+    format!(
+        "Route the board {path} in one go with the gummiband tools and apply the usual rules of good \
+PCB practice around the autorouter. Work through every step without asking back, unless a decision \
+would change the design intent (moving a connector, dropping a part); then stop and ask.
+{currents}{notes}
+1. Look: load_board, list_nets. Note the layers and which are planes, the net classes, the \
+differential pairs, the power and ground nets. part_info on connectors, regulators, fuses and \
+eFuses tells you where the current enters and where it goes.
+
+2. Currents: give every power net a continuous current (connector and fuse ratings, regulator \
+outputs, LED counts, motor or load currents from the schematic and datasheets) and a short term \
+current where a fuse or PTC limits a short. Without facts take the estimate power_plan makes from \
+the class widths, and say so in the report. Name the current paths: source pads -> sink pads.
+
+3. Plan before routing: power_plan with the currents and apply true. Follow its advice and board \
+notes: a solid GND plane on an inner layer next to the main signal layer (add_zone over the whole \
+board; on two layers keep B.Cu for a GND pour), planes or pours for nets too wide for a track \
+(add_zone on an outer layer, priority above the GND pour), the datasheet layout of converters, \
+eFuses and their input and output loops as locked copper (part_info, add_locked_copper), enough \
+vias per pin into the planes (power_plan gives the count). If you can write files, append \
+power_plan's dru_rules to the project's .kicad_dru and load_board again, so KiCad's DRC enforces \
+the widths too. Lock what has its place: connectors, mounting holes, power stages (pass them as \
+fixed to place_parts and route). Keep the switch node of a converter \
+small and the input capacitor loop short. Place parts first if they are not placed (move_part for \
+connectors and power stages, place_parts with semantic true for the rest).
+
+4. Route: route the latest board id (keep_locked when you added locked copper). Use pairs for \
+differential pairs that need coupling. Read unrouted and blocked; fix with set_net_options \
+(priority, width) and route again, or finish single nets with keep_all, nets and reroute.
+
+5. Check the copper: current_check on the routed file with from and to for every current path \
+of step 2. A FLAG names the neck with its position: widen the net (set_net_options width, then \
+route keep_all + nets + reroute), add a pour over the neck (add_zone) or locked copper, and check \
+again until every path is ok. Too few vias where the current changes layer count as a neck too.
+
+6. Ground: ground_pour on the routed file (GND pours on the outer layers, stitching vias on a grid \
+and along the edge). Use the returned file from now on.
+
+7. Judge: drc on the final file (it refills the zones). Fix clearance violations and unconnected \
+items, render the regions of power stages, necks and dense areas and look at them. angles_45 only \
+if 45 degree routing is wanted, then drc again.
+
+8. Report: a short table of the current paths (current, required width, narrowest cross-section, \
+vias, verdict), what you planned and changed, the DRC counts and the path of the final file."
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rounding_up() {
+        assert!((up05(0.69) - 0.7).abs() < 1e-9);
+        assert!((up05(0.75) - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn prompt_names_the_board() {
+        let t = prompt_text("/x/a.kicad_pcb", Some("VBUS 4 A"), None);
+        assert!(t.contains("/x/a.kicad_pcb") && t.contains("VBUS 4 A") && t.contains("current_check"));
+    }
+}
