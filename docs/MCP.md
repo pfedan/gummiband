@@ -79,6 +79,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
+| `create_board` | `netlist`, `output`, `width`, `height`, `x0?`, `y0?`, `corner_radius?`, `layers?`, `plane_layers?`, `thickness?`, `copper_oz?`, `prepreg?`, `mounting_holes? {diameter?, inset?, footprint?, net?}`, `net_classes? [{name, clearance?, track_width?, via_diameter?, via_drill?, diff_pair_width?, diff_pair_gap?, priority?, patterns}]`, `rules?`, `footprint_dirs?`, `pin_aliases?`, `overwrite?` | id of the new board (already loaded), paths of the `.kicad_pcb` and `.kicad_pro`, file version, footprint, hole, net and pad counts, pads with a net, missing footprints, parts whose pads and pins do not match (with the `pin_aliases` entry to pass), libraries read, parts that did not fit inside the outline, `warnings` |
 | `load_board` | `path`, `keep_locked?` | board id, layers (plane flag), outline box and size, pins, nets, routable nets, connections, planes, net classes (priority, width, clearance, via), custom rule count, custom clearance net pairs, kept net options, recognised differential pairs |
 | `list_nets` | `board`, `filter?`, `include_single?` | nets with class, pin count, plane flag, effective priority, skip flag |
 | `board_patterns` | `board` | local patterns of the board: pin rows (part, pins in order, pitch, the side tracks leave to), pad grids, decoupling capacitors with their IC pin, pins of a plane net that can share a fan-out via, buses between two parts; a summary line per kind |
@@ -96,6 +97,65 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `ground_pour` | `path`, `net?`, `layers?`, `pitch?`, `edge_pitch?`, `edge_inset?`, `avoid_courtyards?`, `via_diameter?`, `via_drill?`, `priority?`, `pad_connection?`, `thermal_spoke_width?`, `output?` | id and path of `<input>.gnd.kicad_pcb` with ground zones on the outer layers and locked stitching vias, `warnings` |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?`, `refill?` | PNG (image content) and its path, region, pixels per mm |
+
+### create_board
+
+Turns a KiCad netlist (s-expression format: Eeschema File > Export > Netlist > KiCad, or
+`kicad-cli sch export netlist`) into a `.kicad_pcb` without KiCad or its Python API, and loads
+it (the result carries the board id).
+
+- Footprints: each symbol's `Library:Footprint` is read from the KiCad footprint libraries.
+  Searched in this order: `footprint_dirs` (`.pretty` directories or directories that contain
+  them), the project `fp-lib-table` next to the output, the netlist or the schematic it names
+  (`${KIPRJMOD}` and environment variables expanded), `KICAD10_FOOTPRINT_DIR`,
+  `KICAD9_FOOTPRINT_DIR`, `KICAD8_FOOTPRINT_DIR`, `KICAD_FOOTPRINT_DIR`, the user's global
+  `fp-lib-table`, and the usual install places (`/usr/share/kicad/footprints`,
+  `/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints`, ...). A symbol whose
+  footprint is not found stays off the board and is listed in `missing_footprints`; `libraries`
+  says which directory each library came from. Symbols marked "exclude from board" are left out.
+- Fields: Reference, Value, Datasheet, Description, the user fields (LCSC, MPN, ...) as hidden
+  properties, DNP and "exclude from BOM" as footprint attributes, and the sheet path, name and
+  file that link the footprint to its symbol (so KiCad's Update PCB from Schematic matches them).
+- Nets: a pad gets the net of the netlist pin with its number, with pin function and pin type
+  (`+no_connect` on `unconnected-(...)` nets). A pad without a netlist pin stays without a net,
+  a pin without a pad leaves its net short of a connection: both are listed in `unmatched` and in
+  `warnings`. If exactly one pad number and one pin of a part are left, the warning names the
+  `pin_aliases` entry, e.g. a USB-C shield whose symbol pin is `S1` and whose pads are `SH`:
+  `"pin_aliases": {"J1": {"S1": "SH"}}` gives all `SH` pads the net of `S1`.
+- Board: rectangular outline from `x0`, `y0` (default 100, 100) of `width` x `height` mm with an
+  optional `corner_radius`; `layers` copper layers (default 2; 4 gives F.Cu, In1.Cu, In2.Cu,
+  B.Cu; any even count up to 32), `plane_layers` of KiCad type power (Gummiband does not route
+  them, see `load_board`); a stackup of `thickness` (default 1.6 mm) with `copper_oz` per layer
+  (one value for all, default 1 oz = 0.035 mm), `prepreg` (default 0.21 mm) next to the outer
+  layers and the cores taking the rest, FR4, 0.01 mm masks.
+- `mounting_holes`: four locked holes at the corners, `inset` mm (default 4) from both edges,
+  plain non-plated holes of `diameter` (default 3.2) or a library `footprint` (with `net` for a
+  plated one).
+- Placement: the parts sit unlocked inside the outline, the larger ones first, each at the
+  topmost then leftmost free place around the holes, with a gap of 1 mm (down to 0 mm if needed,
+  see `grid_gap`). What does not fit sits in rows below the board (listed in `outside`), so
+  `place_parts` with `scope: "outside"` takes it in. Both are only a start for `move_part` and
+  `place_parts`.
+- `.kicad_pro`: written next to the board, or merged into an existing one (the schematic's
+  project; the rest of it stays). It gets `board.design_settings.rules` (KiCad's defaults for
+  edge clearance, hole clearances and via sizes if missing, overridden by `rules`) and
+  `net_settings` with the `net_classes` and their patterns; a class named Default sets the
+  defaults of the others. Nets that the schematic puts into a class the patterns do not give go
+  into `netclass_assignments` if `net_classes` defines that class (a warning otherwise).
+- File format: KiCad 9 (version 20241229, with net table) when all footprint files are KiCad 9
+  or older, otherwise KiCad 10 (20260206, nets by name), so the result opens in the KiCad that
+  made the libraries. An existing output is only replaced with `overwrite: true`.
+
+```json
+{"name": "create_board", "arguments": {"netlist": "hw/lichtschnitzel.net",
+  "output": "hw/lichtschnitzel.kicad_pcb", "width": 74, "height": 60, "layers": 4,
+  "plane_layers": ["In1.Cu", "In2.Cu"], "mounting_holes": {"diameter": 3.2, "inset": 4},
+  "rules": {"min_clearance": 0.127, "min_copper_edge_clearance": 0.3},
+  "net_classes": [{"name": "Default", "clearance": 0.15, "track_width": 0.2},
+    {"name": "Power", "track_width": 0.5, "via_diameter": 0.8, "via_drill": 0.4,
+     "patterns": ["+5V_*", "+3V3", "GND"]}],
+  "pin_aliases": {"J1": {"S1": "SH"}}}}
+```
 
 ### load_board
 
@@ -597,8 +657,10 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
   `gummiband place`, knows no datasheet layouts (place and lock power stages with `move_part`;
   `semantic` keeps an inductor at its converter, but no via arrays or copper),
   and treats both board sides as one space.
-- Not reachable through MCP yet: creating a board, and per net widths and priorities
-  from files (`--net-widths`, `--net-priorities`; both go through `set_net_options`).
+- Not reachable through MCP yet: per net widths and priorities from files (`--net-widths`,
+  `--net-priorities`; both go through `set_net_options`).
+- `create_board` reads rectangular outlines only, places every part on the front side and
+  without rotation, and does not read footprint libraries of other types than KiCad (`.pretty`).
 - `power_copper` shapes a pour as a convex hull cut by straight lines: obstacles between the
   terminals cost more copper than needed, and a terminal behind another net's pad is lost (a
   warning says so). It does not move parts; the via fields sit on rings around the pad.

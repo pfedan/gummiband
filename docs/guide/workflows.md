@@ -226,10 +226,10 @@ same design. It is specific to that board's part roles today; the scripts and pa
 
 ## Drive the router from an AI agent
 
-The MCP server exposes `load_board`, `list_nets`, `set_net_options`, `part_info`,
-`move_part`, `add_zone`, `add_locked_copper`, `route` (with the search options of the CLI,
-including `seed` and `keep_all`), `drc` and `render` to Claude Code, Claude Desktop and other
-MCP clients. An agent can load a board, give the critical nets priority, route, read the
+The MCP server exposes `create_board` (a board from a KiCad netlist), `load_board`,
+`list_nets`, `set_net_options`, `part_info`, `move_part`, `add_zone`, `add_locked_copper`,
+`route` (with the search options of the CLI, including `seed` and `keep_all`), `drc` and
+`render` to Claude Code, Claude Desktop and other MCP clients. An agent can load a board, give the critical nets priority, route, read the
 violations with positions and the nets that block each unrouted connection, look at a PNG of the
 region, nudge a part or add a plane in a working copy, and iterate. On a finished board it can
 re-lay single nets: `route` with `keep_all`, `nets` and `reroute` removes the unlocked copper of
