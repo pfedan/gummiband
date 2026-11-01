@@ -244,7 +244,12 @@ conventional 45 degree routing as a last step, like `--angles 45`). `seed` picks
 (default fixed): the same seed gives the same result, another one a different try. `keep_all`
 keeps every track and via of the input and adds to it, like `--keep-all` on the command line;
 with `nets` only those nets are routed and everything else stays. Add `reroute` to replace
-connected nets: the unlocked copper of `nets` goes first, then they are routed anew. `output` defaults to
+connected nets: the unlocked copper of `nets` goes first, then they are routed anew. With
+`keep_all` and `nets` the unlocked tracks of the other nets shift aside where a connection needs
+the room (`shove`, default true), and if a connection still finds no way, those within 8 mm of
+its pins give way and are routed again (`give`, default 8, in steps of 2, 4, 8 mm; the try with
+the fewest open connections, then the fewest violations is written). `shove: false` and `give: 0`
+leave the other nets where they are; locked copper and plane nets never move. `output` defaults to
 `<input>.routed.kicad_pcb` next to the input; the `.kicad_pro` and `.kicad_dru` are copied next
 to the output if missing, so `drc` and `load_board` work on it. `nets` routes only the listed
 nets for this call.
@@ -359,7 +364,7 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
   `gummiband place`, knows no datasheet layouts (place and lock power stages with `move_part`;
   `semantic` keeps an inductor at its converter, but no via arrays or copper),
   and treats both board sides as one space.
-- Not reachable through MCP yet: creating a board, `--move-parts`, `--shove` and `--give`, and per net widths and priorities
+- Not reachable through MCP yet: creating a board, `--move-parts`, and per net widths and priorities
   from files (`--net-widths`, `--net-priorities`; priorities go through `set_net_options`).
 - Progress notifications during long routes, and cancellation (the core has no cancel hook).
 - `route` returns Gummiband's own clearance check; KiCad's verdict needs a `drc` call.

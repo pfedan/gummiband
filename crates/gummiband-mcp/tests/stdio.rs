@@ -250,6 +250,18 @@ fn initialize_list_load_route() {
     assert!(std::fs::read_to_string(&again).unwrap().contains("(segment"));
     assert!(s.call_err("route", json!({"board": kept["board"], "reroute": true})).contains("reroute"));
     assert!(r["blocked"].as_array().unwrap().is_empty(), "{r}");
+    // the other nets shift aside or give way by default; both can be switched off
+    let still = dir.join("tiny.still.kicad_pcb");
+    let r = s.call(
+        "route",
+        json!({"board": kept["board"], "keep_all": true, "reroute": true, "nets": ["B"], "runs": 1,
+               "generations": 0, "shove": false, "give": 0, "output": still}),
+    );
+    assert_eq!(r["routed"], 1, "{r}");
+    assert!(
+        s.call_err("route", json!({"board": kept["board"], "shove": true}))
+            .contains("keep_all")
+    );
 
     // placement and zones go into the same working copy
     let moved = s.call(

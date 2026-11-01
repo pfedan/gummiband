@@ -1139,4 +1139,81 @@ mod tests {
         assert_eq!(c.chains, vec![true]);
         assert!(c.shift >= 0.09 && c.shift < 0.6, "shift {}", c.shift);
     }
+
+    fn quick() -> SearchConfig {
+        SearchConfig {
+            population: 2,
+            generations: 0,
+            geometry_generations: 0,
+            frames: false,
+            progress: None,
+            seed: None,
+            open_end: None,
+            air: 0.0,
+            prefer_width: 0.0,
+        }
+    }
+
+    fn route(b: &Board) -> (Substrate, crate::RouteResult, ()) {
+        let (sub, res) = route_board(b, &SubstrateConfig::default(), &RouterConfig::default(), &quick());
+        (sub, res, ())
+    }
+
+    #[test]
+    fn finishing_a_net_shoves_where_plain_finds_no_way() {
+        let b = channel_board();
+        let nets = ["B".to_string()];
+        let plain = crate::finish_nets(&b, &nets, false, 0.0, route);
+        assert_eq!(plain.res.stats.unrouted.len(), 1);
+        assert!(plain.res.stats.unrouted[0].starts_with("B from "));
+        let f = crate::finish_nets(&b, &nets, true, crate::DEFAULT_GIVE, route);
+        assert!(f.res.stats.unrouted.is_empty(), "{:?}", f.res.stats.unrouted);
+        assert_eq!((f.tries.len(), f.kept), (1, 0), "nothing has to give way");
+        assert!(f.given.is_empty());
+    }
+
+    #[test]
+    fn a_net_near_the_pins_gives_way_and_is_routed_again() {
+        let b = channel_board();
+        let f = crate::finish_nets(&b, &["B".to_string()], false, crate::DEFAULT_GIVE, route);
+        assert_eq!(f.tries.len(), 2);
+        assert_eq!((f.tries[0].open, f.tries[1].radius), (1, 2.0));
+        assert_eq!(f.kept, 1);
+        assert_eq!(f.given.iter().collect::<Vec<_>>(), ["A"]);
+        assert!(f.res.stats.unrouted.is_empty(), "{:?}", f.res.stats.unrouted);
+        assert_eq!(f.res.stats.conns, 2);
+    }
+
+    #[test]
+    fn a_try_that_leaves_more_open_loses_against_the_one_before() {
+        let b = channel_board();
+        // A gives way and finds no way back: that try has more open than the first
+        let worse = |b: &Board| {
+            let sub = Substrate::build(b, &SubstrateConfig::default());
+            let mut unrouted = vec!["B from Q0".to_string()];
+            if !b.nets[0].pins.is_empty() {
+                unrouted.insert(0, "A from P0".to_string());
+            }
+            let stats = crate::RunStats {
+                unrouted,
+                ..Default::default()
+            };
+            let res = crate::RouteResult {
+                geometry: Default::default(),
+                stats,
+                portfolio: Vec::new(),
+                frames: Vec::new(),
+                offsets: Default::default(),
+                alternatives: Vec::new(),
+            };
+            (sub, res, ())
+        };
+        let f = crate::finish_nets(&b, &["B".to_string()], false, crate::DEFAULT_GIVE, worse);
+        assert_eq!(
+            f.tries.iter().map(|t| (t.given, t.open)).collect::<Vec<_>>(),
+            [(0, 1), (1, 2)]
+        );
+        assert_eq!(f.kept, 0);
+        assert!(f.given.is_empty(), "the copper of A stays");
+    }
 }

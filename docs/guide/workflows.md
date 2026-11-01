@@ -33,9 +33,11 @@ the named nets. In KiCad the same is the toolbar action *Finish selected nets wi
 select a track, via or pad of the nets and click, see [Routing in KiCad](kicad-plugin.md).
 The router adds to what is there: pins that already sit on one piece of copper count as
 connected, and a connection may ride along existing copper of its net instead of drawing a new
-track beside it. Add `--shove` to let unlocked tracks of other nets shift aside where the new
-track needs room, and `--give 8` to reroute them when even that is not enough (locked copper and
-plane nets stay in both cases). This is new, so refill the zones and run the DRC afterwards.
+track beside it. Unlocked tracks of other nets shift aside where the new track needs room
+(`--shove`), and when even that is not enough, those within 8 mm of the pins are rerouted
+(`--give 8`); a try that leaves more open than the one before is dropped. Both are on by
+default, `--no-shove` and `--give 0` switch them off. Locked copper and plane nets stay in any
+case. This is new, so refill the zones and run the DRC afterwards.
 
 ## Pre-route and lock power lanes
 
