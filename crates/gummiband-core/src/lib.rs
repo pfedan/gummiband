@@ -54,11 +54,16 @@ pub struct RunStats {
     pub shorts: Option<usize>,
 }
 
+/// Weight of a via in [`RunStats::cost`].
+pub(crate) const VIA_WEIGHT: f64 = 2.0;
+/// Weight of a mm of track in [`RunStats::cost`]: a via weighs 40 mm there.
+pub(crate) const LENGTH_WEIGHT: f64 = 0.05;
+
 impl RunStats {
     /// Lower is better: completion first, then vias, then length. One unrouted connection
     /// weighs as much as ten clearance violations (see the geometry stage).
     pub fn cost(&self) -> f64 {
-        (self.conns - self.routed) as f64 * 1e4 + self.vias as f64 * 2.0 + self.length * 0.05
+        (self.conns - self.routed) as f64 * 1e4 + self.vias as f64 * VIA_WEIGHT + self.length * LENGTH_WEIGHT
     }
 }
 
@@ -203,7 +208,15 @@ pub struct SearchConfig {
     /// mm where there is room (0 = off). A class with a target width of its own (`opt` of a
     /// track width rule) grows to that one instead, also with this off.
     pub prefer_width: f64,
+    /// What a via is worth in mm of track when the open end judges its results
+    /// ([`DEFAULT_OPEN_VIA_COST`]). Lower gives more vias and shorter tracks.
+    pub open_via_cost: f64,
 }
+
+/// The via price of the open end in mm of track: half of what a via weighs in the search
+/// before, since connections that may end on a track of their net would pay for fewer vias
+/// with long ways.
+pub const DEFAULT_OPEN_VIA_COST: f64 = 20.0;
 
 impl SearchConfig {
     fn stopped(&self) -> bool {

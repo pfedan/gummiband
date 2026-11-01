@@ -1567,6 +1567,7 @@ fn route_blocking(
         open_end: None,
         air: p.air.unwrap_or(0.0),
         prefer_width: p.prefer_width.unwrap_or(0.0),
+        open_via_cost: gummiband_core::DEFAULT_OPEN_VIA_COST,
     };
     let finished = gummiband_core::finish_nets(&board, &only, shove, give, |b| {
         if p.pairs == Some(true) {

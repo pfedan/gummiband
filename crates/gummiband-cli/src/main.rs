@@ -182,6 +182,10 @@ enum Cmd {
         /// output as alt1, alt2, ... No placement rounds, and no plain search next to --negotiate.
         #[arg(long)]
         until_stop: bool,
+        /// With --until-stop: what a via is worth in mm of track when the open end judges its
+        /// results. Lower gives more vias and shorter tracks, higher fewer vias and longer ones.
+        #[arg(long, default_value_t = gummiband_core::DEFAULT_OPEN_VIA_COST)]
+        open_via_cost: f64,
         /// Give the finished copper this reserve in mm on top of the clearances where there is
         /// room, instead of leaving it at the limit [default: 0.03 with --until-stop, else 0]
         #[arg(long)]
@@ -494,6 +498,7 @@ fn main() -> Result<()> {
             placement_seed,
             progress,
             until_stop,
+            open_via_cost,
             air,
             prefer_width,
             net_widths,
@@ -566,6 +571,7 @@ fn main() -> Result<()> {
                 open_end: open_end.clone(),
                 air: air.unwrap_or(if until_stop { 0.03 } else { 0.0 }),
                 prefer_width,
+                open_via_cost,
                 progress: progress.then(|| progress_lines(t0, String::new())),
             };
             let load = |path: &std::path::Path| -> Result<gummiband_kicad::KicadBoard> {

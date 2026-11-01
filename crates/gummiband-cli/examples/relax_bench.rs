@@ -56,6 +56,7 @@ fn main() -> anyhow::Result<()> {
         open_end: None,
         air: 0.0,
         prefer_width: 0.0,
+        open_via_cost: gummiband_core::DEFAULT_OPEN_VIA_COST,
     };
     let t = Instant::now();
     let (sub, res) = route_board(

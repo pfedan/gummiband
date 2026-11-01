@@ -67,8 +67,11 @@ class OptionForm:
         self.fields = fields.all_fields(tabs)
         self.controls = {}
         self.book = wx.Notebook(dlg)
+        self.pages = []
         for i, (title, sections) in enumerate(tabs):
-            page = wx.Panel(self.book)
+            # a page scrolls when the dialog is made lower than its fields
+            page = wx.ScrolledWindow(self.book, style=wx.VSCROLL)
+            page.SetScrollRate(0, 12)
             box = wx.BoxSizer(wx.VERTICAL)
             if i == 0 and header is not None:
                 header(page, box)
@@ -81,7 +84,11 @@ class OptionForm:
                 box.Add(frame, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.EXPAND, 8)
             box.AddSpacer(8)
             page.SetSizer(box)
+            # a scrolled page asks for little room of its own: this one makes the dialog open
+            # with every field in sight
+            page.SetMinSize(box.GetMinSize())
             self.book.AddPage(page, title)
+            self.pages.append(page)
         self.set_values(opts)
 
     def grid(self, parent, group):
@@ -148,8 +155,10 @@ class OptionForm:
 
 
 def options_dialog(title: str, tabs, opts, factory, note: str, header=None):
-    """The dialog and its form. ``factory`` holds the values of the Defaults button."""
-    dlg = wx.Dialog(None, title=title)
+    """The dialog and its form. ``factory`` holds the values of the Defaults button. The dialog
+    can be resized: the fields grow with its width, and the pages scroll when it is lower than
+    they are."""
+    dlg = wx.Dialog(None, title=title, style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
     form = OptionForm(dlg, tabs, opts, header)
     reset = wx.Button(dlg, label="Defaults")
     reset.SetToolTip("Back to the values of a fresh installation.")
@@ -159,10 +168,27 @@ def options_dialog(title: str, tabs, opts, factory, note: str, header=None):
     buttons.AddStretchSpacer()
     buttons.Add(dlg.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL), 0, wx.ALIGN_CENTER_VERTICAL)
     box = wx.BoxSizer(wx.VERTICAL)
-    box.Add(form.book, 0, wx.ALL | wx.EXPAND, 12)
+    box.Add(form.book, 1, wx.ALL | wx.EXPAND, 12)
     box.Add(wx.StaticText(dlg, label=note), 0, wx.LEFT | wx.RIGHT, 12)
     box.Add(buttons, 0, wx.ALL | wx.EXPAND, 12)
     dlg.SetSizerAndFit(box)
+    fitted = dlg.GetSize()
+    # not higher than the screen; from here on the pages may shrink and scroll instead
+    for page in form.pages:
+        page.SetMinSize((page.GetMinSize().width, 120))
+    screen = wx.Display(max(wx.Display.GetFromWindow(dlg), 0)).GetClientArea()
+    size = wx.Size(fitted.width, min(fitted.height, screen.height))
+    dlg.SetMinSize((fitted.width, min(fitted.height, 360)))
+    dlg.SetSize(size)
+
+    # GTK opens a window at its minimum whatever size it had before, so it gets it once more
+    def on_show(event):
+        if event.IsShown():
+            dlg.Unbind(wx.EVT_SHOW)
+            wx.CallAfter(lambda: dlg and dlg.SetSize(size))
+        event.Skip()
+
+    dlg.Bind(wx.EVT_SHOW, on_show)
     dlg.CentreOnScreen()
     return dlg, form
 

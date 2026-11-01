@@ -22,7 +22,8 @@ Setup is in [Installation](installation.md).
 
 ## The dialog
 
-The dialog has two tabs, and every field explains itself in a tooltip. It remembers its last values
+The dialog has two tabs, and every field explains itself in a tooltip. It can be resized: the
+fields grow with its width, and a tab scrolls when the dialog is lower than its fields. It remembers its last values
 in the plugin's `settings.json`; references, layer names and net files start empty every time,
 because they fit only one board. *Defaults* brings back the values below.
 
@@ -37,6 +38,7 @@ because they fit only one board. *Defaults* brings back the values below.
 | Geometry generations | 3 | Extra search rounds judged by the clearance check of the drawn tracks, not only by the topology. 0 is fastest; each round costs about one full routing pass and removes violations. |
 | Placements to try | 0 | Places the parts that are not locked or mechanical from the netlist this many times, routes each result and keeps the best (`--placements`). Each one costs a full route. The parts, their keepouts and the tracks arrive in one undo step. Locked tracks stay, parts keep clear of them and a part with locked copper on a pad stays. |
 | Keep improving until I accept the result | on | After the normal search the router keeps working on the result until you press *Accept current result*. Not together with pairs routed as one wide track. |
+| Via price while improving (mm of track) | 20 | With *Keep improving*: how much track a via is worth when the improvement judges its results (`--open-via-cost`). Lower gives more vias and shorter tracks, higher fewer vias and longer tracks. |
 | Preferred track width (mm) | 0 (off) | Tracks of the default net class push aside what can give way and grow up to this width where there is room, with a taper at every change of width. Other classes get a target of their own with a custom rule `track_width (opt ...)`, see [Wider tracks where there is room](concepts.md#wider-tracks-where-there-is-room). |
 | Let parts shift to open channels | on | The geometry generations may shift parts next to clearance problems and open connections (`--move-parts`), so at least one of them is needed; the routed tracks follow like rubber bands. A setting remembered from an earlier version stays as it was: tick it once. Finishing nets leaves the parts where they are. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay. The moved footprints arrive in the same undo step as the tracks, and the message box lists them. |
 | Parts that never move | | With the option above: references that stay in addition (`--fixed`). |
