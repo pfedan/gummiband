@@ -40,6 +40,8 @@ pub struct RunStats {
     pub layer_dirs: f64,
     /// Via pass of this run (see [`RouterConfig`]).
     pub via_pass: f64,
+    /// Rounds of negotiation of this run (see [`RouterConfig`], 0 = plain).
+    pub negotiate: usize,
     /// Generation of the evolutionary search (0 = initial portfolio).
     pub generation: usize,
     pub conns: usize,
@@ -300,6 +302,7 @@ fn lost_run(board: &Board, sub: &Substrate, cfg: RouterConfig, generation: usize
         via_cost: cfg.via_cost,
         layer_dirs: cfg.layer_dirs,
         via_pass: cfg.via_pass,
+        negotiate: cfg.negotiate,
         generation,
         conns: order.len(),
         routed: 0,
@@ -389,6 +392,7 @@ fn candidate(
         via_cost: cfg.via_cost,
         layer_dirs: cfg.layer_dirs,
         via_pass: cfg.via_pass,
+        negotiate: cfg.negotiate,
         generation,
         conns: r.conns.len(),
         routed,
@@ -748,7 +752,16 @@ fn place_and_route(
             continue;
         }
         let moved = board.with_offsets(&next);
-        let (sub, mut res) = route_search(&moved, sub_cfg, base, search);
+        // where the search took up a negotiation on its own, the rounds negotiate right away
+        let (sub, mut res) = if base.negotiate == 0 && best.1.stats.negotiate > 0 {
+            let cfg = RouterConfig {
+                negotiate: best.1.stats.negotiate,
+                ..base.clone()
+            };
+            search_fixed(&moved, sub_cfg, &cfg, search)
+        } else {
+            route_search(&moved, sub_cfg, base, search)
+        };
         res.offsets = next.clone();
         let sc = score(&moved, &res);
         eprintln!(
@@ -790,15 +803,28 @@ fn route_search(
     base: &RouterConfig,
     search: &SearchConfig,
 ) -> (Substrate, RouteResult) {
-    let negotiated = route_fixed(board, sub_cfg, base, search);
-    if base.negotiate == 0 || std::env::var("GB_NEG_ONLY").is_ok() || search.stopped() {
+    if base.negotiate == 0 {
+        return route_fixed(board, sub_cfg, base, search);
+    }
+    let negotiated = search_fixed(board, sub_cfg, base, search);
+    if std::env::var("GB_NEG_ONLY").is_ok() || search.stopped() {
         return negotiated;
     }
     let plain = RouterConfig {
         negotiate: 0,
         ..base.clone()
     };
-    let (sub, mut res) = route_fixed(board, sub_cfg, &plain, search);
+    let plain = search_fixed(board, sub_cfg, &plain, search);
+    better_search(board, negotiated, plain)
+}
+
+/// The better of a negotiated and a plain search on one placement: completion first, then the
+/// cost with the clearance violations of the finished copper; on a tie the plain one.
+fn better_search(
+    board: &Board,
+    negotiated: (Substrate, RouteResult),
+    plain: (Substrate, RouteResult),
+) -> (Substrate, RouteResult) {
     let key = |r: &RouteResult| {
         let v = check::check(board, &r.geometry);
         let shorts = v.iter().filter(|x| x.actual <= 0.0).count();
@@ -807,22 +833,65 @@ fn route_search(
             r.stats.cost() + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0,
         )
     };
-    let (a, b) = (key(&negotiated.1), key(&res));
+    let (a, b) = (key(&negotiated.1), key(&plain.1));
     eprintln!(
         "negotiated: {}/{} routed, cost {:.0}; plain: {}/{} routed, cost {:.0}",
-        a.0, negotiated.1.stats.conns, a.1, b.0, res.stats.conns, b.1
+        a.0, negotiated.1.stats.conns, a.1, b.0, plain.1.stats.conns, b.1
     );
     if a.0 > b.0 || (a.0 == b.0 && a.1 < b.1) {
         return negotiated;
     }
+    let (sub, mut res) = plain;
     res.portfolio.extend(negotiated.1.portfolio);
     (sub, res)
+}
+
+/// Rounds of the negotiation that [`route_fixed`] takes up on its own.
+pub const AUTO_NEGOTIATE: usize = 20;
+
+/// Whether a search with these results takes up a negotiation on its own: none was asked for,
+/// and it leaves connections open, at most 15 % of them. More than that means more connections
+/// than room on the layers (ULX3S leaves about a fifth open), which no price settles.
+/// `GB_AUTO_NEGOTIATE=0` switches it off.
+fn auto_negotiate(base: &RouterConfig, stats: &RunStats) -> bool {
+    let open = stats.conns - stats.routed;
+    base.negotiate == 0
+        && std::env::var("GB_AUTO_NEGOTIATE").map_or(true, |v| v != "0")
+        && open > 0
+        && open * 20 <= stats.conns * 3
+}
+
+/// One full search on a fixed placement, see `search_fixed`. Where it leaves a few connections
+/// open and no negotiation was asked for ([`auto_negotiate`]), a second search negotiates with
+/// [`AUTO_NEGOTIATE`] rounds and the better result counts, as with `--negotiate`. A search that
+/// completes the board, or leaves more open, stays as it is, and so does an open ended one: its
+/// open end has worked on what was open (also when `GB_OPEN_GENERATIONS` ends it, not a stop).
+pub fn route_fixed(
+    board: &Board,
+    sub_cfg: &SubstrateConfig,
+    base: &RouterConfig,
+    search: &SearchConfig,
+) -> (Substrate, RouteResult) {
+    let plain = search_fixed(board, sub_cfg, base, search);
+    if !auto_negotiate(base, &plain.1.stats) || search.open_end.is_some() {
+        return plain;
+    }
+    eprintln!(
+        "negotiation: the search leaves {} connections open, a second search negotiates",
+        plain.1.stats.conns - plain.1.stats.routed
+    );
+    let cfg = RouterConfig {
+        negotiate: AUTO_NEGOTIATE,
+        ..base.clone()
+    };
+    let negotiated = search_fixed(board, sub_cfg, &cfg, search);
+    better_search(board, negotiated, plain)
 }
 
 /// One full search on a fixed placement: build the substrate once, run a portfolio of router
 /// configurations in parallel, then improve the best routing order in generations of mutants
 /// (completion first, then vias, then length). The winner is relaxed into its final geometry.
-pub fn route_fixed(
+fn search_fixed(
     board: &Board,
     sub_cfg: &SubstrateConfig,
     base: &RouterConfig,
@@ -1590,6 +1659,25 @@ mod tests {
             min: pt(x, y),
             max: pt(x + w, y + h),
         }
+    }
+
+    /// The search negotiates on its own only where the plain one left a few connections open.
+    #[test]
+    fn the_search_negotiates_when_a_few_stay_open() {
+        let stats = |routed: usize| RunStats {
+            conns: 100,
+            routed,
+            ..Default::default()
+        };
+        let plain = RouterConfig::default();
+        assert!(!auto_negotiate(&plain, &stats(100)), "complete");
+        assert!(auto_negotiate(&plain, &stats(99)) && auto_negotiate(&plain, &stats(85)));
+        assert!(!auto_negotiate(&plain, &stats(84)), "more connections than room");
+        let asked = RouterConfig {
+            negotiate: 20,
+            ..Default::default()
+        };
+        assert!(!auto_negotiate(&asked, &stats(90)), "asked for already");
     }
 
     fn board() -> Board {

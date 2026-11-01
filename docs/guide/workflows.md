@@ -134,7 +134,7 @@ Effort knobs, from cheap to expensive:
 | shorter tracks, more vias | `--via-cost 1.5` |
 | tidier two layer boards, one direction per layer | `--layer-dirs 1` (0 switches the preference off) |
 | finer via placement in tight spots | `--via-pitch 0.25` |
-| the last connections on a dense board | `--negotiate 20` |
+| the last connections on a dense board | nothing: the search negotiates on its own when a few stay open; `--negotiate 20` does it from the start |
 
 The search is deterministic: the same board, options and `GB_EVO_SEED` give the same result on
 any machine and with any `--threads`; the thread count only changes the run time. Set a different

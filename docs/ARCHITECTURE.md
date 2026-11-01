@@ -140,11 +140,12 @@ each layer stays planar by construction.
 
 ### Negotiated routing
 
-With `--negotiate N` (off by default) the router does not reserve its space firmly at first, in
-the spirit of PathFinder (`Router::negotiate`). In the negotiation phase capacity and planarity
-are soft: the search may overfill an edge or cross a track of another net, and pays for it in mm
-of track. Cross lists and chords stay as they are, a route with a conflict is an ordinary route
-in the state, so the search, the via splits and the rip-up need no second data structure.
+With `--negotiate N` (by default only when needed, see below) the router does not reserve its
+space firmly at first, in the spirit of PathFinder (`Router::negotiate`). In the negotiation phase
+capacity and planarity are soft: the search may overfill an edge or cross a track of another net,
+and pays for it in mm of track. Cross lists and chords stay as they are, a route with a conflict
+is an ordinary route in the state, so the search, the via splits and the rip-up need no second
+data structure.
 
 - First pass: every connection takes its way in the plain order.
 - Then up to N rounds: the connections in a conflict (on an edge that does not pack, or crossing
@@ -170,6 +171,18 @@ in the state, so the search, the via splits and the rip-up need no second data s
 A negotiation is a second search next to the plain one (`route_search`), not a replacement: it
 completes the dense boards, but on a loose board a lucky order may leave the geometry more room,
 and the better result counts, completion first. So the option costs the time of both searches.
+
+Without the option the search negotiates on its own where it has to (`route_fixed`, since
+2026-11-01, `GB_AUTO_NEGOTIATE=0` switches it off): when the whole plain search, geometry
+generations included, leaves connections open, at most 15 % of them, a second search runs with 20
+rounds of negotiation, and the better result counts as above. Later placement rounds of a board
+whose best result came from it negotiate right away, without a plain search first. A search that
+completes the board does not negotiate, so such a board keeps its result byte for byte. That is
+why the decision waits for the geometry generations: they often find the last connection on their
+own, and a negotiation taken up after the order generations left Lichtschnitzel (seed 3)
+complete as well, but with 328 instead of 265 vias. More than 15 % open means more connections
+than room on the layers (ULX3S, whose original routes signals on In2), and no price settles that.
+An open ended run does not negotiate on its own: there the open end works on what is open.
 
 Vias that a ripped connection leaves behind stay in the mesh as phantom vertices, and the wraps of
 the rubber band must keep to their portals after a negotiation: its routes leave more slack in

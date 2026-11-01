@@ -122,8 +122,10 @@ enum Cmd {
         /// just outside them with two single tracks to the pads (breakout zones).
         #[arg(long)]
         no_breakouts: bool,
-        /// Experimental: rounds of negotiated routing before the rip-up passes (0 = off).
+        /// Rounds of negotiated routing from the start, in a second search next to the plain one.
         /// Connections may overfill edges and cross for a rising price, see docs/ARCHITECTURE.md.
+        /// With 0 the search negotiates on its own when the plain one leaves a few connections
+        /// open (GB_AUTO_NEGOTIATE=0 switches that off).
         #[arg(long, default_value_t = 0)]
         negotiate: usize,
         /// Generations of the evolutionary order search after the portfolio.

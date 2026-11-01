@@ -107,8 +107,9 @@ ROUTE_TABS: Tuple = (
                         "Factor on the via cost in the pass that routes connections with vias "
                         "again and keeps what has fewer vias. 0 = off.", 0, 50, 0.5),
             int_field("negotiate", "Negotiation rounds:",
-                      "Experimental: a second search in which connections compete for room at a "
-                      "rising price. 20 rounds work well and take about twice the time. 0 = off.",
+                      "A second search from the start in which connections compete for room at a "
+                      "rising price. 20 rounds work well and take about twice the time. With 0 "
+                      "the search negotiates on its own when it leaves a few connections open.",
                       0, 200),
             THREADS,
             Field("gpu", "Relax on the GPU (experimental, macOS)",
