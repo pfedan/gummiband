@@ -232,7 +232,7 @@ fn kicad_rot(p: Point, deg: f64) -> Point {
     p.rotate(-deg.to_radians())
 }
 
-fn glob_match(pat: &str, s: &str) -> bool {
+pub(crate) fn glob_match(pat: &str, s: &str) -> bool {
     fn rec(p: &[u8], s: &[u8]) -> bool {
         match (p.first(), s.first()) {
             (None, None) => true,

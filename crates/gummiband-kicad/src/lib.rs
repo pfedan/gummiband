@@ -1,5 +1,6 @@
 //! KiCad file support for Gummiband.
 
+pub mod create;
 pub mod dru;
 pub mod follow_write;
 pub mod octo_write;
