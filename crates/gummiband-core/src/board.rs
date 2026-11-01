@@ -167,8 +167,20 @@ pub struct Rules {
     pub hole_to_hole: f64,
     pub hole_clearance: f64,
     pub min_via_diameter: f64,
+    /// The narrowest track KiCad's DRC accepts anywhere: the larger of the project's
+    /// min_track_width and min_connection (0 without project rules).
+    #[serde(default)]
+    pub kicad_min_width: f64,
     /// Polygon approximation error for round shapes.
     pub max_error: f64,
+}
+
+impl Rules {
+    /// The narrowest a track may be anywhere ([`Rules::kicad_min_width`]; net class
+    /// exemptions do not reach it).
+    pub fn width_floor(&self) -> f64 {
+        self.kicad_min_width
+    }
 }
 
 impl Default for Rules {
@@ -180,6 +192,7 @@ impl Default for Rules {
             hole_to_hole: 0.25,
             hole_clearance: 0.2,
             min_via_diameter: 0.45,
+            kicad_min_width: 0.0,
             max_error: 0.005,
         }
     }
@@ -191,6 +204,44 @@ pub struct Plane {
     pub net: NetId,
     pub layer: LayerId,
     pub outline: Polygon,
+    /// Zone priority (KiCad fills a higher priority zone first).
+    #[serde(default)]
+    pub priority: i64,
+    /// Outlines of other nets' zones on the layer with a higher priority: KiCad fills them
+    /// first, so the plane has no copper there.
+    #[serde(default)]
+    pub cut: Vec<Polygon>,
+}
+
+impl Plane {
+    pub fn new(net: NetId, layer: LayerId, outline: Polygon) -> Plane {
+        Plane {
+            net,
+            layer,
+            outline,
+            priority: 0,
+            cut: Vec::new(),
+        }
+    }
+
+    /// Whether p lies in the copper of the plane: inside its outline and outside the zones of
+    /// other nets that KiCad fills first.
+    pub fn covers(&self, p: Point) -> bool {
+        self.outline.contains(p) && !self.cut.iter().any(|c| c.contains(p))
+    }
+
+    /// Distance from p to the nearest border of the plane copper (its outline or a cut).
+    pub fn edge_dist(&self, p: Point) -> f64 {
+        self.cut
+            .iter()
+            .map(|c| c.boundary_dist(p))
+            .fold(self.outline.boundary_dist(p), f64::min)
+    }
+
+    /// p in the plane copper with at least `margin` to its borders.
+    pub fn holds(&self, p: Point, margin: f64) -> bool {
+        self.covers(p) && self.edge_dist(p) >= margin
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -205,6 +256,10 @@ pub struct Board {
     pub rules: Rules,
     /// Courtyard bounding boxes by footprint reference.
     pub courtyards: std::collections::HashMap<String, Rect>,
+    /// Courtyard outlines by footprint reference, where the courtyard lines close into
+    /// polygons (an L or T shaped module courtyard is much smaller than its box).
+    #[serde(default)]
+    pub courtyard_shapes: std::collections::HashMap<String, Vec<Polygon>>,
     /// Track to track clearances of custom rules, above the net class clearance (a < b).
     pub pair_clearance: crate::index::FastMap<(NetId, NetId), f64>,
     /// Clearances of custom rules for copper of any kind, above the net class clearance (a < b).
@@ -363,6 +418,13 @@ impl Board {
                     min: r.min + d,
                     max: r.max + d,
                 };
+            }
+            if let Some(polys) = b.courtyard_shapes.get_mut(fp) {
+                for q in polys.iter_mut() {
+                    for p in q.pts.iter_mut() {
+                        *p = *p + d;
+                    }
+                }
             }
         }
         b
@@ -833,6 +895,69 @@ impl Board {
 
     /// True if p lies inside the board: inside an odd number of outline polygons (a board may
     /// consist of several pieces, cut-outs lie inside a piece, islands inside cut-outs).
+    /// Cuts every plane by the higher priority planes of other nets on its layer, which KiCad
+    /// fills first (see [`Plane::cut`]).
+    pub fn cut_planes(&mut self) {
+        let all = self.planes.clone();
+        for p in self.planes.iter_mut() {
+            p.cut = all
+                .iter()
+                .filter(|o| o.layer == p.layer && o.net != p.net && o.priority > p.priority)
+                .map(|o| o.outline.clone())
+                .collect();
+        }
+    }
+
+    /// Whether p lies in the courtyard of `part` grown by `grow`: by its outline where the
+    /// courtyard lines close into polygons, by its box otherwise.
+    pub fn in_courtyard(&self, part: &str, p: Point, grow: f64) -> bool {
+        match self.courtyard_shapes.get(part) {
+            Some(polys) if !polys.is_empty() => polys.iter().any(|q| q.dist_to_point(p) < grow.max(1e-9)),
+            _ => self.courtyards.get(part).is_some_and(|c| c.grow(grow).contains(p)),
+        }
+    }
+
+    /// The parts whose courtyard holds p (grown by `grow`), see [`Board::in_courtyard`].
+    pub fn courtyards_at(&self, p: Point, grow: f64) -> Vec<&str> {
+        self.courtyards
+            .iter()
+            .filter(|(r, c)| c.grow(grow).contains(p) && self.in_courtyard(r, p, grow))
+            .map(|(r, _)| r.as_str())
+            .collect()
+    }
+
+    /// Courtyard outlines of `part`: the closed polygons, or its box as one polygon.
+    pub fn courtyard_polys(&self, part: &str) -> Vec<Polygon> {
+        match self.courtyard_shapes.get(part) {
+            Some(polys) if !polys.is_empty() => polys.clone(),
+            _ => self
+                .courtyards
+                .get(part)
+                .map(|c| {
+                    vec![Polygon::new(vec![
+                        c.min,
+                        Point { x: c.max.x, y: c.min.y },
+                        c.max,
+                        Point { x: c.min.x, y: c.max.y },
+                    ])]
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Whether the courtyards of a and b overlap by more than `tol` (outlines, not boxes).
+    pub fn courtyards_overlap(&self, a: &str, b: &str, tol: f64) -> bool {
+        let (Some(ca), Some(cb)) = (self.courtyards.get(a), self.courtyards.get(b)) else {
+            return false;
+        };
+        if !ca.grow(-tol).overlaps(&cb.grow(-tol)) {
+            return false;
+        }
+        let pa: Vec<Polygon> = self.courtyard_polys(a).iter().map(|q| q.grown(-tol)).collect();
+        let pb = self.courtyard_polys(b);
+        pa.iter().any(|x| pb.iter().any(|y| x.dist_to_poly(y) <= 0.0))
+    }
+
     pub fn inside(&self, p: Point) -> bool {
         if self.outline.is_empty() {
             return true;

@@ -103,7 +103,7 @@ impl Default for PairConfig {
             all: false,
             room: None,
             angles45: false,
-            breakouts: true,
+            breakouts: false,
         }
     }
 }
@@ -157,12 +157,36 @@ fn breakout(b: &Board, p: usize, n: usize, toward: Point, wide: f64, carrier_clr
     let x = left_of(axis);
     // towards the other end of the pair first, else to the other side
     let first = if (toward - mid).dot(x) >= 0.0 { x } else { x * -1.0 };
+    // the wide track starts outside the part: between the balls of a BGA or the pad rows of a
+    // package it would find no way out past the pads
+    let mut part = crate::geom::Rect::empty();
+    for pin in [pp, pn] {
+        for q in b
+            .pins
+            .iter()
+            .filter(|q| !pin.footprint.is_empty() && q.footprint == pin.footprint)
+        {
+            for &o in &q.obstacles {
+                for v in b.obstacles[o].shape.to_polygon(b.rules.max_error).pts {
+                    part.add(v);
+                }
+            }
+        }
+    }
     [first, first * -1.0]
         .into_iter()
-        .find_map(|x| breakout_towards(b, p, n, x, wide, carrier_clr))
+        .find_map(|x| breakout_towards(b, p, n, x, &part, wide, carrier_clr))
 }
 
-fn breakout_towards(b: &Board, p: usize, n: usize, x: Point, wide: f64, carrier_clr: f64) -> Option<(Point, Obstacle)> {
+fn breakout_towards(
+    b: &Board,
+    p: usize,
+    n: usize,
+    x: Point,
+    part: &crate::geom::Rect,
+    wide: f64,
+    carrier_clr: f64,
+) -> Option<(Point, Obstacle)> {
     let (pp, pn) = (&b.pins[p], &b.pins[n]);
     let mid = (pp.pos + pn.pos) * 0.5;
     let reach = [pp, pn]
@@ -175,6 +199,10 @@ fn breakout_towards(b: &Board, p: usize, n: usize, x: Point, wide: f64, carrier_
     let mut d = reach + r + carrier_clr + 0.02;
     while d <= reach + 3.0 {
         let c = mid + x * d;
+        if part.contains(c) {
+            d += 0.1;
+            continue;
+        }
         let disc: Vec<Point> = (0..16)
             .map(|i| {
                 let a = i as f64 * std::f64::consts::PI / 8.0;
@@ -922,16 +950,26 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
             let mut exit_b = exit_of(real, eb, side_b * -1.0);
             let (mut left_p, mut left_p_end) = (exit_a.p_left, !exit_b.p_left);
             // at a breakout the band may leave the start point in any direction: the tracks
-            // take the sides that do not cross
+            // take the sides that do not cross, and where either side would do, the one that
+            // spares the pair a change of sides
+            let (mut free_a, mut free_b) = (false, false);
             if let Some(c) = ea.out {
                 let (w, g, _) = real.pair_shape(pair.p, pair.n, legs[0].layer);
                 let s = (w + g) / 2.0;
-                (exit_a, left_p) = breakout_exit(real, ea, c, c + left_of(u0) * s, c - left_of(u0) * s, u0);
+                (exit_a, left_p, free_a) = breakout_exit(real, ea, c, c + left_of(u0) * s, c - left_of(u0) * s, u0);
             }
             if let Some(c) = eb.out {
                 let (w, g, _) = real.pair_shape(pair.p, pair.n, last.layer);
                 let s = (w + g) / 2.0;
-                (exit_b, left_p_end) = breakout_exit(real, eb, c, c + left_of(u1) * s, c - left_of(u1) * s, u1 * -1.0);
+                (exit_b, left_p_end, free_b) =
+                    breakout_exit(real, eb, c, c + left_of(u1) * s, c - left_of(u1) * s, u1 * -1.0);
+            }
+            if left_p != left_p_end {
+                if free_a {
+                    left_p = left_p_end;
+                } else if free_b {
+                    left_p_end = left_p;
+                }
             }
             let twisted = left_p != left_p_end;
             let via_joints: Vec<usize> = (0..joints.len()).filter(|&j| joints[j].x.is_finite()).collect();
@@ -1610,8 +1648,9 @@ fn exit_along(b: &Board, e: PairEnd, x: Point) -> Exit {
 /// direction `v`. The tracks go straight out of the pads and then over to their curves, which
 /// begin some way along the band; which of them takes the left track of the band (`left` and
 /// `right` are where the two tracks start) is what keeps the two links from crossing, else the
-/// shorter. Returns the exit and whether P takes `left`.
-fn breakout_exit(b: &Board, e: PairEnd, c: Point, left: Point, right: Point, v: Point) -> (Exit, bool) {
+/// shorter. Returns the exit, whether P takes `left`, and whether the other choice would not
+/// cross either.
+fn breakout_exit(b: &Board, e: PairEnd, c: Point, left: Point, right: Point, v: Point) -> (Exit, bool, bool) {
     let (left, right) = (left + v, right + v);
     let (pp, pn) = (b.pins[e.p].pos, b.pins[e.n].pos);
     let ex = exit_along(b, e, (c - (pp + pn) * 0.5).norm());
@@ -1625,12 +1664,13 @@ fn breakout_exit(b: &Board, e: PairEnd, c: Point, left: Point, right: Point, v: 
         let (tp, tn) = if p_left { (left, right) } else { (right, left) };
         (pp + ex.x * ex.ext).dist(tp) + (pn + ex.x * ex.ext).dist(tn)
     };
-    let p_left = match (crossed(true), crossed(false)) {
+    let (a, b) = (crossed(true), crossed(false));
+    let p_left = match (a, b) {
         (false, true) => true,
         (true, false) => false,
         _ => length(true) <= length(false),
     };
-    (ex, p_left)
+    (ex, p_left, a == b)
 }
 
 /// Arc length to walk along a band of direction u until both tracks are past the tips of the

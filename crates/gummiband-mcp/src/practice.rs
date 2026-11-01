@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use gummiband_core::board::{Board, LayerId, NetId, ObstacleKind};
-use gummiband_core::geom::{Point, Shape};
+use gummiband_core::geom::{Point, Polygon, Shape};
 use gummiband_kicad::power::{self, ZoneFill};
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
 use rmcp::schemars::{self, JsonSchema};
@@ -77,7 +77,7 @@ pub struct PathIn {
     /// Source terminals: pads as "REF.PAD" ("R110.*" = every pad of R110 on the net); pins in
     /// parallel join with "+" ("J1.A4+J1.B9"). Several terminals share the current evenly.
     pub from: Option<Vec<String>>,
-    /// Sink pads, same syntax; any of them may take the current.
+    /// Sink pads, same syntax ("+" allowed); any of them may take the current.
     pub to: Option<Vec<String>>,
     /// A name for the table, optional.
     pub name: Option<String>,
@@ -870,8 +870,11 @@ pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
                     src.push(g);
                 }
                 let mut dst = Vec::new();
+                // a sink is any of its pads: "+" joins them like separate entries
                 for s in t {
-                    dst.extend(pins_of(b, net, s)?);
+                    for part in s.split('+') {
+                        dst.extend(pins_of(b, net, part.trim())?);
+                    }
                 }
                 Some((src, dst))
             }
@@ -911,6 +914,14 @@ pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
             }
             if src.len() > 1 {
                 pnotes.push(format!("{} source terminals, {share:.2} A each", src.len()));
+            }
+            if let Some(w) = nk.cut_window {
+                pnotes.push(format!(
+                    "too much copper for the cross-section on the whole board: measured in the window x {:.1}..{:.1}, y {:.1}..{:.1} around the terminals, copper outside left out (on the safe side)",
+                    w.min.x, w.max.x, w.min.y, w.max.y
+                ));
+            } else if nk.cut_mm.is_none() {
+                pnotes.push("cross-section not measured (too much copper even near the terminals): the band width is all there is".into());
             }
             let need = power::ipc_width(share, power::copper_mm(b, ref_layer), true, dt);
             changes_layer = nk.changes_layer;
@@ -1131,31 +1142,74 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
                 .iter()
                 .flat_map(|f| to.iter().map(move |t| (center(f), center(t))))
                 .collect();
-            let Some(pour) = power::pour_outline(b, net, layer, &terms, &spine, margin) else {
-                warnings.push(format!("{label}: no room for a pour on {}", layer_name(b, layer)));
-                continue;
+            let whole = power::pour_outline(b, net, layer, &terms, &spine, margin);
+            // terminals in parallel that one pour cannot join (the VBUS pin groups of a USB-C
+            // receptacle with the signal pins between them): one pour from each to the sinks
+            let split = from.len() > 1 && whole.as_ref().is_none_or(|w| !w.lost.is_empty());
+            let pieces: Vec<(Vec<Vec<usize>>, Option<power::Pour>)> = if split {
+                from.iter()
+                    .map(|f| {
+                        let grp: Vec<usize> = f.iter().chain(to.iter().flatten()).copied().collect();
+                        let terms = pad_polys(b, &grp, layer);
+                        let spine: Vec<(Point, Point)> = to.iter().map(|t| (center(f), center(t))).collect();
+                        (
+                            vec![f.clone()],
+                            power::pour_outline(b, net, layer, &terms, &spine, margin),
+                        )
+                    })
+                    .collect()
+            } else {
+                vec![(from.clone(), whole)]
             };
-            if !pour.lost.is_empty() {
+            if split
+                && pieces
+                    .iter()
+                    .filter(|(_, x)| x.as_ref().is_some_and(|x| x.lost.is_empty()))
+                    .count()
+                    > 0
+            {
                 warnings.push(format!(
-                    "{label}: the pour does not reach every pad (other copper in between): route the rest"
+                    "{label}: the from terminals do not fit under one pour on {}: one pour from each of them; join them elsewhere if they must share the current (locked copper on another layer)",
+                    layer_name(b, layer)
                 ));
             }
-            let name = format!("{}power {nname}", gummiband_kicad::read::GB_ZONE_PREFIX);
-            pours.push(PourOut {
-                name: name.clone(),
-                net: nname.clone(),
-                kind: "pour".into(),
-                layer: layer_name(b, layer),
-                terminals: from.iter().chain(to.iter()).map(|g| names(g)).collect(),
-                amps,
-                required_width_mm: r3(need),
-                area_mm2: r3(area(&pour.outline)),
-                vias_needed: 0,
-                vias_added: 0,
-                cut_by: pour.cut_by.clone(),
-                outline: pour.outline.iter().map(|x| [r3(x.x), r3(x.y)]).collect(),
-            });
-            zones.push((net, layer, name, pour.outline));
+            for (fg, pour) in pieces {
+                let tname = fg.iter().map(|g| names(g)).collect::<Vec<_>>().join(", ");
+                let Some(pour) = pour else {
+                    warnings.push(format!(
+                        "{label}: no room for a pour on {}{}",
+                        layer_name(b, layer),
+                        if split { format!(" from {tname}") } else { String::new() }
+                    ));
+                    continue;
+                };
+                if !pour.lost.is_empty() {
+                    warnings.push(format!(
+                        "{label}: the pour{} does not reach every pad (other copper in between): route the rest",
+                        if split { format!(" from {tname}") } else { String::new() }
+                    ));
+                }
+                let name = if split {
+                    format!("{}power {nname} {tname}", gummiband_kicad::read::GB_ZONE_PREFIX)
+                } else {
+                    format!("{}power {nname}", gummiband_kicad::read::GB_ZONE_PREFIX)
+                };
+                pours.push(PourOut {
+                    name: name.clone(),
+                    net: nname.clone(),
+                    kind: "pour".into(),
+                    layer: layer_name(b, layer),
+                    terminals: fg.iter().chain(to.iter()).map(|g| names(g)).collect(),
+                    amps: if split { amps / from.len() as f64 } else { amps },
+                    required_width_mm: r3(need),
+                    area_mm2: r3(area(&pour.outline)),
+                    vias_needed: 0,
+                    vias_added: 0,
+                    cut_by: pour.cut_by.clone(),
+                    outline: pour.outline.iter().map(|x| [r3(x.x), r3(x.y)]).collect(),
+                });
+                zones.push((net, layer, name, pour.outline));
+            }
             continue;
         }
         // a plane net: vias from each terminal into the plane
@@ -1190,7 +1244,9 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
                 continue;
             }
             let parts: Vec<String> = g.iter().map(|&x| b.pins[x].footprint.clone()).collect();
-            let room = power::ViaRoom::new(b, &zf, net, dia, drill, 0.15, true).allow_in(parts);
+            let room = power::ViaRoom::new(b, &zf, net, dia, drill, 0.15, true)
+                .allow_in(parts)
+                .into_plane();
             // vias of the net that already touch the pad count
             let have: Vec<Point> = b
                 .obstacles
@@ -1221,8 +1277,24 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
                 spots.retain(|s| !lost.contains(s) || pad.iter().any(|x| x.dist_to_point(*s) <= dia / 2.0));
             }
             if have.len() + spots.len() < count {
+                // would the vias fit if the plane reached there? then the zone is the problem
+                let loose = power::ViaRoom::new(b, &zf, net, dia, drill, 0.15, true)
+                    .allow_in(g.iter().map(|&x| b.pins[x].footprint.clone()).collect());
+                let beside = power::via_field(&loose, &pad, missing, &placed_all)
+                    .into_iter()
+                    .filter(|s| !room.reaches_plane(*s))
+                    .count();
+                let hint = if beside > 0 {
+                    let planes: Vec<String> = b.nets[net as usize].planes.iter().map(|l| layer_name(b, l)).collect();
+                    format!(
+                        ": {beside} more fit beside the pad where the {nname} plane ({}) has no copper; extend its zone there or lower the priority of the zone that covers it",
+                        planes.join(", ")
+                    )
+                } else {
+                    ": add more by hand or use a larger drill".to_string()
+                };
                 warnings.push(format!(
-                    "{label}: room for {} of {count} vias at {}: add more by hand or use a larger drill",
+                    "{label}: room for {} of {count} vias at {}{hint}",
                     have.len() + spots.len(),
                     names(g)
                 ));
@@ -1262,11 +1334,30 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
     } else {
         write::add_locked(kb, &vias)
     };
+    // overlapping zones on one layer must not share a priority (KiCad: zones_intersect), e.g.
+    // the via field pours of two FETs side by side: the later one goes one priority up
+    let mut taken: Vec<(LayerId, u32, Polygon)> = zf
+        .iter()
+        .flat_map(|z| {
+            z.polys
+                .iter()
+                .map(move |q| (z.layer, z.priority.max(0) as u32, q.clone()))
+        })
+        .collect();
     for (i, (net, layer, name, outline)) in zones.iter().enumerate() {
+        let poly = Polygon::new(outline.clone());
+        let mut priority = prio;
+        while taken
+            .iter()
+            .any(|(l, p, q)| *l == *layer && *p == priority && q.dist_to_poly(&poly) <= 0.0)
+        {
+            priority += 1;
+        }
+        taken.push((*layer, priority, poly));
         let spec = write::ZoneSpec {
             net: *net,
             layer: *layer,
-            priority: prio,
+            priority,
             name,
             connect: write::PadConnect::Solid,
             spoke: write::DEFAULT_SPOKE,

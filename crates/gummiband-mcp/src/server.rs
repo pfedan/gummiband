@@ -23,7 +23,7 @@ use crate::external;
 use crate::practice;
 
 const INSTRUCTIONS: &str = "Gummiband is a topological (any-angle, rubber band) autorouter for \
-KiCad boards. Typical loop: load_board (gives a board id) -> list_nets -> optionally \
+KiCad boards. From a schematic only: create_board turns a KiCad netlist into a board (footprints, nets, outline, stackup, net classes). Typical loop: load_board (gives a board id) -> list_nets -> optionally \
 set_net_options (priority: lower routes first; skip: leave a net unrouted) -> route (writes a \
 routed .kicad_pcb and returns stats, unrouted connections and clearance violations) -> drc on \
 the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board coordinates) to \
@@ -196,6 +196,147 @@ fn is_plane_net(b: &Board, net: usize) -> bool {
 }
 
 // --------------------------------------------------------------------------- parameters
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HolesIn {
+    /// Drill diameter in mm (default 3.2, for M3).
+    pub diameter: Option<f64>,
+    /// Distance of each hole centre from the two edges of its corner in mm (default 4).
+    pub inset: Option<f64>,
+    /// Library footprint instead of a plain non-plated hole, e.g.
+    /// "MountingHole:MountingHole_3.2mm_M3_Pad_Via".
+    pub footprint: Option<String>,
+    /// Net for the pads of a plated hole footprint, e.g. "GND".
+    pub net: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NetClassIn {
+    pub name: String,
+    /// Clearance in mm (default: that of Default, 0.2).
+    pub clearance: Option<f64>,
+    /// Track width in mm (default: that of Default, 0.2).
+    pub track_width: Option<f64>,
+    /// Via pad diameter in mm (default: that of Default, 0.6).
+    pub via_diameter: Option<f64>,
+    /// Via drill in mm (default: that of Default, 0.3).
+    pub via_drill: Option<f64>,
+    pub diff_pair_width: Option<f64>,
+    pub diff_pair_gap: Option<f64>,
+    /// KiCad net class priority, lower wins when several patterns match (default: the order
+    /// given, from 0). Default always has the lowest.
+    pub priority: Option<i32>,
+    /// Net name patterns with * and ?, e.g. "+5V*", "/Power/VBUS_*".
+    #[serde(default)]
+    pub patterns: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateBoardIn {
+    /// KiCad netlist in the s-expression format (Eeschema: File > Export > Netlist > KiCad,
+    /// or `kicad-cli sch export netlist`).
+    pub netlist: String,
+    /// The .kicad_pcb to write; the .kicad_pro next to it is written or, if it exists (the
+    /// schematic's project), merged.
+    pub output: String,
+    /// Replace an existing output file (default false).
+    pub overwrite: Option<bool>,
+    /// Board outline in mm (a rectangle).
+    pub width: f64,
+    pub height: f64,
+    /// Top left corner of the outline in mm (default 100, 100).
+    pub x0: Option<f64>,
+    pub y0: Option<f64>,
+    /// Corner radius of the outline in mm (default 0).
+    pub corner_radius: Option<f64>,
+    /// Copper layers (default 2; 4 gives F.Cu, In1.Cu, In2.Cu, B.Cu; any even count to 32).
+    pub layers: Option<usize>,
+    /// Inner layers of KiCad type "power", e.g. ["In1.Cu", "In2.Cu"]: Gummiband treats them as
+    /// planes (not routed). Default: all signal.
+    #[serde(default)]
+    pub plane_layers: Vec<String>,
+    /// Board thickness in mm (default 1.6), split over copper, prepreg and core.
+    pub thickness: Option<f64>,
+    /// Copper weight in oz per layer from F.Cu to B.Cu, or one value for all (default 1 oz =
+    /// 0.035 mm).
+    #[serde(default)]
+    pub copper_oz: Vec<f64>,
+    /// Prepreg thickness in mm between the outer and the next inner layer on boards with 4 or
+    /// more layers (default 0.21); the cores take the rest.
+    pub prepreg: Option<f64>,
+    /// Four mounting holes at the corners, locked.
+    pub mounting_holes: Option<HolesIn>,
+    /// Net classes with their net name patterns, written to the .kicad_pro. A class named
+    /// Default sets the defaults.
+    #[serde(default)]
+    pub net_classes: Vec<NetClassIn>,
+    /// Design rules for the .kicad_pro (board.design_settings.rules), e.g.
+    /// {"min_clearance": 0.127, "min_copper_edge_clearance": 0.3}.
+    #[serde(default)]
+    pub rules: BTreeMap<String, f64>,
+    /// Footprint libraries: .pretty directories or directories that contain them. Searched
+    /// first, then the project fp-lib-table (${KIPRJMOD}), KICAD10_FOOTPRINT_DIR,
+    /// KICAD9_FOOTPRINT_DIR, KICAD_FOOTPRINT_DIR, the global fp-lib-table and the usual
+    /// install places.
+    #[serde(default)]
+    pub footprint_dirs: Vec<String>,
+    /// Netlist pins whose pad has another number, by reference: {"J1": {"S1": "SH"}} gives
+    /// the pads SH of J1 the net of its symbol pin S1. The warnings suggest entries.
+    #[serde(default)]
+    pub pin_aliases: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MissingFootprintOut {
+    pub reference: String,
+    pub footprint: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct UnmatchedOut {
+    pub reference: String,
+    pub footprint: String,
+    /// Pad numbers without a netlist pin: they stay without a net.
+    pub pads: Vec<String>,
+    /// Netlist pins without a pad, "pin (net)": the net misses that connection.
+    pub pins: Vec<String>,
+    /// The pin_aliases entry to pass if the one pin left is the one pad left.
+    pub suggested_alias: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CreateBoardOut {
+    /// Id of the new board in this session (already loaded).
+    pub board: String,
+    pub path: String,
+    pub project: String,
+    /// The .kicad_pro existed (the schematic's project) and was merged.
+    pub project_merged: bool,
+    /// File format version: 20241229 (KiCad 9) or, with KiCad 10 footprint libraries, 20260206.
+    pub version: u64,
+    /// Footprints from the netlist on the board, plus mounting holes.
+    pub footprints: usize,
+    pub mounting_holes: usize,
+    pub nets: usize,
+    /// Numbered pads, and those with a net.
+    pub pads: usize,
+    pub pads_with_net: usize,
+    /// Parts left off the board: their footprint was not found.
+    pub missing_footprints: Vec<MissingFootprintOut>,
+    /// Parts whose pad numbers and netlist pins do not all match.
+    pub unmatched: Vec<UnmatchedOut>,
+    /// Library nickname -> directory read.
+    pub libraries: BTreeMap<String, String>,
+    /// Symbols marked "exclude from board", not placed.
+    pub excluded: Vec<String>,
+    /// Parts that did not fit in rows inside the outline: they sit in rows below the board
+    /// (place_parts with scope "outside" takes them in).
+    pub outside: Vec<String>,
+    /// Gap between the parts in the rows, mm.
+    pub grid_gap: f64,
+    pub warnings: Vec<String>,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoadBoardIn {
@@ -419,8 +560,8 @@ pub struct RouteIn {
     /// With pairs: couple every pair recognised by name (default false: only pairs with a
     /// `diff_pair_gap` rule or a net class of their own).
     pub pair_all: Option<bool>,
-    /// With pairs: the wide track ends just outside the pads, two single tracks connect them
-    /// (default true; false: the wide track ends at the pads).
+    /// With pairs, experimental: the wide track ends just outside the pads, two single tracks
+    /// connect them (default false).
     pub pair_breakouts: Option<bool>,
     /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
     pub layer_dirs: Option<f64>,
@@ -917,6 +1058,144 @@ impl Gummiband {
         }
     }
 
+    fn create(&self, p: CreateBoardIn) -> Result<(String, CreateBoardOut)> {
+        use gummiband_kicad::create::{ClassSpec, CreateOptions, HoleSpec, create_board_files};
+        let output = {
+            let o = PathBuf::from(&p.output);
+            if o.is_absolute() {
+                o
+            } else {
+                std::env::current_dir().map(|d| d.join(&o)).unwrap_or(o)
+            }
+        };
+        let d = CreateOptions::default();
+        let opts = CreateOptions {
+            width: p.width,
+            height: p.height,
+            x0: p.x0.unwrap_or(d.x0),
+            y0: p.y0.unwrap_or(d.y0),
+            corner_radius: p.corner_radius.unwrap_or(0.0),
+            layers: p.layers.unwrap_or(2),
+            plane_layers: p.plane_layers,
+            thickness: p.thickness.unwrap_or(d.thickness),
+            copper_oz: if p.copper_oz.is_empty() {
+                d.copper_oz
+            } else {
+                p.copper_oz
+            },
+            prepreg: p.prepreg.unwrap_or(d.prepreg),
+            mounting_holes: p.mounting_holes.map(|h| HoleSpec {
+                diameter: h.diameter.unwrap_or(3.2),
+                inset: h.inset.unwrap_or(4.0),
+                footprint: h.footprint,
+                net: h.net,
+            }),
+            net_classes: p
+                .net_classes
+                .into_iter()
+                .map(|c| ClassSpec {
+                    name: c.name,
+                    clearance: c.clearance,
+                    track_width: c.track_width,
+                    via_diameter: c.via_diameter,
+                    via_drill: c.via_drill,
+                    diff_pair_width: c.diff_pair_width,
+                    diff_pair_gap: c.diff_pair_gap,
+                    priority: c.priority,
+                    patterns: c.patterns,
+                })
+                .collect(),
+            rules: p.rules,
+            footprint_dirs: p.footprint_dirs.iter().map(|d| abs_path(d)).collect(),
+            pin_aliases: p.pin_aliases,
+            system_libraries: true,
+        };
+        let rep = create_board_files(&abs_path(&p.netlist), &output, &opts, p.overwrite.unwrap_or(false))?;
+        let (_, loaded) = self.load(LoadBoardIn {
+            path: rep.pcb_path.display().to_string(),
+            keep_locked: None,
+        })?;
+        let out = CreateBoardOut {
+            board: loaded.board.clone(),
+            path: loaded.path.clone(),
+            project: rep.pro_path.display().to_string(),
+            project_merged: rep.pro_merged,
+            version: rep.version,
+            footprints: rep.footprints + rep.holes,
+            mounting_holes: rep.holes,
+            nets: rep.nets,
+            pads: rep.pads,
+            pads_with_net: rep.pads_with_net,
+            missing_footprints: rep
+                .missing_footprints
+                .iter()
+                .map(|m| MissingFootprintOut {
+                    reference: m.reference.clone(),
+                    footprint: m.footprint.clone(),
+                    reason: m.reason.clone(),
+                })
+                .collect(),
+            unmatched: rep
+                .unmatched
+                .iter()
+                .map(|u| UnmatchedOut {
+                    reference: u.reference.clone(),
+                    footprint: u.footprint.clone(),
+                    pads: u.pads.clone(),
+                    pins: u.pins.iter().map(|(p, n)| format!("{p} ({n})")).collect(),
+                    suggested_alias: u.suggested_alias.as_ref().map(|(pin, pad)| {
+                        let mut m = serde_json::Map::new();
+                        m.insert(pin.clone(), serde_json::Value::from(pad.clone()));
+                        let mut r = serde_json::Map::new();
+                        r.insert(u.reference.clone(), serde_json::Value::Object(m));
+                        serde_json::Value::Object(r)
+                    }),
+                })
+                .collect(),
+            libraries: rep.libraries.clone(),
+            excluded: rep.excluded.clone(),
+            outside: rep.overflow.clone(),
+            grid_gap: rep.grid_gap,
+            warnings: rep.warnings.clone(),
+        };
+        let summary = format!(
+            "Created {} as board {}: {} x {} mm, {} copper layers, {} footprints ({} mounting holes), {} nets, {} of {} pads with a net{}{}. {}",
+            rep.pcb_path.file_name().and_then(|s| s.to_str()).unwrap_or(""),
+            out.board,
+            r3(p.width),
+            r3(p.height),
+            loaded.layers.len(),
+            out.footprints,
+            out.mounting_holes,
+            out.nets,
+            out.pads_with_net,
+            out.pads,
+            if out.missing_footprints.is_empty() {
+                String::new()
+            } else {
+                format!(", {} footprints missing", out.missing_footprints.len())
+            },
+            if out.unmatched.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", {} parts with unmatched pads or pins (see warnings)",
+                    out.unmatched.len()
+                )
+            },
+            if out.outside.is_empty() {
+                "Parts sit in rows inside the outline, unlocked: place them with move_part / place_parts.".to_string()
+            } else {
+                format!(
+                    "{} parts sit in rows inside the outline, {} did not fit and sit below the board; all unlocked: place them with move_part / place_parts.",
+                    rep.footprints - out.outside.len(),
+                    out.outside.len()
+                )
+            }
+        );
+        Ok((summary, out))
+    }
+
     fn load(&self, p: LoadBoardIn) -> Result<(String, LoadBoardOut)> {
         let path = abs_path(&p.path);
         let keep_locked = p.keep_locked.unwrap_or(false);
@@ -1341,14 +1620,14 @@ impl Gummiband {
             let c = c.grow(-0.05);
             let mut hits: Vec<String> = b
                 .courtyards
-                .iter()
-                .filter(|(r, o)| **r != p.reference && c.overlaps(o))
-                .map(|(r, _)| r.clone())
+                .keys()
+                .filter(|r| **r != p.reference && b.courtyards_overlap(&p.reference, r, 0.05))
+                .cloned()
                 .collect();
             hits.sort();
             let mut w: Vec<String> = hits
                 .into_iter()
-                .map(|r| format!("courtyard box of {} overlaps {r}", p.reference))
+                .map(|r| format!("courtyard of {} overlaps {r}", p.reference))
                 .collect();
             let bb = b.bbox();
             if c.min.x < bb.min.x || c.min.y < bb.min.y || c.max.x > bb.max.x || c.max.y > bb.max.y {
@@ -1690,7 +1969,7 @@ fn route_blocking(
                 all: p.pair_all.unwrap_or(false),
                 room: tune.then(|| tune_cfg.clone()),
                 angles45: angles_45,
-                breakouts: p.pair_breakouts.unwrap_or(true),
+                breakouts: p.pair_breakouts.unwrap_or(false),
             };
             gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, &search_cfg, &cfg)
         } else {
@@ -2235,6 +2514,19 @@ impl Gummiband {
     }
 
     #[tool(
+        description = "Create a board from a KiCad netlist without KiCad: footprints from the KiCad footprint libraries with the nets on their pads (by pin number), symbol fields (LCSC, ...), DNP flags and sheet links; a rectangular outline (optional corner radius), 2 or 4 (or more) copper layers with stackup, optional inner power planes, optional mounting holes at the corners, and the .kicad_pro with design rules and net classes with patterns. Parts sit in rows inside the outline, unlocked, for move_part / place_parts. Pads without a netlist pin and pins without a pad are reported in warnings, with the pin_aliases entry to pass when it is clear. The new board is loaded; use the returned id.",
+        output_schema = schema_for_output::<CreateBoardOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn create_board(&self, Parameters(p): Parameters<CreateBoardIn>) -> Result<CallToolResult, ErrorData> {
+        let me = self.clone();
+        match blocking(move || me.create(p)).await {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
         description = "Load a KiCad .kicad_pcb (with its .kicad_pro and .kicad_dru) into the session. Returns a board id for the other tools, the copper layers, outline size, pin/net/connection counts, net classes and custom rule count. Loading the same file again re-reads it and keeps its id and net options.",
         output_schema = schema_for_output::<LoadBoardOut>(),
         annotations(read_only_hint = true, open_world_hint = false)
@@ -2297,7 +2589,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Move a part to a new position (and rotation) in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. Without rotation the tracks around it follow like rubber bands (follow: false switches that off): its own tracks stretch, other nets give way within their clearances, and the part stops short where nothing can give way any more (a warning says where). `warnings` also names courtyard boxes it now overlaps (boxes only: drc has the exact answer).",
+        description = "Move a part to a new position (and rotation) in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. Without rotation the tracks around it follow like rubber bands (follow: false switches that off): its own tracks stretch, other nets give way within their clearances, and the part stops short where nothing can give way any more (a warning says where). `warnings` also names courtyards it now overlaps (by their outlines; drc has the exact answer).",
         output_schema = schema_for_output::<AddLockedOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
