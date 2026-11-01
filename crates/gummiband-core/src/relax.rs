@@ -666,15 +666,15 @@ pub fn relax_while(
     let routing = board.routing_layers();
     let drills: Vec<f64> = geo.vias.iter().map(|v| v.drill).collect();
     // the planes each via reaches, and how near to their border it may come
-    let via_planes: Vec<Vec<(&crate::geom::Polygon, f64)>> = geo
+    let via_planes: Vec<Vec<(&crate::board::Plane, f64)>> = geo
         .vias
         .iter()
         .map(|v| {
             board
                 .planes
                 .iter()
-                .filter(|p| cfg.via_edge && p.net == v.net && p.outline.contains(v.at))
-                .map(|p| (&p.outline, nearest_on_poly(&p.outline, v.at).0.min(v.diameter / 2.0)))
+                .filter(|p| cfg.via_edge && p.net == v.net && p.covers(v.at))
+                .map(|p| (p, p.edge_dist(v.at).min(v.diameter / 2.0)))
                 .collect()
         })
         .collect();
@@ -1033,8 +1033,8 @@ pub fn relax_while(
                     }
                 };
                 let to = vc + mv * if on_gpu_now { via_gain } else { 1.0 };
-                let stays =
-                    |&(o, floor): &(&crate::geom::Polygon, f64)| o.contains(to) && nearest_on_poly(o, to).0 >= floor;
+                // the plane copper, cut by the higher zones of other nets
+                let stays = |&(pl, floor): &(&crate::board::Plane, f64)| pl.holds(to, floor);
                 if via_planes[vi].is_empty() || via_planes[vi].iter().any(stays) {
                     to
                 } else {

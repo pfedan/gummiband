@@ -79,6 +79,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
+| `create_board` | `netlist`, `output`, `width`, `height`, `x0?`, `y0?`, `corner_radius?`, `layers?`, `plane_layers?`, `thickness?`, `copper_oz?`, `prepreg?`, `mounting_holes? {diameter?, inset?, footprint?, net?}`, `net_classes? [{name, clearance?, track_width?, via_diameter?, via_drill?, diff_pair_width?, diff_pair_gap?, priority?, patterns}]`, `rules?`, `footprint_dirs?`, `pin_aliases?`, `overwrite?` | id of the new board (already loaded), paths of the `.kicad_pcb` and `.kicad_pro`, file version, footprint, hole, net and pad counts, pads with a net, missing footprints, parts whose pads and pins do not match (with the `pin_aliases` entry to pass), libraries read, parts that did not fit inside the outline, `warnings` |
 | `load_board` | `path`, `keep_locked?` | board id, layers (plane flag), outline box and size, pins, nets, routable nets, connections, planes, net classes (priority, width, clearance, via), custom rule count, custom clearance net pairs, kept net options, recognised differential pairs |
 | `list_nets` | `board`, `filter?`, `include_single?` | nets with class, pin count, plane flag, effective priority, skip flag |
 | `board_patterns` | `board` | local patterns of the board: pin rows (part, pins in order, pitch, the side tracks leave to), pad grids, decoupling capacitors with their IC pin, pins of a plane net that can share a fan-out via, buses between two parts; a summary line per kind |
@@ -96,6 +97,65 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `ground_pour` | `path`, `net?`, `layers?`, `pitch?`, `edge_pitch?`, `edge_inset?`, `avoid_courtyards?`, `via_diameter?`, `via_drill?`, `priority?`, `pad_connection?`, `thermal_spoke_width?`, `output?` | id and path of `<input>.gnd.kicad_pcb` with ground zones on the outer layers and locked stitching vias, `warnings` |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?`, `refill?` | PNG (image content) and its path, region, pixels per mm |
+
+### create_board
+
+Turns a KiCad netlist (s-expression format: Eeschema File > Export > Netlist > KiCad, or
+`kicad-cli sch export netlist`) into a `.kicad_pcb` without KiCad or its Python API, and loads
+it (the result carries the board id).
+
+- Footprints: each symbol's `Library:Footprint` is read from the KiCad footprint libraries.
+  Searched in this order: `footprint_dirs` (`.pretty` directories or directories that contain
+  them), the project `fp-lib-table` next to the output, the netlist or the schematic it names
+  (`${KIPRJMOD}` and environment variables expanded), `KICAD10_FOOTPRINT_DIR`,
+  `KICAD9_FOOTPRINT_DIR`, `KICAD8_FOOTPRINT_DIR`, `KICAD_FOOTPRINT_DIR`, the user's global
+  `fp-lib-table`, and the usual install places (`/usr/share/kicad/footprints`,
+  `/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints`, ...). A symbol whose
+  footprint is not found stays off the board and is listed in `missing_footprints`; `libraries`
+  says which directory each library came from. Symbols marked "exclude from board" are left out.
+- Fields: Reference, Value, Datasheet, Description, the user fields (LCSC, MPN, ...) as hidden
+  properties, DNP and "exclude from BOM" as footprint attributes, and the sheet path, name and
+  file that link the footprint to its symbol (so KiCad's Update PCB from Schematic matches them).
+- Nets: a pad gets the net of the netlist pin with its number, with pin function and pin type
+  (`+no_connect` on `unconnected-(...)` nets). A pad without a netlist pin stays without a net,
+  a pin without a pad leaves its net short of a connection: both are listed in `unmatched` and in
+  `warnings`. If exactly one pad number and one pin of a part are left, the warning names the
+  `pin_aliases` entry, e.g. a USB-C shield whose symbol pin is `S1` and whose pads are `SH`:
+  `"pin_aliases": {"J1": {"S1": "SH"}}` gives all `SH` pads the net of `S1`.
+- Board: rectangular outline from `x0`, `y0` (default 100, 100) of `width` x `height` mm with an
+  optional `corner_radius`; `layers` copper layers (default 2; 4 gives F.Cu, In1.Cu, In2.Cu,
+  B.Cu; any even count up to 32), `plane_layers` of KiCad type power (Gummiband does not route
+  them, see `load_board`); a stackup of `thickness` (default 1.6 mm) with `copper_oz` per layer
+  (one value for all, default 1 oz = 0.035 mm), `prepreg` (default 0.21 mm) next to the outer
+  layers and the cores taking the rest, FR4, 0.01 mm masks.
+- `mounting_holes`: four locked holes at the corners, `inset` mm (default 4) from both edges,
+  plain non-plated holes of `diameter` (default 3.2) or a library `footprint` (with `net` for a
+  plated one).
+- Placement: the parts sit unlocked inside the outline, the larger ones first, each at the
+  topmost then leftmost free place around the holes, with a gap of 1 mm (down to 0 mm if needed,
+  see `grid_gap`). What does not fit sits in rows below the board (listed in `outside`), so
+  `place_parts` with `scope: "outside"` takes it in. Both are only a start for `move_part` and
+  `place_parts`.
+- `.kicad_pro`: written next to the board, or merged into an existing one (the schematic's
+  project; the rest of it stays). It gets `board.design_settings.rules` (KiCad's defaults for
+  edge clearance, hole clearances and via sizes if missing, overridden by `rules`) and
+  `net_settings` with the `net_classes` and their patterns; a class named Default sets the
+  defaults of the others. Nets that the schematic puts into a class the patterns do not give go
+  into `netclass_assignments` if `net_classes` defines that class (a warning otherwise).
+- File format: KiCad 9 (version 20241229, with net table) when all footprint files are KiCad 9
+  or older, otherwise KiCad 10 (20260206, nets by name), so the result opens in the KiCad that
+  made the libraries. An existing output is only replaced with `overwrite: true`.
+
+```json
+{"name": "create_board", "arguments": {"netlist": "hw/lichtschnitzel.net",
+  "output": "hw/lichtschnitzel.kicad_pcb", "width": 74, "height": 60, "layers": 4,
+  "plane_layers": ["In1.Cu", "In2.Cu"], "mounting_holes": {"diameter": 3.2, "inset": 4},
+  "rules": {"min_clearance": 0.127, "min_copper_edge_clearance": 0.3},
+  "net_classes": [{"name": "Default", "clearance": 0.15, "track_width": 0.2},
+    {"name": "Power", "track_width": 0.5, "via_diameter": 0.8, "via_drill": 0.4,
+     "patterns": ["+5V_*", "+3V3", "GND"]}],
+  "pin_aliases": {"J1": {"S1": "SH"}}}}
+```
 
 ### load_board
 
@@ -149,9 +209,9 @@ footprints whose courtyard lies within 3 mm.
 
 Preliminary. Moves a footprint to a new position in mm (and rotation in degrees, unchanged if
 left out) in the working copy `<input>.prerouted.kicad_pcb`; the input file stays untouched and
-the returned board id is the one to route. `warnings` names the footprints whose courtyard box
-the moved part now overlaps, and an outline it leaves; boxes only, so run `drc` or `render` for
-the exact answer. Pads, their nets and the footprint's own copper move along. Without
+the returned board id is the one to route. `warnings` names the footprints whose courtyard
+the moved part now overlaps (by outline where the courtyard lines close, by box otherwise), and
+an outline it leaves (by box); run `drc` or `render` for the exact answer. Pads, their nets and the footprint's own copper move along. Without
 `rotation` only the position changes; with it the pads, the footprint's texts and its own zones
 turn with the footprint, so the part arrives as KiCad would place it.
 
@@ -281,8 +341,8 @@ stay). Defaults match the CLI: `runs` 14 (a constant, so results do not depend o
 directions per layer for every third run, 0 = off), `pair_pull` 0 (experimental pull between the
 nets of a differential pair), `pairs` false (experimental: a pair as one wide track that is split
 in two, see the CLI guide; only pairs with a pair rule or a net class of their own, `pair_all`
-true for every pair), `pair_breakouts` true (the wide track ends just outside the pads, false: at
-the pads), `pair_skew` 0.1 mm, `pair_zdiff` none, `tune` true (meanders for the
+true for every pair), `pair_breakouts` false (experimental: the wide track ends just outside the
+pads), `pair_skew` 0.1 mm, `pair_zdiff` none, `tune` true (meanders for the
 `length` and `skew` rules of the `.kicad_dru`, written as KiCad tuning patterns),
 `tune_amplitude` 1 mm, `tune_spacing` 2 track widths between meander legs, `negotiate` 0
 (negotiated routing from the start, 20 rounds work well and take about twice the time; with 0
@@ -318,7 +378,9 @@ Result fields: `board`, `moved`, `input`, `output`, `seconds`, `threads`, `conne
 `violations_total`, `violations_by_kind`, `violations` (first `max_violations`, default 50:
 `what`, `x`, `y`, `actual_mm`, `required_mm`, `nets` [routed net, other net or null]; the kinds
 are those of the CLI's `clearance check`, and for `width` and `current` the two values are
-widths),
+widths; `hole_to_hole` holds between all drilled holes, of the same net too, and `width` also
+names a track below the project's `min_track_width` or `min_connection`, which KiCad reports
+as `track_width` or `connection_width` whatever the net class allows),
 `portfolio` (per run: `generation`, `seed`, `fanout_first`, `routed`, `connections`, `vias`,
 `length_mm`, `violations`), `pairs` (with `pairs`), `coupling` (every recognised pair, whatever
 the settings: `p`, `n`, `coupled_mm` within width + gap + 0.1 mm of the partner on the same layer,
@@ -401,14 +463,30 @@ pins to the inductor, a big pad that reaches its plane through one via. For each
   their clearance, and along the board edge. Each cut runs across the line from the obstacle to
   the nearest point of the spine between the terminals, so the pour gives way on that side only.
   Terminals further apart than `max_span` (12 mm) get no pour (route them wide); a pad the pour
-  no longer reaches gets a warning.
+  no longer reaches gets a warning. Several `from` terminals that one pour cannot join (the
+  two VBUS pin groups of a USB-C receptacle with the signal pins between them) get one pour
+  each to the `to` pads, with a warning; join them on another layer if they must share the
+  current.
 - A net with a plane gets, at every terminal, locked vias for the current (IPC-2221 per via; the
   `from` terminals share the current, every `to` terminal takes all of it) on rings just off the
   pad (the holes stay out of the pad; vias already touching it count), free by the same rules as
   stitching vias except that the part's own courtyard is allowed, and a small pour joining pad
-  and vias.
+  and vias. A via only counts where it lands in the copper of a plane of the net: inside the
+  plane zone with room for the via and its clearance, and outside the zones of other nets on
+  that layer with a higher priority (KiCad fills those first). When vias would fit beside the
+  pad but the plane has no copper there, the warning says so (extend the plane zone).
 
-The pours are zones named `gb:...` with priority 20 and solid pad connections. Gummiband keeps
+Courtyards count by their outline where the courtyard lines close (an L or T shaped module
+courtyard leaves the room beside its stem free), by their box otherwise. The same holds for the
+stitching vias of `ground_pour` and the overlap warnings of `move_part`.
+
+Overlapping zones on a plane layer: the router and `power_copper` see a plane only where no
+zone of another net with a higher priority covers it, so a via of the lower net does not land
+in the higher net's area.
+
+The pours are zones named `gb:...` with priority 20 and solid pad connections; a pour that
+overlaps a zone of the same priority on its layer (two via fields of FETs side by side) goes one
+priority up, so KiCad reports no `zones_intersect`. Gummiband keeps
 zones with that prefix as obstacles for other nets even without `zones_as_obstacles`, and counts
 pads under one such pour (and vias in it that reach the plane) as connected, so the router
 neither runs a track across the pour nor routes the joined pads again. The tool writes the
@@ -432,7 +510,7 @@ all connections, 19 instead of 36 Gummiband clearance violations, none near the 
 After routing, on the written file. A path names a net, its current and optionally its terminals:
 `from` (source pads as `REF.PAD`, `REF.*` for every pad of the part on the net, pins in parallel
 joined with `+` as one terminal; several terminals share the current evenly) and `to` (sink
-pads, any of them may take the current). A net with two pins gets its terminals automatically; a
+pads, any of them may take the current; `+` is allowed there too). A net with two pins gets its terminals automatically; a
 glob without terminals expands to its nets. Without `paths` the nets of the wide classes are
 checked.
 
@@ -450,7 +528,10 @@ has copper) is put on a 0.05 mm raster, and two numbers are measured between the
 - `cross_section_mm`: the total cross-section, a minimum cut on the raster where parallel copper
   adds up and every via counts with what its barrel carries. Copper that is a band of the full
   width anyway cannot be cut, so the cut runs through narrower copper and vias only; a cut at an
-  angle through narrow copper counts a little short (the safe side).
+  angle through narrow copper counts a little short (the safe side). On a net with a lot of
+  copper (a ground net with a plane and pours) the cut is measured in a window around the
+  terminals, smaller until it fits; the copper outside it does not count (the safe side) and a
+  note gives the window.
 
 The cross-section decides: a path is `ok` when it reaches the required width (within half a
 raster cell), else `FLAG` with the position and layer of the cut, marked `via` when a via barrel
@@ -585,13 +666,15 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
 ## Open points
 
 - `move_part` and `add_zone` are new and tested on small boards only; `move_part` checks
-  courtyard boxes only, and a zone is not filled until KiCad fills it.
+  courtyard outlines, not the clearance KiCad's DRC wants between them, and a zone is not filled until KiCad fills it.
 - `place_parts` is new. It lacks the `--iters`, `--margin` and `--free` options of
   `gummiband place`, knows no datasheet layouts (place and lock power stages with `move_part`;
   `semantic` keeps an inductor at its converter, but no via arrays or copper),
   and treats both board sides as one space.
-- Not reachable through MCP yet: creating a board, and per net widths and priorities
-  from files (`--net-widths`, `--net-priorities`; both go through `set_net_options`).
+- Not reachable through MCP yet: per net widths and priorities from files (`--net-widths`,
+  `--net-priorities`; both go through `set_net_options`).
+- `create_board` reads rectangular outlines only, places every part on the front side and
+  without rotation, and does not read footprint libraries of other types than KiCad (`.pretty`).
 - `power_copper` shapes a pour as a convex hull cut by straight lines: obstacles between the
   terminals cost more copper than needed, and a terminal behind another net's pad is lost (a
   warning says so). It does not move parts; the via fields sit on rings around the pad.

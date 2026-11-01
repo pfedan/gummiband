@@ -327,10 +327,10 @@ fn write_item(kb: &KicadBoard, it: &Item, id: &str, out: &mut String) {
 }
 
 /// Deterministic version 4 style UUIDs (splitmix64).
-struct UuidGen(u64);
+pub(crate) struct UuidGen(u64);
 
 impl UuidGen {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         UuidGen(seed ^ 0x9e37_79b9_7f4a_7c15)
     }
     fn word(&mut self) -> u64 {
@@ -340,7 +340,7 @@ impl UuidGen {
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
     }
-    fn next(&mut self) -> String {
+    pub(crate) fn next(&mut self) -> String {
         let a = self.word();
         let b = self.word();
         format!(

@@ -146,6 +146,7 @@ fn initialize_list_load_route() {
             "add_zone",
             "angles_45",
             "board_patterns",
+            "create_board",
             "current_check",
             "drc",
             "ground_pour",
@@ -443,4 +444,140 @@ fn power_copper_pours_a_path_before_routing() {
         json!({"path": work, "net": "A", "pad_connection": "spokes"}),
     );
     assert!(bad.contains("thermal_tht"), "{bad}");
+}
+
+const NETLIST: &str = r#"(export (version "E")
+  (components
+    (comp (ref "R1") (value "10k") (footprint "GbRes:R_0603")
+      (fields (field (name "LCSC") "C25804"))
+      (sheetpath (names "/") (tstamps "/")) (tstamps "1111"))
+    (comp (ref "J1") (value "USB") (footprint "GbConn:Shielded")
+      (sheetpath (names "/") (tstamps "/")) (tstamps "2222")))
+  (nets
+    (net (code "1") (name "GND")
+      (node (ref "R1") (pin "2") (pintype "passive"))
+      (node (ref "J1") (pin "2") (pintype "power_in"))
+      (node (ref "J1") (pin "S1") (pintype "passive")))
+    (net (code "2") (name "VBUS")
+      (node (ref "R1") (pin "1") (pintype "passive"))
+      (node (ref "J1") (pin "1") (pintype "power_out")))))
+"#;
+
+const R0603: &str = r#"(footprint "R_0603" (version 20241229) (generator "test") (layer "F.Cu")
+  (property "Reference" "REF**" (at 0 -1.43 0) (layer "F.SilkS") (uuid "11111111-1111-4111-8111-111111111111"))
+  (property "Value" "R_0603" (at 0 1.43 0) (layer "F.Fab") (uuid "22222222-2222-4222-8222-222222222222"))
+  (attr smd)
+  (fp_rect (start -1.48 -0.73) (end 1.48 0.73) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd"))
+  (pad "1" smd roundrect (at -0.7875 0) (size 0.875 0.95) (layers "F.Cu" "F.Mask" "F.Paste") (roundrect_rratio 0.25))
+  (pad "2" smd roundrect (at 0.7875 0) (size 0.875 0.95) (layers "F.Cu" "F.Mask" "F.Paste") (roundrect_rratio 0.25)))
+"#;
+
+const SHIELDED: &str = r#"(footprint "Shielded" (version 20241229) (layer "F.Cu")
+  (property "Reference" "REF**" (at 0 -3 0) (layer "F.SilkS"))
+  (property "Value" "Shielded" (at 0 3 0) (layer "F.Fab"))
+  (attr smd)
+  (fp_rect (start -3.5 -2) (end 3.5 2) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd"))
+  (pad "1" smd rect (at -1 0) (size 0.6 1) (layers "F.Cu" "F.Mask" "F.Paste"))
+  (pad "2" smd rect (at 1 0) (size 0.6 1) (layers "F.Cu" "F.Mask" "F.Paste"))
+  (pad "SH" thru_hole oval (at -2.5 0) (size 1 1.6) (drill 0.6) (layers "*.Cu" "*.Mask"))
+  (pad "SH" thru_hole oval (at 2.5 0) (size 1 1.6) (drill 0.6) (layers "*.Cu" "*.Mask")))
+"#;
+
+#[test]
+fn create_board_from_a_netlist() {
+    let dir = std::env::temp_dir().join(format!("gummiband-mcp-create-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("libs/GbRes.pretty")).unwrap();
+    std::fs::create_dir_all(dir.join("other/GbConn.pretty")).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    std::fs::write(dir.join("libs/GbRes.pretty/R_0603.kicad_mod"), R0603).unwrap();
+    std::fs::write(dir.join("other/GbConn.pretty/Shielded.kicad_mod"), SHIELDED).unwrap();
+    // one library through the project table, the other through footprint_dirs
+    std::fs::write(
+        dir.join("fp-lib-table"),
+        "(fp_lib_table (version 7)\n  (lib (name \"GbRes\") (type \"KiCad\") (uri \"${KIPRJMOD}/libs/GbRes.pretty\") (options \"\") (descr \"\")))\n",
+    )
+    .unwrap();
+    let net = dir.join("t.net");
+    std::fs::write(&net, NETLIST).unwrap();
+    let pcb = dir.join("t.kicad_pcb");
+
+    let mut s = Server::start();
+    s.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}),
+    );
+    s.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+
+    let args = json!({
+        "netlist": net.display().to_string(),
+        "output": pcb.display().to_string(),
+        "width": 30, "height": 25, "layers": 4, "plane_layers": ["In1.Cu", "In2.Cu"],
+        "mounting_holes": {"diameter": 2.2, "inset": 3},
+        "footprint_dirs": [dir.join("other").display().to_string()],
+        "net_classes": [{"name": "Power", "track_width": 0.5, "patterns": ["VBUS", "GND"]}],
+        "rules": {"min_clearance": 0.127},
+    });
+    let c = s.call("create_board", args.clone());
+    assert_eq!(c["board"], "b1");
+    assert_eq!(c["version"], 20241229);
+    assert_eq!(c["footprints"], 6);
+    assert_eq!(c["mounting_holes"], 4);
+    assert_eq!(c["nets"], 2);
+    assert_eq!(c["pads"], 6);
+    assert_eq!(c["pads_with_net"], 4);
+    assert_eq!(c["missing_footprints"], json!([]));
+    assert_eq!(c["outside"], json!([]));
+    assert_eq!(c["unmatched"][0]["reference"], "J1");
+    assert_eq!(c["unmatched"][0]["pads"], json!(["SH"]));
+    assert_eq!(c["unmatched"][0]["pins"], json!(["S1 (GND)"]));
+    assert_eq!(c["unmatched"][0]["suggested_alias"], json!({"J1": {"S1": "SH"}}));
+    let w = c["warnings"].as_array().unwrap();
+    assert!(
+        w.iter()
+            .any(|w| w.as_str().unwrap().contains("pin_aliases {\"J1\": {\"S1\": \"SH\"}}")),
+        "{w:?}"
+    );
+    assert!(c["libraries"]["GbRes"].as_str().unwrap().ends_with("libs/GbRes.pretty"));
+
+    // the file exists now
+    let e = s.call_err("create_board", args.clone());
+    assert!(e.contains("overwrite"), "{e}");
+
+    let mut args = args;
+    args["overwrite"] = json!(true);
+    args["pin_aliases"] = json!({"J1": {"S1": "SH"}});
+    let c = s.call("create_board", args);
+    assert_eq!(c["board"], "b1", "the same file keeps its id");
+    assert_eq!(c["pads_with_net"], 6);
+    assert_eq!(c["unmatched"], json!([]));
+    assert_eq!(c["project_merged"], true);
+
+    let b = s.call("load_board", json!({"path": pcb.display().to_string()}));
+    assert_eq!(b["outline"]["width_mm"], 30.0);
+    let planes: Vec<bool> = b["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["plane"].as_bool().unwrap())
+        .collect();
+    assert_eq!(planes, [false, true, true, false]);
+    let power = b["net_classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "Power")
+        .unwrap()
+        .clone();
+    assert_eq!(power["track_width"], 0.5);
+    let nets = s.call("list_nets", json!({"board": "b1", "filter": "GND"}));
+    assert_eq!(nets["nets"][0]["pins"], 4, "R1.2, J1.2 and both SH pads");
+    assert_eq!(nets["nets"][0]["class"], "Power");
+
+    let pro: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("t.kicad_pro")).unwrap()).unwrap();
+    assert_eq!(pro["board"]["design_settings"]["rules"]["min_clearance"], 0.127);
+    let text = std::fs::read_to_string(&pcb).unwrap();
+    assert!(text.contains("(property \"LCSC\" \"C25804\""));
+    assert!(text.contains("(path \"/1111\")"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
