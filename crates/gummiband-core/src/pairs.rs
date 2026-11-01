@@ -649,6 +649,8 @@ fn make_track(elems: Vec<Elem>, width: f64, layer: LayerId, net: NetId) -> Track
         resting: false,
         fitted: Vec::new(),
         pattern: None,
+        seg: u32::MAX,
+        tap: None,
     }
 }
 

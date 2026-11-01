@@ -949,6 +949,8 @@ mod tests {
                 resting: false,
                 fitted: Vec::new(),
                 pattern: None,
+                seg: u32::MAX,
+                tap: None,
             });
         }
         (b, geo)

@@ -278,6 +278,8 @@ pub fn soft_geometry(board: &Board) -> Geometry {
             resting: true,
             fitted: Vec::new(),
             pattern: None,
+            seg: u32::MAX,
+            tap: None,
         });
     }
     for (i, n) in board.soft.nodes.iter().enumerate() {

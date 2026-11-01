@@ -37,6 +37,10 @@ pub struct Track {
     pub fitted: Vec<(crate::geom::Rect, f64)>,
     /// Part of a length tuning pattern (a KiCad `tuning_pattern` group): its index.
     pub pattern: Option<u32>,
+    /// The router's segment of this track (`u32::MAX`: none).
+    pub seg: u32,
+    /// The segment its end lies on, when that is a track of its net and not a pad or a via.
+    pub tap: Option<u32>,
 }
 
 impl Track {
@@ -113,6 +117,16 @@ impl Router<'_> {
             End::Pin(p) => self.board.pins[p].pos,
             End::Via(site) => self.site_point(site),
             End::Point(p) => p,
+            End::Tap(sid, e) => {
+                let s = self.segs[sid as usize].as_ref().unwrap();
+                match s.crossings.iter().position(|c| c.e == e) {
+                    Some(k) => {
+                        let (l, r) = self.portal(sid, k);
+                        (l.p + r.p) * 0.5
+                    }
+                    None => self.end_point(s.start),
+                }
+            }
         }
     }
 
@@ -461,6 +475,11 @@ impl Router<'_> {
                     })
                 };
                 let track = |pts: Vec<Point>, elems: Vec<Elem>| Track {
+                    seg: sid,
+                    tap: match s.end {
+                        End::Tap(on, _) => Some(on),
+                        _ => None,
+                    },
                     pts,
                     elems,
                     width: s.width,

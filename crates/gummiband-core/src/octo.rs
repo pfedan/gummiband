@@ -679,6 +679,8 @@ pub fn octilinear_copper(board: &mut Board, nets: &[String]) -> (Geometry, crate
             resting: false,
             fitted: Vec::new(),
             pattern: None,
+            seg: u32::MAX,
+            tap: None,
         });
     }
     for (i, n) in board.soft.nodes.iter().enumerate() {

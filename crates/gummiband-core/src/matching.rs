@@ -686,6 +686,8 @@ pub fn kept_geometry(board: &Board) -> Geometry {
             resting: true,
             fitted: Vec::new(),
             pattern: c.pattern.then_some(0),
+            seg: u32::MAX,
+            tap: None,
         });
     }
     geo
@@ -725,6 +727,8 @@ mod tests {
             resting: false,
             fitted: Vec::new(),
             pattern: None,
+            seg: u32::MAX,
+            tap: None,
         };
         // a via at the origin (radius 0.2); the chain kinks inside it before it leaves along x
         let a = track(vec![

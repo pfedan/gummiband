@@ -86,11 +86,14 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?` | id and path of the working copy, the new poses, decoupling assignment, crossings, smallest courtyard distance, pins off their plane, with `semantic` inductors and groups, `warnings` |
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
-| `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
+| `set_net_options` | `board`, `net`, `priority?`, `skip?`, `width?`, `reset?` | the net's options and effective priority |
 | `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `move_parts?`, `fixed?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_all?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
 | `angles_45` | `path`, `output?`, `nets?` | path of the written `<input>.45.kicad_pcb`, runs of track looked at and changed, length before and after, pieces off the grid, sharp corners, Gummiband's violations before and after |
+| `power_plan` | `board`, `currents? [{net, amps, short_amps?}]`, `temp_rise?`, `apply?` | per power net the IPC-2221 width per layer, the track width to route with, vias per layer change, planes and zones, advice; board notes (GND plane, reference planes); the widths as `.kicad_dru` rules; with `apply` the widths stored as net options |
+| `current_check` | `path`, `paths? [{net, amps, short_amps?, from?, to?, name?}]`, `temp_rise?`, `refill?`, `max_segments?` | per current path the narrow segments, the narrowest single band and the total cross-section between the terminals (pours and vias included) with their position, vias against the current, verdict `ok` or `FLAG` |
+| `ground_pour` | `path`, `net?`, `layers?`, `pitch?`, `edge_pitch?`, `edge_inset?`, `avoid_courtyards?`, `via_diameter?`, `via_drill?`, `priority?`, `output?` | id and path of `<input>.gnd.kicad_pcb` with ground zones on the outer layers and locked stitching vias, `warnings` |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
-| `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?` | PNG (image content) and its path, region, pixels per mm |
+| `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?`, `refill?` | PNG (image content) and its path, region, pixels per mm |
 
 ### load_board
 
@@ -223,10 +226,17 @@ then `route` with the returned board id.
 Stored in the session by net name and applied on every following `route` of the board:
 `priority` overrides the net class priority (lower routes first), `skip: true` leaves the net
 out of routing (its pads stay obstacles; its old tracks are not kept, since the output replaces
-all unlocked copper). `reset: true` drops the net's options before applying the others.
+all unlocked copper). `width` (mm) gives the net its own track width, which is also its minimum
+width: it does not neck below it, except inside the courtyards of the parts whose pads are
+narrower than the width (fine pitch pins); `width: 0` clears it. Known gap: the router still
+lets such a net neck in places outside those courtyards (VBUS_F on the Lichtschnitzel benchmark
+kept 0.25 to 0.6 mm pieces); `current_check` finds them. `power_plan` with `apply` sets
+the widths of the power nets this way. `reset: true` drops the net's options before applying the
+others.
 
 ```json
 {"name": "set_net_options", "arguments": {"board": "b1", "net": "/MCU/SDA", "priority": -10}}
+{"name": "set_net_options", "arguments": {"board": "b1", "net": "VBUS_F", "width": 0.75}}
 {"name": "set_net_options", "arguments": {"board": "b1", "net": "VBUS_IN", "skip": true}}
 ```
 
@@ -299,6 +309,126 @@ nets. The output goes to `<input>.45.kicad_pcb` by default, with the `.kicad_pro
 {"name": "angles_45", "arguments": {"path": "/abs/path/lichtschnitzel.routed.kicad_pcb"}}
 ```
 
+### Good practice: power_plan, current_check, ground_pour
+
+The router does the heavy lifting; around it go the rules of the craft a careful layouter
+applies: plan the power copper before routing, check the current carrying capacity after it,
+pour ground and stitch it. These three tools and the prompt `good_practice` (below) cover that,
+so an agent can take a board from netlist to DRC in one go. Currents follow IPC-2221
+(I = k * dT^0.44 * A^0.725, A in mil², k = 0.048 outer, 0.024 inner, default rise 20 K) with the
+copper thickness of each layer from the board's stackup (35 um without one). A via counts with
+its barrel (drill plus 25 um plating, inner k): a 0.3 mm via carries about 1.3 A, a 0.4 mm via
+about 1.6 A at 20 K.
+
+#### power_plan
+
+Before routing. `currents` names the power nets by name or glob (`*VBUS_P`, `/Power/SW_?`) with
+their continuous current and, where a fuse or PTC limits a short, the short term current the
+copper must carry until it trips (the larger of both sizes the copper). Without `currents` the
+tool takes the nets of clearly wide classes (twice the default width and at least 0.5 mm) and
+the current their minimum width (or class width) carries, and lists nets that look like supplies
+by name but have a narrow class.
+
+Per net: the required width per copper layer, `track_width_mm` (outer layers, rounded up to
+0.05 mm), the planes and zones it has, `vias_per_transition` and `advice`. The advice says to
+widen the net, to keep it off thin inner layers, to give each pin into a plane enough vias, or to
+draw a pour instead of a track: above 2.5 mm, or above 1 mm into pins narrower than half the
+width (a 1.75 mm switch node track into 0.3 mm converter pins blocks the router around them; on
+the Lichtschnitzel benchmark it turned 36 clearance violations into 2541). Nets that already
+have a plane or a pour on a routing layer are left to `current_check`. `board_notes` cover the
+ground plane (missing, or on which layer), plane layers without a zone and, on boards with
+differential pairs, routing layers whose nearest plane is not ground. `dru_rules` holds the
+widths as KiCad custom rules (`track_width` min and opt, courtyards of fine pitch parts exempt)
+to append to the project's `.kicad_dru`: KiCad's DRC then enforces them, and Gummiband reads
+them on the next `load_board`. `apply: true` stores the widths as net options (`width`, see
+`set_net_options`) for the following routes.
+
+```json
+{"name": "power_plan", "arguments": {"board": "b1", "apply": true, "currents": [
+  {"net": "*VBUS_RAW", "amps": 4.1}, {"net": "VBUS_F", "amps": 4.1},
+  {"net": "*/SW_?", "amps": 8}, {"net": "*OUT?_5V", "amps": 4, "short_amps": 7}]}}
+```
+
+#### current_check
+
+After routing, on the written file. A path names a net, its current and optionally its terminals:
+`from` (source pads as `REF.PAD`, `REF.*` for every pad of the part on the net, pins in parallel
+joined with `+` as one terminal; several terminals share the current evenly) and `to` (sink
+pads, any of them may take the current). A net with two pins gets its terminals automatically; a
+glob without terminals expands to its nets. Without `paths` the nets of the wide classes are
+checked.
+
+For every path the copper of the net (pads, tracks, vias and its filled zones, on every layer it
+has copper) is put on a 0.05 mm raster, and two numbers are measured between the terminals:
+
+- `width_mm`: the narrowest single band, the largest width whose band still joins every source
+  terminal to the sinks (the copper eroded by half the width; terminal and via pads are not
+  eroded, and a band may end up to 0.3 mm from them). Inner layers count with their width
+  divided by the factor IPC-2221 asks for there. This is the measure of the Lichtschnitzel
+  `layout/necks.py` and gives its numbers for the VBUS paths of that board (0.70, 0.70,
+  0.28 mm). necks.py lets a band end up to half its width from a pad, so where two terminals are
+  closer than the width it bridges the gap without copper and reports its search limit (3.99 mm
+  for the switch nodes and the outputs); the 0.3 mm limit here measures the copper that is there.
+- `cross_section_mm`: the total cross-section, a minimum cut on the raster where parallel copper
+  adds up and every via counts with what its barrel carries. Copper that is a band of the full
+  width anyway cannot be cut, so the cut runs through narrower copper and vias only; a cut at an
+  angle through narrow copper counts a little short (the safe side).
+
+The cross-section decides: a path is `ok` when it reaches the required width (within half a
+raster cell), else `FLAG` with the position and layer of the cut, marked `via` when a via barrel
+is the limit. `segments` lists the track segments narrower than required (outside fills of the
+net), which also covers nets without terminals. Zones without fill are refilled with `kicad-cli
+pcb drc --refill-zones --save-board` in a temp copy (KiCad 9 or newer); without kicad-cli their
+outline counts, which is optimistic, and a note says so. IPC-2221 describes long conductors: a
+neck of a few tenths of a millimetre right at a pad runs cooler than it says, so judge a short
+flag by its length.
+
+On the finished Lichtschnitzel board the check finds the known 0.28 mm neck of `VBUS_IN` and
+shows that `VBUS_F` and `VBUS_IN` each pass a single 0.4 mm via (about 1.6 A) on their 4.1 A path.
+
+```json
+{"name": "current_check", "arguments": {"path": "/abs/lichtschnitzel.routed.kicad_pcb", "paths": [
+  {"name": "USB-C to fuse", "net": "/Power/VBUS_RAW", "amps": 4.1,
+   "from": ["J1.A4+J1.B9", "J1.A9+J1.B4"], "to": ["F1.1"]},
+  {"name": "fuse to shunt", "net": "VBUS_F", "amps": 4.1, "from": ["F1.2"], "to": ["R110.*"]},
+  {"name": "buck A switch node", "net": "/Power/SW_A", "amps": 8,
+   "from": ["U4.5+U4.6+U4.7+U4.8+U4.9"], "to": ["L1.1"]}]}}
+```
+
+A flag is fixed by widening the net (`set_net_options` width, then `route` with `keep_all`,
+`nets` and `reroute`), a pour over the neck (`add_zone`), more vias or locked copper, then
+another check.
+
+#### ground_pour
+
+After routing: zones of the ground net (default `GND`, or the net with the most pins whose name
+holds GND) over the board outline on the outer layers (or `layers`), with `priority` 0 so power
+pours with a higher priority win, and locked stitching vias: a row along the edge
+(`edge_pitch` 3 mm, `edge_inset` 1 mm from the outline) and a grid (`pitch` 5 mm; a blocked
+grid spot tries eight neighbours a quarter pitch away, and spots next to an existing via of the
+net are skipped). A via goes only where it keeps the clearance plus 0.3 mm to copper of other
+nets on every layer, the hole to hole distance, the edge clearance, out of rule areas that
+forbid vias, of other nets' zones on routing layers and of courtyards (`avoid_courtyards`). A
+layer that already has a zone of the net is left as it is; `warnings` name zones of other nets
+whose priority does not beat the pour. The output `<input>.gnd.kicad_pcb` is loaded as a new
+board. The zones are filled with kicad-cli before the file is handed back (a warning says so if
+that fails), so `render` and KiCad show the pours right away. A via the fill does not reach shows
+up in `drc` as dangling, unless an inner plane of the net holds it.
+
+```json
+{"name": "ground_pour", "arguments": {"path": "/abs/lichtschnitzel.routed.kicad_pcb"}}
+```
+
+#### The prompt good_practice
+
+The server offers one MCP prompt, `good_practice` (arguments `path`, optional `currents` and
+`notes`). It asks the agent to take the board through the whole sequence without asking back
+unless the design intent changes: look at the board and its power paths, settle the currents,
+plan with `power_plan` (planes, pours, datasheet layouts as locked copper, `dru_rules` into the
+project), place and route, `current_check` every path and fix the flags, `ground_pour`, `drc`
+and `render`, and report a table of the current paths. In Claude Code it appears as
+`/mcp__gummiband__good_practice`.
+
 ### drc
 
 Runs `kicad-cli pcb drc --refill-zones --format json --units mm` and summarizes it. The
@@ -323,7 +453,9 @@ Plots the layers with `kicad-cli pcb export svg` (page coordinates equal board c
 crops the SVG to `region` and rasterizes it with `rsvg-convert`. Default layers: the routing
 copper layers (no inner planes, which are solid pours) and `Edge.Cuts`; default region: the
 board outline plus 1 mm; `width_px` defaults to 1000 (at most 4000), the height follows the
-region. The PNG goes to the server's temp folder unless `output` is given.
+region. The PNG goes to the server's temp folder unless `output` is given. Zones without fill
+(after `add_zone` or a pour that was never filled) plot as nothing, so by default they are filled
+in a temp copy first (`refill`, kicad-cli 9 or newer); the file itself is not changed.
 
 ```json
 {"name": "render", "arguments": {"path": "/abs/path/lichtschnitzel.routed.kicad_pcb",
@@ -378,6 +510,9 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
   `semantic` keeps an inductor at its converter, but no via arrays or copper),
   and treats both board sides as one space.
 - Not reachable through MCP yet: creating a board, and per net widths and priorities
-  from files (`--net-widths`, `--net-priorities`; priorities go through `set_net_options`).
+  from files (`--net-widths`, `--net-priorities`; both go through `set_net_options`).
+- `current_check` measures on a raster (0.05 mm, coarser on very large nets); it does not weigh
+  the length of a neck, and the cross-section is skipped for nets of more than three million
+  copper cells. `ground_pour` does not yet check that the fill reaches every via (the DRC does).
 - Progress notifications during long routes, and cancellation (the core has no cancel hook).
 - `route` returns Gummiband's own clearance check; KiCad's verdict needs a `drc` call.

@@ -91,6 +91,11 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   copper through MCP tools as locked tracks, vias and zones, checks it, and then lets the
   autorouter do the rest around it. Done: `part_info`, `add_locked_copper` (tracks, vias).
   Still open: locked zones, checking a region.
+- Good practice around the router (idea from Daniel: the controlling agent sets the rules, the
+  router does the heavy lifting, the agent finishes): `power_plan` (currents to widths, pours,
+  planes, vias, `.kicad_dru` rules, widths as net options), `current_check` (narrowest band and
+  total cross-section of every current path, vias included), `ground_pour` (ground zones and
+  stitching vias) and the prompt `good_practice` that runs a board end to end.
 - Blocks (fixed blocks): a KiCad group or placed design block (parts plus their pre-routed locked copper, e.g. the datasheet
   layout of a converter) moves only as a whole under --move-parts; inside it nothing changes.
 
@@ -204,6 +209,13 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   `--geometry-generations 3`: 348/348, 200 vias, 2523 mm, converged in 9 minutes, 2 clearance hits at
   one spot. The original has 294 vias and 2633 mm. Each also leaves results that differ in vias and
   length to choose from.
+- Tracks that end on a track of their net, 2026-11-01. Arty until convergence, with the width of
+  0.25 mm preferred, no routing errors in the DRC in all three: without them 106 vias, 2927 mm; with
+  them at 40 mm per via 71 vias, 3203 mm; at 20 mm per via 80 vias, 3083 mm. Same-net tracks next to
+  each other went from 176 to 24 mm (measured on the 40 mm run), mostly plane fan-outs of GND.
+  Lichtschnitzel: 200 vias, 2523 mm; 122 vias, 2864 mm; 123 vias, 2848 mm, one spot in each. Single
+  runs. Fewer vias cost length: the results on offer reach 125 vias with 2945 mm on Arty and 236
+  vias with 2460 mm on Lichtschnitzel.
 - KiCad's DRC stops at 199 or 499 hits per type, so those are limits and not results.
 - Idea to keep: a strict convergence, where every gain in vias or length starts the boldness over
   as well. Arty then still lost a via every few minutes after 18 minutes and never converged, but

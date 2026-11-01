@@ -87,6 +87,8 @@ fn main() {
                     resting: false,
                     fitted: Vec::new(),
                     pattern: None,
+                    seg: u32::MAX,
+                    tap: None,
                 });
             }
             _ => {}
