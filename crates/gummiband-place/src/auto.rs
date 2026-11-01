@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use gummiband_core::board::{Board, LayerSet};
+use gummiband_core::board::{Board, LayerSet, ObstacleKind};
 use gummiband_core::geom::{Point, Polygon, pt};
 use gummiband_kicad::place_write::{self, Patch, kicad_rot};
 use gummiband_kicad::sexpr::Node;
@@ -36,6 +36,29 @@ const CLUSTER_WEIGHT: f64 = 0.5;
 const POWER_WEIGHT: f64 = 2.0;
 /// With `semantic`: a signal net ties its parts into a cluster up to this many parts.
 const CLUSTER_NET_PARTS: usize = 3;
+/// With `semantic`: pull of a pad of a two-pin part to the IC (or the series part) it shares a
+/// small net with, per mm. The net alone pulls its box, this pulls the pad itself.
+const AFFINITY_WEIGHT: f64 = 2.0;
+/// A signal net ties a two-pin part to an IC up to this many parts.
+const AFFINITY_NET_PARTS: usize = 4;
+/// A current path ties a two-pin part to its neighbour in the chain up to this many parts.
+const AFFINITY_POWER_PARTS: usize = 8;
+/// With `semantic`: pull of a small regulator to the biggest IC on its output rail, per mm.
+const REGULATOR_WEIGHT: f64 = 3.0;
+/// A regulator has at most this many pads, its consumer more.
+const REGULATOR_PADS: usize = 8;
+/// A pad of a plane net needs a free via site this close to its centre (mm).
+const ESCAPE_REACH: f64 = 0.6;
+/// Field cost of a plane pad without a via site in reach, on top of the distance to the next one.
+const ESCAPE_COST: f64 = 10.0;
+/// Overlap (mm2) such a pad counts for its part: annealing and legalization keep it out like a
+/// courtyard of another part.
+const ESCAPE_OVERLAP: f64 = 0.5;
+/// Pads larger than this (an exposed pad) take their vias inside, they need no escape.
+const ESCAPE_PAD: f64 = 2.0;
+/// Courtyards of two parts that overlap by more than this share of the smaller one form a pile,
+/// not a placement: a part placed by hand may touch a neighbour, it does not sit on it.
+const PILE_OVERLAP: f64 = 0.3;
 
 /// Which parts get a new position. Locked footprints stay in every case.
 #[derive(Debug, Clone, Default)]
@@ -115,6 +138,16 @@ pub struct PlaceReport {
     pub groups: Vec<(String, Vec<String>)>,
     /// Pins left outside the plane of their net: reached by routing.
     pub off_plane: Vec<String>,
+    /// With `semantic`: two-pin parts and small regulators with the part they were pulled to.
+    pub ties: Vec<(String, String)>,
+    /// Connectors, buttons and test points outside the scope that were placed because they sat
+    /// piled up or off the board.
+    pub released: Vec<String>,
+    /// Pads of a plane net with no room for their via: kept copper or a rule area around them.
+    pub no_via_room: Vec<String>,
+    /// What the caller has to look at: released parts, parts that stay piled up or off the
+    /// board, pads without room for their via.
+    pub warnings: Vec<String>,
     /// Tracks and vias in the input: they do not follow the parts.
     pub stale_copper: usize,
     pub seed: u64,
@@ -136,8 +169,80 @@ pub struct Placed {
     pub report: PlaceReport,
 }
 
+/// Courtyard rectangles of a part at its input position.
+fn court_quads(p: &crate::model::Part) -> impl Iterator<Item = Quad> + '_ {
+    p.court.iter().map(|r| Quad {
+        pos: p.pos,
+        rot: p.rot,
+        r: *r,
+    })
+}
+
+/// Why a part counts as not placed yet, see [`unplaced_parts`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Unplaced {
+    /// No rectangle of its courtyard has its centre on the board.
+    Off,
+    /// It sits on this part, see [`unplaced_parts`].
+    On(usize),
+}
+
+/// Courtyard rectangles of every part at its input position, board frame.
+fn court_boxes(d: &Design) -> Vec<Vec<R>> {
+    d.parts
+        .iter()
+        .map(|p| court_quads(p).map(|q| q.bbox()).collect())
+        .collect()
+}
+
+/// Overlap of two sets of courtyard rectangles in mm2.
+fn court_overlap(a: &[R], b: &[R]) -> f64 {
+    a.iter().map(|x| b.iter().map(|y| x.overlap(y)).sum::<f64>()).sum()
+}
+
+/// Parts that are not placed yet in the input: off the board, or sitting on another part, which
+/// covers more than [`PILE_OVERLAP`] of its courtyard (the pile of a fresh import). A big part
+/// whose courtyard reaches over a pile is not in it.
+fn unplaced_parts(d: &Design, outer: &Polygon) -> Vec<Option<Unplaced>> {
+    let boxes = court_boxes(d);
+    let all: Vec<R> = boxes
+        .iter()
+        .map(|b| b.iter().fold(R::empty(), |a, r| a.union(r)))
+        .collect();
+    (0..d.parts.len())
+        .map(|i| {
+            if boxes[i].is_empty() {
+                return None;
+            }
+            // an edge connector or an antenna may hang over the edge, not all of it
+            if !boxes[i].iter().any(|r| outer.contains(r.center())) {
+                return Some(Unplaced::Off);
+            }
+            let area: f64 = boxes[i].iter().map(|r| r.area()).sum();
+            (0..d.parts.len())
+                .find(|&j| {
+                    j != i && all[i].overlap(&all[j]) > 0.0 && court_overlap(&boxes[i], &boxes[j]) > PILE_OVERLAP * area
+                })
+                .map(Unplaced::On)
+        })
+        .collect()
+}
+
+/// What [`fixed_parts`] decided.
+struct Fixing {
+    /// Flag per part of the design.
+    fixed: Vec<bool>,
+    /// Parts that stay because kept copper ends on one of their pads.
+    anchored: Vec<usize>,
+    /// Connectors, buttons and test points outside the scope that moved anyway: they were not
+    /// placed (piled up or off the board).
+    released: Vec<usize>,
+    /// Per part: piled up or off the board in the input, see [`unplaced_parts`].
+    unplaced: Vec<Option<Unplaced>>,
+}
+
 /// Parts that stay, as flags per part of `d`.
-fn fixed_parts(d: &Design, kb: &KicadBoard, opts: &PlaceOptions, outer: &Polygon) -> Result<(Vec<bool>, Vec<usize>)> {
+fn fixed_parts(d: &Design, kb: &KicadBoard, opts: &PlaceOptions, outer: &Polygon) -> Result<Fixing> {
     let only: &[String] = match &opts.scope {
         Scope::Only(refs) => refs,
         _ => &[],
@@ -154,22 +259,35 @@ fn fixed_parts(d: &Design, kb: &KicadBoard, opts: &PlaceOptions, outer: &Polygon
             .fold(R::empty(), |b, r| b.union(&r.transformed_bbox(p.pos, p.rot)));
         !outer.contains(b.center())
     };
+    let unplaced = unplaced_parts(d, outer);
+    let mut released = Vec::new();
     let mut fixed: Vec<bool> = d
         .parts
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
             let in_scope = match &opts.scope {
                 Scope::Unlocked => kb.board.movable.contains(&p.reference),
                 Scope::AllUnlocked => true,
                 Scope::Outside => outside(p),
                 Scope::Only(refs) => refs.contains(&p.reference),
             };
-            let chosen = in_scope || opts.free.contains(&p.reference);
-            !chosen || p.locked || opts.fixed.contains(&p.reference) || p.court.is_empty()
+            let stays = p.locked || opts.fixed.contains(&p.reference) || p.court.is_empty();
+            // a connector or button in the pile has no position to keep
+            let release = matches!(opts.scope, Scope::Unlocked) && !in_scope && unplaced[i].is_some() && !stays;
+            if release && !opts.free.contains(&p.reference) {
+                released.push(i);
+            }
+            let chosen = in_scope || release || opts.free.contains(&p.reference);
+            !chosen || stays
         })
         .collect();
-    // copper that ends on a pad keeps the part where it is: tracks do not follow
-    let anchored = anchored_parts(d, &kb.board, &fixed);
+    // copper that ends on a pad keeps the part where it is: tracks do not follow. A part in the
+    // pile is not placed, whatever copper touches it there.
+    let anchored: Vec<usize> = anchored_parts(d, &kb.board, &fixed)
+        .into_iter()
+        .filter(|&i| unplaced[i].is_none())
+        .collect();
     for &i in &anchored {
         fixed[i] = true;
     }
@@ -190,7 +308,13 @@ fn fixed_parts(d: &Design, kb: &KicadBoard, opts: &PlaceOptions, outer: &Polygon
             ids.iter().for_each(|&i| fixed[i] = true);
         }
     }
-    Ok((fixed, anchored))
+    released.retain(|&i| !fixed[i]);
+    Ok(Fixing {
+        fixed,
+        anchored,
+        released,
+        unplaced,
+    })
 }
 
 /// Parts with kept copper of their net on a pad, among those not fixed yet.
@@ -459,6 +583,137 @@ fn coil_springs(d: &Design) -> Vec<((usize, usize), (usize, usize))> {
     out
 }
 
+/// A pull between two pads, each (part, pad), with its weight per mm.
+type Spring = ((usize, usize), (usize, usize), f64);
+
+/// The pad of `p` on `net` in the middle of its pads on that net.
+fn middle_pad(p: &crate::model::Part, net: usize) -> Option<usize> {
+    let on: Vec<usize> = (0..p.pads.len()).filter(|&x| p.pads[x].net == Some(net)).collect();
+    if on.is_empty() {
+        return None;
+    }
+    let c = on.iter().fold(pt(0.0, 0.0), |a, &x| a + p.pads[x].local) * (1.0 / on.len() as f64);
+    on.into_iter()
+        .min_by(|&a, &b| p.pads[a].local.dist(c).partial_cmp(&p.pads[b].local.dist(c)).unwrap())
+}
+
+fn has_ground(d: &Design, p: &crate::model::Part) -> bool {
+    p.pads.iter().any(|x| x.net.is_some_and(|n| is_ground(&d.nets[n])))
+}
+
+/// A two-pin part in a signal or current path (a series resistor, a fuse, a boot capacitor), not
+/// a capacitor or resistor to ground.
+fn is_series(d: &Design, p: &crate::model::Part) -> bool {
+    p.pads.len() == 2 && !is_coil(p) && !has_ground(d, p)
+}
+
+/// Local affinity, with `semantic`: each pad of a two-pin part on a small net goes to the part
+/// with the most pads on that net, an IC, a connector or the next part of a series chain. The
+/// net alone only pulls its box, so a pull-down sat anywhere next to a crowded IC. Ground,
+/// planes and decoupling capacitors (they have springs of their own) are left out; current
+/// paths tie their chain up to [`AFFINITY_POWER_PARTS`] parts.
+/// Small regulators (few pads, only rails on them) go to the biggest IC on their output rail.
+/// The result: pad, pad, weight.
+fn affinity_springs(d: &Design, terms: &Nets, fixed: &[bool]) -> Vec<Spring> {
+    let mut parts_on: Vec<Vec<usize>> = vec![Vec::new(); d.nets.len()];
+    let mut pads_on = vec![0usize; d.nets.len()];
+    for (i, p) in d.parts.iter().enumerate() {
+        for x in &p.pads {
+            if let Some(n) = x.net {
+                pads_on[n] += 1;
+                if parts_on[n].last() != Some(&i) {
+                    parts_on[n].push(i);
+                }
+            }
+        }
+    }
+    let count_on = |p: &crate::model::Part, n: usize| p.pads.iter().filter(|x| x.net == Some(n)).count();
+    let open_net = |n: usize| !is_ground(&d.nets[n]) && terms.weight[n] > 0.0 && terms.partial[n].is_empty();
+    let mut out = Vec::new();
+    for (i, p) in d.parts.iter().enumerate() {
+        if fixed[i] || p.pads.len() != 2 || is_coil(p) || (has_ground(d, p) && p.reference.starts_with('C')) {
+            continue;
+        }
+        for (k, pad) in p.pads.iter().enumerate() {
+            let Some(n) = pad.net.filter(|&n| open_net(n)) else {
+                continue;
+            };
+            let limit = if terms.power[n] {
+                AFFINITY_POWER_PARTS
+            } else {
+                AFFINITY_NET_PARTS
+            };
+            if parts_on[n].len() > limit {
+                continue;
+            }
+            // the IC or connector with the most pads on the net, else the one series part; a net
+            // between two ICs leaves the part free along it
+            let rank = |kind: &dyn Fn(usize) -> bool| -> Option<usize> {
+                let mut c: Vec<(usize, usize)> = parts_on[n]
+                    .iter()
+                    .copied()
+                    .filter(|&j| j != i && kind(j))
+                    .map(|j| (count_on(&d.parts[j], n), j))
+                    .collect();
+                c.sort_by_key(|x| std::cmp::Reverse(x.0));
+                match c.as_slice() {
+                    [one] => Some(one.1),
+                    [a, b, ..] if a.0 > b.0 => Some(a.1),
+                    _ => None,
+                }
+            };
+            let anchors = parts_on[n]
+                .iter()
+                .filter(|&&j| j != i && d.parts[j].pads.len() >= 3)
+                .count();
+            let best = if anchors > 0 {
+                rank(&|j| d.parts[j].pads.len() >= 3)
+            } else {
+                rank(&|j| is_series(d, &d.parts[j]))
+            };
+            if let Some(j) = best
+                && let Some(x) = middle_pad(&d.parts[j], n)
+            {
+                out.push(((i, k), (j, x), AFFINITY_WEIGHT));
+            }
+        }
+    }
+    // regulators: every net on them a rail (a plane, a current path or a net with many pads)
+    let rail = |n: usize| terms.weight[n] == 0.0 || !terms.partial[n].is_empty() || terms.power[n] || pads_on[n] >= 8;
+    for (a, p) in d.parts.iter().enumerate() {
+        if fixed[a] || !is_ic(p) || p.pads.len() > REGULATOR_PADS {
+            continue;
+        }
+        let nets: Vec<usize> = p
+            .pads
+            .iter()
+            .filter_map(|x| x.net)
+            .filter(|&n| !is_ground(&d.nets[n]) && !d.nets[n].starts_with("unconnected-"))
+            .collect();
+        if nets.is_empty() || !nets.iter().all(|&n| rail(n)) {
+            continue;
+        }
+        let mut done: Vec<usize> = Vec::new();
+        for &n in nets.iter().filter(|&&n| open_net(n)) {
+            if done.contains(&n) {
+                continue;
+            }
+            done.push(n);
+            let best = parts_on[n]
+                .iter()
+                .copied()
+                .filter(|&j| j != a && is_ic(&d.parts[j]) && d.parts[j].pads.len() > p.pads.len())
+                .max_by_key(|&j| (count_on(&d.parts[j], n), d.parts[j].pads.len(), std::cmp::Reverse(j)));
+            if let (Some(j), Some(k)) = (best, middle_pad(p, n))
+                && let Some(x) = middle_pad(&d.parts[j], n)
+            {
+                out.push(((a, k), (j, x), REGULATOR_WEIGHT));
+            }
+        }
+    }
+    out
+}
+
 struct Group {
     name: String,
     parts: Vec<usize>,
@@ -573,6 +828,156 @@ fn plane_field(polys: &[&Polygon], b: &R) -> Field {
         h,
         nx,
         ny,
+        v,
+    }
+}
+
+/// Copper and rule areas that keep a via out, whatever the layer: kept tracks and vias, pours,
+/// holes, rule areas without vias and the pads of the parts that stay. Not the pads of the
+/// moving parts, they are not where the board says.
+fn via_blockers(board: &Board, moving: &dyn Fn(&str) -> bool) -> Vec<usize> {
+    let mut skip = vec![false; board.obstacles.len()];
+    for (r, obs) in &board.footprint_obstacles {
+        if moving(r) {
+            for &o in obs {
+                skip[o] = true;
+            }
+        }
+    }
+    for c in &board.copper {
+        for o in c.first..c.last {
+            skip[o as usize] = false;
+        }
+    }
+    (0..board.obstacles.len())
+        .filter(|&o| !skip[o])
+        .filter(|&o| match board.obstacles[o].kind {
+            ObstacleKind::Keepout { vias, mask, .. } => vias && !mask,
+            ObstacleKind::Zone | ObstacleKind::Graphic => false,
+            _ => true,
+        })
+        .collect()
+}
+
+/// Escape raster of the plane net `net` (of the board): 0 where a via of the net fits within
+/// [`ESCAPE_REACH`], else [`ESCAPE_COST`] plus the distance to the next site that has room.
+fn escape_field(board: &Board, blockers: &[usize], net: u32, outer: &Polygon, b: &R) -> Field {
+    let h = 0.1;
+    let nx = (b.w() / h).ceil() as usize + 1;
+    let ny = (b.h() / h).ceil() as usize + 1;
+    let class = board.class_of(net);
+    let via_r = if class.via_diameter > 0.0 {
+        class.via_diameter * 0.5
+    } else {
+        0.4
+    };
+    let centre = |c: usize| pt(b.x0 + ((c % nx) as f64 + 0.5) * h, b.y0 + ((c / nx) as f64 + 0.5) * h);
+    let edge = via_r + board.rules.edge_clearance.max(0.2);
+    let mut blocked: Vec<bool> = (0..nx * ny)
+        .into_par_iter()
+        .map(|c| {
+            let p = centre(c);
+            !outer.contains(p) || outer.boundary_dist(p) < edge
+        })
+        .collect();
+    for &o in blockers {
+        let ob = &board.obstacles[o];
+        if ob.net == Some(net) {
+            continue;
+        }
+        let reach = via_r + ob.clearance.max(class.clearance);
+        let bb = ob.shape.bbox();
+        let i0 = (((bb.min.x - reach - b.x0) / h).floor().max(0.0) as usize).min(nx - 1);
+        let i1 = (((bb.max.x + reach - b.x0) / h).ceil().max(0.0) as usize).min(nx - 1);
+        let j0 = (((bb.min.y - reach - b.y0) / h).floor().max(0.0) as usize).min(ny - 1);
+        let j1 = (((bb.max.y + reach - b.y0) / h).ceil().max(0.0) as usize).min(ny - 1);
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                let c = j * nx + i;
+                if !blocked[c] && ob.shape.dist_to_point(centre(c)) < reach {
+                    blocked[c] = true;
+                }
+            }
+        }
+    }
+    // distance to the next free site: two chamfer passes
+    let diag = h * std::f64::consts::SQRT_2;
+    let mut dist: Vec<f64> = blocked.iter().map(|&x| if x { f64::INFINITY } else { 0.0 }).collect();
+    for j in 0..ny {
+        for i in 0..nx {
+            let c = j * nx + i;
+            let mut v = dist[c];
+            if i > 0 {
+                v = v.min(dist[c - 1] + h);
+            }
+            if j > 0 {
+                v = v.min(dist[c - nx] + h);
+                if i > 0 {
+                    v = v.min(dist[c - nx - 1] + diag);
+                }
+                if i + 1 < nx {
+                    v = v.min(dist[c - nx + 1] + diag);
+                }
+            }
+            dist[c] = v;
+        }
+    }
+    for j in (0..ny).rev() {
+        for i in (0..nx).rev() {
+            let c = j * nx + i;
+            let mut v = dist[c];
+            if i + 1 < nx {
+                v = v.min(dist[c + 1] + h);
+            }
+            if j + 1 < ny {
+                v = v.min(dist[c + nx] + h);
+                if i + 1 < nx {
+                    v = v.min(dist[c + nx + 1] + diag);
+                }
+                if i > 0 {
+                    v = v.min(dist[c + nx - 1] + diag);
+                }
+            }
+            dist[c] = v;
+        }
+    }
+    let v = dist
+        .into_iter()
+        .map(|e| {
+            if e <= ESCAPE_REACH {
+                0.0
+            } else {
+                (ESCAPE_COST + e.min(100.0) - ESCAPE_REACH) as f32
+            }
+        })
+        .collect();
+    Field {
+        ox: b.x0,
+        oy: b.y0,
+        h,
+        nx,
+        ny,
+        v,
+    }
+}
+
+/// The sum of two fields, on the raster of `a`.
+fn field_sum(a: &Field, b: &Field) -> Field {
+    let v = (0..a.v.len())
+        .map(|c| {
+            let p = pt(
+                a.ox + ((c % a.nx) as f64 + 0.5) * a.h,
+                a.oy + ((c / a.nx) as f64 + 0.5) * a.h,
+            );
+            a.v[c] + b.at(p) as f32
+        })
+        .collect();
+    Field {
+        ox: a.ox,
+        oy: a.oy,
+        h: a.h,
+        nx: a.nx,
+        ny: a.ny,
         v,
     }
 }
@@ -722,7 +1127,8 @@ fn run(p: &Problem, bbox: &R, seed: u64, iters: usize) -> Option<(State, f64)> {
     let mut pl = Placer::new(p, State { pos, k: vec![0; n] });
     let size = bbox.w().max(bbox.h());
     pl.anneal(&mut rng, iters, 30.0, 0.05, 0.3, 400.0, size / 3.0, 0.2, false);
-    if pl.legalize(0.25, 40.0) > 0 || pl.total_overlap() > 1e-6 {
+    // a crowded corner may have to give a small part to the other end of the board
+    if pl.legalize(0.25, size.max(40.0)) > 0 || pl.total_overlap() > 1e-6 {
         return None;
     }
     pl.anneal(&mut rng, iters / 3, 0.8, 0.01, 0.0, 0.0, 2.0, 0.1, true);
@@ -802,7 +1208,14 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         v
     };
     let (outer, cutouts) = outlines.split_first().context("the board has no outline")?;
-    let (fixed, anchored) = fixed_parts(&d, &kb, opts, outer)?;
+    let Fixing {
+        fixed,
+        anchored,
+        released,
+        unplaced,
+    } = fixed_parts(&d, &kb, opts, outer)?;
+    // the courtyards as the file has them, before the halo, for the report
+    let boxes = court_boxes(&d);
     for p in &mut d.parts {
         if p.pads.len() >= 5 {
             for r in &mut p.court {
@@ -891,6 +1304,11 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
     } else {
         Vec::new()
     };
+    let ties = if opts.semantic {
+        affinity_springs(&d, &terms, &fixed)
+    } else {
+        Vec::new()
+    };
     // a group is a net of its own between the courtyard centres of its parts
     let real_nets = d.nets.len();
     for g in &groups {
@@ -930,6 +1348,7 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         .iter()
         .map(|&(c, ic, w)| spring(c, ic, w))
         .chain(coils.iter().map(|&(l, ic)| spring(l, ic, COIL_WEIGHT)))
+        .chain(ties.iter().map(|&(a, b, w)| spring(a, b, w)))
         .collect();
     let net_weight = |n: usize| {
         if n < real_nets {
@@ -950,36 +1369,91 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         }
     }
 
-    // ---- partial planes
-    let mut field_of: HashMap<usize, usize> = HashMap::new();
-    for (n, polys) in terms.partial.iter().enumerate() {
-        if !polys.is_empty() {
-            field_of.insert(n, prob.fields.len());
-            prob.fields.push(plane_field(&polys.iter().collect::<Vec<_>>(), &bbox));
+    // ---- partial planes, and room for the via of every plane pad
+    let moving = |r: &str| d.by_ref.get(r).is_some_and(|&i| !fixed[i]);
+    let blockers = via_blockers(&kb.board, &moving);
+    let mut plane_fields: HashMap<usize, Field> = HashMap::new();
+    let mut escape_fields: HashMap<usize, Field> = HashMap::new();
+    for n in 0..real_nets {
+        if !terms.partial[n].is_empty() {
+            plane_fields.insert(n, plane_field(&terms.partial[n].iter().collect::<Vec<_>>(), &bbox));
+        }
+        if let Some(id) = kb.board.net_id(&d.nets[n])
+            && kb.board.planes.iter().any(|p| p.net == id)
+        {
+            escape_fields.insert(n, escape_field(&kb.board, &blockers, id, outer, &bbox));
         }
     }
+    // pads that take a fan-out via: small SMD pads (a through hole pad reaches the plane itself)
+    let mut escapes: HashMap<&str, bool> = HashMap::new();
+    for pin in &kb.board.pins {
+        let small = pin.layers.0.count_ones() == 1 && pin.size.0.max(pin.size.1) <= ESCAPE_PAD;
+        *escapes.entry(pin.name.as_str()).or_insert(true) &= small;
+    }
+    let escapes_at = |i: usize, k: usize| -> bool {
+        let p = &d.parts[i];
+        escapes
+            .get(format!("{}.{}", p.reference, p.pads[k].number).as_str())
+            .copied()
+            .unwrap_or(false)
+    };
+    let mut field_of: HashMap<(usize, bool), usize> = HashMap::new();
+    let mut escape_of: HashMap<usize, usize> = HashMap::new();
     prob.field_weight = PLANE_WEIGHT;
     for (i, p) in d.parts.iter().enumerate() {
+        if fixed[i] {
+            continue;
+        }
         for (k, pad) in p.pads.iter().enumerate() {
-            if let (Some(n), Some(&(u, pin))) = (pad.net, part_pins[i].get(k))
-                && let Some(&f) = field_of.get(&n)
-            {
-                prob.units[u].pin_field[pin] = Some(f);
+            let (Some(n), Some(&(u, pin))) = (pad.net, part_pins[i].get(k)) else {
+                continue;
+            };
+            let escape = escape_fields.contains_key(&n) && escapes_at(i, k);
+            if !escape && !plane_fields.contains_key(&n) {
+                continue;
+            }
+            let f = *field_of.entry((n, escape)).or_insert_with(|| {
+                let f = match (plane_fields.get(&n), escape) {
+                    (Some(pf), true) => field_sum(&escape_fields[&n], pf),
+                    (Some(pf), false) => pf.clone(),
+                    (None, _) => escape_fields[&n].clone(),
+                };
+                prob.fields.push(f);
+                prob.fields.len() - 1
+            });
+            prob.units[u].pin_field[pin] = Some(f);
+            if escape {
+                let e = *escape_of.entry(n).or_insert_with(|| {
+                    prob.fields.push(escape_fields[&n].clone());
+                    prob.fields.len() - 1
+                });
+                prob.units[u].pin_escape[pin] = Some(e);
             }
         }
     }
+    prob.escape_overlap = ESCAPE_OVERLAP;
 
     // ---- the starts, in parallel; the fewest crossings win, then the shortest wires
     let starts: Vec<usize> = (1..=opts.starts.max(1)).collect();
-    let mut results: Vec<(usize, State, f64, usize)> = starts
-        .par_iter()
-        .filter_map(|&start| {
-            let seed = opts.seed.wrapping_sub(1).wrapping_mul(SEED_STEP) + start as u64;
-            let (s, wire) = run(&prob, &bbox, seed, opts.iters)?;
-            let c = crossings(&d, &unit_poses(&d, &units, &s), &terms.weight);
-            Some((start, s, wire, c))
-        })
-        .collect();
+    let attempt = |prob: &Problem| -> Vec<(usize, State, f64, usize)> {
+        starts
+            .par_iter()
+            .filter_map(|&start| {
+                let seed = opts.seed.wrapping_sub(1).wrapping_mul(SEED_STEP) + start as u64;
+                let (s, wire) = run(prob, &bbox, seed, opts.iters)?;
+                let c = crossings(&d, &unit_poses(&d, &units, &s), &terms.weight);
+                Some((start, s, wire, c))
+            })
+            .collect()
+    };
+    let mut results = attempt(&prob);
+    let mut escape_soft = false;
+    if results.is_empty() && escape_of.values().next().is_some() {
+        // too tight to keep every via site free: the free sites only count as cost then
+        prob.escape_overlap = 0.0;
+        escape_soft = true;
+        results = attempt(&prob);
+    }
     results.sort_by(|a, b| (a.3, a.2).partial_cmp(&(b.3, b.2)).unwrap());
     let starts: Vec<(usize, f64, usize)> = results.iter().map(|r| (r.0, r.2, r.3)).collect();
     let Some((start, state, wire, crossed)) = results.into_iter().next() else {
@@ -1067,16 +1541,20 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
     }
 
     let mut off_plane = Vec::new();
+    let mut no_via_room = Vec::new();
     for (i, p) in d.parts.iter().enumerate().filter(|(i, _)| !fixed[*i]) {
-        for pad in &p.pads {
-            if let Some(n) = pad.net
-                && let Some(&f) = field_of.get(&n)
-                && prob.fields[f].at(pose[i].0 + kicad_rot(pad.local, pose[i].1)) > PLANE_INSET
-            {
+        for (k, pad) in p.pads.iter().enumerate() {
+            let Some(n) = pad.net else { continue };
+            let at = pose[i].0 + kicad_rot(pad.local, pose[i].1);
+            if plane_fields.get(&n).is_some_and(|f| f.at(at) > PLANE_INSET) {
                 off_plane.push(format!("{}.{}", p.reference, pad.number));
+            }
+            if escapes_at(i, k) && escape_fields.get(&n).is_some_and(|f| f.at(at) > 0.0) {
+                no_via_room.push(format!("{}.{}", p.reference, pad.number));
             }
         }
     }
+    no_via_room.dedup();
     off_plane.dedup();
     let names = |want: bool| -> Vec<String> {
         let mut v: Vec<String> = (0..d.parts.len())
@@ -1086,6 +1564,71 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         v.sort();
         v
     };
+    let refs = |v: &mut dyn Iterator<Item = usize>| -> Vec<String> {
+        let mut v: Vec<String> = v.map(|i| d.parts[i].reference.clone()).collect();
+        v.sort();
+        v
+    };
+    let mut warnings = Vec::new();
+    let released_refs = refs(&mut released.iter().copied());
+    if !released_refs.is_empty() {
+        warnings.push(format!(
+            "{} placed although outside the scope: connectors, buttons or test points piled up or off \
+             the board, now placed by the netlist alone; move them where they belong and pass them in \
+             fixed (or lock them)",
+            released_refs.join(", ")
+        ));
+    }
+    let overhang = |i: usize| boxes[i].iter().any(|r| r.corners().iter().any(|c| !outer.contains(*c)));
+    let off_refs = refs(&mut (0..d.parts.len()).filter(|&i| fixed[i] && unplaced[i] == Some(Unplaced::Off)));
+    if !off_refs.is_empty() {
+        warnings.push(format!(
+            "{} stay off the board: they are fixed, locked or out of scope; release them (scope \
+             all_unlocked or outside) or move them",
+            off_refs.join(", ")
+        ));
+    }
+    let hang_refs =
+        refs(&mut (0..d.parts.len()).filter(|&i| fixed[i] && unplaced[i] != Some(Unplaced::Off) && overhang(i)));
+    if !hang_refs.is_empty() {
+        warnings.push(format!(
+            "{} stay with the courtyard over the board outline (right for an edge connector or an \
+             antenna, else move them)",
+            hang_refs.join(", ")
+        ));
+    }
+    // parts that stay on parts that stay; the pile of the moving parts is gone
+    let mut piled: Vec<String> = (0..d.parts.len())
+        .filter(|&i| fixed[i] && unplaced[i] != Some(Unplaced::Off) && !boxes[i].is_empty())
+        .filter_map(|i| {
+            let area: f64 = boxes[i].iter().map(|r| r.area()).sum();
+            (0..d.parts.len())
+                .find(|&j| j != i && fixed[j] && court_overlap(&boxes[i], &boxes[j]) > PILE_OVERLAP * area)
+                .map(|j| format!("{} on {}", d.parts[i].reference, d.parts[j].reference))
+        })
+        .collect();
+    piled.sort();
+    if !piled.is_empty() {
+        warnings.push(format!(
+            "{} stay where they are although their courtyards overlap (a pile of unplaced parts?): \
+             they are fixed, locked or out of scope",
+            piled.join(", ")
+        ));
+    }
+    if escape_soft {
+        warnings.push(
+            "the board is too tight to keep a via site free next to every plane pad: those sites only \
+             counted as cost"
+                .to_string(),
+        );
+    }
+    if !no_via_room.is_empty() {
+        warnings.push(format!(
+            "no room for the plane via of {}: kept copper, a hole or a rule area around the pad on some \
+             layer; move the part or give it a via by hand",
+            no_via_room.join(", ")
+        ));
+    }
     let stale_copper = kb
         .root
         .args()
@@ -1120,6 +1663,13 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
                 })
                 .collect(),
             off_plane,
+            ties: ties
+                .iter()
+                .map(|&((a, _), (b, _), _)| (d.parts[a].reference.clone(), d.parts[b].reference.clone()))
+                .collect(),
+            released: released_refs,
+            no_via_room,
+            warnings,
             stale_copper,
             seed: opts.seed,
             start,
@@ -1337,10 +1887,219 @@ mod tests {
 
     #[test]
     fn a_part_with_copper_on_its_pad_stays() {
-        let text = with_track(&board(|_| (116.0, 110.0)), (115.4, 110.0), (112.0, 112.0), "F.Cu", "B");
+        // U2 placed on its own, the small parts in a pile off the board
+        let spot = |i: usize| if i == 0 { (116.0, 110.0) } else { (160.0, 160.0) };
+        let text = with_track(&board(spot), (115.4, 110.0), (112.0, 112.0), "F.Cu", "B");
         let p = place(&text, "anchor", &quick()).unwrap();
         assert_eq!(p.report.anchored, vec!["U2"]);
         assert!(p.report.fixed.contains(&"U2".to_string()));
+    }
+
+    #[test]
+    fn a_part_in_the_pile_is_not_anchored() {
+        // the same copper, but U2 sits in the pile of the fresh import
+        let text = with_track(&board(|_| (116.0, 110.0)), (115.4, 110.0), (112.0, 112.0), "F.Cu", "B");
+        let p = place(&text, "pile", &quick()).unwrap();
+        assert!(p.report.anchored.is_empty(), "{:?}", p.report.anchored);
+        assert!(p.report.moved.contains(&"U2".to_string()));
+    }
+
+    #[test]
+    fn a_connector_in_the_pile_is_placed_with_a_warning() {
+        let text = board(|_| (116.0, 110.0)).replace("(at 125.0 115.0)", "(at 116 110)");
+        let text = text.replace("(at 125 115)", "(at 116 110)");
+        let p = place(&text, "stray", &quick()).unwrap();
+        assert_eq!(p.report.released, vec!["J1"]);
+        assert!(p.report.moved.contains(&"J1".to_string()));
+        assert!(
+            p.report.warnings.iter().any(|w| w.contains("J1")),
+            "{:?}",
+            p.report.warnings
+        );
+        // a connector in its place stays without a word
+        let p = place(&board(|_| (116.0, 110.0)), "placed", &quick()).unwrap();
+        assert!(p.report.released.is_empty());
+        assert!(p.report.fixed.contains(&"J1".to_string()));
+    }
+
+    #[test]
+    fn parts_left_off_the_board_are_named() {
+        let opts = PlaceOptions {
+            scope: Scope::Only(vec!["C1".into()]),
+            ..quick()
+        };
+        let p = place(&board(|_| (160.0, 160.0)), "off", &opts).unwrap();
+        let w = p
+            .report
+            .warnings
+            .iter()
+            .find(|w| w.contains("off the board"))
+            .expect("a warning");
+        for r in ["C2", "R1", "U2"] {
+            assert!(w.contains(r), "{w}");
+        }
+        assert!(!w.contains("C1"), "{w}");
+    }
+
+    /// A 4-layer variant of [`board`] with a ground plane on In1.Cu and a wide locked track of
+    /// net B on B.Cu at x = `wall`.
+    fn plane_board(spot: impl Fn(usize) -> (f64, f64), wall: f64) -> String {
+        let text = board(spot).replace(
+            "(layers (0 \"F.Cu\" signal) (31 \"B.Cu\" signal) (44 \"Edge.Cuts\" user))",
+            "(layers (0 \"F.Cu\" signal) (1 \"In1.Cu\" power) (2 \"In2.Cu\" signal) (31 \"B.Cu\" signal) \
+             (44 \"Edge.Cuts\" user))",
+        );
+        let end = text.rfind(')').unwrap();
+        let text = format!(
+            "{}\t(zone (net 1) (net_name \"GND\") (layer \"In1.Cu\") (hatch edge 0.5) \
+             (polygon (pts (xy 100 100) (xy 130 100) (xy 130 120) (xy 100 120))))\n{}",
+            &text[..end],
+            &text[end..]
+        );
+        with_track(&text, (wall, 100.0), (wall, 120.0), "B.Cu", "B").replace("(width 0.3)", "(width 1.2)")
+    }
+
+    #[test]
+    fn the_escape_field_keeps_a_via_off_foreign_copper() {
+        let dir = std::env::temp_dir().join(format!("gb-auto-{}-escape", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.kicad_pcb");
+        std::fs::write(&path, plane_board(|_| (160.0, 160.0), 112.0)).unwrap();
+        let kb = read_board(
+            &path,
+            &ReadOptions {
+                move_parts: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let board = &kb.board;
+        let outer = board.outline[0].clone();
+        let bb = outer.bbox();
+        let r = R {
+            x0: bb.min.x,
+            y0: bb.min.y,
+            x1: bb.max.x,
+            y1: bb.max.y,
+        };
+        let moving = |x: &str| x != "U1" && x != "J1";
+        let blockers = via_blockers(board, &moving);
+        let gnd = board.net_id("GND").unwrap();
+        let f = escape_field(board, &blockers, gnd, &outer, &r);
+        // on the track and right next to it there is no room, 3 mm away there is
+        assert!(f.at(pt(112.0, 110.0)) >= ESCAPE_COST);
+        assert!(f.at(pt(112.4, 110.0)) >= ESCAPE_COST);
+        assert_eq!(f.at(pt(115.0, 110.0)), 0.0);
+        // the field grows towards the track, so a pad finds its way out
+        assert!(f.at(pt(112.0, 110.0)) > f.at(pt(112.4, 110.0)));
+        // the track's own net may put its via there
+        let b = board.net_id("B").unwrap();
+        assert_eq!(escape_field(board, &blockers, b, &outer, &r).at(pt(112.0, 110.0)), 0.0);
+        // the pads of the pile are not where they will be: they block nothing
+        assert_eq!(f.at(pt(116.0, 116.0)), 0.0);
+    }
+
+    #[test]
+    fn ground_pads_keep_room_for_their_via() {
+        // a wall on the far side right next to U1, where the decoupling capacitors want to go
+        let p = place(&plane_board(|_| (160.0, 160.0), 107.0), "via", &quick()).unwrap();
+        assert!(p.report.no_via_room.is_empty(), "{:?}", p.report.no_via_room);
+        for r in ["C1", "C2", "U2"] {
+            let (x, y, rot) = p
+                .report
+                .poses
+                .iter()
+                .find(|q| q.0 == r)
+                .map(|q| (q.1, q.2, q.3))
+                .unwrap();
+            let pads = if r == "U2" { 4 } else { 2 };
+            let gnd = if r == "U2" { 2 } else { 1 };
+            let local = pt(-0.6 + 1.2 * gnd as f64 / (pads - 1) as f64, 0.0);
+            let at = pt(x, y) + kicad_rot(local, rot);
+            assert!((at.x - 107.0).abs() > 0.55, "{r}: ground pad at {at:?} over the wall");
+        }
+    }
+
+    /// Two ICs, a pull-down on a pin of one, a resistor on a net between both, and a small
+    /// regulator on a partial plane that feeds a rail of the bigger IC.
+    fn affinity_board() -> String {
+        let mut s = String::from(
+            "(kicad_pcb (version 20240108) (generator test)\n\
+             \t(layers (0 \"F.Cu\" signal) (1 \"In1.Cu\" power) (2 \"In2.Cu\" signal) (31 \"B.Cu\" signal) \
+             (44 \"Edge.Cuts\" user))\n\
+             \t(setup (pad_to_mask_clearance 0))\n\
+             \t(net 0 \"\") (net 1 \"VIN\")\n\
+             \t(gr_rect (start 100 100) (end 140 130) (stroke (width 0.1) (type solid)) (fill none) \
+             (layer \"Edge.Cuts\"))\n\
+             \t(zone (net 1) (net_name \"VIN\") (layer \"In1.Cu\") (hatch edge 0.5) \
+             (polygon (pts (xy 100 100) (xy 140 100) (xy 140 110) (xy 100 110))))\n",
+        );
+        let far = (170.0, 170.0);
+        s += &fp(
+            "Lib:MCU",
+            "U1",
+            (105.0, 125.0),
+            true,
+            &[
+                ("1", "EN"),
+                ("2", "LINK"),
+                ("3", "V3"),
+                ("4", "GND"),
+                ("5", "S1"),
+                ("6", "S2"),
+            ],
+        );
+        s += &fp(
+            "Lib:IC",
+            "U2",
+            far,
+            false,
+            &[("1", "LINK"), ("2", "X"), ("3", "S1"), ("4", "GND")],
+        );
+        s += &fp(
+            "Lib:REG",
+            "U3",
+            far,
+            false,
+            &[("1", "VIN"), ("2", "V3"), ("3", "GND"), ("4", "V3")],
+        );
+        s += &fp("Lib:R", "R1", far, false, &[("1", "EN"), ("2", "GND")]);
+        s += &fp("Lib:R", "R2", far, false, &[("1", "LINK"), ("2", "GND")]);
+        for i in 0..5 {
+            s += &fp("Lib:C", &format!("C{i}"), far, false, &[("1", "V3"), ("2", "GND")]);
+        }
+        s += &fp(
+            "Connector:X",
+            "J1",
+            (137.0, 102.0),
+            false,
+            &[("1", "VIN"), ("2", "GND"), ("3", "S2")],
+        );
+        s.push_str(")\n");
+        s
+    }
+
+    #[test]
+    fn semantic_ties_small_parts_to_their_ic() {
+        let opts = PlaceOptions {
+            semantic: true,
+            ..quick()
+        };
+        let p = place(&affinity_board(), "ties", &opts).unwrap();
+        let ties = &p.report.ties;
+        let tie = |a: &str, b: &str| ties.contains(&(a.to_string(), b.to_string()));
+        assert!(tie("R1", "U1"), "{ties:?}");
+        // LINK joins two ICs: the resistor is free along it
+        assert!(!ties.iter().any(|t| t.0 == "R2"), "{ties:?}");
+        // the regulator goes to the MCU it feeds
+        assert!(tie("U3", "U1"), "{ties:?}");
+        let (x, y) = pose(&p.report, "R1");
+        let d = ((x - 104.4).powi(2) + (y - 125.0).powi(2)).sqrt();
+        assert!(d < 4.0, "R1 is {d} mm from its pin");
+        // without semantic there are no ties
+        let p = place(&affinity_board(), "noties", &quick()).unwrap();
+        assert!(p.report.ties.is_empty());
     }
 
     /// A footprint on a schematic sheet.

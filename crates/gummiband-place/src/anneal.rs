@@ -121,6 +121,7 @@ impl Raster {
 
 /// Cost per mm around the board (a distance raster): pins of a net with a partial plane want to
 /// sit over that plane, so that a via reaches it.
+#[derive(Clone)]
 pub struct Field {
     pub ox: f64,
     pub oy: f64,
@@ -146,6 +147,9 @@ pub struct UnitGeom {
     pub pin_net: Vec<usize>,
     /// Plane field of each pin, see [`Field`].
     pub pin_field: Vec<Option<usize>>,
+    /// Escape field of each pin: where it is above 0 the pin has no room for its via, which
+    /// counts as overlap ([`Problem::escape_overlap`]).
+    pub pin_escape: Vec<Option<usize>>,
     pub area: f64,
     pub nets: Vec<usize>,
     pub decaps: Vec<usize>,
@@ -179,6 +183,8 @@ pub struct Problem {
     pub swappable: Vec<usize>,
     pub fields: Vec<Field>,
     pub field_weight: f64,
+    /// Overlap (mm2) a pin without room for its via adds to its unit; 0 leaves it to the cost.
+    pub escape_overlap: f64,
 }
 
 impl Problem {
@@ -222,12 +228,14 @@ impl Problem {
             let bbox = [0, 1, 2, 3].map(|k| rects[k].iter().fold(R::empty(), |a, r| a.union(r)));
             let area = rects[0].iter().map(|r| r.area()).sum();
             let pin_field = vec![None; pin_net.len()];
+            let pin_escape = vec![None; pin_net.len()];
             geoms.push(UnitGeom {
                 rects,
                 bbox,
                 pins,
                 pin_net,
                 pin_field,
+                pin_escape,
                 area,
                 nets: Vec::new(),
                 decaps: Vec::new(),
@@ -308,6 +316,7 @@ impl Problem {
                 swappable,
                 fields: Vec::new(),
                 field_weight: 0.0,
+                escape_overlap: 0.0,
             },
             part_pins,
         )
@@ -451,7 +460,22 @@ impl<'a> Placer<'a> {
     }
 
     pub fn fixed_overlap(&self, u: usize) -> f64 {
-        self.rects(u).map(|r| self.p.raster.blocked(&r)).sum()
+        self.rects(u).map(|r| self.p.raster.blocked(&r)).sum::<f64>() + self.escape_blocked(u)
+    }
+
+    /// Overlap for the pins of `u` that find no room for their via.
+    fn escape_blocked(&self, u: usize) -> f64 {
+        if self.p.escape_overlap == 0.0 {
+            return 0.0;
+        }
+        let g = &self.p.units[u];
+        let blocked = g
+            .pin_escape
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| f.is_some_and(|f| self.p.fields[f].at(self.pin(u, *i)) > 0.0))
+            .count();
+        blocked as f64 * self.p.escape_overlap
     }
 
     /// Overlap of `u` with everything else.

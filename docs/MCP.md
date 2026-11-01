@@ -85,7 +85,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `board_patterns` | `board` | local patterns of the board: pin rows (part, pins in order, pitch, the side tracks leave to), pad grids, decoupling capacitors with their IC pin, pins of a plane net that can share a fan-out via, buses between two parts; a summary line per kind |
 | `part_info` | `board`, `reference` | value, position, rotation, locked, sheet, pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
 | `move_part` | `board`, `reference`, `x`, `y`, `rotation?`, `follow?` | id and path of the working copy with the footprint at its new position, `items_added`, `warnings` |
-| `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?` | id and path of the working copy, the new poses, decoupling assignment, crossings, smallest courtyard distance, pins off their plane, with `semantic` inductors and groups, `warnings` |
+| `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?` | id and path of the working copy, the new poses, decoupling assignment, crossings, smallest courtyard distance, pins off their plane, pads without via room, released connectors, with `semantic` inductors, groups and ties, `warnings` |
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?`, `pad_connection?`, `thermal_spoke_width?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `width?`, `reset?` | the net's options and effective priority |
@@ -240,7 +240,18 @@ decoupling capacitor was assigned to which part, the `crossings` between the net
 the vias to expect), the smallest distance between two courtyards and the pins that ended up off
 the plane of their net (`off_plane`, routing reaches them with a via). Locked copper stays: parts
 keep `gap` away from it, and a part with locked copper of its net on a pad stays (`anchored`), so add
-pre-routed copper before this call, not after. Unlocked tracks and vias do not follow, so call it
+pre-routed copper before this call, not after. A part that still sits in the pile of a fresh import
+(its courtyard covers a good part of another one) or off the board is not anchored, whatever copper
+touches it. Pads of a net with a plane (small SMD pads, which need a fan-out via) keep a via site
+free next to them: kept tracks and vias of other nets on any layer, holes and rule areas without
+vias push them off, so that a ground pad does not land over a locked track on the other side.
+Pads that found no room anyway are listed in `no_via_room`.
+
+With the default scope connectors, modules, buttons and test points stay, unless they sit piled up
+or off the board: then they are placed with the rest and listed in `released`, with a warning.
+Place them yourself with `move_part` and name them in `fixed` for a real layout. `warnings` also
+names every part that stays piled up or with its courtyard outside the outline (fixed, locked or
+out of scope); the tool never returns such a placement silently. Unlocked tracks and vias do not follow, so call it
 before `route`. The tool places, it does not judge: `route` and `drc` tell how good the result is,
 another `seed` gives another try, and seeds differ a lot. Neighbouring seeds share no starts. The
 crossing count is no forecast of the routed result.
@@ -248,8 +259,11 @@ crossing count is no forecast of the routed result.
 `semantic` (default false) uses the schematic beyond the netlist, as `gummiband place --semantic`
 does: sheets and clusters around an IC stay together, an inductor sits at the switch pins of its
 converter, decoupling capacitors prefer an IC of their own sheet, and current paths count their
-full length, so an input chain stays in order. The result then lists `coils` (inductor, IC) and
-`groups` (name, parts). Connectors and the power stages you care about still go in `fixed`.
+full length, so an input chain stays in order. A two-pin part on a small net is pulled to the part
+with the most pads on it (a pull-down to its IC pin, a boot resistor to its converter, a fuse to the
+next part of the input chain), and a small regulator with only rails on its pins to the biggest IC
+on its output rail (an LDO to the MCU it feeds). The result then lists `coils` (inductor, IC),
+`groups` (name, parts) and `ties` (part, the part it was pulled to). Connectors and the power stages you care about still go in `fixed`.
 
 ```json
 {"name": "place_parts", "arguments": {"board": "b1", "fixed": ["U1", "L1"], "seed": 2}}
