@@ -2849,9 +2849,7 @@ impl<'a> Router<'a> {
         let mut gone = gone;
         while let Some(sid) = gone.pop() {
             let ends_on = |cj: usize| {
-                let on = |s: &u32| {
-                    matches!(self.segs[*s as usize].as_ref().map(|x| x.end), Some(End::Tap(seg, _)) if seg == sid)
-                };
+                let on = |s: &u32| matches!(self.segs[*s as usize].as_ref().map(|x| x.end), Some(End::Tap(seg, _)) if seg == sid);
                 self.conn_segs[cj].iter().any(on)
             };
             let hanging: Vec<usize> = (0..self.conns.len()).filter(|&cj| ends_on(cj)).collect();
