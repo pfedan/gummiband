@@ -409,7 +409,11 @@ pub fn neck(
             x.net == Some(net)
                 && matches!(
                     x.kind,
-                    ObstacleKind::Pad | ObstacleKind::Track | ObstacleKind::Via | ObstacleKind::Zone
+                    ObstacleKind::Pad
+                        | ObstacleKind::Track
+                        | ObstacleKind::Via
+                        | ObstacleKind::Zone
+                        | ObstacleKind::Pour
                 )
         })
         .map(|(i, _)| i)
@@ -1299,6 +1303,7 @@ pub fn pour_outline(
             (None, ObstacleKind::Track) => "track".to_string(),
             (None, ObstacleKind::Via) => "via".to_string(),
             (None, ObstacleKind::Zone) => "zone".to_string(),
+            (None, ObstacleKind::Pour) => "pour".to_string(),
             (None, ObstacleKind::Keepout { .. }) => "rule area".to_string(),
             (None, ObstacleKind::Pad) => "pad".to_string(),
             (None, ObstacleKind::Hole) => "hole".to_string(),

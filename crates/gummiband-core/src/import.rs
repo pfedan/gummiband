@@ -153,7 +153,10 @@ impl Board {
         self.obstacles.iter().any(|o| {
             o.net == Some(net)
                 && o.layers.has(layer)
-                && !matches!(o.kind, ObstacleKind::Zone | ObstacleKind::Keepout { .. })
+                && !matches!(
+                    o.kind,
+                    ObstacleKind::Zone | ObstacleKind::Pour | ObstacleKind::Keepout { .. }
+                )
                 && o.shape.bbox().contains(p)
                 && o.shape.dist_to_point(p) <= 0.0
         })

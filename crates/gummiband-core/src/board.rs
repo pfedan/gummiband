@@ -111,6 +111,9 @@ pub enum ObstacleKind {
     },
     /// Copper zone fill or outline.
     Zone,
+    /// A pour laid out before routing (a "gb:" zone of `power_copper`): like a zone, and the
+    /// pads under it count as joined.
+    Pour,
     /// Copper graphics without net.
     Graphic,
     /// Drilled hole without copper (NPTH).
