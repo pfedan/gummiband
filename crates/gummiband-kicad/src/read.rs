@@ -397,6 +397,10 @@ impl Reader {
         }
         if let Some(v) = g("min_track_width") {
             rules.min_track_width = v;
+            rules.kicad_min_width = rules.kicad_min_width.max(v);
+        }
+        if let Some(v) = g("min_connection") {
+            rules.kicad_min_width = rules.kicad_min_width.max(v);
         }
         if let Some(v) = g("min_copper_edge_clearance") {
             rules.edge_clearance = v;

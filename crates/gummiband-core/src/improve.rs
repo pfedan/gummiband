@@ -2052,6 +2052,8 @@ pub(crate) fn taper_spots(board: &Board, geo: &Geometry) -> Option<Geometry> {
                 let Some(min) = board.class_of(net).min_width else {
                     continue;
                 };
+                // never below the board minimum (KiCad: connection_width, track_width)
+                let min = min.max(board.rules.width_floor());
                 for (ti, t) in g.tracks.iter().enumerate().filter(|(_, t)| t.net == net) {
                     for (ei, e) in t.elems.iter().enumerate() {
                         let (chords, width) = elem_widths(t, e);
