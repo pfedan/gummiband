@@ -394,6 +394,32 @@ track its whole length. After that `relax::prefer_width` lets every piece of tra
 0.025 mm, round by round so that a bundle shares its room, drops wider stretches under 1.5 mm and
 ramps every change of width by one step per piece.
 
+## Local patterns
+
+`gummiband_core::patterns` finds, once per board and from the pins alone, the situations a
+person routes by habit: rows of pins of one part at a regular pitch (with the side tracks leave
+to), pad grids of at least 3 x 3 (BGA), decoupling capacitors (a two pin part next to a pin of a
+larger part, on the supply net they share, its other pin on a plane or a net with many pins),
+pins of a plane net close enough to reach the plane through one via, and buses between two pin
+rows. `gummiband info`, `route --report` and the MCP tool `board_patterns` list them.
+
+A pattern is only a hint to the search, never fixed copper: what does not fit a board costs at
+most the run that tried it, and nothing is ever given up for it. `route --patterns` switches the
+hints on, all off by default (and then byte for byte the same as without them):
+
+- `decaps`: the connection between a capacitor and its IC pin goes first, while the room at the
+  pin is free (`Router::plan`).
+- `shares`: a pin of a plane net connects to its neighbour or its capacitor (the leader, which
+  fans out) instead of taking a via of its own. A connection that takes a via or a detour
+  for that falls back to a fan-out of its own (`Router::detour_bridge`).
+- `rows`: a move of the open end (`improve::row_move`, 15 % of the moves) takes the connections
+  of one pin row out and lays them again in the order of their pins, from one end, the other,
+  the middle out or the ends in.
+
+Pockets (a pad that can only be left through a via in it) are not a pattern: the tracks of its
+neighbours close the pocket, not the fixed copper, so the empty board does not show them (see
+the via in a pad experiments in `MILESTONES.md`).
+
 ## Parallelism
 
 - Portfolio: N independent router runs (different orders and seeds), one per core.

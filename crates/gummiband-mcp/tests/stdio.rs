@@ -145,6 +145,7 @@ fn initialize_list_load_route() {
             "add_locked_copper",
             "add_zone",
             "angles_45",
+            "board_patterns",
             "current_check",
             "drc",
             "ground_pour",

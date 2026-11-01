@@ -357,6 +357,52 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   - ULX3S, 40 minutes: main and A both 655/796, A with 305 instead of 370 vias. The open connections
     are no search problem: the original routes signals on In2.
 
+## Local patterns
+
+`gummiband_core::patterns` (see ARCHITECTURE) finds pin rows, pad grids, decoupling capacitors,
+pins of a plane net that could share a via, and buses, and `route --patterns` turns three of them
+into hints, all off by default. Measured on 2026-11-01 in the cloud on 4 cores, on main before
+PR #38 (no `--move-parts`), with Gummiband's own clearance check (no `kicad-cli` there): cost as
+in the open end, 2 per via, 0.05 per mm, 10000 per open connection. Detection on the boards:
+Lichtschnitzel 11 rows in 6 parts, 14 decaps, 8 groups that share a via; Arty 38 rows, 41 decaps,
+16 groups; Corne 20 rows, 10 decaps, no planes; ULX3S a 20 x 20 grid at 0.8 mm with 379 pins;
+`bus` one kept bus of 16 nets, `crossing` one of 16 nets in reversed order.
+
+Normal search (default settings, seeds 1 to 3), mean:
+
+| Board | none | `decaps` | `shares` | `shares,decaps` |
+| --- | --- | --- | --- | --- |
+| Lichtschnitzel | 288 vias, 2610 mm, 1.3 spots, cost 707 | 267 vias, 2524 mm, 2.0 spots, cost 660 | 289 vias, 2565 mm, 2.7 spots, cost 706 | 269 vias, 2562 mm, 3.0 spots, cost 667 |
+| Arty | 0.67 open, 181 vias, 2934 mm | 0.33 open, 185 vias, 3033 mm | 0.33 open, 256 vias, 3205 mm | 0.67 open, 228 vias, 3218 mm |
+| Corne (seed 1) | 6 open, 385 vias, 8190 mm, 82 spots | 6 open, 529 vias, 8538 mm, 119 spots | | |
+| `qfn_fanout` | 46 vias | 46 vias | 47 vias | 47 vias |
+| `bga_dense` | 10.7 open | same | same | same |
+
+- `decaps` is the only one that gains on Lichtschnitzel (-7 %), at a spot more; on Arty it is
+  even, on Corne much worse in the one seed measured. Not a default.
+- `shares` costs Arty 70 vias, mostly on signal nets near the bridged pins: it is the bridges
+  between neighbouring pins of one part (`GB_SHARE_KIND=neighbours`: 251, 247, 245 vias), not the
+  ones between an IC pin and its capacitor (`GB_SHARE_KIND=decap`: 196, 177, 138 vias, but 3374
+  instead of 2934 mm). The router already shares a via that lies close, at 0.05 mm of track, so a
+  bridge brings little and takes room at the pins. A bridge that takes a via or a detour falls
+  back to a via of its own (`Router::detour_bridge`); that changed nothing measurable.
+- Pockets were left out: the via in a pad experiments above show that the empty board does not
+  show them.
+
+Open end with and without `rows` (`--until-stop`, `GB_OPEN_GENERATIONS` 300 on Lichtschnitzel, 150
+on Corne with `--geometry-generations 1`), same work per run:
+
+| Board, seed | none | `rows` |
+| --- | --- | --- |
+| Lichtschnitzel, 1 | 166 vias, 3089 mm, 1 spot, cost 486.5 | 160 vias, 3067 mm, 1 spot, cost 473.4 |
+| Lichtschnitzel, 2 | 177 vias, 2976 mm, 1 spot, cost 502.8 | 177 vias, 2932 mm, 1 spot, cost 500.6 |
+| Corne, 1 | 481/482, 365 vias, 8590 mm, 4 spots | 482/482, 347 vias, 8704 mm, 5 spots |
+
+A small gain on every run, Corne complete; three runs are not proof, the search is chaotic. Next:
+`rows` in the night series on the Mac with the KiCad DRC and more seeds, before it becomes a
+default. Not built yet from the concept: pad grid via sites and quadrant directions, local
+preferred directions per tile, buses as bundles (after the differential pair concept).
+
 ## M4b: GPU experiment
 
 - Opt-in: `--features gpu` at build time and `GB_GPU=1` at run time, Metal through wgpu. Without
