@@ -155,6 +155,12 @@ step:
   because the rule allows a neck only where it touches the courtyard.
 - Where no 45 degree path fits, typically inside tight bundles at an odd angle, the piece keeps
   its angle. The output counts these pieces and their length.
+- With `--pairs` the wide track of a pair goes onto the grid before it is split, together with
+  the tracks around it, so the two tracks of the pair stay parallel at their gap (the outer track
+  of a corner gets a corner too, not an arc). Near the pads and vias of the pair, where the split
+  decides how the tracks leave the wide one, the wide track keeps its direction for about three
+  times its width; those pieces stay off the grid. The two tracks are left alone afterwards, only
+  what was routed on its own at the ends goes onto the grid in the last step.
 
 The same step also works on a board that is already routed, without routing again:
 `gummiband angles45`, the plugin button *45 degree tracks with Gummiband* and the MCP tool

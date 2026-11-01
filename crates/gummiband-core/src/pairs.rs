@@ -43,6 +43,9 @@ struct Merged {
     pairs: Vec<MergedPair>,
     /// Pairs that stay two nets, and why.
     skipped: Vec<(String, String)>,
+    /// The wide tracks run on the 45 degree grid: the outer side of a corner of the two
+    /// tracks is a corner as well, not an arc.
+    miter: bool,
 }
 
 /// Result of a pair for reports.
@@ -82,6 +85,9 @@ pub struct PairConfig {
     /// Make room for the meanders of the length tuning while the pairs are still one wide
     /// track (see [`crate::tune::make_room`]), with the settings the tuning will use.
     pub room: Option<crate::tune::TuneConfig>,
+    /// `--angles 45`: the wide tracks go onto the 45 degree grid before they are split, so the
+    /// two tracks of a pair stay parallel (see [`crate::octo`]).
+    pub angles45: bool,
 }
 
 impl Default for PairConfig {
@@ -91,6 +97,7 @@ impl Default for PairConfig {
             zdiff: None,
             all: false,
             room: None,
+            angles45: false,
         }
     }
 }
@@ -391,6 +398,7 @@ fn merge(board: &Board, all: bool) -> Merged {
         board: b,
         pairs,
         skipped,
+        miter: false,
     }
 }
 
@@ -472,6 +480,22 @@ fn cut_end(elems: &[Elem], s: f64) -> Vec<Elem> {
     reversed(&cut_start(&reversed(elems), s))
 }
 
+/// Direction from the start of a curve to its point `len` mm on (or its end if shorter).
+fn chord(elems: &[Elem], len: f64) -> Point {
+    let a = point_at_start(elems);
+    let total = elems_len(elems);
+    let b = if total > len {
+        point_at_end(&cut_end(elems, total - len))
+    } else {
+        point_at_end(elems)
+    };
+    if b.dist(a) < 1e-9 {
+        tangent(&elems[0], false)
+    } else {
+        (b - a).norm()
+    }
+}
+
 fn point_at_start(elems: &[Elem]) -> Point {
     elem_ends(&elems[0]).0
 }
@@ -493,6 +517,12 @@ fn line_cross(a: Point, b: Point, c: Point, d: Point) -> Option<(f64, f64)> {
 /// The curve moved `d` mm to the left of travel (right if negative): arcs stay arcs, the outer
 /// side of a sharp corner gets an arc of radius |d| around it, the inner side a corner.
 pub fn offset_curve(elems: &[Elem], d: f64) -> Vec<Elem> {
+    offset_curve_with(elems, d, false)
+}
+
+/// [`offset_curve`]; with `miter` the outer side of a corner between two lines is a corner too:
+/// both lines go on to where they meet (on the 45 degree grid they stay on it).
+fn offset_curve_with(elems: &[Elem], d: f64, miter: bool) -> Vec<Elem> {
     let mut out: Vec<Elem> = Vec::new();
     for e in elems {
         let (ea, eb) = elem_ends(e);
@@ -548,6 +578,19 @@ pub fn offset_curve(elems: &[Elem], d: f64) -> Vec<Elem> {
             }
             out.push(Elem::Line(end, start));
         } else {
+            if miter
+                && let (Elem::Line(a, b), Elem::Line(c, f)) = (prev, next)
+                && let Some((s, t)) = line_cross(a, b, c, f)
+                && s > 0.0
+                && t < 1.0
+                && turn.abs() < 0.75
+            {
+                // at most a 45 degree turn: the corner sticks out by d tan(22.5 deg)
+                let x = a.lerp(b, s);
+                *out.last_mut().unwrap() = Elem::Line(a, x);
+                out.push(Elem::Line(x, f));
+                continue;
+            }
             let bis = (end - ea) + (start - ea);
             if bis.len() > 1e-9 && ea.dist(end) > 1e-9 {
                 out.push(Elem::Arc(end, ea + bis.norm() * d.abs(), start));
@@ -624,8 +667,8 @@ fn remove_loops(mut elems: Vec<Elem>, window: f64) -> Vec<Elem> {
 }
 
 /// The offset of a curve without loops, at least a line between the moved ends.
-fn offset_side(elems: &[Elem], d: f64) -> Vec<Elem> {
-    let c = remove_loops(offset_curve(elems, d), 6.0 * d.abs() + 0.5);
+fn offset_side(elems: &[Elem], d: f64, miter: bool) -> Vec<Elem> {
+    let c = remove_loops(offset_curve_with(elems, d, miter), 6.0 * d.abs() + 0.5);
     if !c.is_empty() {
         return c;
     }
@@ -767,9 +810,17 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
             let u0 = tangent(&legs[0].elems[0], false);
             let last = legs.last().unwrap();
             let u1 = tangent(last.elems.last().unwrap(), true);
-            // at the far end the pads lie ahead: seen from them the tracks arrive
-            let exit_a = exit_of(real, ea, u0);
-            let exit_b = exit_of(real, eb, u1 * -1.0);
+            // at the far end the pads lie ahead: seen from them the tracks arrive. On the 45
+            // degree grid the first piece may run along the row of pads: the side of the pads
+            // the band leaves to is where it is a millimetre on
+            let (side_a, side_b) = if m.miter {
+                let all: Vec<Elem> = legs.iter().flat_map(|l| l.elems.iter().copied()).collect();
+                (chord(&all, 1.0), chord(&reversed(&all), 1.0) * -1.0)
+            } else {
+                (u0, u1)
+            };
+            let exit_a = exit_of(real, ea, side_a);
+            let exit_b = exit_of(real, eb, side_b * -1.0);
             let (left_p, left_p_end) = (exit_a.p_left, !exit_b.p_left);
             let twisted = left_p != left_p_end;
             let via_joints: Vec<usize> = (0..joints.len()).filter(|&j| joints[j].x.is_finite()).collect();
@@ -810,7 +861,10 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                 let net_l = if left_is_p { pair.p } else { pair.n };
                 let net_r = if left_is_p { pair.n } else { pair.p };
                 let disc = via_disc(via_d, via_gap, s + w / 2.0, clr);
-                let (full_l, full_r) = (offset_side(&leg.elems, s), offset_side(&leg.elems, -s));
+                let (full_l, full_r) = (
+                    offset_side(&leg.elems, s, m.miter),
+                    offset_side(&leg.elems, -s, m.miter),
+                );
                 let mut start_trim = reach_start.unwrap_or(0.0);
                 if reach_start.is_none() {
                     let base = exit_trim(&exit_a, u0, s, w, clr);
@@ -1003,8 +1057,9 @@ struct PairPath {
 
 /// A track of a pair that lost its way to the pad: pad, and where the track starts now.
 struct Cut {
-    /// Index of the path.
+    /// Index of the path, and whether the cut is at its start.
     path: usize,
+    at_start: bool,
     pad: usize,
     net: NetId,
     at: Point,
@@ -1028,22 +1083,28 @@ const REPAIR_REACH: f64 = 6.0;
 
 /// Next to the pads and vias the two tracks do not always fit, the wide track knew nothing of
 /// them. Where a path has clearance problems near one of its ends, take its tracks and vias
-/// away up to the last problem: single tracks connect the rest. Returns the nets concerned.
-fn repair(real: &Board, geo: &mut Geometry, paths: &[PairPath], skip: &[usize]) -> (Vec<String>, Vec<Cut>) {
+/// away up to the last problem: single tracks connect the rest. The paths in `given_up` go
+/// completely (their nets are routed as single tracks); the ends in `kept` (path, start or
+/// end) stay as they are. Returns the nets concerned.
+fn repair(
+    real: &Board,
+    geo: &mut Geometry,
+    paths: &[PairPath],
+    given_up: &[usize],
+    kept: &[(usize, bool)],
+) -> (Vec<String>, Vec<Cut>) {
     let viol = crate::check::check(real, geo);
     let mut names = Vec::new();
     let mut cuts = Vec::new();
     let mut gone_vias: Vec<usize> = Vec::new();
     for (pi, path) in paths.iter().enumerate() {
-        if skip.contains(&pi) {
-            continue;
-        }
+        let give_up = given_up.contains(&pi);
         let hits: Vec<Point> = viol
             .iter()
             .filter(|v| [path.p, path.n].iter().any(|&x| v.nets.0 == x || v.nets.1 == Some(x)))
             .map(|v| v.at)
             .collect();
-        if hits.is_empty() {
+        if hits.is_empty() && !give_up {
             continue;
         }
         let legs: Vec<[usize; 2]> = path.tracks.chunks(2).map(|c| [c[0], c[1]]).collect();
@@ -1075,6 +1136,15 @@ fn repair(real: &Board, geo: &mut Geometry, paths: &[PairPath], skip: &[usize]) 
             } else if total - s <= REPAIR_REACH {
                 from_end = from_end.max(total - s + 0.5);
             }
+        }
+        if give_up {
+            (from_start, from_end) = (total + 1.0, 0.0);
+        }
+        if kept.contains(&(pi, true)) {
+            from_start = 0.0;
+        }
+        if kept.contains(&(pi, false)) {
+            from_end = 0.0;
         }
         if from_start == 0.0 && from_end == 0.0 {
             continue;
@@ -1145,6 +1215,7 @@ fn repair(real: &Board, geo: &mut Geometry, paths: &[PairPath], skip: &[usize]) 
                 let at = if at_start { t.pts[0] } else { *t.pts.last().unwrap() };
                 cuts.push(Cut {
                     path: pi,
+                    at_start,
                     pad: if t.net == path.p { end.p } else { end.n },
                     net: t.net,
                     at,
@@ -1585,7 +1656,8 @@ pub fn route_pairs(
     search: &SearchConfig,
     cfg: &PairConfig,
 ) -> (Substrate, RouteResult, Vec<PairReport>) {
-    let merged = merge(board, cfg.all);
+    let mut merged = merge(board, cfg.all);
+    merged.miter = cfg.angles45;
     let (sub, mut res) = route_board(&merged.board, sub_cfg, base, search);
     let real = if res.offsets.is_empty() {
         board.clone()
@@ -1625,11 +1697,69 @@ pub fn route_pairs(
             }
         }
     }
+    // the 45 degree grid on the wide tracks: the two tracks of a pair follow it side by side
+    if cfg.angles45 {
+        let moved;
+        let mb = if res.offsets.is_empty() {
+            &merged.board
+        } else {
+            moved = merged.board.with_offsets(&res.offsets);
+            &moved
+        };
+        let wide: Vec<NetId> = merged.pairs.iter().map(|p| p.p).collect();
+        // the split decides at the pads and at the vias how the two tracks leave the wide one
+        // (exit, via pair, polarity): the wide tracks keep their direction there
+        let mut held: HashMap<usize, (usize, usize)> = HashMap::new();
+        for (ti, t) in res.geometry.tracks.iter_mut().enumerate() {
+            if !wide.contains(&t.net) || t.elems.is_empty() {
+                continue;
+            }
+            let r = (3.0 * t.width).max(1.0);
+            let total = elems_len(&t.elems);
+            if total <= 2.0 * r + 0.01 {
+                held.insert(ti, (usize::MAX, 0));
+                continue;
+            }
+            let head = cut_end(&t.elems, total - r);
+            let mid = cut_end(&cut_start(&t.elems, r), r);
+            let tail = cut_start(&t.elems, total - r);
+            let (h, m) = (head.len(), mid.len());
+            t.elems = head.into_iter().chain(mid).chain(tail).collect();
+            t.pts = flatten(&t.elems);
+            held.insert(ti, (h, h + m));
+        }
+        // the outer track of a 45 degree corner is mitred: its corner sticks out of the round
+        // corner of the wide track by s (1 / cos 22.5 deg - 1), which the wide track carries
+        // while it goes onto the grid
+        let widths: Vec<f64> = res.geometry.tracks.iter().map(|t| t.width).collect();
+        for t in res.geometry.tracks.iter_mut() {
+            if let Some(mp) = merged.pairs.iter().find(|mp| mp.p == t.net) {
+                let (w, g, _) = real.pair_shape(mp.p, mp.n, t.layer);
+                let s = (w + g) / 2.0;
+                let out = s * (1.0 / (std::f64::consts::PI / 8.0).cos() - 1.0);
+                t.width = t.width.max(2.0 * (s + out + w / 2.0) + 0.002);
+            }
+        }
+        let hold = |ti: usize, ei: usize| {
+            held.get(&ti)
+                .is_some_and(|&(h, m)| h == usize::MAX || ei < h || ei >= m)
+        };
+        // all tracks: a bundle makes room for its wide tracks only when its other tracks go
+        // onto the grid as well
+        let st = crate::octo::octilinear_only(mb, &mut res.geometry, &|_| true, &hold);
+        for (t, w) in res.geometry.tracks.iter_mut().zip(widths) {
+            t.width = w;
+        }
+        eprintln!(
+            "45 degrees on the wide tracks: {} tracks, {} pieces off the grid ({:.1} mm)",
+            st.tracks, st.any_angle, st.any_angle_length
+        );
+    }
     let Split {
         geo,
         mut reports,
         unfinished,
-        mut paths,
+        paths,
     } = split(&real, &merged, &res.geometry);
     for (p, why) in &merged.skipped {
         reports.push(PairReport {
@@ -1669,12 +1799,16 @@ pub fn route_pairs(
         prefer_width: 0.0,
         open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
     };
-    // a repaired end that finds no way keeps the two tracks it had: completion comes first
+    // a repaired end that finds no way gives up its pair: its two nets are routed as single
+    // tracks, so that no crossed or touching tracks of the pair stay. If they find no way
+    // either, the ends that found no way keep the two tracks they had: completion comes first
     let split_geo = geo;
-    let mut keep: Vec<usize> = Vec::new();
+    let mut given_up: Vec<usize> = Vec::new();
+    let mut failed_ends: Vec<(usize, bool)> = Vec::new();
+    let mut keep: Vec<(usize, bool)> = Vec::new();
     let (geo_done, fin) = loop {
         let mut geo = split_geo.clone();
-        let (repaired, cuts) = repair(&real, &mut geo, &paths, &keep);
+        let (repaired, cuts) = repair(&real, &mut geo, &paths, &given_up, &keep);
         let mut names = unfinished.clone();
         names.extend(repaired);
         names.sort();
@@ -1687,7 +1821,7 @@ pub fn route_pairs(
         lock_geometry(&mut b, &geo);
         let cut_map = cut_nets(&mut b, &cuts, kept_from);
         let (_, mut fin) = route_board(&b, sub_cfg, base, &finish);
-        let failed: Vec<usize> = fin
+        let failed: Vec<(usize, bool)> = fin
             .stats
             .unrouted
             .iter()
@@ -1696,10 +1830,37 @@ pub fn route_pairs(
                     .enumerate()
                     .find(|(i, _)| u.contains(&format!("~cut{i} from ")))
             })
-            .map(|(_, c)| c.path)
+            .map(|(_, c)| (c.path, c.at_start))
             .collect();
         if !failed.is_empty() {
-            keep.extend(failed);
+            for (pi, at_start) in failed {
+                if keep.iter().any(|&(k, _)| k == pi) {
+                    // a path that already keeps an end: the other end keeps its tracks too
+                    keep.push((pi, at_start));
+                } else {
+                    given_up.push(pi);
+                }
+                failed_ends.push((pi, at_start));
+            }
+            continue;
+        }
+        let lost: Vec<usize> = given_up
+            .iter()
+            .copied()
+            .filter(|&pi| {
+                let names = [
+                    &real.nets[paths[pi].p as usize].name,
+                    &real.nets[paths[pi].n as usize].name,
+                ];
+                fin.stats
+                    .unrouted
+                    .iter()
+                    .any(|u| names.iter().any(|n| u.starts_with(&format!("{n} from "))))
+            })
+            .collect();
+        if !lost.is_empty() {
+            given_up.retain(|pi| !lost.contains(pi));
+            keep.extend(failed_ends.iter().filter(|(pi, _)| lost.contains(pi)));
             continue;
         }
         for t in fin.geometry.tracks.iter_mut() {
@@ -1711,6 +1872,19 @@ pub fn route_pairs(
         break (geo, Some(fin));
     };
     let mut geo = geo_done;
+    given_up.sort_unstable();
+    given_up.dedup();
+    for &pi in &given_up {
+        let r = &mut reports[paths[pi].report];
+        r.wide = false;
+        r.note = "routed as single tracks: an end of the wide track found no way to its pads".to_string();
+    }
+    let mut paths: Vec<PairPath> = paths
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !given_up.contains(i))
+        .map(|(_, p)| p)
+        .collect();
     if let Some(fin) = fin {
         for path in paths.iter_mut().filter(|p| p.whole) {
             let start = geo.tracks.len();
@@ -1974,6 +2148,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_mitred_offset_stays_on_the_45_degree_grid() {
+        // a 45 degree turn to the right: the left side is the outer one
+        let e = vec![
+            Elem::Line(pt(0.0, 0.0), pt(2.0, 0.0)),
+            Elem::Line(pt(2.0, 0.0), pt(4.0, -2.0)),
+        ];
+        let round = offset_curve(&e, 0.2);
+        assert!(round.iter().any(|x| matches!(x, Elem::Arc(..))));
+        let mitred = offset_curve_with(&e, 0.2, true);
+        assert_eq!(mitred.len(), 2);
+        let dirs: Vec<f64> = mitred
+            .iter()
+            .map(|x| {
+                let (a, b) = elem_ends(x);
+                (b.y - a.y).atan2(b.x - a.x).to_degrees()
+            })
+            .collect();
+        assert!(dirs[0].abs() < 1e-9 && (dirs[1] + 45.0).abs() < 1e-9);
+        // both pieces keep their distance 0.2 from the centre line
+        let (a, _) = elem_ends(&mitred[0]);
+        assert!((a.y - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_chord_looks_past_the_first_piece() {
+        let e = vec![
+            Elem::Line(pt(0.0, 0.0), pt(0.1, 0.0)),
+            Elem::Line(pt(0.1, 0.0), pt(0.1, 2.0)),
+        ];
+        let u = chord(&e, 1.0);
+        assert!(u.y > 0.9);
     }
 
     #[test]
