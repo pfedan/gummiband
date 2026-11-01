@@ -326,6 +326,16 @@ pub struct PlacePartsOut {
     pub coils: Vec<(String, String)>,
     /// With `semantic`: groups kept together (sheet, or sheet/anchor IC) with their parts.
     pub groups: Vec<GroupOut>,
+    /// With `semantic`: two-pin parts and small regulators with the part they were pulled to.
+    pub ties: Vec<(String, String)>,
+    /// Connectors, buttons and test points outside the scope that were placed anyway because
+    /// they sat piled up or off the board.
+    pub released: Vec<String>,
+    /// Pads of a plane net without room for their fan-out via (kept copper, a hole or a rule
+    /// area around them on some layer).
+    pub no_via_room: Vec<String>,
+    /// Released parts, parts that stay piled up or with a courtyard off the board, pads without
+    /// room for their via.
     pub warnings: Vec<String>,
 }
 
@@ -1409,8 +1419,10 @@ impl Gummiband {
             Ok(placed.text)
         })?;
         let r = report.context("placement did not run")?;
-        let warnings = Vec::new();
-        let text = format!("placed {} parts, {} crossings", r.moved.len(), r.crossings);
+        let mut text = format!("placed {} parts, {} crossings", r.moved.len(), r.crossings);
+        if !r.warnings.is_empty() {
+            text += &format!("; {} warnings: {}", r.warnings.len(), r.warnings.join("; "));
+        }
         let out = PlacePartsOut {
             board: id,
             path,
@@ -1435,7 +1447,10 @@ impl Gummiband {
                 .into_iter()
                 .map(|(name, parts)| GroupOut { name, parts })
                 .collect(),
-            warnings,
+            ties: r.ties,
+            released: r.released,
+            no_via_room: r.no_via_room,
+            warnings: r.warnings,
         };
         Ok((text, out))
     }
@@ -2239,7 +2254,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Give parts a position from the netlist in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. By default all parts move except locked ones, connectors, modules, mounting holes, buttons and test points; `only`, `scope` and `fixed` narrow that, so you can place the key parts yourself with move_part and leave the small parts to this tool. Run it before route: tracks do not follow.",
+        description = "Give parts a position from the netlist in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. By default all parts move except locked ones, connectors, modules, mounting holes, buttons and test points (those move too while they sit piled up or off the board, listed in `released`); `only`, `scope` and `fixed` narrow that, so you can place the key parts yourself with move_part and leave the small parts to this tool. Run it before route: tracks do not follow. Read `warnings`: parts that stay piled up or off the board, pads of a plane net without room for their via (`no_via_room`).",
         output_schema = schema_for_output::<PlacePartsOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
