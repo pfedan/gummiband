@@ -939,6 +939,7 @@ fn auto_negotiate(base: &RouterConfig, stats: &RunStats) -> bool {
 /// [`AUTO_NEGOTIATE`] rounds and the better result counts, as with `--negotiate`. A search that
 /// completes the board, or leaves more open, stays as it is, and so does an open ended one: its
 /// open end has worked on what was open (also when `GB_OPEN_GENERATIONS` ends it, not a stop).
+/// Nor does a board with soft copper (finishing nets with shove): its router does not negotiate.
 pub fn route_fixed(
     board: &Board,
     sub_cfg: &SubstrateConfig,
@@ -946,7 +947,7 @@ pub fn route_fixed(
     search: &SearchConfig,
 ) -> (Substrate, RouteResult) {
     let plain = search_fixed(board, sub_cfg, base, search);
-    if !auto_negotiate(base, &plain.1.stats) || search.open_end.is_some() {
+    if !auto_negotiate(base, &plain.1.stats) || search.open_end.is_some() || !board.soft.chains.is_empty() {
         return plain;
     }
     eprintln!(

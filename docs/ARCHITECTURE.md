@@ -182,7 +182,9 @@ why the decision waits for the geometry generations: they often find the last co
 own, and a negotiation taken up after the order generations left Lichtschnitzel (seed 3)
 complete as well, but with 328 instead of 265 vias. More than 15 % open means more connections
 than room on the layers (ULX3S, whose original routes signals on In2), and no price settles that.
-An open ended run does not negotiate on its own: there the open end works on what is open.
+An open ended run does not negotiate on its own: there the open end works on what is open. Nor
+does a board with soft copper (finishing nets with shove, see below), whose router does not
+negotiate (`Router::run`), so a second search would only repeat the first.
 
 Vias that a ripped connection leaves behind stay in the mesh as phantom vertices, and the wraps of
 the rubber band must keep to their portals after a negotiation: its routes leave more slack in
