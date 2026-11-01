@@ -65,7 +65,7 @@ enum Cmd {
         /// With --keep-all --nets: the unlocked tracks of other nets are threaded into the
         /// topology, so a connection passes between them and they shift aside. What it does not
         /// touch stays as it is in the file. On by default with --keep-all --nets (not with
-        /// --move-parts or --until-stop); this flag insists on it.
+        /// --move-parts); this flag insists on it.
         #[arg(long, conflicts_with = "no_shove")]
         shove: bool,
         /// With --keep-all --nets: the tracks of other nets stay where they are (no shove).
@@ -198,6 +198,7 @@ enum Cmd {
         /// lay them again, the rest of the result stays; when that stops helping, bolder side
         /// branches take over. Results that differ in vias and length are written next to the
         /// output as alt1, alt2, ... No placement rounds, and no plain search next to --negotiate.
+        /// Finishing nets, the tries of --give run first and the one kept goes on open ended.
         #[arg(long)]
         until_stop: bool,
         /// With --until-stop: what a via is worth in mm of track when the open end judges its
@@ -205,7 +206,8 @@ enum Cmd {
         #[arg(long, default_value_t = gummiband_core::DEFAULT_OPEN_VIA_COST)]
         open_via_cost: f64,
         /// Give the finished copper this reserve in mm on top of the clearances where there is
-        /// room, instead of leaving it at the limit [default: 0.03 with --until-stop, else 0]
+        /// room, instead of leaving it at the limit [default: 0.03 with --until-stop, but not
+        /// when finishing nets with --keep-all --nets, else 0]
         #[arg(long)]
         air: Option<f64>,
         /// At the end tracks of the default net class push aside what can give way and grow up
@@ -537,18 +539,16 @@ fn main() -> Result<()> {
             // parts move by default when the whole board is routed; on a board whose copper is
             // kept they stay unless asked
             let move_parts = move_parts || (!no_move_parts && !keep_all);
-            if until_stop && (shove || give.is_some_and(|g| g > 0.0) || pairs) {
-                anyhow::bail!("--until-stop does not work with --shove, --give or --pairs");
+            if until_stop && pairs {
+                anyhow::bail!("--until-stop does not work with --pairs");
             }
             if shove && (!keep_all || nets.is_empty() || move_parts) {
                 anyhow::bail!("--shove needs --keep-all and --nets, and fixed parts");
             }
             // finishing nets on a routed board: the unlocked tracks of the other nets shift aside
-            // and, if that is not enough, give way; --no-shove and --give 0 switch that off
-            let finishing = keep_all && !nets.is_empty() && !until_stop;
-            if keep_all && !nets.is_empty() && until_stop {
-                println!("with --until-stop the tracks of other nets stay where they are (no shove, no give)");
-            }
+            // and, if that is not enough, give way; --no-shove and --give 0 switch that off. With
+            // --until-stop the tries run without the open end and the one kept runs on open ended.
+            let finishing = keep_all && !nets.is_empty();
             let shove = shove || (finishing && !no_shove && !move_parts);
             let give = give.unwrap_or(if finishing { gummiband_core::DEFAULT_GIVE } else { 0.0 });
             if placements > 0 && (keep_all || !nets.is_empty() || pairs) {
@@ -596,7 +596,8 @@ fn main() -> Result<()> {
                 frames: frames.is_some(),
                 seed,
                 open_end: open_end.clone(),
-                air: air.unwrap_or(if until_stop { 0.03 } else { 0.0 }),
+                // finishing nets moves only what the new tracks touch, also open ended
+                air: air.unwrap_or(if until_stop && !finishing { 0.03 } else { 0.0 }),
                 prefer_width,
                 open_via_cost,
                 progress: progress.then(|| progress_lines(t0, String::new())),
@@ -721,7 +722,7 @@ fn main() -> Result<()> {
             };
             let tune_room = !no_tune && std::env::var("GB_NO_TUNE_ROOM").is_err();
             // the nets asked for, and the nets that give way when a connection finds no way
-            let finished = gummiband_core::finish_nets(b, &nets, shove, give, |board| {
+            let finished = gummiband_core::finish_nets(b, &nets, shove, give, &search_cfg, |board, search| {
                 let out = if pairs {
                     let pair_cfg = gummiband_core::pairs::PairConfig {
                         skew: pair_skew,
@@ -732,9 +733,9 @@ fn main() -> Result<()> {
                         breakouts,
                         via_pairs,
                     };
-                    gummiband_core::pairs::route_pairs(board, &sub_cfg, &router_cfg, &search_cfg, &pair_cfg)
+                    gummiband_core::pairs::route_pairs(board, &sub_cfg, &router_cfg, search, &pair_cfg)
                 } else {
-                    let (sub, res) = gummiband_core::route_board(board, &sub_cfg, &router_cfg, &search_cfg);
+                    let (sub, res) = gummiband_core::route_board(board, &sub_cfg, &router_cfg, search);
                     (sub, res, Vec::new())
                 };
                 gummiband_core::prof::report();
@@ -1027,6 +1028,8 @@ fn main() -> Result<()> {
             let rests = |origin: Option<u32>, list: &[bool]| origin.is_some_and(|o| !list[o as usize]);
             let write_result =
                 |geometry: &gummiband_core::realize::Geometry, path: &std::path::Path| -> Result<usize> {
+                    // an alternative has its own soft copper that moved
+                    let changes = gummiband_core::import::soft_changes(b, geometry);
                     let mut items = Vec::new();
                     // the items of each track, for the tuning patterns
                     let mut of_track: Vec<std::ops::Range<usize>> = Vec::with_capacity(geometry.tracks.len());

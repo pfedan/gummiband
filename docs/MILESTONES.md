@@ -304,7 +304,11 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
     cloud with seed 1: on the empty board no connection between pins needs a via in a pad, D+
     included (`=empty`), so the tracks of its neighbours close the pocket, not fixed copper; after
     the portfolio 14 nets are open, D+ among them, and none routes more on its own with one (`=1`).
-    Open: the via in a pad as a gene of the search, which the mutations give and take.
+    Open: the via in a pad as a gene of the search, which the mutations give and take. Measured
+    again on 2026-11-01, once the search negotiates by itself (PR #55): no bench board needs it.
+    Corne is complete through the negotiation, and `bga_dense`, which keeps 8 of 100 connections
+    open, gives the same file byte for byte with a via in the pad at any time for those eight
+    nets (`GB_VIP_NETS`, seed 1). So it waits for a board that shows the case.
 - Negotiated routing: done as an option, `route --negotiate N` (see ARCHITECTURE). Measured on
   2026-10-30 with `--runs 14 --generations 1 --negotiate 20`, KiCad DRC against the plain run:
   `fine_pitch_mixed` 0 open and 0 errors instead of 8 and 7, `four_signal_layers` 0 open instead
@@ -340,6 +344,29 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   alone within 3 mm completed three of the four but broke four connections around BUCK_EN; the
   new rule keeps the try before in such a case. With the new defaults all 16 nets give the same
   file as `--shove` before, byte for byte.
+- Finishing nets open ended (2026-11-01; `--until-stop` with `--keep-all --nets`, MCP
+  `open_end_seconds` with `keep_all` and `nets`): shove and give no longer exclude the open end.
+  The tries of give run without it, and the one kept runs again, the same search first, so the
+  open end goes on from where that try ended; if it ends worse (a stop during its search part),
+  the try stays. The open end works on the soft copper (its rebuild repeats the router run on
+  it, `soft_tagged`), its own passes let soft copper sleep until routed copper pushes it, and the
+  air reserve stays 0, as it would move tracks of other nets that the new ones do not touch (270
+  on Arty). Night series data (the 16 nets above, 30 generations of open end, 2 threads, KiCad
+  DRC with zones refilled): today's open end, which keeps the other copper where it is, leaves
+  LED_D0, LED_D3, BUCK_EN and UART_EN half open (12 of 16 complete); open ended with shove all 16
+  are complete, KiCad 0 unconnected everywhere, Lichtschnitzel 0 errors and Arty only the 66 the
+  board brings along, the alternatives as well. Against finishing without the open end: 22
+  instead of 25 vias on the nets laid, 596 instead of 576 mm (BTN_BOOT trades two vias for 22 mm,
+  OUT1_DATA one for 4 mm, five nets get shorter), 218 instead of 189 tracks of other nets moved.
+  A normal open ended run (Arty seed 1, 20 generations) gives the same file byte for byte.
+  A first version wrote the soft copper that the passes of the open end had put to sleep where
+  the file had it, not where it lay: KiCad found clearance errors in 12 of the 16 files and
+  shorts in three, which the own check could not see, as it reads the geometry. Now the place
+  decides what is written again (`import::rest_in_place`), and an alternative gets its own list
+  of what moved. With that, a resting track that the taper narrowed is written as well: VBUS_IN
+  at R61 on Lichtschnitzel kept KiCad's three errors of 1.5 µm in every finished file, also
+  without the open end, now 0. The files of finishing without the open end change only there;
+  Arty stays byte for byte.
 - Tapering at tight spots is on by default (2026-11-01, `improve::taper_spots`, `GB_TAPER=0`
   switches it off): a line or arc that misses its clearance by at most 50 µm gets narrower, never
   below the minimum width of its class and never wider anywhere. Lichtschnitzel is the only bench

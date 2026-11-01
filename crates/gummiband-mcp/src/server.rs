@@ -1979,7 +1979,7 @@ fn route_blocking(
         spacing: p.tune_spacing.unwrap_or(2.0),
     };
     let tune = p.tune != Some(false);
-    let finished = gummiband_core::finish_nets(&board, &only, shove, give, |b| {
+    let finished = gummiband_core::finish_nets(&board, &only, shove, give, &search_cfg, |b, search| {
         if p.pairs == Some(true) {
             let cfg = gummiband_core::pairs::PairConfig {
                 skew: p.pair_skew.unwrap_or(0.1),
@@ -1990,9 +1990,9 @@ fn route_blocking(
                 breakouts: p.pair_breakouts.unwrap_or(false),
                 via_pairs: p.pair_via_pairs.unwrap_or(false),
             };
-            gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, &search_cfg, &cfg)
+            gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, search, &cfg)
         } else {
-            let (sub, res) = gummiband_core::route_board(b, &sub_cfg, &router_cfg, &search_cfg);
+            let (sub, res) = gummiband_core::route_board(b, &sub_cfg, &router_cfg, search);
             (sub, res, Vec::new())
         }
     });

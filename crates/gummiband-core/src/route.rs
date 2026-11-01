@@ -1923,7 +1923,7 @@ impl<'a> Router<'a> {
 
     fn in_plane(&self, p: Point, net: NetId) -> bool {
         let (r, _, _) = self.via_size(net);
-        self.board.planes.iter().any(|pl| pl.net == net && pl.holds(p, r + 0.3))
+        self.board.planes.iter().any(|pl| pl.net == net && pl.takes_via(p, r))
     }
 
     /// A via or branch point of the soft copper: it stays for good.
@@ -3590,9 +3590,11 @@ impl<'a> Router<'a> {
             }
             for &t in &s.chord_tris {
                 for (a, b) in self.tri_crossings(li, t) {
-                    if a == ci && !hit.contains(&b) {
+                    // soft copper (no connection) does not go
+                    let soft = u32::MAX as usize;
+                    if a == ci && b != soft && !hit.contains(&b) {
                         hit.push(b);
-                    } else if b == ci && !hit.contains(&a) {
+                    } else if b == ci && a != soft && !hit.contains(&a) {
                         hit.push(a);
                     }
                 }
@@ -3692,7 +3694,10 @@ impl<'a> Router<'a> {
         let others = self.cross[li][e as usize]
             .iter()
             .map(|&o| self.segs[o as usize].as_ref().unwrap());
-        others.filter(|o| o.net != net).for_each(|o| add(o.conn as usize));
+        // soft copper is no connection that could be laid again
+        others
+            .filter(|o| o.net != net && o.imported.is_none())
+            .for_each(|o| add(o.conn as usize));
         let m = self.m(li);
         for &t in m.edge_tris[e as usize].iter().filter(|&&t| t != NONE) {
             for &v in &m.tris[t as usize] {

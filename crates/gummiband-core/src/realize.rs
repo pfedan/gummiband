@@ -495,19 +495,7 @@ impl Router<'_> {
         let mut vias: Vec<(Via, u32)> = self
             .vias
             .iter()
-            .map(|(&v, info)| {
-                let via = Via {
-                    at: self.site_point(v),
-                    diameter: info.r * 2.0,
-                    drill: info.drill,
-                    net: info.net,
-                    layer: None,
-                    origin: None,
-                    resting: false,
-                    half: Default::default(),
-                };
-                (via, v)
-            })
+            .filter_map(|(&v, info)| Some((self.placed_via(v, info)?, v)))
             .collect();
         vias.sort_by(|a, b| a.0.at.x.total_cmp(&b.0.at.x).then(a.0.at.y.total_cmp(&b.0.at.y)));
         let (vias, sites) = vias.into_iter().unzip();

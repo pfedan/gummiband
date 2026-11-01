@@ -242,6 +242,16 @@ impl Plane {
     pub fn holds(&self, p: Point, margin: f64) -> bool {
         self.covers(p) && self.edge_dist(p) >= margin
     }
+
+    /// Whether a via of radius `r` at p connects to the plane: `r + 0.3` inside the outline,
+    /// and fully outside the zones that cut the plane. Next to such a zone the plane fill
+    /// already keeps its clearance to the zone's copper, so the via only has to stay off the
+    /// zone itself; the larger outline margin there would drop the sites the router needs.
+    pub fn takes_via(&self, p: Point, r: f64) -> bool {
+        self.outline.contains(p)
+            && self.outline.boundary_dist(p) >= r + 0.3
+            && self.cut.iter().all(|c| !c.contains(p) && c.boundary_dist(p) >= r)
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -983,5 +993,36 @@ impl Board {
             .enumerate()
             .filter(|(_, n)| n.pins.len() >= 2)
             .map(|(i, _)| i as NetId)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Polygon {
+        Polygon::new(vec![
+            crate::geom::pt(x0, y0),
+            crate::geom::pt(x1, y0),
+            crate::geom::pt(x1, y1),
+            crate::geom::pt(x0, y1),
+        ])
+    }
+
+    #[test]
+    fn via_next_to_a_cut_reaches_the_plane() {
+        let mut pl = Plane::new(0, 1, rect(0.0, 0.0, 20.0, 20.0));
+        pl.cut = vec![rect(5.0, 5.0, 10.0, 10.0)];
+        let r = 0.3;
+        // inside the cut: no copper of the plane
+        assert!(!pl.takes_via(crate::geom::pt(7.0, 7.0), r));
+        // the via overlaps the cut zone
+        assert!(!pl.takes_via(crate::geom::pt(10.2, 7.0), r));
+        // just off the cut zone: the plane fill reaches it
+        assert!(pl.takes_via(crate::geom::pt(10.35, 7.0), r));
+        assert!(!pl.holds(crate::geom::pt(10.35, 7.0), r + 0.3));
+        // the outline keeps its larger margin
+        assert!(!pl.takes_via(crate::geom::pt(19.5, 15.0), r));
+        assert!(pl.takes_via(crate::geom::pt(19.3, 15.0), r));
     }
 }

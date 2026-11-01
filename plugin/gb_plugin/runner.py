@@ -217,7 +217,7 @@ def _changed(opts, flags: tuple) -> List[str]:
 
 def open_ended(opts: RouteOptions) -> bool:
     """Whether the run goes on until the user accepts it: not with the wide tracks of pairs, and
-    not for finishing tracks, where only the nets asked for may change."""
+    not for finishing tracks, a quick action without a window to accept the result in."""
     return opts.until_stop and not opts.pairs and not opts.finish_nets
 
 
