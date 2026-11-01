@@ -501,9 +501,10 @@ fn judge(board: &Board, c: &mut Candidate) {
     c.flaw = spots.iter().map(|s| 300.0 + 700.0 * (s.missing / 0.03).min(1.0)).sum();
 }
 
-/// The cost of the open end.
+/// The cost of the open end. A via weighs half of what it does in the search before: with
+/// connections that can end on a track of their net, it would be paid for with long ways.
 fn open_cost(c: &Candidate) -> f64 {
-    c.stats.cost() + c.flaw + c.stats.shorts.unwrap_or(0) as f64 * 5000.0
+    c.stats.cost() + c.flaw + c.stats.shorts.unwrap_or(0) as f64 * 5000.0 - c.stats.vias as f64
 }
 
 /// What has to go for `aim`: what its connection runs into, and at random what lies around its way.
