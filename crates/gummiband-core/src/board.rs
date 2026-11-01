@@ -167,8 +167,20 @@ pub struct Rules {
     pub hole_to_hole: f64,
     pub hole_clearance: f64,
     pub min_via_diameter: f64,
+    /// The narrowest track KiCad's DRC accepts anywhere: the larger of the project's
+    /// min_track_width and min_connection (0 without project rules).
+    #[serde(default)]
+    pub kicad_min_width: f64,
     /// Polygon approximation error for round shapes.
     pub max_error: f64,
+}
+
+impl Rules {
+    /// The narrowest a track may be anywhere ([`Rules::kicad_min_width`]; net class
+    /// exemptions do not reach it).
+    pub fn width_floor(&self) -> f64 {
+        self.kicad_min_width
+    }
 }
 
 impl Default for Rules {
@@ -180,6 +192,7 @@ impl Default for Rules {
             hole_to_hole: 0.25,
             hole_clearance: 0.2,
             min_via_diameter: 0.45,
+            kicad_min_width: 0.0,
             max_error: 0.005,
         }
     }

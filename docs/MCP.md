@@ -304,7 +304,9 @@ Result fields: `board`, `moved`, `input`, `output`, `seconds`, `threads`, `conne
 `violations_total`, `violations_by_kind`, `violations` (first `max_violations`, default 50:
 `what`, `x`, `y`, `actual_mm`, `required_mm`, `nets` [routed net, other net or null]; the kinds
 are those of the CLI's `clearance check`, and for `width` and `current` the two values are
-widths),
+widths; `hole_to_hole` holds between all drilled holes, of the same net too, and `width` also
+names a track below the project's `min_track_width` or `min_connection`, which KiCad reports
+as `track_width` or `connection_width` whatever the net class allows),
 `portfolio` (per run: `generation`, `seed`, `fanout_first`, `routed`, `connections`, `vias`,
 `length_mm`, `violations`), `pairs` (with `pairs`), `coupling` (every recognised pair, whatever
 the settings: `p`, `n`, `coupled_mm` within width + gap + 0.1 mm of the partner on the same layer,
