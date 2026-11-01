@@ -2,7 +2,7 @@
 
 The `bench/` folder holds boards and scripts to measure the router: a synthetic suite of small
 boards of increasing difficulty, the Lichtschnitzel controller as a real four layer board, and
-four open hardware boards as external real world cases. Every benchmark routes a board that was
+four open hardware boards as external real world cases, and a DDR5 board for length matching. Every benchmark routes a board that was
 stripped of all its tracks and vias and judges the result with the KiCad DRC. Details of the
 scripts are in [bench/README.md](../../bench/README.md).
 
@@ -10,7 +10,7 @@ You need `kicad-cli` on `PATH` and Python 3.
 
 ## Synthetic suite
 
-Twelve generated boards (`bench/boards/`), from a few 0603 connections to a 10x10 BGA whose inner
+Thirteen generated boards (`bench/boards/`), from a few 0603 connections to a 10x10 BGA whose inner
 ring needs vias on two signal layers. They are committed with their `.kicad_pro`, so they work
 out of the box:
 
@@ -41,6 +41,7 @@ per board in `bench/boards/out/<board>.route.log`.
 | `fine_pitch` | 2 | QFN-56 at 0.4 mm with 0.2/0.19 mm rules, nets in pin order: a clean straight fan-out |
 | `fine_pitch_mixed` | 2 | the same part with shuffled nets: vias and crossings right at the pins |
 | `diff_pairs` | 2 | 8 differential pairs with a ground between them, 0.5 mm connectors at an angle, parts in the way |
+| `matching` | 2 | a byte lane and a clock pair with length, skew and uncoupled rules, see [Length matching](#length-matching) |
 
 `bench/gen_boards.py` regenerates the boards deterministically; commit the boards together with
 a change to the generator.
@@ -72,6 +73,43 @@ bench/run-ext.sh corne [route args]
 
 The plane layers are marked as *power* layers in the stripped files, so the boards describe
 themselves.
+
+## Length matching
+
+Two boards carry `length`, `skew` and `diff_pair_uncoupled` rules in their `.kicad_dru`, so the
+lengths can be judged by the KiCad DRC (see [Length matching](concepts.md#length-matching)).
+
+- `matching` in the synthetic suite: a byte lane (8 data nets and a strobe pair) and a clock pair
+  between two 0.5 mm connectors at an angle. One skew group of 0.2 mm, the clock 40 to 41 mm long
+  with 0.05 mm skew inside the pair, 3 mm uncoupled length per pair.
+- Antmicro's DDR5 testbed (one DDR5 x8 DRAM on an SO-DIMM edge connector, 6 layers, Apache-2.0),
+  fetched at a fixed commit. The board ships without length rules; `bench/ddr5-testbed.kicad_dru`
+  adds what its reference routing achieves: one byte lane (DQ0 to DQ7, DQS, TDQS) with 0.75 mm
+  skew, one command/address group with the clock and 0.6 mm skew, 6 mm uncoupled length per pair.
+  Antmicro's routing passes all of them.
+
+```bash
+bench/run_suite.sh matching
+bench/prepare-ddr5.sh              # fetches and strips into bench/work/ddr5/
+bench/run-ddr5.sh --pairs --no-move-parts   # lengths of the reference, routing, lengths, KiCad DRC
+```
+
+Results of 2026-11-01 (`--pairs --runs 4 --generations 1 --no-move-parts`, so the placement
+stays as the reference has it):
+
+| Board | Without tuning | With tuning | KiCad DRC of the tuned board |
+| --- | --- | --- | --- |
+| `matching` | 13 of 16 nets or pairs out of range | 11 of 16: clock length 2 of 2, 5 of 11 tuned nets reached their length | 0 unconnected, 0 clearance, 10 skew (was 10), 0 length (was 2), 2 uncoupled |
+| DDR5 testbed | 24 of 29: byte lane 3 of 12, command/address 1 of 14, 22 skew errors in the KiCad DRC | 16 of 29: byte lane 7 of 12, command/address 5 of 14, uncoupled 1 of 3; 7 of 22 tuned nets reached their length | 261 of 263 routed, 0 clearance, 14 skew (was 22), 22 pair gap, 3 uncoupled, 1 sliver |
+
+In `bench/compare.py` against the version before (default arguments, so without `--pairs` and
+with moving parts), `matching` goes from 12 to 6 KiCad DRC errors and `diff_pairs` from 11 to 5;
+the other boards are unchanged.
+
+The meanders go where the routed nets have room. In tight bundles there is none, and the router
+does not leave room for them yet, so most of the misses on DDR5 are nets in the middle of a
+bundle. The longest net of a group sets the target, and one long detour (TDQS on DDR5) pulls the
+whole group after it.
 
 ## Conventional 45 degree tracks
 

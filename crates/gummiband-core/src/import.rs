@@ -849,6 +849,7 @@ impl Router<'_> {
                 origin: Some(imp.chain),
                 resting: !bent,
                 fitted: Vec::new(),
+                pattern: None,
                 seg: u32::MAX,
                 tap: None,
             });
@@ -867,6 +868,7 @@ impl Router<'_> {
                 origin: Some(c),
                 resting: true,
                 fitted: Vec::new(),
+                pattern: None,
                 seg: u32::MAX,
                 tap: None,
             });
@@ -1089,6 +1091,7 @@ mod tests {
             source: 7,
             first,
             last: first + 1,
+            pattern: false,
         });
         b
     }

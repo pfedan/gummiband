@@ -33,7 +33,10 @@ pub struct Spot {
 pub fn spots(violations: &[Violation]) -> Vec<Spot> {
     let mut out: Vec<Spot> = Vec::new();
     for v in violations {
-        let key = (v.nets.0.min(v.nets.1.unwrap_or(u32::MAX)), v.nets.0.max(v.nets.1.unwrap_or(u32::MAX)));
+        let key = (
+            v.nets.0.min(v.nets.1.unwrap_or(u32::MAX)),
+            v.nets.0.max(v.nets.1.unwrap_or(u32::MAX)),
+        );
         let missing = v.required - v.actual;
         let same = |s: &&mut Spot| {
             let k = s.nets.1.unwrap_or(u32::MAX);

@@ -33,6 +33,28 @@ pub enum Item {
         drill: f64,
         net: NetId,
     },
+    /// A KiCad length tuning pattern (`generated` group of type `tuning_pattern`) over items of
+    /// the same list, by their index.
+    Pattern(Box<PatternItem>),
+}
+
+#[derive(Debug, Clone)]
+pub struct PatternItem {
+    pub layer: LayerId,
+    /// The net (P of a pair).
+    pub net: NetId,
+    /// The base line the meander replaces, and that of the N track for a pair.
+    pub base: (Point, Point),
+    pub base_coupled: Option<(Point, Point)>,
+    pub rounded: bool,
+    pub width: f64,
+    pub gap: f64,
+    pub amplitude: f64,
+    pub spacing: f64,
+    pub target: f64,
+    /// Length of the net with the meander.
+    pub length: f64,
+    pub members: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -117,12 +139,93 @@ pub fn patch(kb: &KicadBoard, remove: &[Range<usize>], items: &[Item]) -> String
         out.pop();
     }
     out.push('\n');
-    let mut ids = UuidGen::new(text.len() as u64 ^ items.len() as u64);
+    let n_items = items.iter().filter(|it| !matches!(it, Item::Pattern(_))).count();
+    let mut ids = UuidGen::new(text.len() as u64 ^ n_items as u64);
+    let mut uuids: Vec<String> = Vec::with_capacity(items.len());
     for it in items {
-        write_item(kb, it, &mut ids, &mut out);
+        if matches!(it, Item::Pattern(_)) {
+            uuids.push(String::new());
+            continue;
+        }
+        let id = ids.next();
+        write_item(kb, it, &id, &mut out);
+        uuids.push(id);
+    }
+    for it in items {
+        if let Item::Pattern(p) = it {
+            write_pattern(kb, p, &ids.next(), &uuids, &mut out);
+        }
     }
     out.push_str(")\n");
     out
+}
+
+/// A tuning pattern as KiCad writes one: its properties in alphabetical order, the members by
+/// UUID, sorted.
+fn write_pattern(kb: &KicadBoard, p: &PatternItem, id: &str, uuids: &[String], out: &mut String) {
+    let xy = |q: Point| format!("(xy {} {})", f(q.x), f(q.y));
+    let yn = |b: bool| if b { "yes" } else { "no" };
+    let mut members: Vec<&str> = p
+        .members
+        .iter()
+        .filter_map(|&i| uuids.get(i))
+        .map(String::as_str)
+        .collect();
+    members.sort();
+    let mut props = vec![format!("(base_line (pts {} {}))", xy(p.base.0), xy(p.base.1))];
+    if let Some((a, b)) = p.base_coupled {
+        props.push(format!("(base_line_coupled (pts {} {}))", xy(a), xy(b)));
+    }
+    let status = if p.length < p.target - 0.05 {
+        "too_short"
+    } else if p.length > p.target + 0.05 {
+        "too_long"
+    } else {
+        "tuned"
+    };
+    props.extend([
+        "(corner_radius_percent 100)".to_string(),
+        format!("(end {})", xy(p.base.1)),
+        "(initial_side \"default\")".to_string(),
+        "(is_time_domain no)".to_string(),
+        format!("(last_diff_pair_gap {})", f(p.gap)),
+        format!("(last_netname {})", quote(&kb.board.nets[p.net as usize].name)),
+        format!("(last_status \"{status}\")"),
+        format!("(last_track_width {})", f(p.width)),
+        format!("(last_tuning_length {})", f(p.length)),
+        format!("(max_amplitude {})", f(p.amplitude)),
+        format!("(min_amplitude {})", f(p.spacing.min(p.amplitude))),
+        format!("(min_spacing {})", f(p.spacing)),
+        format!("(origin {})", xy(p.base.0)),
+        "(override_custom_rules yes)".to_string(),
+        format!("(rounded {})", yn(p.rounded)),
+        "(single_sided no)".to_string(),
+        "(target_delay 0)".to_string(),
+        "(target_delay_max 0)".to_string(),
+        "(target_delay_min 0)".to_string(),
+        format!("(target_length {})", f(p.target)),
+        format!("(target_length_max {})", f(p.target + 0.05)),
+        format!("(target_length_min {})", f(p.target - 0.05)),
+        "(target_skew 0)".to_string(),
+        "(target_skew_max 0)".to_string(),
+        "(target_skew_min 0)".to_string(),
+        format!(
+            "(tuning_mode \"{}\")",
+            if p.base_coupled.is_some() {
+                "diff_pair"
+            } else {
+                "single"
+            }
+        ),
+        "(update_order 0)".to_string(),
+    ]);
+    let _ = writeln!(
+        out,
+        "\t(generated\n\t\t(uuid \"{id}\")\n\t\t(type tuning_pattern)\n\t\t(name \"Tuning Pattern\")\n\t\t(layer {})\n\t\t{}\n\t\t(members {})\n\t)",
+        quote(&kb.layer_names[p.layer as usize]),
+        props.join("\n\t\t"),
+        members.iter().map(|m| format!("\"{m}\"")).collect::<Vec<_>>().join(" ")
+    );
 }
 
 fn net_ref(kb: &KicadBoard, net: NetId) -> String {
@@ -140,7 +243,7 @@ fn f(v: f64) -> String {
     if s == "-0" { "0".into() } else { s.to_string() }
 }
 
-fn write_item(kb: &KicadBoard, it: &Item, ids: &mut UuidGen, out: &mut String) {
+fn write_item(kb: &KicadBoard, it: &Item, id: &str, out: &mut String) {
     let layer = |l: LayerId| quote(&kb.layer_names[l as usize]);
     match *it {
         Item::Track {
@@ -160,7 +263,7 @@ fn write_item(kb: &KicadBoard, it: &Item, ids: &mut UuidGen, out: &mut String) {
                 f(width),
                 layer(l),
                 net_ref(kb, net),
-                ids.next()
+                id
             );
         }
         Item::Arc {
@@ -183,9 +286,10 @@ fn write_item(kb: &KicadBoard, it: &Item, ids: &mut UuidGen, out: &mut String) {
                 f(width),
                 layer(l),
                 net_ref(kb, net),
-                ids.next()
+                id
             );
         }
+        Item::Pattern(_) => {}
         Item::Via {
             at,
             diameter,
@@ -203,7 +307,7 @@ fn write_item(kb: &KicadBoard, it: &Item, ids: &mut UuidGen, out: &mut String) {
                 layer(0),
                 layer(last),
                 net_ref(kb, net),
-                ids.next()
+                id
             );
         }
     }

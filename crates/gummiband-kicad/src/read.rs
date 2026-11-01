@@ -80,6 +80,7 @@ pub fn read_board(path: &Path, opts: &ReadOptions) -> Result<KicadBoard> {
         kb.board.net_hole_clearance = crate::dru::hole_clearances(&kb.board, &dru).into_iter().collect();
         crate::dru::apply_width_rules(&mut kb.board, &dru);
         crate::dru::apply_pair_rules(&mut kb.board, &dru);
+        kb.board.match_rules = crate::dru::match_rules(&kb.board, &dru);
     }
     Ok(kb)
 }
@@ -107,6 +108,10 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
 
     r.read_layers(&root, opts);
     r.read_stackup(&root);
+    r.b.thickness = root
+        .child("general")
+        .and_then(|g| g.child_f64("thickness"))
+        .unwrap_or(1.6);
     r.mask_margin = root
         .child("setup")
         .and_then(|s| s.child_f64("pad_to_mask_clearance"))
@@ -115,12 +120,25 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
     r.read_classes(pro);
     r.read_net_table(&root);
 
+    // members of length tuning patterns
+    let mut tuned: std::collections::HashSet<String> = Default::default();
+    for n in root.children("generated") {
+        if n.child_str("type") == Some("tuning_pattern")
+            && let Some(m) = n.child("members")
+        {
+            tuned.extend(m.args().iter().filter_map(|x| x.as_str()).map(str::to_string));
+        }
+    }
     for (i, n) in root.args().iter().enumerate() {
         match n.head() {
             Some("footprint") | Some("module") => r.read_footprint(n),
             Some("segment") | Some("arc") | Some("via") => {
                 let first = r.b.obstacles.len();
+                let before = r.b.copper.len();
                 r.read_copper(n, opts.keep, &opts.ignore_nets, i as u32);
+                if let (Some(c), Some(id)) = (r.b.copper.get_mut(before), item_id(n)) {
+                    c.pattern = tuned.contains(id);
+                }
                 if let Some(id) = item_id(n) {
                     r.copper_uuids
                         .insert(id.to_string(), (first..r.b.obstacles.len()).collect());
@@ -860,6 +878,9 @@ impl Reader {
                 size: (bb.width(), bb.height()),
             });
             self.b.nets[net as usize].pins.push(pin);
+            if let Some(d) = pad.child_f64("die_length").filter(|d| *d > 0.0) {
+                self.b.die_length.insert(pin, d);
+            }
         }
     }
 
@@ -886,6 +907,7 @@ impl Reader {
                 source,
                 first,
                 last,
+                pattern: false,
             });
         };
         match n.head() {
@@ -1185,7 +1207,10 @@ impl Reader {
         }
         let font = effects.and_then(|e| e.child("font"));
         let size = font.and_then(|f| f.child_f64s("size")).unwrap_or_default();
-        let (h, w) = (size.first().copied().unwrap_or(1.0), size.get(1).copied().unwrap_or(1.0));
+        let (h, w) = (
+            size.first().copied().unwrap_or(1.0),
+            size.get(1).copied().unwrap_or(1.0),
+        );
         let stroke = font.and_then(|f| f.child_f64("thickness")).unwrap_or(0.15);
         let lines = text.split(['\n', '\r']).filter(|l| !l.is_empty()).count().max(1);
         let longest = text.split(['\n', '\r']).map(|l| l.chars().count()).max().unwrap_or(0);
@@ -1364,11 +1389,22 @@ mod tests {
   (gr_text "SILK" (at 10 40 0) (layer "F.SilkS") (effects (font (size 1 1))))
 )"#;
         let kb = parse_board(text.to_string(), None, &ReadOptions::default()).unwrap();
-        let shapes: Vec<_> = kb.board.obstacles.iter().filter(|o| o.kind == ObstacleKind::Graphic).collect();
+        let shapes: Vec<_> = kb
+            .board
+            .obstacles
+            .iter()
+            .filter(|o| o.kind == ObstacleKind::Graphic)
+            .collect();
         assert_eq!(shapes.len(), 1);
         let bb = shapes[0].shape.bbox();
-        assert!((bb.min.x - 9.9).abs() < 1e-9 && (bb.max.x - (9.9 + 3.6)).abs() < 1e-9, "{bb:?}");
-        assert!((bb.min.y - 19.4).abs() < 1e-9 && (bb.max.y - 20.6).abs() < 1e-9, "{bb:?}");
+        assert!(
+            (bb.min.x - 9.9).abs() < 1e-9 && (bb.max.x - (9.9 + 3.6)).abs() < 1e-9,
+            "{bb:?}"
+        );
+        assert!(
+            (bb.min.y - 19.4).abs() < 1e-9 && (bb.max.y - 20.6).abs() < 1e-9,
+            "{bb:?}"
+        );
     }
 
     fn mask_board(body: &str) -> Board {

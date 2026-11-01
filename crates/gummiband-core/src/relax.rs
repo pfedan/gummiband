@@ -129,7 +129,8 @@ fn pin_rails(board: &Board) -> crate::index::FastMap<u32, Vec<Rail>> {
     }
     let mut out: crate::index::FastMap<u32, Vec<Rail>> = Default::default();
     for pins in parts.values().filter(|p| p.len() >= 4) {
-        let centre = pins.iter().map(|&p| board.pins[p].pos).fold(pt(0.0, 0.0), |a, b| a + b) * (1.0 / pins.len() as f64);
+        let centre =
+            pins.iter().map(|&p| board.pins[p].pos).fold(pt(0.0, 0.0), |a, b| a + b) * (1.0 / pins.len() as f64);
         for &i in pins {
             let pin = &board.pins[i];
             let pitch = pins
@@ -1032,9 +1033,8 @@ pub fn relax_while(
                     }
                 };
                 let to = vc + mv * if on_gpu_now { via_gain } else { 1.0 };
-                let stays = |&(o, floor): &(&crate::geom::Polygon, f64)| {
-                    o.contains(to) && nearest_on_poly(o, to).0 >= floor
-                };
+                let stays =
+                    |&(o, floor): &(&crate::geom::Polygon, f64)| o.contains(to) && nearest_on_poly(o, to).0 >= floor;
                 if via_planes[vi].is_empty() || via_planes[vi].iter().any(stays) {
                     to
                 } else {
@@ -1379,6 +1379,7 @@ pub fn relax_while(
             origin: t.origin,
             resting: !awake[ti],
             fitted: std::mem::take(&mut t.fitted),
+            pattern: t.pattern,
             seg: t.seg,
             tap: t.tap,
         };
@@ -1970,13 +1971,7 @@ const GROW_MIN_LEN: f64 = 1.5;
 /// `reserve` on top of the clearances; tracks in a bundle share the room. A track never gets
 /// narrower than it is, and it changes width in steps of [`GROW_STEP`] per piece, which gives
 /// a taper that needs no special copper.
-pub fn prefer_width(
-    board: &Board,
-    sub: &Substrate,
-    geo: &mut Geometry,
-    target: impl Fn(u32) -> f64,
-    reserve: f64,
-) {
+pub fn prefer_width(board: &Board, sub: &Substrate, geo: &mut Geometry, target: impl Fn(u32) -> f64, reserve: f64) {
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
     let margin = RelaxConfig::default().margin + reserve;
     let mut grown: Vec<Grown> = Vec::new();
@@ -1989,9 +1984,16 @@ pub fn prefer_width(
         for e in &t.elems {
             let (w, parts) = match *e {
                 Elem::Line(a, b) => {
-                    let n = if grows { (a.dist(b) / 0.3).ceil().max(1.0) as usize } else { 1 };
+                    let n = if grows {
+                        (a.dist(b) / 0.3).ceil().max(1.0) as usize
+                    } else {
+                        1
+                    };
                     let at = |i: usize| a + (b - a) * (i as f64 / n as f64);
-                    (t.piece_width(a, b), (0..n).map(|i| Elem::Line(at(i), at(i + 1))).collect())
+                    (
+                        t.piece_width(a, b),
+                        (0..n).map(|i| Elem::Line(at(i), at(i + 1))).collect(),
+                    )
                 }
                 Elem::Arc(a, _, b) => {
                     let pts = crate::realize::flatten(std::slice::from_ref(e));
@@ -2067,7 +2069,10 @@ pub fn prefer_width(
                     v.net == net
                         || v.layer.is_some_and(|l| l != layer)
                         || point_seg_dist(v.at, a, b)
-                            >= v.diameter / 2.0 + w / 2.0 + c.max(clr(v.net)).max(board.item_gap(net, Some(v.net))) + margin
+                            >= v.diameter / 2.0
+                                + w / 2.0
+                                + c.max(clr(v.net)).max(board.item_gap(net, Some(v.net)))
+                                + margin
                 })
                 && idx.query(&rr).into_iter().all(|pi| {
                     let (p, q, uj) = pieces[pi as usize];
@@ -2157,7 +2162,13 @@ mod tests {
             len: 0.6,
         };
         // out of the pad a little off the middle, then far to the side at the height of the rail
-        let mut pts = vec![pt(0.0, 0.0), pt(0.02, -0.1), pt(0.02, -0.2), pt(-1.0, -0.2), pt(-4.0, -0.2)];
+        let mut pts = vec![
+            pt(0.0, 0.0),
+            pt(0.02, -0.1),
+            pt(0.02, -0.2),
+            pt(-1.0, -0.2),
+            pt(-4.0, -0.2),
+        ];
         follow(&r, &mut pts, false);
         assert_eq!(pts[2], pt(0.0, -0.2));
         assert_eq!(pts[3], pt(-1.0, -0.2));

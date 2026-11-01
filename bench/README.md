@@ -22,6 +22,7 @@ only unconnected items.
 | `fine_pitch` | 2 | QFN-56 at 0.4 mm with 0.2/0.19 mm rules, nets in pin order: a clean straight fan-out |
 | `fine_pitch_mixed` | 2 | the same part with shuffled nets: vias and crossings right at the pins, the Corne problem in small |
 | `diff_pairs` | 2 | 8 differential pairs (`_P`, `_N`) with a ground between them, 0.5 mm connectors at an angle, parts in the way |
+| `matching` | 2 | a byte lane and a clock pair between two 0.5 mm connectors at an angle, with `length`, `skew` and `diff_pair_uncoupled` rules |
 
 `run_suite.sh [board ...]` builds the CLI, routes every board into `boards/out/`
 one board after another (`--runs 4 --generations 1 --geometry-generations 0` with `RAYON_NUM_THREADS=4`, override with
@@ -70,3 +71,12 @@ First results (2026-10-29, `--runs 14 --generations 1`, no geometry generations)
 | `arty` | 322/323 | 179 | 10 s | two tracks on top of each other along the left edge, FTDI area |
 | `corne` | 471/482 | 453 | 136 s | the two RP2040 fan-outs (0.4 mm pitch) |
 | `ulx3s` | 651/796 | 377 | 304 s | BGA escape on two signal layers, bundles along the board edge |
+
+## DDR5 testbed (length matching)
+
+`prepare-ddr5.sh` fetches Antmicro's DDR5 testbed (Apache-2.0, pinned to one commit) into
+`work/ddr5/src/`, writes the board with its routing and the real layer types into
+`work/ddr5/reference/` and the stripped board into `work/ddr5/ddr5/`. `ddr5-testbed.kicad_dru`
+holds the length rules (the board has none of its own). `run-ddr5.sh [route args]` prints the
+lengths of the reference routing, routes the stripped board into `work/ddr5/routed/`, prints its
+lengths and the KiCad DRC summary.

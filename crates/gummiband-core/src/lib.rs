@@ -7,6 +7,7 @@ pub mod geom;
 pub mod import;
 mod improve;
 pub mod index;
+pub mod matching;
 pub mod octo;
 pub mod pairs;
 pub mod prof;
@@ -14,6 +15,7 @@ pub mod realize;
 pub mod relax;
 pub mod route;
 pub mod topo;
+pub mod tune;
 
 use std::collections::HashMap;
 
@@ -597,13 +599,23 @@ pub fn route_board(
         let quick = {
             // the routed copper stays awake: the relaxation of each step may also settle the
             // spots the shift is meant to free
-            let f = follow::follow_steps(board, &offsets, &next, &best.1.geometry, sub_cfg, &relax::RelaxConfig::default());
+            let f = follow::follow_steps(
+                board,
+                &offsets,
+                &next,
+                &best.1.geometry,
+                sub_cfg,
+                &relax::RelaxConfig::default(),
+            );
             let geometry = f.geo;
             eprintln!(
                 "placement round {round}: followed {} of {} steps{}",
                 f.stats.steps,
                 f.stats.steps_planned,
-                f.stats.stopped.as_ref().map_or(String::new(), |w| format!(", stopped: {w}"))
+                f.stats
+                    .stopped
+                    .as_ref()
+                    .map_or(String::new(), |w| format!(", stopped: {w}"))
             );
             let moved = board.with_offsets(&f.offsets);
             let sub = Substrate::build(&moved, sub_cfg);
@@ -1141,11 +1153,7 @@ pub fn route_fixed(
     if open {
         (best, others) = improve::run(board, &sub, search, best, done, &mut rng, &mut |c, generation| {
             if search.frames {
-                frames.push((
-                    label(c, &format!("generation {generation}")),
-                    c.geo.clone(),
-                    true,
-                ));
+                frames.push((label(c, &format!("generation {generation}")), c.geo.clone(), true));
             }
         });
     }

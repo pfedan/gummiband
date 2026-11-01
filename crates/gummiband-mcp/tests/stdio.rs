@@ -240,7 +240,10 @@ fn initialize_list_load_route() {
         json!({"board": kept["board"], "keep_all": true, "nets": ["B"], "output": done}),
     );
     assert_eq!(r["connections"], 0, "{r}");
-    assert_eq!(std::fs::read_to_string(&done).unwrap().matches("(segment").count(), after);
+    assert_eq!(
+        std::fs::read_to_string(&done).unwrap().matches("(segment").count(),
+        after
+    );
 
     // reroute replaces the copper of the net, the other nets stay
     let again = dir.join("tiny.again.kicad_pcb");
@@ -251,7 +254,10 @@ fn initialize_list_load_route() {
     );
     assert_eq!(r["routed"], 1, "{r}");
     assert!(std::fs::read_to_string(&again).unwrap().contains("(segment"));
-    assert!(s.call_err("route", json!({"board": kept["board"], "reroute": true})).contains("reroute"));
+    assert!(
+        s.call_err("route", json!({"board": kept["board"], "reroute": true}))
+            .contains("reroute")
+    );
     assert!(r["blocked"].as_array().unwrap().is_empty(), "{r}");
     // the other nets shift aside or give way by default; both can be switched off
     let still = dir.join("tiny.still.kicad_pcb");
@@ -324,12 +330,21 @@ fn good_practice_plan_check_and_pour() {
     let w = plan["nets"][0]["track_width_mm"].as_f64().unwrap();
     assert!(w > 0.5 && w < 1.0, "{plan}");
     assert_eq!(plan["applied"][0]["net"], "A", "{plan}");
-    assert!(plan["dru_rules"].as_str().unwrap().contains("A.NetName == 'A'"), "{plan}");
+    assert!(
+        plan["dru_rules"].as_str().unwrap().contains("A.NetName == 'A'"),
+        "{plan}"
+    );
 
     // the route takes the width
     let r = s.call("route", json!({"board": "b1", "runs": 1, "generations": 0}));
     assert_eq!(r["routed"], 2, "{r}");
-    let a = r["nets"].as_array().unwrap().iter().find(|n| n["net"] == "A").unwrap().clone();
+    let a = r["nets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["net"] == "A")
+        .unwrap()
+        .clone();
     assert!(a["min_width_mm"].as_f64().unwrap() > w - 0.01, "{a}");
 
     // check: the two pin net gets its cross-section measured automatically
@@ -346,7 +361,10 @@ fn good_practice_plan_check_and_pour() {
     assert_eq!(c["flagged"], 1, "{c}");
 
     // pour: zones of B on both layers and stitching vias clear of net A
-    let g = s.call("ground_pour", json!({"path": out, "net": "B", "pitch": 4.0, "edge_pitch": 0}));
+    let g = s.call(
+        "ground_pour",
+        json!({"path": out, "net": "B", "pitch": 4.0, "edge_pitch": 0}),
+    );
     assert_eq!(g["zones_added"], json!(["F.Cu", "B.Cu"]), "{g}");
     assert!(g["vias_added"].as_u64().unwrap() > 0, "{g}");
     let text = std::fs::read_to_string(dir.join("tiny.routed.gnd.kicad_pcb")).unwrap();

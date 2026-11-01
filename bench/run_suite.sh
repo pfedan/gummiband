@@ -56,6 +56,11 @@ for name in names:
         if os.path.exists(f):
             os.remove(f)
     shutil.copy(os.path.join(boards_dir, name + ".kicad_pro"), os.path.join(out, name + ".kicad_pro"))
+    dru = os.path.join(boards_dir, name + ".kicad_dru")
+    if os.path.exists(dru):
+        shutil.copy(dru, os.path.join(out, name + ".kicad_dru"))
+    elif os.path.exists(os.path.join(out, name + ".kicad_dru")):
+        os.remove(os.path.join(out, name + ".kicad_dru"))
     cmd = [gb, "route", src, "-o", dst, "--runs", runs, "--generations", gens, "--geometry-generations", geo] + extra
     if os.environ.get("SVG") == "1":
         cmd += ["--svg", os.path.join(out, name + ".svg")]

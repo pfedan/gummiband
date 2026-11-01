@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use gummiband_core::board::{Board, NetId};
+use gummiband_core::board::{Board, MatchKind, MatchRule, MinOptMax, NetId};
 
 use crate::sexpr::{self, Node};
 
@@ -18,6 +18,11 @@ enum Expr {
     Ne(Operand, Operand),
     /// A function call on an item: always false here.
     Call,
+    /// `A.inDiffPair('pattern')`: the net of the item is part of a differential pair whose base
+    /// name matches.
+    InDiffPair(char, String),
+    /// `A.hasNetclass('name')`.
+    HasNetclass(char, String),
     Bool(bool),
 }
 
@@ -41,6 +46,8 @@ struct ItemProps<'a> {
     kind: &'a str,
     net: &'a str,
     class: &'a str,
+    /// Base name of the differential pair the net belongs to (`USB_D` of `USB_DP`), if any.
+    pair: Option<&'a str>,
 }
 
 pub fn parse_rules(text: &str) -> Vec<ClearanceRule> {
@@ -137,7 +144,8 @@ fn constraint_opt(c: &Node) -> Option<f64> {
 
 /// Width and gap of differential pairs per net class, from rules with a `diff_pair_gap`
 /// constraint: `A.NetClass == 'X'` or `A.inDiffPair('pattern')` conditions, for all layers or
-/// for inner or outer layers. Rules further down win, as in KiCad. `skew` limits go along.
+/// for inner or outer layers. Rules further down win, as in KiCad. Skew limits are match rules
+/// ([`match_rules`]).
 pub fn apply_pair_rules(board: &mut Board, text: &str) {
     let text: String = text
         .lines()
@@ -155,23 +163,19 @@ pub fn apply_pair_rules(board: &mut Board, text: &str) {
         };
         let gap = of("diff_pair_gap").and_then(constraint_opt);
         let width = of("track_width").and_then(constraint_opt);
-        let skew = of("skew").and_then(|c| {
-            c.child("max")?
-                .args()
-                .first()?
-                .as_str()?
-                .trim_end_matches("mm")
-                .parse()
-                .ok()
-        });
-        if gap.is_none() && skew.is_none() {
+        if gap.is_none() {
             continue;
         }
         let mut classes = quoted_after(cond, "A.NetClass == ");
         for pat in quoted_after(cond, "A.inDiffPair(") {
             for &(p, n) in &pairs {
                 let (a, b) = (&board.nets[p as usize], &board.nets[n as usize]);
-                if glob(&pat, &a.name) || glob(&pat, &b.name) {
+                let base = &a.name[..a.name.len() - 1];
+                if glob(&pat, &a.name)
+                    || glob(&pat, &b.name)
+                    || glob(&pat, base)
+                    || glob(&pat, base.trim_end_matches('_'))
+                {
                     classes.push(board.classes[a.class as usize].name.clone());
                 }
             }
@@ -193,11 +197,115 @@ pub fn apply_pair_rules(board: &mut Board, text: &str) {
                     cls.diff_inner = Some((w, g));
                 }
             }
-            if skew.is_some() {
-                cls.diff_skew = skew;
+        }
+    }
+}
+
+/// A length value of a constraint in mm; time values (`ps`) are not lengths.
+fn length_value(c: &Node, key: &str) -> Option<f64> {
+    let v = c.child(key)?.args().first()?.as_str()?.trim().to_string();
+    if v.ends_with("ps") || v.ends_with("fs") || v.ends_with("ns") {
+        return None;
+    }
+    let (num, scale) = if let Some(x) = v.strip_suffix("mil") {
+        (x, 0.0254)
+    } else if let Some(x) = v.strip_suffix("in") {
+        (x, 25.4)
+    } else {
+        (v.trim_end_matches("mm"), 1.0)
+    };
+    num.trim().parse::<f64>().ok().map(|x| x * scale)
+}
+
+/// The `length`, `skew` and `diff_pair_uncoupled` constraints of the rules, grouped as KiCad's
+/// DRC groups them: per net and kind of constraint the last rule in the file whose condition
+/// holds for the net's tracks wins, and a rule holds for the nets it wins.
+pub fn match_rules(board: &Board, text: &str) -> Vec<MatchRule> {
+    let text: String = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let wrapped = format!("(rules {text})");
+    let Ok(root) = sexpr::parse(&wrapped) else {
+        return Vec::new();
+    };
+    let mut base: HashMap<NetId, String> = HashMap::new();
+    for (p, n) in board.diff_pairs() {
+        for x in [p, n] {
+            let name = &board.nets[x as usize].name;
+            base.insert(x, name[..name.len() - 1].to_string());
+        }
+    }
+    // candidates in file order: (kind, rule name, value, within pairs, condition)
+    let mut cands: Vec<(MatchKind, String, MinOptMax, bool, Expr)> = Vec::new();
+    for r in root.children("rule") {
+        let name = r.args().first().and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let Some(cond) = r.child_str("condition") else { continue };
+        let Some(expr) = parse_expr(cond) else { continue };
+        for c in r.children("constraint") {
+            let kind = match c.args().first().and_then(|x| x.as_str()) {
+                Some("length") => MatchKind::Length,
+                Some("skew") => MatchKind::Skew,
+                Some("diff_pair_uncoupled") => MatchKind::Uncoupled,
+                Some("diff_pair_gap") => MatchKind::Gap,
+                _ => continue,
+            };
+            let value = MinOptMax {
+                min: length_value(c, "min"),
+                opt: length_value(c, "opt"),
+                max: length_value(c, "max"),
+            };
+            if value == MinOptMax::default() {
+                continue;
+            }
+            let within = c.child("within_diff_pairs").is_some()
+                || c.args().iter().any(|x| x.as_str() == Some("within_diff_pairs"));
+            cands.push((kind, name.clone(), value, within, expr.clone()));
+        }
+    }
+    let none = ItemProps {
+        kind: "",
+        net: "",
+        class: "",
+        pair: None,
+    };
+    // the winning candidate per kind and net
+    let mut won: Vec<Vec<NetId>> = vec![Vec::new(); cands.len()];
+    for (i, net) in board.nets.iter().enumerate() {
+        if net.pins.len() < 2 {
+            continue;
+        }
+        let a = ItemProps {
+            kind: "Track",
+            net: &net.name,
+            class: &board.classes[net.class as usize].name,
+            pair: base.get(&(i as NetId)).map(String::as_str),
+        };
+        for kind in [MatchKind::Length, MatchKind::Skew, MatchKind::Uncoupled, MatchKind::Gap] {
+            if matches!(kind, MatchKind::Uncoupled | MatchKind::Gap) && a.pair.is_none() {
+                continue;
+            }
+            if let Some(c) = (0..cands.len())
+                .rev()
+                .find(|&c| cands[c].0 == kind && eval(&cands[c].4, &a, &none))
+            {
+                won[c].push(i as NetId);
             }
         }
     }
+    cands
+        .into_iter()
+        .zip(won)
+        .filter(|(_, nets)| !nets.is_empty())
+        .map(|((kind, name, value, within_pairs, _), nets)| MatchRule {
+            name,
+            kind,
+            value,
+            within_pairs,
+            nets,
+        })
+        .collect()
 }
 
 /// The quoted strings that follow each occurrence of `prefix`.
@@ -236,11 +344,13 @@ pub fn hole_clearances(board: &Board, text: &str) -> HashMap<NetId, f64> {
                 kind: "Via",
                 net: &net.name,
                 class: &board.classes[net.class as usize].name,
+                pair: None,
             };
             let hole = ItemProps {
                 kind: "Hole",
                 net: "",
                 class: "",
+                pair: None,
             };
             if r.min > board.rules.hole_clearance && (eval(&r.cond, &a, &hole) || eval(&r.cond, &hole, &a)) {
                 let e = out.entry(i as NetId).or_insert(0.0_f64);
@@ -270,11 +380,13 @@ fn clearances(board: &Board, rules: &[ClearanceRule], kind: &str) -> HashMap<(Ne
                 kind,
                 net: &na.name,
                 class: &board.classes[na.class as usize].name,
+                pair: None,
             };
             let pb = ItemProps {
                 kind,
                 net: &nb.name,
                 class: &board.classes[nb.class as usize].name,
+                pair: None,
             };
             let mut best: f64 = 0.0;
             for r in rules {
@@ -335,6 +447,17 @@ fn eval(e: &Expr, a: &ItemProps, b: &ItemProps) -> bool {
         Expr::Eq(x, y) => eq(x, y),
         Expr::Ne(x, y) => !eq(x, y),
         Expr::Call => false,
+        Expr::InDiffPair(w, pat) => {
+            let it = if *w == 'B' { b } else { a };
+            it.pair.is_some_and(|base| {
+                // KiCad matches the base name, with or without a trailing '_'
+                glob(pat, base) || glob(pat, base.trim_end_matches('_')) || glob(pat, it.net)
+            })
+        }
+        Expr::HasNetclass(w, name) => {
+            let it = if *w == 'B' { b } else { a };
+            glob(name, it.class)
+        }
         Expr::Bool(v) => *v,
     }
 }
@@ -413,7 +536,11 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
 
 fn parse_expr(s: &str) -> Option<Expr> {
     let toks = tokenize(s)?;
-    let mut p = Parser { t: toks, i: 0 };
+    let mut p = Parser {
+        t: toks,
+        i: 0,
+        known: None,
+    };
     let e = p.or()?;
     if p.i != p.t.len() {
         return None;
@@ -424,6 +551,8 @@ fn parse_expr(s: &str) -> Option<Expr> {
 struct Parser {
     t: Vec<Tok>,
     i: usize,
+    /// A function call the last operand was, if it is one evaluated here.
+    known: Option<Expr>,
 }
 
 impl Parser {
@@ -466,7 +595,7 @@ impl Parser {
         let lhs = self.operand()?;
         let lhs = match lhs {
             Some(o) => o,
-            None => return Some(Expr::Call),
+            None => return Some(self.known.take().unwrap_or(Expr::Call)),
         };
         if self.eat(&Tok::Op("==")) {
             let rhs = self.operand()??;
@@ -498,6 +627,20 @@ impl Parser {
                 };
                 self.i += 1;
                 if self.eat(&Tok::LParen) {
+                    let who = w.chars().next().unwrap_or('A');
+                    let known = matches!(name.as_str(), "inDiffPair" | "hasNetclass" | "hasNetClass");
+                    if known
+                        && let (Some(Tok::Str(arg)), Some(Tok::RParen)) =
+                            (self.t.get(self.i).cloned(), self.t.get(self.i + 1).cloned())
+                    {
+                        self.i += 2;
+                        self.known = Some(if name == "inDiffPair" {
+                            Expr::InDiffPair(who, arg)
+                        } else {
+                            Expr::HasNetclass(who, arg)
+                        });
+                        return Some(None);
+                    }
                     // function call: skip arguments
                     let mut depth = 1;
                     while depth > 0 {
@@ -561,7 +704,6 @@ mod tests {
         let c = &b.classes[0];
         assert_eq!(c.diff_outer, Some((0.16, 0.138)));
         assert_eq!(c.diff_inner, Some((0.155, 0.144)));
-        assert_eq!(c.diff_skew, Some(0.5));
         assert_eq!(b.pair_shape(0, 1, 0), (0.16, 0.138, 0.138));
         assert_eq!(b.pair_shape(0, 1, 1), (0.155, 0.144, 0.144));
     }
@@ -607,16 +749,19 @@ mod tests {
             kind: "Track",
             net: "/Outputs/OUT1_DATA",
             class: "LEDData",
+            pair: None,
         };
         let b = ItemProps {
             kind: "Track",
             net: "/Outputs/OUT2_DATA",
             class: "LEDData",
+            pair: None,
         };
         let c = ItemProps {
             kind: "Track",
             net: "LED_D1",
             class: "LEDData",
+            pair: None,
         };
         assert!(eval(&rules[0].cond, &a, &b));
         assert!(!eval(&rules[0].cond, &a, &c));

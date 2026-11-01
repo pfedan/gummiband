@@ -106,6 +106,10 @@ enum Cmd {
         /// from the board's stackup; the gap stays.
         #[arg(long)]
         pair_zdiff: Option<f64>,
+        /// With --pairs: couple every pair recognised by name. Without it only pairs that a
+        /// `diff_pair_gap` rule or a net class of their own marks as differential pairs.
+        #[arg(long)]
+        pair_all: bool,
         /// Experimental: rounds of negotiated routing before the rip-up passes (0 = off).
         /// Connections may overfill edges and cross for a rising price, see docs/ARCHITECTURE.md.
         #[arg(long, default_value_t = 0)]
@@ -194,6 +198,16 @@ enum Cmd {
         /// where a 45 degree path does not fit, a piece keeps its angle.
         #[arg(long, value_enum, default_value_t = Angles::Any)]
         angles: Angles,
+        /// Leave the lengths as routed: no meanders for the length and skew rules of the
+        /// .kicad_dru (without such rules nothing is tuned anyway)
+        #[arg(long)]
+        no_tune: bool,
+        /// Highest meander bump in mm (centre line above the original line)
+        #[arg(long, default_value_t = 1.0)]
+        tune_amplitude: f64,
+        /// Air between neighbouring meander legs in track widths (at least the clearance)
+        #[arg(long, default_value_t = 2.0)]
+        tune_spacing: f64,
     },
     /// Place parts from the netlist: locked footprints, connectors, modules, mounting holes,
     /// buttons and test points stay, everything else gets a new position. Its current position
@@ -280,6 +294,18 @@ enum Cmd {
         #[arg(long)]
         svg: Option<PathBuf>,
     },
+    /// Measure a routed board as KiCad's DRC does: net lengths with vias and pad-to-die, the
+    /// coupled length of differential pairs, and the length, skew and uncoupled rules of the
+    /// `.kicad_dru`.
+    Lengths {
+        board: PathBuf,
+        /// Nets to list with their lengths (glob patterns), in addition to the rules.
+        #[arg(long, value_delimiter = ',')]
+        nets: Vec<String>,
+        /// Print JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove tracks, vias and outer copper zones (benchmark preparation).
     Strip {
         board: PathBuf,
@@ -292,6 +318,56 @@ enum Cmd {
         #[arg(long)]
         keep_zones: bool,
     },
+}
+
+/// Wildcard match as in KiCad rules (`*` and `?`).
+fn glob_match(pat: &str, s: &str) -> bool {
+    fn rec(p: &[u8], s: &[u8]) -> bool {
+        match (p.first(), s.first()) {
+            (None, None) => true,
+            (Some(b'*'), _) => rec(&p[1..], s) || (!s.is_empty() && rec(p, &s[1..])),
+            (Some(b'?'), Some(_)) => rec(&p[1..], &s[1..]),
+            (Some(a), Some(b)) if a == b => rec(&p[1..], &s[1..]),
+            _ => false,
+        }
+    }
+    rec(pat.as_bytes(), s.as_bytes())
+}
+
+/// The lines of the length, skew and uncoupled rules: one per rule, and one per net out of range.
+fn print_matching(rules: &[gummiband_core::matching::RuleMatch]) {
+    use gummiband_core::board::MatchKind;
+    if rules.is_empty() {
+        return;
+    }
+    println!("length rules: {}", gummiband_core::matching::summary(rules));
+    for r in rules {
+        let kind = match (r.kind, r.within_pairs) {
+            (MatchKind::Length, _) => "length",
+            (MatchKind::Skew, false) => "skew",
+            (MatchKind::Skew, true) => "skew within pairs",
+            (MatchKind::Uncoupled, _) => "uncoupled",
+            (MatchKind::Gap, _) => "gap",
+        };
+        let v = r.value;
+        let range = [("min", v.min), ("opt", v.opt), ("max", v.max)]
+            .iter()
+            .filter_map(|(k, x)| x.map(|x| format!("{k} {x}")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "  rule {} ({kind} {range}): {} of {} ok",
+            r.rule,
+            r.nets.len() - r.failed(),
+            r.nets.len()
+        );
+        for n in r.nets.iter().filter(|n| !n.ok) {
+            match n.skew {
+                Some(s) => println!("    {}: {:.4} mm, skew {:+.4}", n.net, n.length, s),
+                None => println!("    {}: {:.4} mm", n.net, n.length),
+            }
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -403,6 +479,7 @@ fn main() -> Result<()> {
             pairs,
             pair_skew,
             pair_zdiff,
+            pair_all,
             generations,
             geometry_generations,
             seed,
@@ -423,6 +500,9 @@ fn main() -> Result<()> {
             teardrops,
             net_priorities,
             angles,
+            no_tune,
+            tune_amplitude,
+            tune_spacing,
         } => {
             // parts move by default when the whole board is routed; on a board whose copper is
             // kept they stay unless asked
@@ -603,6 +683,7 @@ fn main() -> Result<()> {
                     let pair_cfg = gummiband_core::pairs::PairConfig {
                         skew: pair_skew,
                         zdiff: pair_zdiff,
+                        all: pair_all,
                     };
                     gummiband_core::pairs::route_pairs(board, &sub_cfg, &router_cfg, &search_cfg, &pair_cfg)
                 } else {
@@ -633,6 +714,15 @@ fn main() -> Result<()> {
                 given,
                 ..
             } = finished;
+            let tune_cfg = gummiband_core::tune::TuneConfig {
+                style: if angles == Angles::Deg45 {
+                    gummiband_core::tune::Style::Chamfer
+                } else {
+                    gummiband_core::tune::Style::Round
+                },
+                amplitude: tune_amplitude,
+                spacing: tune_spacing,
+            };
             let b = &routed_board;
             let mut res = res;
             let dt = t0.elapsed();
@@ -660,6 +750,28 @@ fn main() -> Result<()> {
                     st.tracks, st.length_before, st.length_after, st.any_angle, st.any_angle_length, st.sharp_corners
                 );
                 st
+            });
+            let tuned = (!no_tune && !b.match_rules.is_empty()).then(|| {
+                let t1 = std::time::Instant::now();
+                let rep = gummiband_core::tune::tune(b, &mut res.geometry, &tune_cfg);
+                let short: Vec<_> = rep.nets.iter().filter(|n| n.aim - n.after > 0.005).collect();
+                println!(
+                    "length tuning: {} nets, {} reached their length, {:.1} s",
+                    rep.nets.len(),
+                    rep.nets.len() - short.len(),
+                    t1.elapsed().as_secs_f64()
+                );
+                for n in &short {
+                    println!(
+                        "  {}: {:.3} -> {:.3} mm, aim {:.3} mm{}",
+                        n.net,
+                        n.before,
+                        n.after,
+                        n.aim,
+                        if n.coupled { " (as a pair)" } else { "" }
+                    );
+                }
+                rep
             });
             println!(
                 "substrate: {} vertices, {} triangles, {} via sites",
@@ -734,7 +846,7 @@ fn main() -> Result<()> {
             }
             for r in &pair_reports {
                 println!(
-                    "  pair {} / {}: {}, width {:.3} gap {:.3}, {:.0} ohm, {:.2} / {:.2} mm, skew {:.3} mm, {} vias, {} swaps {}",
+                    "  pair {} / {}: {}, width {:.3} gap {:.3}, {:.0} ohm, {:.2} / {:.2} mm, skew {:.3} mm, uncoupled {:.2} mm, {} vias, {} swaps {}",
                     r.p,
                     r.n,
                     if r.wide { "wide" } else { "single" },
@@ -744,11 +856,14 @@ fn main() -> Result<()> {
                     r.length_p,
                     r.length_n,
                     r.skew,
+                    r.uncoupled,
                     r.vias,
                     r.swaps,
                     r.note
                 );
             }
+            let matching = gummiband_core::matching::check(b, &res.geometry);
+            print_matching(&matching);
             let viol = gummiband_core::check::check(b, &res.geometry);
             let spots = gummiband_core::check::spots(&viol).len();
             println!("clearance check: {} violations at {spots} spots", viol.len());
@@ -840,68 +955,99 @@ fn main() -> Result<()> {
                 );
             }
             let rests = |origin: Option<u32>, list: &[bool]| origin.is_some_and(|o| !list[o as usize]);
-            let write_result = |geometry: &gummiband_core::realize::Geometry, path: &std::path::Path| -> Result<usize> {
-                let mut items = Vec::new();
-                for t in &geometry.tracks {
-                    if rests(t.origin, &changes.chains) {
-                        continue;
+            let write_result =
+                |geometry: &gummiband_core::realize::Geometry, path: &std::path::Path| -> Result<usize> {
+                    let mut items = Vec::new();
+                    // the items of each track, for the tuning patterns
+                    let mut of_track: Vec<std::ops::Range<usize>> = Vec::with_capacity(geometry.tracks.len());
+                    for t in &geometry.tracks {
+                        let start = items.len();
+                        if rests(t.origin, &changes.chains) {
+                            of_track.push(start..start);
+                            continue;
+                        }
+                        for e in &t.elems {
+                            items.push(match *e {
+                                Elem::Line(a, b) => write::Item::Track {
+                                    width: t.piece_width(a, b),
+                                    a,
+                                    b,
+                                    layer: t.layer,
+                                    net: t.net,
+                                },
+                                Elem::Arc(a, mid, b) => write::Item::Arc {
+                                    width: t.piece_width(a, b),
+                                    a,
+                                    mid,
+                                    b,
+                                    layer: t.layer,
+                                    net: t.net,
+                                },
+                            });
+                        }
+                        of_track.push(start..items.len());
                     }
-                    for e in &t.elems {
-                        items.push(match *e {
-                            Elem::Line(a, b) => write::Item::Track {
-                                width: t.piece_width(a, b),
-                                a,
-                                b,
-                                layer: t.layer,
-                                net: t.net,
-                            },
-                            Elem::Arc(a, mid, b) => write::Item::Arc {
-                                width: t.piece_width(a, b),
-                                a,
-                                mid,
-                                b,
-                                layer: t.layer,
-                                net: t.net,
-                            },
+                    for p in tuned.iter().flat_map(|r| &r.patterns) {
+                        let members: Vec<usize> = p
+                            .tracks
+                            .iter()
+                            .filter_map(|&i| of_track.get(i))
+                            .flat_map(|r| r.clone())
+                            .collect();
+                        if members.is_empty() {
+                            continue;
+                        }
+                        items.push(write::Item::Pattern(Box::new(write::PatternItem {
+                            layer: p.layer,
+                            net: p.nets[0],
+                            base: p.base[0],
+                            base_coupled: p.base.get(1).copied(),
+                            rounded: p.rounded,
+                            width: p.width,
+                            gap: p.gap,
+                            amplitude: p.amplitude,
+                            spacing: p.spacing,
+                            target: p.aim,
+                            length: gummiband_core::matching::net_length(b, geometry, p.nets[0]).total(),
+                            members,
+                        })));
+                    }
+                    for v in &geometry.vias {
+                        if v.drill == 0.0 || rests(v.origin, &changes.nodes) {
+                            continue;
+                        }
+                        items.push(write::Item::Via {
+                            at: v.at,
+                            diameter: v.diameter,
+                            drill: v.drill,
+                            net: v.net,
                         });
                     }
-                }
-                for v in &geometry.vias {
-                    if v.drill == 0.0 || rests(v.origin, &changes.nodes) {
-                        continue;
+                    let opts = write::StripOptions {
+                        unlocked: !keep_all,
+                        locked: !keep_locked && !keep_all,
+                        zone_layers: vec![],
+                        nets: given.iter().cloned().collect(),
+                        items: changes.strip.clone(),
+                    };
+                    let ranges = write::strip_ranges(&kb, &opts);
+                    let text = write::patch(&kb, &ranges, &items);
+                    let text = if res.offsets.is_empty() {
+                        text
+                    } else {
+                        write::move_footprints(&text, &res.offsets, &kb.board.blocks)?
+                    };
+                    let text = if teardrops {
+                        write::enable_teardrops(&text)?
+                    } else {
+                        text
+                    };
+                    std::fs::write(path, text)?;
+                    if teardrops {
+                        track_end_teardrops(&board, path)?;
                     }
-                    items.push(write::Item::Via {
-                        at: v.at,
-                        diameter: v.diameter,
-                        drill: v.drill,
-                        net: v.net,
-                    });
-                }
-                let opts = write::StripOptions {
-                    unlocked: !keep_all,
-                    locked: !keep_locked && !keep_all,
-                    zone_layers: vec![],
-                    nets: given.iter().cloned().collect(),
-                    items: changes.strip.clone(),
+                    Ok(items.len())
                 };
-                let ranges = write::strip_ranges(&kb, &opts);
-                let text = write::patch(&kb, &ranges, &items);
-                let text = if res.offsets.is_empty() {
-                    text
-                } else {
-                    write::move_footprints(&text, &res.offsets, &kb.board.blocks)?
-                };
-                let text = if teardrops {
-                    write::enable_teardrops(&text)?
-                } else {
-                    text
-                };
-                std::fs::write(path, text)?;
-                if teardrops {
-                    track_end_teardrops(&board, path)?;
-                }
-                Ok(items.len())
-            };
             let items = write_result(&res.geometry, &output)?;
             // the results the open end leaves to choose from, next to the output
             for (i, (st, geometry)) in res.alternatives.iter().enumerate() {
@@ -929,10 +1075,12 @@ fn main() -> Result<()> {
                     "routed": st.routed,
                     "unrouted": st.unrouted,
                     "pairs": pair_reports,
+                    "matching": matching,
                     "vias": st.vias,
                     "length_mm": st.length,
                     "length_lower_bound_mm": gummiband_core::length_lower_bound(b),
                     "angles_45": octo,
+                    "length_tuning": tuned,
                     "items_written": items,
                     "violations": viol.iter().map(|v| serde_json::json!({
                         "what": v.what,
@@ -1148,13 +1296,29 @@ fn main() -> Result<()> {
             let st = &r.stats;
             println!(
                 "moved {} from ({:.3}, {:.3}) to ({:.3}, {:.3}), {} of {} steps; {} tracks and {} vias of {} nets followed, at most {:.3} mm; clearance spots {} -> {}, {secs:.1} s",
-                r.reference, r.from.0, r.from.1, r.to.0, r.to.1, st.steps, st.steps_planned,
-                st.tracks_moved, st.vias_moved, st.nets_moved, st.max_shift, st.spots_before, st.spots_after
+                r.reference,
+                r.from.0,
+                r.from.1,
+                r.to.0,
+                r.to.1,
+                st.steps,
+                st.steps_planned,
+                st.tracks_moved,
+                st.vias_moved,
+                st.nets_moved,
+                st.max_shift,
+                st.spots_before,
+                st.spots_after
             );
             if let Some(why) = &st.stopped {
                 println!("stopped short: {why}");
             }
-            println!("replaced {} items with {} items, wrote {}", r.items_removed, r.items_written, output.display());
+            println!(
+                "replaced {} items with {} items, wrote {}",
+                r.items_removed,
+                r.items_written,
+                output.display()
+            );
             if let Some(path) = svg_out {
                 let mut ob = read_board(
                     &output,
@@ -1178,6 +1342,76 @@ fn main() -> Result<()> {
                     "move_part": r,
                 });
                 std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
+            }
+        }
+        Cmd::Lengths { board, nets, json } => {
+            let kb = read_board(
+                &board,
+                &ReadOptions {
+                    keep: KeepCopper::All,
+                    plane_layers: cli.plane_layers.clone(),
+                    ..Default::default()
+                },
+            )?;
+            let b = &kb.board;
+            let geo = gummiband_core::matching::kept_geometry(b);
+            let rules = gummiband_core::matching::check(b, &geo);
+            let glob = |pat: &str, s: &str| glob_match(pat, s);
+            let listed: Vec<(String, gummiband_core::matching::NetLength)> = b
+                .nets
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| nets.iter().any(|p| glob(p, &n.name)))
+                .map(|(i, n)| (n.name.clone(), gummiband_core::matching::net_length(b, &geo, i as u32)))
+                .collect();
+            let pairs: Vec<serde_json::Value> = b
+                .diff_pairs()
+                .into_iter()
+                .map(|(p, n)| {
+                    let gap = gummiband_core::matching::gap_rule(b, p);
+                    let (c, t) = gummiband_core::matching::coupling(b, &geo, p, n, gap);
+                    let lp = gummiband_core::matching::net_length(b, &geo, p).total();
+                    let ln = gummiband_core::matching::net_length(b, &geo, n).total();
+                    serde_json::json!({
+                        "p": b.nets[p as usize].name, "n": b.nets[n as usize].name,
+                        "length_p": lp, "length_n": ln, "skew": lp - ln,
+                        "coupled": c, "uncoupled": (t - c).max(0.0),
+                    })
+                })
+                .collect();
+            if json {
+                let nets_json: Vec<serde_json::Value> = listed
+                    .iter()
+                    .map(|(n, l)| serde_json::json!({"net": n, "length": l.total(), "tracks": l.tracks, "vias": l.vias, "die": l.die}))
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"rules": rules, "pairs": pairs, "nets": nets_json})
+                    )?
+                );
+            } else {
+                for (n, l) in &listed {
+                    println!(
+                        "net {n}: {:.4} mm (tracks {:.4}, vias {:.4}, pad-to-die {:.4})",
+                        l.total(),
+                        l.tracks,
+                        l.vias,
+                        l.die
+                    );
+                }
+                for p in &pairs {
+                    println!(
+                        "pair {} / {}: {:.4} / {:.4} mm, skew {:.4}, uncoupled {:.4} mm",
+                        p["p"].as_str().unwrap_or(""),
+                        p["n"].as_str().unwrap_or(""),
+                        p["length_p"].as_f64().unwrap_or(0.0),
+                        p["length_n"].as_f64().unwrap_or(0.0),
+                        p["skew"].as_f64().unwrap_or(0.0),
+                        p["uncoupled"].as_f64().unwrap_or(0.0)
+                    );
+                }
+                print_matching(&rules);
             }
         }
         Cmd::Strip {

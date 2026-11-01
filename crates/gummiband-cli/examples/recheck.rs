@@ -18,7 +18,12 @@ fn main() {
     )
     .unwrap();
     let b = &kb.board;
-    let names: HashMap<&str, u32> = b.nets.iter().enumerate().map(|(i, n)| (n.name.as_str(), i as u32)).collect();
+    let names: HashMap<&str, u32> = b
+        .nets
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.name.as_str(), i as u32))
+        .collect();
     let numbered: HashMap<i64, u32> = kb
         .net_numbers
         .iter()
@@ -81,6 +86,7 @@ fn main() {
                     origin: None,
                     resting: false,
                     fitted: Vec::new(),
+                    pattern: None,
                     seg: u32::MAX,
                     tap: None,
                 });
@@ -90,7 +96,13 @@ fn main() {
     }
     let v = check::check(b, &geo);
     let spots = check::spots(&v);
-    println!("{} tracks, {} vias: {} violations at {} spots", geo.tracks.len(), geo.vias.len(), v.len(), spots.len());
+    println!(
+        "{} tracks, {} vias: {} violations at {} spots",
+        geo.tracks.len(),
+        geo.vias.len(),
+        v.len(),
+        spots.len()
+    );
     let mut kinds: HashMap<&str, usize> = HashMap::new();
     for x in &v {
         *kinds.entry(x.what.split(' ').next().unwrap_or("")).or_default() += 1;
@@ -98,6 +110,13 @@ fn main() {
     println!("{kinds:?}");
     for s in spots.iter().take(12) {
         let name = |n: Option<u32>| n.map_or("-", |n| b.nets[n as usize].name.as_str());
-        println!("  {:.2} {:.2} {} ~ {}: {:.3} missing", s.at.x, s.at.y, name(Some(s.nets.0)), name(s.nets.1), s.missing);
+        println!(
+            "  {:.2} {:.2} {} ~ {}: {:.3} missing",
+            s.at.x,
+            s.at.y,
+            name(Some(s.nets.0)),
+            name(s.nets.1),
+            s.missing
+        );
     }
 }

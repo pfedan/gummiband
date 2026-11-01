@@ -35,6 +35,8 @@ pub struct Track {
     /// Widths fitted to the surroundings after the geometry step: (zone, width). A piece takes
     /// the smallest of those it touches, instead of the neck width.
     pub fitted: Vec<(crate::geom::Rect, f64)>,
+    /// Part of a length tuning pattern (a KiCad `tuning_pattern` group): its index.
+    pub pattern: Option<u32>,
     /// The router's segment of this track (`u32::MAX`: none).
     pub seg: u32,
     /// The segment its end lies on, when that is a track of its net and not a pad or a via.
@@ -220,7 +222,10 @@ impl Router<'_> {
             let (a, b) = (lo.0 + lo.2, hi.0 - hi.2);
             let share = (lo.1 + hi.1 - 1) as f64;
             let (x, y) = if a < b {
-                (a + (b - a) * (lo.1 - 1) as f64 / share, a + (b - a) * lo.1 as f64 / share)
+                (
+                    a + (b - a) * (lo.1 - 1) as f64 / share,
+                    a + (b - a) * lo.1 as f64 / share,
+                )
             } else {
                 let mid = (lo.0 + hi.0) * 0.5;
                 (mid, mid)
@@ -228,11 +233,19 @@ impl Router<'_> {
             let (x, y) = (pu + dir * x, pu + dir * y);
             // leaving triangle `from` (counter-clockwise) through edge a->b: b is on the left
             let t = m.tris[c.from as usize];
-            portals.push(if t[m.local_edge(c.from, c.e)] == u { (y, x) } else { (x, y) });
+            portals.push(if t[m.local_edge(c.from, c.e)] == u {
+                (y, x)
+            } else {
+                (x, y)
+            });
         }
         portals.push((end, end));
         let mut pts = vec![start];
-        pts.extend(funnel_bends(&portals).into_iter().map(|(i, left)| if left { portals[i].0 } else { portals[i].1 }));
+        pts.extend(
+            funnel_bends(&portals)
+                .into_iter()
+                .map(|(i, left)| if left { portals[i].0 } else { portals[i].1 }),
+        );
         pts.push(end);
         pts.dedup_by(|a, b| a.dist(*b) < 1e-9);
         if pts.len() < 2 {
@@ -477,6 +490,7 @@ impl Router<'_> {
                     origin: None,
                     resting: false,
                     fitted: Vec::new(),
+                    pattern: None,
                 };
                 let kept: Vec<bool> = if self.has_kept {
                     pts.iter().map(|&p| on_kept(p)).collect()

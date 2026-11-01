@@ -219,6 +219,51 @@ pub struct Board {
     /// Stackup from top to bottom, if the board has one.
     #[serde(default)]
     pub stackup: Vec<StackItem>,
+    /// Board thickness from the file (`general`), for via lengths without a stackup.
+    #[serde(default)]
+    pub thickness: f64,
+    /// Pad-to-die lengths of pins that have one, by pin index.
+    #[serde(default)]
+    pub die_length: std::collections::HashMap<usize, f64>,
+    /// Length, skew and uncoupled length rules of the `.kicad_dru`, with the nets they hold for.
+    #[serde(default)]
+    pub match_rules: Vec<MatchRule>,
+}
+
+/// A min, opt and max value of a custom rule constraint.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MinOptMax {
+    pub min: Option<f64>,
+    pub opt: Option<f64>,
+    pub max: Option<f64>,
+}
+
+/// What a [`MatchRule`] constrains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MatchKind {
+    /// Length of every net (`length`).
+    Length,
+    /// Length difference to the longest net of the rule (`skew`), or within each differential
+    /// pair of the rule (`skew ... (within_diff_pairs)`).
+    Skew,
+    /// Length of a differential pair that does not run coupled (`diff_pair_uncoupled`).
+    Uncoupled,
+    /// Gap within a differential pair (`diff_pair_gap`): only a gap inside its min and max counts
+    /// as coupled.
+    Gap,
+}
+
+/// One constraint of a custom rule on lengths, as KiCad groups it: every net whose items the rule
+/// governs for this kind of constraint (the last rule in the file whose condition holds wins).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MatchRule {
+    pub name: String,
+    pub kind: MatchKind,
+    pub value: MinOptMax,
+    /// Skew within each differential pair instead of across the whole group.
+    #[serde(default)]
+    pub within_pairs: bool,
+    pub nets: Vec<NetId>,
 }
 
 /// A layer of the stackup: copper (with its layer) or dielectric.
@@ -240,6 +285,9 @@ pub struct CopperItem {
     /// Its obstacles.
     pub first: u32,
     pub last: u32,
+    /// Member of a length tuning pattern (KiCad leaves those out of the diff pair coupling).
+    #[serde(default)]
+    pub pattern: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -458,6 +506,56 @@ impl Board {
         }
         // the writer's grid is fine enough, a board house's is not finer than a micrometre
         Some((lo * 1000.0).round() / 1000.0)
+    }
+
+    /// Distance between two copper layers through the board, as KiCad counts the length of a via
+    /// (`BOARD_STACKUP::GetLayerDistance`): the copper of both layers (half of an inner one) and the
+    /// dielectric between them. Without a stackup the board thickness is shared out evenly.
+    pub fn layer_distance(&self, a: LayerId, b: LayerId) -> f64 {
+        if a == b {
+            return 0.0;
+        }
+        let (a, b) = (a.min(b), a.max(b));
+        let last = self.layers.len().saturating_sub(1) as LayerId;
+        let outer = |l: LayerId| l == 0 || l == last;
+        let ia = self.stackup.iter().position(|s| s.copper == Some(a));
+        let ib = self.stackup.iter().position(|s| s.copper == Some(b));
+        if let (Some(ia), Some(ib)) = (ia, ib) {
+            let mut total = 0.0;
+            for (i, s) in self.stackup.iter().enumerate().take(ib + 1).skip(ia) {
+                let half = (i == ia && !outer(a)) || (i == ib && !outer(b));
+                total += if half { s.thickness / 2.0 } else { s.thickness };
+            }
+            return total;
+        }
+        let t = if self.thickness > 0.0 { self.thickness } else { 1.6 };
+        t * (b - a) as f64 / last.max(1) as f64
+    }
+
+    /// The pairs that `--pairs` routes coupled: pairs by name that a `diff_pair_gap` rule or a net
+    /// class of their own marks as a differential pair. A pair of the default class without such a
+    /// rule (`MOTOR_P` and `MOTOR_N`) is recognised but not coupled, unless `all` is set.
+    pub fn coupled_pairs(&self, all: bool) -> Vec<(NetId, NetId)> {
+        self.diff_pairs()
+            .into_iter()
+            .filter(|&(p, n)| {
+                let (cp, cn) = (self.class_of(p), self.class_of(n));
+                all || cp.diff_outer.is_some()
+                    || cp.diff_inner.is_some()
+                    || (cp.name != "Default" && cp.name == cn.name)
+            })
+            .collect()
+    }
+
+    /// The largest length difference allowed within the pair p, n: a `skew` rule with
+    /// `within_diff_pairs` over the pair, or a plain `skew` rule whose nets are just these two.
+    pub fn pair_skew_limit(&self, p: NetId, n: NetId) -> Option<f64> {
+        self.match_rules
+            .iter()
+            .filter(|r| r.kind == MatchKind::Skew && r.nets.contains(&p) && r.nets.contains(&n))
+            .filter(|r| r.within_pairs || r.nets.len() == 2)
+            .filter_map(|r| r.value.max)
+            .fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.min(v))))
     }
 
     /// The largest differential impedance of a pair over the routing layers, in ohm.
