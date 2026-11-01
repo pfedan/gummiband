@@ -2032,9 +2032,7 @@ pub fn route_pairs(
         let failed: Vec<(usize, bool)> = cuts
             .iter()
             .enumerate()
-            .filter(|&(i, c)| {
-                fin.stats.unrouted.iter().any(|u| u.contains(&format!("~cut{i} from "))) || detour(i, c)
-            })
+            .filter(|&(i, c)| fin.stats.unrouted.iter().any(|u| u.contains(&format!("~cut{i} from "))) || detour(i, c))
             .map(|(_, c)| (c.path, c.at_start))
             .collect();
         if !failed.is_empty() {
