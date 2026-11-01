@@ -25,6 +25,8 @@ const BAND_MARGIN: f64 = 0.03;
 struct PairEnd {
     p: usize,
     n: usize,
+    /// Breakout: the wide track starts here, outside the pads; single tracks connect the pads.
+    out: Option<Point>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +90,9 @@ pub struct PairConfig {
     /// `--angles 45`: the wide tracks go onto the 45 degree grid before they are split, so the
     /// two tracks of a pair stay parallel (see [`crate::octo`]).
     pub angles45: bool,
+    /// Breakout zones: the wide track starts outside the pads of a pair end, two single
+    /// tracks connect the pads (see [`breakout`]).
+    pub breakouts: bool,
 }
 
 impl Default for PairConfig {
@@ -98,6 +103,7 @@ impl Default for PairConfig {
             all: false,
             room: None,
             angles45: false,
+            breakouts: true,
         }
     }
 }
@@ -136,6 +142,57 @@ fn hull(mut pts: Vec<Point>) -> Vec<Point> {
 
 /// The copper hull of two pads, if it keeps its distance from everything foreign.
 fn bridge(b: &Board, p: usize, n: usize, carrier_clr: f64) -> Option<Obstacle> {
+    zone(b, p, n, &[], carrier_clr)
+}
+
+/// A breakout zone for the pads `p` and `n`: the point outside the pads where the wide track
+/// of width `wide` starts, and the hull of the pads and that start as the end of the wide net,
+/// so that nothing else runs where the two single tracks will go. The point lies on the side of
+/// the pads that faces the other end of the pair (else on the other side), as close as the hull
+/// keeps its distance from everything foreign.
+fn breakout(b: &Board, p: usize, n: usize, toward: Point, wide: f64, carrier_clr: f64) -> Option<(Point, Obstacle)> {
+    let (pp, pn) = (&b.pins[p], &b.pins[n]);
+    let mid = (pp.pos + pn.pos) * 0.5;
+    let axis = (pp.pos - pn.pos).norm();
+    let x = left_of(axis);
+    // towards the other end of the pair first, else to the other side
+    let first = if (toward - mid).dot(x) >= 0.0 { x } else { x * -1.0 };
+    [first, first * -1.0]
+        .into_iter()
+        .find_map(|x| breakout_towards(b, p, n, x, wide, carrier_clr))
+}
+
+fn breakout_towards(b: &Board, p: usize, n: usize, x: Point, wide: f64, carrier_clr: f64) -> Option<(Point, Obstacle)> {
+    let (pp, pn) = (&b.pins[p], &b.pins[n]);
+    let mid = (pp.pos + pn.pos) * 0.5;
+    let reach = [pp, pn]
+        .iter()
+        .flat_map(|pin| pin.obstacles.iter())
+        .flat_map(|&o| b.obstacles[o].shape.to_polygon(b.rules.max_error).pts)
+        .map(|q| (q - mid).dot(x))
+        .fold(0.0, f64::max);
+    let r = wide / 2.0;
+    let mut d = reach + r + carrier_clr + 0.02;
+    while d <= reach + 3.0 {
+        let c = mid + x * d;
+        let disc: Vec<Point> = (0..16)
+            .map(|i| {
+                let a = i as f64 * std::f64::consts::PI / 8.0;
+                c + pt(a.cos(), a.sin()) * r
+            })
+            .collect();
+        if let Some(mut o) = zone(b, p, n, &disc, carrier_clr) {
+            o.clearance = o.clearance.max(carrier_clr);
+            return Some((c, o));
+        }
+        d += 0.1;
+    }
+    None
+}
+
+/// The hull of two pads and the points `extra`, if it keeps its distance from everything
+/// foreign.
+fn zone(b: &Board, p: usize, n: usize, extra: &[Point], carrier_clr: f64) -> Option<Obstacle> {
     let (pp, pn) = (&b.pins[p], &b.pins[n]);
     let layers = LayerSet(pp.layers.0 & pn.layers.0 & b.routing_layers().0);
     if layers.is_empty() {
@@ -149,6 +206,7 @@ fn bridge(b: &Board, p: usize, n: usize, carrier_clr: f64) -> Option<Obstacle> {
     };
     let mut pts = polys(pp);
     pts.extend(polys(pn));
+    pts.extend_from_slice(extra);
     let poly = Polygon::new(hull(pts));
     let bb = poly.bbox();
     let foreign = b.obstacles.iter().any(|o| {
@@ -200,7 +258,7 @@ fn match_pads(b: &Board, a: NetId, c: NetId) -> Vec<PairEnd> {
     let mut ends: Vec<PairEnd> = Vec::new();
     for (_, _, p, n) in cand {
         if ends.iter().all(|e| e.p != p && e.n != n) {
-            ends.push(PairEnd { p, n });
+            ends.push(PairEnd { p, n, out: None });
         }
     }
     ends
@@ -272,7 +330,7 @@ pub fn apply_zdiff(b: &mut Board, zdiff: f64) {
     }
 }
 
-fn merge(board: &Board, all: bool) -> Merged {
+fn merge(board: &Board, all: bool, breakouts: bool) -> Merged {
     let mut b = board.clone();
     let mut pairs = Vec::new();
     let mut skipped = Vec::new();
@@ -327,6 +385,34 @@ fn merge(board: &Board, all: bool) -> Merged {
             let first = ends.swap_remove(far.1);
             ends = vec![first, second];
         }
+        if breakouts {
+            let mids: Vec<Point> = ends
+                .iter()
+                .map(|(e, _)| (b.pins[e.p].pos + b.pins[e.n].pos) * 0.5)
+                .collect();
+            let ours: Vec<usize> = ends.iter().flat_map(|(e, _)| [e.p, e.n]).collect();
+            for (i, (e, o)) in ends.iter_mut().enumerate() {
+                // a part with more pins of the pair (a USB-C socket) keeps the end at its pads:
+                // the single tracks of those pins join the pair there
+                let (fp, fn_) = (&b.pins[e.p].footprint, &b.pins[e.n].footprint);
+                let crowded = b.nets[p as usize]
+                    .pins
+                    .iter()
+                    .chain(&b.nets[n as usize].pins)
+                    .any(|&x| !ours.contains(&x) && (&b.pins[x].footprint == fp || &b.pins[x].footprint == fn_));
+                if crowded {
+                    continue;
+                }
+                // towards the other end of the pair
+                if let Some((c, z)) = breakout(&b, e.p, e.n, mids[1 - i], class.track_width, class.clearance) {
+                    e.out = Some(c);
+                    *o = z;
+                    if std::env::var("GB_PAIR_LOG").is_ok() {
+                        eprintln!("breakout {} at {:.2},{:.2}", board.nets[p as usize].name, c.x, c.y);
+                    }
+                }
+            }
+        }
         // the class first: from here on the pair is one net
         b.classes.push(class);
         let cid = (b.classes.len() - 1) as ClassId;
@@ -354,8 +440,21 @@ fn merge(board: &Board, all: bool) -> Merged {
         b.nets[p as usize].priority = b.nets[p as usize].priority.min(b.nets[n as usize].priority);
         b.nets[n as usize].pins = pins_n.iter().copied().filter(|x| !matched_n.contains(x)).collect();
         for (e, o) in &ends {
-            let mid = (b.pins[e.p].pos + b.pins[e.n].pos) * 0.5;
+            let mid = e.out.unwrap_or((b.pins[e.p].pos + b.pins[e.n].pos) * 0.5);
+            if e.out.is_some() {
+                // at a breakout the wide track ends outside the pads and must not run over
+                // them: they block it like copper of no net
+                let mut pads = std::mem::take(&mut b.pins[e.p].obstacles);
+                pads.extend(b.pins[e.n].obstacles.iter().copied());
+                for i in pads {
+                    b.obstacles[i].net = None;
+                    b.obstacles[i].pin = None;
+                }
+            }
             for i in b.pins[e.n].obstacles.clone() {
+                if e.out.is_some() {
+                    break;
+                }
                 b.obstacles[i].net = Some(p);
                 b.obstacles[i].pin = Some(e.p);
                 b.pins[e.p].obstacles.push(i);
@@ -799,7 +898,7 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
         let mids: Vec<Point> = pair
             .ends
             .iter()
-            .map(|e| (real.pins[e.p].pos + real.pins[e.n].pos) * 0.5)
+            .map(|e| e.out.unwrap_or((real.pins[e.p].pos + real.pins[e.n].pos) * 0.5))
             .collect();
         let paths = paths_of(&tracks, &vias, &mids);
         let (cp, cn) = (real.class_of(pair.p), real.class_of(pair.n));
@@ -819,9 +918,21 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
             } else {
                 (u0, u1)
             };
-            let exit_a = exit_of(real, ea, side_a);
-            let exit_b = exit_of(real, eb, side_b * -1.0);
-            let (left_p, left_p_end) = (exit_a.p_left, !exit_b.p_left);
+            let mut exit_a = exit_of(real, ea, side_a);
+            let mut exit_b = exit_of(real, eb, side_b * -1.0);
+            let (mut left_p, mut left_p_end) = (exit_a.p_left, !exit_b.p_left);
+            // at a breakout the band may leave the start point in any direction: the tracks
+            // take the sides that do not cross
+            if let Some(c) = ea.out {
+                let (w, g, _) = real.pair_shape(pair.p, pair.n, legs[0].layer);
+                let s = (w + g) / 2.0;
+                (exit_a, left_p) = breakout_exit(real, ea, c, c + left_of(u0) * s, c - left_of(u0) * s, u0);
+            }
+            if let Some(c) = eb.out {
+                let (w, g, _) = real.pair_shape(pair.p, pair.n, last.layer);
+                let s = (w + g) / 2.0;
+                (exit_b, left_p_end) = breakout_exit(real, eb, c, c + left_of(u1) * s, c - left_of(u1) * s, u1 * -1.0);
+            }
             let twisted = left_p != left_p_end;
             let via_joints: Vec<usize> = (0..joints.len()).filter(|&j| joints[j].x.is_finite()).collect();
             if twisted && via_joints.is_empty() {
@@ -867,12 +978,17 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                 );
                 let mut start_trim = reach_start.unwrap_or(0.0);
                 if reach_start.is_none() {
-                    let base = exit_trim(&exit_a, u0, s, w, clr);
+                    // a breakout starts the band past the tips of the pads already
+                    let base = if ea.out.is_some() {
+                        w + clr
+                    } else {
+                        exit_trim(&exit_a, u0, s, w, clr)
+                    };
                     let sides = [
                         (ln_start, net_l, full_l.as_slice()),
                         (rn_start, net_r, full_r.as_slice()),
                     ];
-                    let (more, t) = best_exit(&around, &exit_a, sides, base, w, clr, leg.layer);
+                    let (more, t) = best_exit(&around, &exit_a, sides, base, ea.out.is_some(), w, clr, leg.layer);
                     let out = exit_a.x * (exit_a.ext + more);
                     lead_l = vec![ln_start + out];
                     lead_r = vec![rn_start + out];
@@ -881,11 +997,15 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                 let mut end_trim = disc + 0.02;
                 let mut exits = None;
                 if k + 1 == legs.len() {
-                    let base = exit_trim(&exit_b, u1, s, w, clr);
+                    let base = if eb.out.is_some() {
+                        w + clr
+                    } else {
+                        exit_trim(&exit_b, u1, s, w, clr)
+                    };
                     let (tl, tr) = (pad_target(real, eb, left_is_p), pad_target(real, eb, !left_is_p));
                     let (bl, br) = (reversed(&full_l), reversed(&full_r));
                     let sides = [(tl, net_l, bl.as_slice()), (tr, net_r, br.as_slice())];
-                    let (more, t) = best_exit(&around, &exit_b, sides, base, w, clr, leg.layer);
+                    let (more, t) = best_exit(&around, &exit_b, sides, base, eb.out.is_some(), w, clr, leg.layer);
                     let out = exit_b.x * (exit_b.ext + more);
                     end_trim = t;
                     exits = Some((tl + out, tr + out));
@@ -1466,6 +1586,11 @@ fn exit_of(b: &Board, e: PairEnd, u: Point) -> Exit {
     if x.dot(u) < 0.0 {
         x = x * -1.0;
     }
+    exit_along(b, e, x)
+}
+
+fn exit_along(b: &Board, e: PairEnd, x: Point) -> Exit {
+    let (pp, pn) = (b.pins[e.p].pos, b.pins[e.n].pos);
     let reach = |pin: usize| {
         b.pins[pin]
             .obstacles
@@ -1479,6 +1604,33 @@ fn exit_of(b: &Board, e: PairEnd, u: Point) -> Exit {
         ext: reach(e.p).max(reach(e.n)) + 0.06,
         p_left: cross(x, pp - pn) > 0.0,
     }
+}
+
+/// At a breakout the wide track starts at `c`, outside the pads, and may leave in any
+/// direction `v`. The tracks go straight out of the pads and then over to their curves, which
+/// begin some way along the band; which of them takes the left track of the band (`left` and
+/// `right` are where the two tracks start) is what keeps the two links from crossing, else the
+/// shorter. Returns the exit and whether P takes `left`.
+fn breakout_exit(b: &Board, e: PairEnd, c: Point, left: Point, right: Point, v: Point) -> (Exit, bool) {
+    let (left, right) = (left + v, right + v);
+    let (pp, pn) = (b.pins[e.p].pos, b.pins[e.n].pos);
+    let ex = exit_along(b, e, (c - (pp + pn) * 0.5).norm());
+    let link = |pad: Point, to: Point| (pad + ex.x * ex.ext, to);
+    let crossed = |p_left: bool| {
+        let (tp, tn) = if p_left { (left, right) } else { (right, left) };
+        let (a, b) = (link(pp, tp), link(pn, tn));
+        crate::geom::seg_seg_dist(a.0, a.1, b.0, b.1) < 1e-6
+    };
+    let length = |p_left: bool| {
+        let (tp, tn) = if p_left { (left, right) } else { (right, left) };
+        (pp + ex.x * ex.ext).dist(tp) + (pn + ex.x * ex.ext).dist(tn)
+    };
+    let p_left = match (crossed(true), crossed(false)) {
+        (false, true) => true,
+        (true, false) => false,
+        _ => length(true) <= length(false),
+    };
+    (ex, p_left)
 }
 
 /// Arc length to walk along a band of direction u until both tracks are past the tips of the
@@ -1562,11 +1714,13 @@ impl<'a> Around<'a> {
 /// straight out of the pads and how much of the curves to skip, the same for both tracks, so
 /// that they keep their clearance on the links and on the next 3 mm of the curves. The first
 /// choice that does, else the one with the most room.
+#[allow(clippy::too_many_arguments)]
 fn best_exit(
     around: &Around,
     ex: &Exit,
     sides: [(Point, NetId, &[Elem]); 2],
     base: f64,
+    breakout: bool,
     w: f64,
     clr: f64,
     layer: LayerId,
@@ -1574,7 +1728,13 @@ fn best_exit(
     let near = around.near(sides[0].0, 8.0);
     let mut best = (0.0, base);
     let mut room = f64::NEG_INFINITY;
-    for f in [1.0, 1.3, 1.7, 2.2, 3.0] {
+    // a breakout starts with a short trim and may need longer ones
+    let factors: &[f64] = if breakout {
+        &[1.0, 1.3, 1.7, 2.2, 3.0, 4.0, 5.5, 7.0]
+    } else {
+        &[1.0, 1.3, 1.7, 2.2, 3.0]
+    };
+    for &f in factors {
         for more in [0.0, 0.1, 0.2] {
             let t = base * f;
             let mut r = f64::INFINITY;
@@ -1656,7 +1816,7 @@ pub fn route_pairs(
     search: &SearchConfig,
     cfg: &PairConfig,
 ) -> (Substrate, RouteResult, Vec<PairReport>) {
-    let mut merged = merge(board, cfg.all);
+    let mut merged = merge(board, cfg.all, cfg.breakouts);
     merged.miter = cfg.angles45;
     let (sub, mut res) = route_board(&merged.board, sub_cfg, base, search);
     let real = if res.offsets.is_empty() {
@@ -2002,36 +2162,65 @@ mod tests {
     #[test]
     fn a_pair_becomes_two_parallel_tracks_of_equal_length() {
         let b = pair_board();
-        assert_eq!(merge(&b, true).pairs.len(), 1);
-        let search = SearchConfig {
-            population: 2,
-            generations: 0,
-            geometry_generations: 0,
-            frames: false,
-            progress: None,
-            seed: None,
-            open_end: None,
-            air: 0.0,
-            prefer_width: 0.0,
-            open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
-        };
-        let (_, res, rep) = route_pairs(
-            &b,
-            &SubstrateConfig::default(),
-            &RouterConfig::default(),
-            &search,
-            &PairConfig {
-                all: true,
-                ..PairConfig::default()
-            },
-        );
-        assert!(res.stats.unrouted.is_empty(), "{:?}", res.stats.unrouted);
-        assert_eq!(rep.len(), 1);
-        assert!(rep[0].wide && rep[0].note.is_empty(), "{:?}", rep[0]);
-        assert!((rep[0].length_p - rep[0].length_n).abs() <= 0.1, "{:?}", rep[0]);
-        assert_eq!(res.geometry.tracks.iter().filter(|t| t.net == 0).count(), 1);
-        assert_eq!(res.geometry.tracks.iter().filter(|t| t.net == 1).count(), 1);
-        assert!(crate::check::check(&b, &res.geometry).is_empty());
+        assert_eq!(merge(&b, true, false).pairs.len(), 1);
+        for breakouts in [true, false] {
+            let search = SearchConfig {
+                population: 2,
+                generations: 0,
+                geometry_generations: 0,
+                frames: false,
+                progress: None,
+                seed: None,
+                open_end: None,
+                air: 0.0,
+                prefer_width: 0.0,
+                open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
+            };
+            let (_, res, rep) = route_pairs(
+                &b,
+                &SubstrateConfig::default(),
+                &RouterConfig::default(),
+                &search,
+                &PairConfig {
+                    all: true,
+                    breakouts,
+                    ..PairConfig::default()
+                },
+            );
+            assert!(res.stats.unrouted.is_empty(), "{:?}", res.stats.unrouted);
+            assert_eq!(rep.len(), 1);
+            assert!(rep[0].wide && rep[0].note.is_empty(), "{:?}", rep[0]);
+            assert!((rep[0].length_p - rep[0].length_n).abs() <= 0.1, "{:?}", rep[0]);
+            assert_eq!(res.geometry.tracks.iter().filter(|t| t.net == 0).count(), 1);
+            assert_eq!(res.geometry.tracks.iter().filter(|t| t.net == 1).count(), 1);
+            assert!(crate::check::check(&b, &res.geometry).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_breakout_starts_the_wide_track_past_the_pads() {
+        let b = pair_board();
+        let m = merge(&b, true, true);
+        assert_eq!(m.pairs[0].ends.len(), 2);
+        for e in &m.pairs[0].ends {
+            let c = e.out.expect("a breakout");
+            let mid = (b.pins[e.p].pos + b.pins[e.n].pos) * 0.5;
+            // past the tips of the pads, 0.6 mm from their centres, towards the other end
+            assert!(
+                (c.x - mid.x).abs() > 0.6 && (c.x - mid.x) * (15.0 - mid.x) > 0.0,
+                "{c:?}"
+            );
+            assert!((c.y - mid.y).abs() < 1e-9, "{c:?}");
+            // the wide net does not own the pads there
+            assert!(
+                b.pins[e.p]
+                    .obstacles
+                    .iter()
+                    .all(|&i| m.board.obstacles[i].net.is_none())
+            );
+        }
+        let off = merge(&b, true, false);
+        assert!(off.pairs[0].ends.iter().all(|e| e.out.is_none()));
     }
 
     #[test]

@@ -73,9 +73,15 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   so both tracks stay parallel; a pair end whose repair finds no way gives up the pair (single
   tracks) before it keeps crossed tracks. `diff_pairs` 8 instead of 13 KiCad errors (pair gap 1
   instead of 11, 99 % instead of 95 % coupled), Lichtschnitzel 0 instead of 12 errors and 1
-  instead of 3 open, but its USB pair then runs as single tracks. Open: room in the
-  router itself, phase matching near the source, carrying the pair to its end and breakout
-  zones, via pairs, the open end with pairs.
+  instead of 3 open, but its USB pair then runs as single tracks. Breakout zones
+  (2026-11-01): with `--pairs` the wide track ends just outside the pads, the pads block it and
+  the room for the two short tracks to them stays free; which track takes which side is chosen
+  so that they do not cross. `diff_pairs` without clearance errors and shorts on all seeds
+  (before 3 of 6 runs with them), seed 0 2 instead of 6 KiCad errors (45 degrees 3 instead of
+  8), `matching` 7 instead of 13, Lichtschnitzel unchanged (its USB-C end stays at the pads).
+  Open: room in the router itself, phase matching near the source, carrying the pair to its
+  end, via pairs (the remaining pair errors sit at vias near the ends), the open end with
+  pairs.
 - Rule engine: more custom rule conditions (positions, footprints, layers).
 - More than two signal layers (pulled forward with the synthetic 4 layer benchmarks).
 - Alternative placements as portfolio variants (smaller, square, round outlines with the
@@ -357,6 +363,24 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   via of a chain split the triangle that another via of the same chain leaves through; such a
   chain is refused now, and a run that panics all the same counts as lost instead of ending the
   search.
+- The search negotiates when the plain one leaves a few connections open (2026-11-01,
+  `route_fixed`, `GB_AUTO_NEGOTIATE=0` switches it off): at most 15 % open, a second search with 20
+  rounds of negotiation, and the better result counts, as with `--negotiate 20`. Seeds 1 to 3 in
+  the cloud, KiCad's DRC on the Mac with zones refilled, unconnected items and errors with the
+  second search against without: `fine_pitch_mixed` 0 and 0 in every seed instead of 4 to 7 and 23
+  to 32, `four_signal_layers` 0 and 0 instead of 3 and 0, `bga_dense` 8 instead of 10 or 11 open
+  (no errors in either) with 45 to 49 vias instead of 62 to 67. Corne, seed 1: 482/482 with 313
+  instead of 475/482 with 397 vias; KiCad 0 unconnected and 501 errors (478 clearance) instead of 7
+  and 576 (clearance at KiCad's limit of 499, 15 shorts, 4 crossings, 32 hole clearances). The
+  Corne figure comes from the negotiated search alone (`--negotiate 20`, `GB_NEG_ONLY=1`), which is
+  the one the default keeps there. A search that completes the board does not negotiate: the ten
+  other synthetic boards, Arty and Lichtschnitzel seeds 1 to 4 give the same files byte for byte.
+  The first version negotiated as soon as the order generations left a connection open, before the
+  geometry generations, and took the negotiated generations from there; Lichtschnitzel seed 3 then
+  came out complete with 328 instead of 265 vias, because the geometry generations of the plain
+  search find the last connection themselves. Open: ULX3S and other boards with more than 15 %
+  open, an open ended run (the open end works on what is open), and Corne's clearance errors at its
+  fine pitch parts.
 - Adaptive track width: as wide as the surroundings allow, instead of one neck width per zone.
 - A new via in the plane of its net stays in it (open end, 2026-11-01, default since 60ab967,
   `GB_PLANE_HOLD=0` switches it off). `place_new_vias` moved such a via along its track past a

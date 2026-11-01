@@ -346,6 +346,11 @@ pub struct AddZoneIn {
     pub points: Vec<[f64; 2]>,
     /// Zone priority (default 0).
     pub priority: Option<u32>,
+    /// How the pads of the net join the zone: "thermal" (default), "solid" or "thermal_tht"
+    /// (reliefs on through hole pads, SMD pads solid).
+    pub pad_connection: Option<String>,
+    /// Width of the thermal spokes in mm (default 0.3); wider for pins that carry amperes.
+    pub thermal_spoke_width: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -413,6 +418,9 @@ pub struct RouteIn {
     /// With pairs: couple every pair recognised by name (default false: only pairs with a
     /// `diff_pair_gap` rule or a net class of their own).
     pub pair_all: Option<bool>,
+    /// With pairs: the wide track ends just outside the pads, two single tracks connect them
+    /// (default true; false: the wide track ends at the pads).
+    pub pair_breakouts: Option<bool>,
     /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
     pub layer_dirs: Option<f64>,
     /// Hints from the local patterns of board_patterns, comma separated: shares, decaps, rows,
@@ -443,8 +451,9 @@ pub struct RouteIn {
     pub via_pitch: Option<f64>,
     /// Via cost in mm of track (default 3, as the CLI).
     pub via_cost: Option<f64>,
-    /// Experimental: rounds of negotiated routing in a second search (default 0: off; 20 works
-    /// well and takes about twice the time).
+    /// Rounds of negotiated routing from the start, in a second search (20 works well and takes
+    /// about twice the time). With the default 0 the search negotiates on its own when the plain
+    /// one leaves a few connections open.
     pub negotiate: Option<usize>,
     /// Factor on the via cost in the pass that routes connections with vias again and keeps
     /// what has fewer vias (default 4; 0: off), as `gummiband route --via-pass`.
@@ -1442,7 +1451,24 @@ impl Gummiband {
                 .layer_id(&p.layer)
                 .with_context(|| format!("no layer {:?}", p.layer))?;
             let pts: Vec<_> = p.points.iter().map(|q| gummiband_core::geom::pt(q[0], q[1])).collect();
-            Ok(write::add_zone(kb, text, net, layer, &pts, p.priority.unwrap_or(0), 1))
+            let connect = match p.pad_connection.as_deref() {
+                None => write::PadConnect::Thermal,
+                Some(s) => write::PadConnect::parse(s)
+                    .with_context(|| format!("pad_connection {s:?}: use thermal, solid or thermal_tht"))?,
+            };
+            let spoke = p.thermal_spoke_width.unwrap_or(write::DEFAULT_SPOKE);
+            if spoke <= 0.0 {
+                bail!("thermal_spoke_width must be positive");
+            }
+            let spec = write::ZoneSpec {
+                net,
+                layer,
+                priority: p.priority.unwrap_or(0),
+                name: "",
+                connect,
+                spoke,
+            };
+            Ok(write::add_zone_named(kb, text, &spec, &pts, 1))
         })?;
         let out = AddLockedOut {
             board: id,
@@ -1646,6 +1672,7 @@ fn route_blocking(
                 all: p.pair_all.unwrap_or(false),
                 room: tune.then(|| tune_cfg.clone()),
                 angles45: angles_45,
+                breakouts: p.pair_breakouts.unwrap_or(true),
             };
             gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, &search_cfg, &cfg)
         } else {
