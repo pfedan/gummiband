@@ -1885,6 +1885,8 @@ impl<'a> Router<'a> {
             .and_then(|p| self.guides.get(p))
             .map(|g| g.as_slice());
         let net = conn.net;
+        // a via in a pad is a last resort, except for the nets of `GB_VIP_NETS` (experiment)
+        let via_in_pad = self.cfg.via_in_pad || vip_net(&self.board.nets[net as usize].name);
         let cls = self.board.class_of(net);
         let item = Item {
             net,
@@ -2277,13 +2279,35 @@ impl<'a> Router<'a> {
                     }
                     // via in pad: a plane fan-out may end on a via inside the source pad
                     if !free
-                        && self.cfg.via_in_pad
+                        && via_in_pad
                         && let Some(pin) = self.tri_pin(lu, t)
                         && self.pin_group[pin] == self.pin_group[conn.from]
                         && let Some(list) = self.sub.shared.pad_sites.get(&(pin as u32))
                     {
                         for &site in list {
                             let q = self.site_point(site);
+                            if pad_reuse() && conn.goal != Goal::Plane && !self.sub.site_usable(site) {
+                                // a via in this pad was placed and ripped up: the site stays split,
+                                // but its vertices on the other layers can take a via again
+                                let ok = *vertex_ok.entry(site).or_insert_with(|| self.via_ok_vertex(site, net));
+                                if let Some(existing) = ok {
+                                    let vc = if existing { 0.1 } else { self.cfg.via_cost * 2.0 };
+                                    for l2 in 0..nl {
+                                        if l2 != lu && self.m(l2).site_vert.contains_key(&site) {
+                                            push(
+                                                best,
+                                                nodes,
+                                                open,
+                                                NK::Vert { site, li: l2 as u8 },
+                                                q,
+                                                node.g + node.pos.dist(q) + vc,
+                                                idx,
+                                            );
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
                             let ok = *site_ok.entry(site).or_insert_with(|| self.via_ok_site(site, net));
                             if !self.sub.site_usable(site) || !ok {
                                 continue;
@@ -2413,7 +2437,7 @@ impl<'a> Router<'a> {
                             .filter(|&&s| match self.sub.shared.sites[s as usize].pad {
                                 None => true,
                                 // a via into a target pad ends the connection (last resort)
-                                Some(p) => self.cfg.via_in_pad && is_target(p as usize),
+                                Some(p) => via_in_pad && is_target(p as usize),
                             })
                             .enumerate()
                             .map(|(i, &s)| (self.site_point(s).dist(node.pos), i as u32, s)),
@@ -3494,6 +3518,32 @@ fn jitter(seed: u64, x: u64) -> f64 {
     z = z.wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^= z >> 29;
     0.5 + (z % 1000) as f64 / 1000.0
+}
+
+/// Experiment: the nets named in `GB_VIP_NETS` (comma separated) may leave or enter a pad through
+/// a via in it at any time, not only as the last resort of a run. Off when the variable is unset.
+fn vip_net(name: &str) -> bool {
+    static NETS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NETS.get_or_init(|| {
+        std::env::var("GB_VIP_NETS")
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .iter()
+    .any(|n| n == name)
+}
+
+/// Experiment: with `GB_PAD_REUSE=1` a via in the source pad that was ripped up can come back.
+/// Its site stays split after the rip-up and is no longer usable as a site, so without this the
+/// pad has no via-in-pad candidate left (see docs/MILESTONES.md, Corne `rR4.1`).
+fn pad_reuse() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("GB_PAD_REUSE").is_ok_and(|v| v == "1"))
 }
 
 #[cfg(test)]
