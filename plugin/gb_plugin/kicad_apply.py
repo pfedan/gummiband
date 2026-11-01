@@ -190,8 +190,7 @@ def set_outline(zone, points: Sequence[bf.Point]) -> None:
         line.append(PolyLineNode.from_point(vec(p)))
     poly = PolygonWithHoles()
     poly.outline = line
-    zone.outline.polygons.clear()
-    zone.outline.polygons.append(poly)
+    zone.outline = poly
 
 
 def reshape_zones(board, zones: Sequence[dict]) -> List[object]:
