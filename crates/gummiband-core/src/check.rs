@@ -211,6 +211,7 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
                                 ObstacleKind::Keepout { mask: true, .. } => "mask",
                                 ObstacleKind::Keepout { .. } => "keepout",
                                 ObstacleKind::Zone => "zone",
+                                ObstacleKind::Pour => "pour",
                                 ObstacleKind::Graphic => "graphic",
                                 ObstacleKind::Hole => "hole",
                             },

@@ -1049,7 +1049,11 @@ impl Reader {
                     shape: Shape::Polygon(Polygon::new(outline.clone())),
                     layers: LayerSet::single(l),
                     net: Some(net),
-                    kind: ObstacleKind::Zone,
+                    kind: if reserved {
+                        ObstacleKind::Pour
+                    } else {
+                        ObstacleKind::Zone
+                    },
                     hole: None,
                     clearance,
                     pin: None,
@@ -1412,6 +1416,38 @@ mod tests {
             (bb.min.y - 19.4).abs() < 1e-9 && (bb.max.y - 20.6).abs() < 1e-9,
             "{bb:?}"
         );
+    }
+
+    #[test]
+    fn only_gb_zones_are_pours() {
+        let text = r#"(kicad_pcb (version 20240108) (generator "test")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "") (net 1 "A")
+  (zone (net 1) (net_name "A") (layer "F.Cu") (name "gb:power A")
+    (polygon (pts (xy 0 0) (xy 4 0) (xy 4 4) (xy 0 4))))
+  (zone (net 1) (net_name "A") (layer "F.Cu")
+    (polygon (pts (xy 10 0) (xy 14 0) (xy 14 4) (xy 10 4))))
+)"#;
+        let kinds = |opts: &ReadOptions| -> Vec<ObstacleKind> {
+            let kb = parse_board(text.to_string(), None, opts).unwrap();
+            let mut k: Vec<ObstacleKind> = kb
+                .board
+                .obstacles
+                .iter()
+                .filter(|o| matches!(o.kind, ObstacleKind::Zone | ObstacleKind::Pour))
+                .map(|o| o.kind)
+                .collect();
+            k.sort_by_key(|k| format!("{k:?}"));
+            k
+        };
+        // a reserved pour is an obstacle always; any other zone only on request, and then it
+        // joins no pads (KiCad's fill may not reach them)
+        assert_eq!(kinds(&ReadOptions::default()), [ObstacleKind::Pour]);
+        let all = ReadOptions {
+            zones_as_obstacles: true,
+            ..Default::default()
+        };
+        assert_eq!(kinds(&all), [ObstacleKind::Pour, ObstacleKind::Zone]);
     }
 
     fn mask_board(body: &str) -> Board {
