@@ -48,7 +48,8 @@ negotiated congestion), not any existing product's code.
         |
         v
  Check (gummiband-core::check) and writer (gummiband-kicad)
-   clearance check in the core, then new segments/arcs/vias into a copy of the board;
+   clearance check in the core, then new segments/arcs/vias into a copy of the board
+   (a track whose ends fall on the same nanometre is left out: KiCad takes it for a crossing);
    kicad-cli pcb drc as the final judge
 ```
 
