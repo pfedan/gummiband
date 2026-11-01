@@ -265,7 +265,9 @@ the routed board (existing unlocked tracks and vias replaced; with `keep_locked`
 stay). Defaults match the CLI: `runs` 14 (a constant, so results do not depend on the machine), `generations` 3,
 `geometry_generations` 3, `via_pitch` 0.5 mm, `via_cost` 3.0, `layer_dirs` 0.5 (preferred
 directions per layer for every third run, 0 = off), `pair_pull` 0 (experimental pull between the
-nets of a differential pair), `pairs` false (experimental: a pair as one wide track that is split
+nets of a differential pair: the search keeps the second net near the first one's way on the same
+layer, and the finished tracks close up to the pair's gap wherever they run within 1.5 mm of each
+other and nothing lies between; works for every recognised pair, also in the `Default` class), `pairs` false (experimental: a pair as one wide track that is split
 in two, see the CLI guide; only pairs with a pair rule or a net class of their own, `pair_all`
 true for every pair), `pair_breakouts` true (the wide track ends just outside the pads, false: at
 the pads), `pair_skew` 0.1 mm, `pair_zdiff` none, `tune` true (meanders for the
@@ -308,8 +310,11 @@ widths),
 `portfolio` (per run: `generation`, `seed`, `fanout_first`, `routed`, `connections`, `vias`,
 `length_mm`, `violations`), `pairs` (with `pairs`), `coupling` (every recognised pair, whatever
 the settings: `p`, `n`, `coupled_mm` within width + gap + 0.1 mm of the partner on the same layer,
-`length_mm` of both nets, `vias_p`, `vias_n`), `notes` (hints, such as pairs routed without
-`pair_pull` or `pairs`), `length_tuning` (every net the tuning aimed at: `net`, `before_mm`,
+`length_mm` of both nets, `vias_p`, `vias_n`, and with `pair_pull` or `pairs` `uncoupled`: the
+longest stretches of 0.5 mm and more that do not run beside the partner, `net`, `layer`, `x`, `y`,
+`length_mm`, `why` one of "partner on another layer", "partner farther away" (a breakout to the
+pins, or a way of its own), "something between"), `notes` (hints, such as pairs routed without
+`pair_pull` or `pairs`, or a pair with `pair_pull` that runs coupled for less than 60 % of its length), `length_tuning` (every net the tuning aimed at: `net`, `before_mm`,
 `after_mm`, `aim_mm`, `as_pair`), `length_rules` (every length, skew, uncoupled and gap rule
 after the tuning, measured as the KiCad DRC measures: `rule`, `kind`, `min_mm`, `opt_mm`,
 `max_mm`, `nets`, `failed` with `net`, `length_mm`, `skew_mm`), `nets` (per routed net, longest first: `net`,

@@ -312,8 +312,10 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
   into two parallel tracks with the gap and width from the rules or an impedance target, and tunes
   the skew within the pair; it keeps pairs together but still costs connections on dense boards
   and can leave DRC errors near pads and vias. `--pair-pull` is the lighter variant: the second
-  net is pulled towards the first, spacing only roughly kept. A pair is coupled only if a pair
-  rule or a net class of its own marks it as one (`--pair-all` for all). Polarity awareness is
+  net is pulled towards the first one's way on the same layer, and afterwards the tracks close
+  up to the pair's gap wherever they run within 1.5 mm of each other with nothing between; it
+  works for every recognised pair. With `--pairs` a pair is coupled only if a pair rule or a net
+  class of its own marks it as one (`--pair-all` for all). Polarity awareness is
   not there yet.
 - **Length matching makes room only after routing.** The router itself does not keep room free
   for meanders; the room comes from pushing neighbours aside afterwards, which a tight bundle

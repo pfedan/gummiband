@@ -101,6 +101,79 @@ pub fn pair_coupling_of(geo: &Geometry, a: NetId, b: NetId, near: f64) -> (f64, 
     (coupled, total)
 }
 
+/// A stretch of a pair net that does not run beside its partner (see [`uncoupled_stretches`]).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Uncoupled {
+    pub net: NetId,
+    pub layer: board::LayerId,
+    /// Middle of the stretch and its length in mm.
+    pub at: geom::Point,
+    pub length: f64,
+    /// Why, as far as the geometry tells: "partner on another layer", "partner farther away"
+    /// (a breakout to the pins, or a way of its own), "something between" (copper, a pad or a
+    /// via within [`pairs::ZIP_REACH`] that keeps the two apart).
+    pub why: &'static str,
+}
+
+/// The stretches of the tracks of pair `a`, `b` that are not within `near` of the partner's
+/// track on the same layer, longest first; pieces shorter than `min` are left out.
+pub fn uncoupled_stretches(geo: &Geometry, a: NetId, b: NetId, near: f64, min: f64) -> Vec<Uncoupled> {
+    const STEP: f64 = 0.1;
+    let dist = |q: geom::Point, net: NetId, layer: Option<board::LayerId>| {
+        geo.tracks
+            .iter()
+            .filter(|o| o.net == net && layer.is_none_or(|l| o.layer == l))
+            .flat_map(|o| o.pts.windows(2).map(move |v| geom::point_seg_dist(q, v[0], v[1])))
+            .fold(f64::INFINITY, f64::min)
+    };
+    let mut out = Vec::new();
+    for (x, y) in [(a, b), (b, a)] {
+        for t in geo.tracks.iter().filter(|t| t.net == x) {
+            // (start, length, points) of the open stretch
+            let mut run: Option<(f64, Vec<geom::Point>)> = None;
+            let mut close_run = |run: &mut Option<(f64, Vec<geom::Point>)>| {
+                if let Some((len, pts)) = run.take()
+                    && len >= min
+                {
+                    let at = pts[pts.len() / 2];
+                    let same = dist(at, y, Some(t.layer));
+                    let why = if same <= pairs::ZIP_REACH {
+                        "something between"
+                    } else if dist(at, y, None) <= pairs::ZIP_REACH {
+                        "partner on another layer"
+                    } else {
+                        "partner farther away"
+                    };
+                    out.push(Uncoupled {
+                        net: x,
+                        layer: t.layer,
+                        at,
+                        length: len,
+                        why,
+                    });
+                }
+            };
+            for w in t.pts.windows(2) {
+                let l = w[0].dist(w[1]);
+                let k = (l / STEP).ceil().max(1.0) as usize;
+                for i in 0..k {
+                    let q = w[0].lerp(w[1], (i as f64 + 0.5) / k as f64);
+                    if dist(q, y, Some(t.layer)) < near {
+                        close_run(&mut run);
+                    } else {
+                        let r = run.get_or_insert((0.0, Vec::new()));
+                        r.0 += l / k as f64;
+                        r.1.push(q);
+                    }
+                }
+            }
+            close_run(&mut run);
+        }
+    }
+    out.sort_by(|p, q| q.length.total_cmp(&p.length));
+    out
+}
+
 /// Lower bound of the total track length: per net without plane the minimum spanning tree of
 /// its pins times sqrt(3)/2 (no Steiner tree is shorter than that). Plane nets count zero.
 pub fn length_lower_bound(board: &Board) -> f64 {
@@ -1390,6 +1463,13 @@ fn search_fixed(
             relax::prefer_width(board, &sub, &mut best.geo, target, search.air / 2.0);
             if check::check(board, &best.geo).len() > check::check(board, &plain).len() {
                 best.geo = plain;
+            }
+        }
+        // the pairs the search pulled together close up to their gap where nothing is between
+        if base.pair_pull > 0.0 && std::env::var("GB_ZIP").map_or(true, |v| v != "0") {
+            let zipped = pairs::zip(board, &mut best.geo);
+            if std::env::var("GB_ZIP_LOG").is_ok() {
+                eprintln!("zip {zipped:?}");
             }
         }
         if std::env::var("GB_TAPER").map_or(true, |v| v != "0")

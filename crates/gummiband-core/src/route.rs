@@ -230,7 +230,7 @@ pub struct Router<'a> {
     plane_groups: HashSet<u32>,
     /// Partner net of each differential pair net, and where the nets ran so far.
     partner: HashMap<NetId, NetId>,
-    guides: HashMap<NetId, Vec<Point>>,
+    guides: HashMap<NetId, Vec<Guide>>,
     /// The board has kept tracks or vias.
     pub has_kept: bool,
     /// Soft copper of the board is in the topology, see [`crate::import`].
@@ -394,6 +394,63 @@ pub struct ExtraApex {
     pub side: usize,
     pub p: Point,
     pub via: ViaInfo,
+}
+
+/// How much farther the way of the pair partner counts on another layer, in mm: right above it
+/// the pull is still there, but less than on its own layer.
+const OFF_LAYER: f64 = 1.0;
+
+/// Where one connection of a differential pair net runs: the polyline of its committed chain,
+/// with the routing layer of each piece. The partner's search is pulled towards it.
+#[derive(Debug, Clone)]
+struct Guide {
+    conn: usize,
+    /// Pieces from the point before to this point on routing layer `li` (the first has none).
+    pts: Vec<(Point, u8)>,
+}
+
+impl Guide {
+    fn of(conn: usize, chain: &[Node]) -> Guide {
+        let first = chain.iter().find_map(|n| node_layer(&n.kind)).unwrap_or(0);
+        let mut li = first;
+        let pts = chain
+            .iter()
+            .map(|n| {
+                if let Some(l) = node_layer(&n.kind) {
+                    li = l;
+                }
+                (n.pos, li)
+            })
+            .collect();
+        Guide { conn, pts }
+    }
+}
+
+fn node_layer(k: &NK) -> Option<u8> {
+    match *k {
+        NK::Tri { li, .. } | NK::Vert { li, .. } | NK::Site { li, .. } => Some(li),
+        _ => None,
+    }
+}
+
+/// Distance from q on routing layer li to the nearest piece of the guides, a piece on another
+/// layer [`OFF_LAYER`] farther; at most `cap`.
+fn guide_dist(guides: &[Guide], li: usize, q: Point, cap: f64) -> f64 {
+    let mut best = cap;
+    for g in guides {
+        if let [(p, _)] = g.pts[..] {
+            best = best.min(p.dist(q) + OFF_LAYER);
+        }
+        for w in g.pts.windows(2) {
+            let (a, b, l) = (w[0].0, w[1].0, w[1].1);
+            let extra = if l as usize == li { 0.0 } else { OFF_LAYER };
+            if extra >= best {
+                continue;
+            }
+            best = best.min(point_seg_dist(q, a, b) + extra);
+        }
+    }
+    best
 }
 
 fn key(k: &NK) -> (u8, u32, u32) {
@@ -728,10 +785,12 @@ impl<'a> Router<'a> {
     }
 
     /// Extra cost of a step of length `step` ending at q, away from the pair partner's way.
-    fn pull(&self, guide: Option<&[Point]>, q: Point, step: f64) -> f64 {
-        let Some(g) = guide else { return 0.0 };
-        let d = g.iter().map(|p| (*p - q).len2()).fold(f64::INFINITY, f64::min).sqrt();
-        self.cfg.pair_pull * step * (d / 2.0).min(1.0)
+    /// Nothing within the pitch of the pair (track width and gap) on the same layer; the way of
+    /// the partner on another layer counts as [`OFF_LAYER`] farther.
+    fn pull(&self, guide: Option<(&[Guide], f64)>, li: usize, q: Point, step: f64) -> f64 {
+        let Some((g, pitch)) = guide else { return 0.0 };
+        let d = guide_dist(g, li, q, 2.0 + pitch);
+        self.cfg.pair_pull * step * ((d - pitch).max(0.0) / 2.0).min(1.0)
     }
 
     /// Extra cost of the step a-b on routing layer li for leaving the layer's preferred
@@ -1930,11 +1989,11 @@ impl<'a> Router<'a> {
     /// A* for one connection. Returns the node chain from start to goal.
     fn search(&self, ci: usize, buf: &mut SearchBuf) -> Option<Vec<Node>> {
         let conn = &self.conns[ci];
-        let guide = self
-            .partner
-            .get(&conn.net)
-            .and_then(|p| self.guides.get(p))
-            .map(|g| g.as_slice());
+        let guide = self.partner.get(&conn.net).and_then(|&p| {
+            let g = self.guides.get(&p)?;
+            let (w, gap, _) = self.board.pair_shape(conn.net, p, 0);
+            Some((g.as_slice(), w + gap))
+        });
         let net = conn.net;
         // a via in a pad is a last resort, except for the nets of `GB_VIP_NETS`, with
         // `GB_VIP_LEARN` the nets that needed one before, and the nets of `cfg.vip_nets`
@@ -2203,7 +2262,7 @@ impl<'a> Router<'a> {
                     node.g
                 } else {
                     let step = node.pos.dist(q);
-                    node.g + step + self.across(lu, node.pos, q) + escape + self.pull(guide, q, step) + price
+                    node.g + step + self.across(lu, node.pos, q) + escape + self.pull(guide, lu, q, step) + price
                 };
                 let kind = NK::Tri {
                     t: t2,
@@ -2650,9 +2709,6 @@ impl<'a> Router<'a> {
     fn commit(&mut self, ci: usize, chain: &[Node]) -> bool {
         let mut chain = chain.to_vec();
         let net = self.conns[ci].net;
-        if self.partner.contains_key(&net) {
-            self.guides.entry(net).or_default().extend(chain.iter().map(|n| n.pos));
-        }
         // Place new vias first: split their triangles and rewrite the chain to the new mesh.
         let mut split_tris: Vec<(usize, u32)> = Vec::new(); // (layer, old triangle)
         for i in 0..chain.len() {
@@ -2807,6 +2863,11 @@ impl<'a> Router<'a> {
         }
         self.conn_segs[ci] = seg_ids;
         self.conn_vias[ci] = via_ids;
+        if self.partner.contains_key(&net) {
+            let g = self.guides.entry(net).or_default();
+            g.retain(|x| x.conn != ci);
+            g.push(Guide::of(ci, &chain));
+        }
         if vip_learn()
             && self.conns[ci].goal != Goal::Plane
             && self.conn_vias[ci]
@@ -2918,7 +2979,9 @@ impl<'a> Router<'a> {
 
     fn rip_one(&mut self, ci: usize) -> Vec<u32> {
         let net = self.conns[ci].net;
-        self.guides.remove(&net);
+        if let Some(g) = self.guides.get_mut(&net) {
+            g.retain(|x| x.conn != ci);
+        }
         let gone = self.conn_segs[ci].clone();
         for sid in std::mem::take(&mut self.conn_segs[ci]) {
             let Some(s) = self.segs[sid as usize].take() else {
@@ -3878,6 +3941,21 @@ fn learn_vip(net: NetId, name: &str) {
 mod tests {
     use super::*;
     use crate::topo::SubstrateConfig;
+
+    #[test]
+    fn the_pair_guide_is_the_partners_way_on_its_layer() {
+        // nodes 4 mm apart on routing layer 1, as the search leaves them in open space
+        let g = Guide {
+            conn: 0,
+            pts: vec![(pt(0.0, 0.0), 1), (pt(4.0, 0.0), 1), (pt(8.0, 0.0), 1)],
+        };
+        let guides = [g];
+        // between two nodes the way is right there, not 2 mm off at the nodes
+        assert!((guide_dist(&guides, 1, pt(2.0, 0.3), 10.0) - 0.3).abs() < 1e-9);
+        // on another layer right above, it counts farther
+        assert!((guide_dist(&guides, 0, pt(2.0, 0.3), 10.0) - 0.3 - OFF_LAYER).abs() < 1e-9);
+        assert_eq!(guide_dist(&guides, 1, pt(2.0, 50.0), 3.0), 3.0);
+    }
 
     #[test]
     fn routes_two_pads() {

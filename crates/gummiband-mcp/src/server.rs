@@ -404,7 +404,8 @@ pub struct RouteIn {
     /// Seed of the search. The same seed gives the same result; another one a different try.
     pub seed: Option<u64>,
     /// Weight of the pull between the nets of differential pairs (default 0: off; 1 is a good
-    /// start, it can cost clearance on tight boards).
+    /// start, it can cost clearance on tight boards). The finished tracks then close up to the
+    /// pair's gap where nothing lies between; `coupling` says where and why a pair stays apart.
     pub pair_pull: Option<f64>,
     /// Experimental: route differential pairs as one wide track and split it into two parallel
     /// tracks, width and gap from net classes and custom rules (default false). Check the result
@@ -746,6 +747,23 @@ pub struct CouplingOut {
     pub length_mm: f64,
     pub vias_p: usize,
     pub vias_n: usize,
+    /// With `pair_pull` or `pairs`: the longest stretches (0.5 mm and more, at most 5) that do
+    /// not run beside the partner, with where and why.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub uncoupled: Vec<UncoupledOut>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct UncoupledOut {
+    pub net: String,
+    pub layer: String,
+    /// Middle of the stretch.
+    pub x: f64,
+    pub y: f64,
+    pub length_mm: f64,
+    /// "partner on another layer", "partner farther away" (a breakout to the pins, or a way of
+    /// its own), "something between" (copper, a pad or a via keeps the two apart).
+    pub why: String,
 }
 
 /// The fields of `gummiband route --report`, plus a few for the session.
@@ -1870,6 +1888,23 @@ fn route_blocking(
         let (w, g, _) = b.pair_shape(a, c, 0);
         let (coupled, total) = gummiband_core::pair_coupling_of(&res.geometry, a, c, w + g + 0.1);
         let vias = |n| res.geometry.vias.iter().filter(|v| v.net == n).count();
+        let asked = p.pair_pull.unwrap_or(0.0) > 0.0 || p.pairs == Some(true);
+        let uncoupled = if asked {
+            gummiband_core::uncoupled_stretches(&res.geometry, a, c, w + g + 0.1, 0.5)
+                .into_iter()
+                .take(5)
+                .map(|u| UncoupledOut {
+                    net: net(u.net),
+                    layer: b.layers[u.layer as usize].name.clone(),
+                    x: r3(u.at.x),
+                    y: r3(u.at.y),
+                    length_mm: r3(u.length),
+                    why: u.why.to_string(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         coupling.push(CouplingOut {
             p: net(a),
             n: net(c),
@@ -1877,9 +1912,19 @@ fn route_blocking(
             length_mm: r3(total),
             vias_p: vias(a),
             vias_n: vias(c),
+            uncoupled,
         });
     }
     let mut notes = Vec::new();
+    for x in coupling
+        .iter()
+        .filter(|x| !x.uncoupled.is_empty() && x.coupled_mm < 0.6 * x.length_mm)
+    {
+        notes.push(format!(
+            "differential pair {}/{} runs coupled for only {:.1} of {:.1} mm: coupling lists the longest uncoupled stretches with where and why",
+            x.p, x.n, x.coupled_mm, x.length_mm
+        ));
+    }
     if !coupling.is_empty() && p.pair_pull.unwrap_or(0.0) == 0.0 && p.pairs != Some(true) {
         let names: Vec<String> = coupling.iter().map(|x| format!("{}/{}", x.p, x.n)).collect();
         notes.push(format!(
