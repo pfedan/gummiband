@@ -673,7 +673,7 @@ pub fn relax_while(
             board
                 .planes
                 .iter()
-                .filter(|p| cfg.via_edge && p.net == v.net && p.outline.contains(v.at))
+                .filter(|p| cfg.via_edge && p.net == v.net && p.covers(v.at))
                 .map(|p| (&p.outline, nearest_on_poly(&p.outline, v.at).0.min(v.diameter / 2.0)))
                 .collect()
         })

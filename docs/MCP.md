@@ -149,9 +149,9 @@ footprints whose courtyard lies within 3 mm.
 
 Preliminary. Moves a footprint to a new position in mm (and rotation in degrees, unchanged if
 left out) in the working copy `<input>.prerouted.kicad_pcb`; the input file stays untouched and
-the returned board id is the one to route. `warnings` names the footprints whose courtyard box
-the moved part now overlaps, and an outline it leaves; boxes only, so run `drc` or `render` for
-the exact answer. Pads, their nets and the footprint's own copper move along. Without
+the returned board id is the one to route. `warnings` names the footprints whose courtyard
+the moved part now overlaps (by outline where the courtyard lines close, by box otherwise), and
+an outline it leaves (by box); run `drc` or `render` for the exact answer. Pads, their nets and the footprint's own copper move along. Without
 `rotation` only the position changes; with it the pads, the footprint's texts and its own zones
 turn with the footprint, so the part arrives as KiCad would place it.
 
@@ -392,9 +392,21 @@ pins to the inductor, a big pad that reaches its plane through one via. For each
   `from` terminals share the current, every `to` terminal takes all of it) on rings just off the
   pad (the holes stay out of the pad; vias already touching it count), free by the same rules as
   stitching vias except that the part's own courtyard is allowed, and a small pour joining pad
-  and vias.
+  and vias. A via only counts where it lands in the copper of a plane of the net: inside the
+  plane zone with room for the via and its clearance, and outside the zones of other nets on
+  that layer with a higher priority (KiCad fills those first).
 
-The pours are zones named `gb:...` with priority 20 and solid pad connections. Gummiband keeps
+Courtyards count by their outline where the courtyard lines close (an L or T shaped module
+courtyard leaves the room beside its stem free), by their box otherwise. The same holds for the
+stitching vias of `ground_pour` and the overlap warnings of `move_part`.
+
+Overlapping zones on a plane layer: the router and `power_copper` see a plane only where no
+zone of another net with a higher priority covers it, so a via of the lower net does not land
+in the higher net's area.
+
+The pours are zones named `gb:...` with priority 20 and solid pad connections; a pour that
+overlaps a zone of the same priority on its layer (two via fields of FETs side by side) goes one
+priority up, so KiCad reports no `zones_intersect`. Gummiband keeps
 zones with that prefix as obstacles for other nets even without `zones_as_obstacles`, and counts
 pads under one such pour (and vias in it that reach the plane) as connected, so the router
 neither runs a track across the pour nor routes the joined pads again. The tool writes the
@@ -571,7 +583,7 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
 ## Open points
 
 - `move_part` and `add_zone` are new and tested on small boards only; `move_part` checks
-  courtyard boxes only, and a zone is not filled until KiCad fills it.
+  courtyard outlines, not the clearance KiCad's DRC wants between them, and a zone is not filled until KiCad fills it.
 - `place_parts` is new. It lacks the `--iters`, `--margin` and `--free` options of
   `gummiband place`, knows no datasheet layouts (place and lock power stages with `move_part`;
   `semantic` keeps an inductor at its converter, but no via arrays or copper),

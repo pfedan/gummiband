@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use gummiband_core::board::{Board, LayerId, NetId, ObstacleKind};
-use gummiband_core::geom::{Point, Shape};
+use gummiband_core::geom::{Point, Polygon, Shape};
 use gummiband_kicad::power::{self, ZoneFill};
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
 use rmcp::schemars::{self, JsonSchema};
@@ -1190,7 +1190,9 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
                 continue;
             }
             let parts: Vec<String> = g.iter().map(|&x| b.pins[x].footprint.clone()).collect();
-            let room = power::ViaRoom::new(b, &zf, net, dia, drill, 0.15, true).allow_in(parts);
+            let room = power::ViaRoom::new(b, &zf, net, dia, drill, 0.15, true)
+                .allow_in(parts)
+                .into_plane();
             // vias of the net that already touch the pad count
             let have: Vec<Point> = b
                 .obstacles
@@ -1262,11 +1264,30 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
     } else {
         write::add_locked(kb, &vias)
     };
+    // overlapping zones on one layer must not share a priority (KiCad: zones_intersect), e.g.
+    // the via field pours of two FETs side by side: the later one goes one priority up
+    let mut taken: Vec<(LayerId, u32, Polygon)> = zf
+        .iter()
+        .flat_map(|z| {
+            z.polys
+                .iter()
+                .map(move |q| (z.layer, z.priority.max(0) as u32, q.clone()))
+        })
+        .collect();
     for (i, (net, layer, name, outline)) in zones.iter().enumerate() {
+        let poly = Polygon::new(outline.clone());
+        let mut priority = prio;
+        while taken
+            .iter()
+            .any(|(l, p, q)| *l == *layer && *p == priority && q.dist_to_poly(&poly) <= 0.0)
+        {
+            priority += 1;
+        }
+        taken.push((*layer, priority, poly));
         let spec = write::ZoneSpec {
             net: *net,
             layer: *layer,
-            priority: prio,
+            priority,
             name,
             connect: write::PadConnect::Solid,
             spoke: write::DEFAULT_SPOKE,
