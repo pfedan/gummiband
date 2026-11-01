@@ -864,7 +864,8 @@ fn auto_negotiate(base: &RouterConfig, stats: &RunStats) -> bool {
 /// One full search on a fixed placement, see `search_fixed`. Where it leaves a few connections
 /// open and no negotiation was asked for ([`auto_negotiate`]), a second search negotiates with
 /// [`AUTO_NEGOTIATE`] rounds and the better result counts, as with `--negotiate`. A search that
-/// completes the board, or leaves more open, stays as it is.
+/// completes the board, or leaves more open, stays as it is, and so does an open ended one: its
+/// open end has worked on what was open (also when `GB_OPEN_GENERATIONS` ends it, not a stop).
 pub fn route_fixed(
     board: &Board,
     sub_cfg: &SubstrateConfig,
@@ -872,7 +873,7 @@ pub fn route_fixed(
     search: &SearchConfig,
 ) -> (Substrate, RouteResult) {
     let plain = search_fixed(board, sub_cfg, base, search);
-    if !auto_negotiate(base, &plain.1.stats) || search.stopped() {
+    if !auto_negotiate(base, &plain.1.stats) || search.open_end.is_some() {
         return plain;
     }
     eprintln!(
