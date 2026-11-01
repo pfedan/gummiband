@@ -392,7 +392,7 @@ struct NearObstacle {
     hole: bool,
 }
 
-fn resample(pts: &[Point], spacing: f64) -> Vec<Point> {
+pub(crate) fn resample(pts: &[Point], spacing: f64) -> Vec<Point> {
     let mut out = vec![pts[0]];
     for w in pts.windows(2) {
         let l = w[0].dist(w[1]);

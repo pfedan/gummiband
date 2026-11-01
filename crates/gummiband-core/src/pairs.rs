@@ -2134,6 +2134,240 @@ pub fn route_pairs(
     (sub, res, reports)
 }
 
+/// Farthest the tracks of a pair may be apart for [`zip`] to close them up, in mm.
+pub const ZIP_REACH: f64 = 1.5;
+
+/// Point spacing of the tracks [`zip`] reshapes, in mm.
+const ZIP_STEP: f64 = 0.05;
+
+/// Around a clearance problem that closing up made, the track of [`zip`] stays where it was
+/// within this distance in mm (and comes over in a 45 degree ramp beyond).
+const ZIP_KEEP: f64 = 0.3;
+
+/// Shortest stretch in mm that [`zip`] moves, ramps included.
+const ZIP_MIN_RUN: f64 = 1.0;
+
+/// Tries of [`zip`] per track: each one keeps the track where it was around the clearance
+/// problems of the try before, twice as far around a place that has one again.
+const ZIP_TRIES: usize = 10;
+
+/// What [`zip`] did to a pair.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ZipReport {
+    pub p: String,
+    pub n: String,
+    /// Tracks that now run at the pair's gap beside their partner (all or part of the way).
+    pub zipped: usize,
+    /// Where a track stays apart from its partner because closing up would break a clearance
+    /// (other copper between the two, a via or pad of the partner): a point of each place.
+    pub kept_apart: Vec<Point>,
+}
+
+/// From q to the nearest point of the polyline, if that point lies inside it (not on one of its
+/// two ends, where the track turns off to a pad or via).
+fn inner_offset(poly: &[Point], q: Point) -> Option<(f64, Point)> {
+    let mut best: Option<(f64, Point, bool)> = None;
+    let last = poly.len().checked_sub(2)?;
+    for (i, w) in poly.windows(2).enumerate() {
+        let ab = w[1] - w[0];
+        let l2 = ab.len2();
+        let t = if l2 > 0.0 {
+            ((q - w[0]).dot(ab) / l2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let o = q - (w[0] + ab * t);
+        let d = o.len();
+        let end = (i == 0 && t <= 0.0) || (i == last && t >= 1.0);
+        if best.is_none_or(|b| d < b.0) {
+            best = Some((d, o, end));
+        }
+    }
+    best.filter(|b| !b.2).map(|b| (b.0, b.1))
+}
+
+/// Shift wanted per point of `pts` (spaced [`ZIP_STEP`]) to run at `pitch` beside the anchors,
+/// zero where no anchor is within [`ZIP_REACH`] and where the point or its place beside the anchor
+/// lies within the radius of a `keep` point. The
+/// ends stay where they are, a shift grows by at most the way along the track from a point
+/// that stays (45 degrees at most), and stretches shorter than [`ZIP_MIN_RUN`] stay as well.
+pub(crate) fn zip_shifts(pts: &[Point], anchors: &[&[Point]], pitch: f64, keep: &[(Point, f64)]) -> Vec<Point> {
+    let mut want: Vec<Point> = pts
+        .iter()
+        .map(|&q| {
+            let v = anchors
+                .iter()
+                .filter_map(|a| inner_offset(a, q))
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .filter(|&(d, _)| d > pitch + 1e-3 && d <= ZIP_REACH)
+                .map_or(pt(0.0, 0.0), |(d, o)| o * ((pitch - d) / d));
+            // a place to keep counts where the point is and where it would go
+            if keep.iter().any(|&(k, r)| k.dist(q) < r || k.dist(q + v) < r) {
+                return pt(0.0, 0.0);
+            }
+            v
+        })
+        .collect();
+    for end in [0, want.len().saturating_sub(1)] {
+        if let Some(v) = want.get_mut(end) {
+            *v = pt(0.0, 0.0);
+        }
+    }
+    let mut cap: Vec<f64> = want.iter().map(|v| v.len()).collect();
+    for i in 1..pts.len() {
+        cap[i] = cap[i].min(cap[i - 1] + pts[i].dist(pts[i - 1]));
+    }
+    for i in (0..pts.len().saturating_sub(1)).rev() {
+        cap[i] = cap[i].min(cap[i + 1] + pts[i].dist(pts[i + 1]));
+    }
+    for (v, c) in want.iter_mut().zip(cap) {
+        let l = v.len();
+        if l > c {
+            *v = if c > 0.0 { *v * (c / l) } else { pt(0.0, 0.0) };
+        }
+    }
+    // a short move between places that stay is a dent, not a coupled stretch
+    let mut i = 0;
+    while i < want.len() {
+        if want[i].len() < 1e-6 {
+            i += 1;
+            continue;
+        }
+        let j = (i..want.len()).find(|&k| want[k].len() < 1e-6).unwrap_or(want.len());
+        let len: f64 = pts[i.saturating_sub(1)..j.min(pts.len() - 1) + 1]
+            .windows(2)
+            .map(|w| w[0].dist(w[1]))
+            .sum();
+        if len < ZIP_MIN_RUN {
+            want[i..j].fill(pt(0.0, 0.0));
+        }
+        i = j;
+    }
+    want
+}
+
+/// Where the violations that involve net n are.
+fn spots_of(board: &Board, geo: &Geometry, n: NetId) -> Vec<Point> {
+    crate::check::check(board, geo)
+        .iter()
+        .filter(|v| v.nets.0 == n || v.nets.1 == Some(n))
+        .map(|v| v.at)
+        .collect()
+}
+
+/// Close up the differential pairs routed as two nets with `pair_pull`: the search keeps the
+/// two nets in one channel on one layer, but each track is a band of its own and lies where its
+/// own obstacles leave it, often half a millimetre or more from its partner. Where a track runs
+/// within [`ZIP_REACH`] of its partner on the same layer, it moves over to the pair's gap, with
+/// 45 degree ramps to where it stays: its ends at pads and vias, where other tracks of its net
+/// end on it, where the partner is farther, and around every place where the move would give
+/// its net a clearance violation more (other copper between the two, a via or pad of the
+/// partner). Such places are reported in [`ZipReport::kept_apart`].
+pub fn zip(board: &Board, geo: &mut Geometry) -> Vec<ZipReport> {
+    let mut out = Vec::new();
+    for (a, b) in board.diff_pairs() {
+        let mut rep = ZipReport {
+            p: board.nets[a as usize].name.clone(),
+            n: board.nets[b as usize].name.clone(),
+            ..Default::default()
+        };
+        // where a track moved, it is the partner's anchor no more: only the pieces it kept
+        // pull the partner over (None: the whole track stays as it was)
+        let mut kept: Vec<Option<Vec<Vec<Point>>>> = vec![None; geo.tracks.len()];
+        for (mover, anchor) in [(b, a), (a, b)] {
+            for ti in 0..geo.tracks.len() {
+                let t = &geo.tracks[ti];
+                if t.net != mover || t.resting || t.pattern.is_some() || t.pts.len() < 2 {
+                    continue;
+                }
+                let (layer, width) = (t.layer, t.width);
+                let others: Vec<usize> = (0..geo.tracks.len())
+                    .filter(|&oi| geo.tracks[oi].net == anchor && geo.tracks[oi].layer == layer)
+                    .collect();
+                let Some(w_anchor) = others.first().map(|&oi| geo.tracks[oi].width) else {
+                    continue;
+                };
+                let anchors: Vec<Vec<Point>> = others
+                    .iter()
+                    .flat_map(|&oi| match &kept[oi] {
+                        Some(pieces) => pieces.clone(),
+                        None => vec![geo.tracks[oi].pts.clone()],
+                    })
+                    .collect();
+                let refs: Vec<&[Point]> = anchors.iter().map(|v| v.as_slice()).collect();
+                let (_, gap, _) = board.pair_shape(a, b, layer);
+                let pitch = (width + w_anchor) / 2.0 + gap;
+                // where other tracks of the net end on this one
+                let mut keep: Vec<(Point, f64)> = geo
+                    .tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|&(oi, o)| oi != ti && o.net == mover)
+                    .flat_map(|(_, o)| [o.pts[0], o.pts[o.pts.len() - 1]])
+                    .map(|p| (p, ZIP_STEP))
+                    .collect();
+                let old = geo.tracks[ti].clone();
+                let base = crate::relax::resample(&old.pts, ZIP_STEP);
+                let before = spots_of(board, geo, mover);
+                let mut done: Option<Vec<Vec<Point>>> = None;
+                for _ in 0..ZIP_TRIES {
+                    let shifts = zip_shifts(&base, &refs, pitch, &keep);
+                    if shifts.iter().all(|v| v.len() < 1e-6) {
+                        break;
+                    }
+                    let moved: Vec<Point> = base.iter().zip(&shifts).map(|(&p, &v)| p + v).collect();
+                    let pts = crate::relax::simplify(&moved, 0.0005);
+                    let t = &mut geo.tracks[ti];
+                    t.elems = pts.windows(2).map(|w| Elem::Line(w[0], w[1])).collect();
+                    t.pts = pts;
+                    let after = spots_of(board, geo, mover);
+                    let new: Vec<Point> = after
+                        .iter()
+                        .copied()
+                        .filter(|p| !before.iter().any(|q| q.dist(*p) < ZIP_STEP))
+                        .collect();
+                    if after.len() <= before.len() && new.is_empty() {
+                        let mut pieces: Vec<Vec<Point>> = vec![Vec::new()];
+                        for (&p, v) in base.iter().zip(&shifts) {
+                            if v.len() < 1e-6 {
+                                pieces.last_mut().unwrap().push(p);
+                            } else if !pieces.last().unwrap().is_empty() {
+                                pieces.push(Vec::new());
+                            }
+                        }
+                        pieces.retain(|p| p.len() >= 2);
+                        done = Some(pieces);
+                        break;
+                    }
+                    geo.tracks[ti] = old.clone();
+                    if new.is_empty() {
+                        break;
+                    }
+                    for p in new {
+                        // the same place again: the ramp beside it was too steep, keep more
+                        match keep
+                            .iter_mut()
+                            .find(|k| k.1 >= ZIP_KEEP && k.0.dist(p) < k.1 + ZIP_KEEP)
+                        {
+                            Some(k) => k.1 = (k.1 * 2.0).min(ZIP_REACH),
+                            None => {
+                                rep.kept_apart.push(p);
+                                keep.push((p, ZIP_KEEP));
+                            }
+                        }
+                    }
+                }
+                if done.is_some() {
+                    kept[ti] = done;
+                    rep.zipped += 1;
+                }
+            }
+        }
+        out.push(rep);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2200,6 +2434,70 @@ mod tests {
             b.nets.push(net);
         }
         b
+    }
+
+    fn polyline(pts: &[Point], net: NetId) -> Track {
+        make_track(pts.windows(2).map(|w| Elem::Line(w[0], w[1])).collect(), 0.2, 0, net)
+    }
+
+    #[test]
+    fn zip_closes_up_a_pair_to_its_gap_except_where_copper_is_between() {
+        let mut b = pair_board();
+        // a keep-out of no net between the two tracks around x = 15
+        let (lo, hi) = (pt(14.8, 5.45), pt(15.2, 6.05));
+        b.obstacles.push(Obstacle {
+            shape: Shape::Polygon(Polygon::new(vec![lo, pt(hi.x, lo.y), hi, pt(lo.x, hi.y)])),
+            layers: LayerSet::single(0),
+            net: None,
+            kind: ObstacleKind::Pad,
+            hole: None,
+            clearance: 0.1,
+            pin: None,
+            locked: false,
+        });
+        // D_P straight, D_N 1.4 mm away from it in the middle, as two separate bands leave them
+        let mut geo = Geometry {
+            tracks: vec![
+                polyline(&[pt(4.0, 5.0), pt(26.0, 5.0)], 0),
+                polyline(&[pt(4.0, 5.8), pt(5.0, 6.4), pt(25.0, 6.4), pt(26.0, 5.8)], 1),
+            ],
+            vias: Vec::new(),
+        };
+        assert!(crate::check::check(&b, &geo).is_empty());
+        let before = crate::pair_coupling_of(&geo, 0, 1, 0.5).0;
+        let rep = zip(&b, &mut geo);
+        assert!(
+            crate::check::check(&b, &geo).is_empty(),
+            "{:?}",
+            crate::check::check(&b, &geo)
+        );
+        assert_eq!(rep.len(), 1);
+        assert_eq!(rep[0].zipped, 1, "{:?}", rep[0]);
+        // stays apart at the keep-out, and says where
+        assert!(
+            rep[0].kept_apart.iter().any(|p| p.dist(pt(15.0, 6.0)) < 1.0),
+            "{:?}",
+            rep[0]
+        );
+        let n = &geo.tracks[1];
+        let y_at = |x: f64| {
+            n.pts
+                .windows(2)
+                .find(|w| (w[0].x - x) * (w[1].x - x) <= 0.0 && w[0].x != w[1].x)
+                .map(|w| w[0].y + (w[1].y - w[0].y) * (x - w[0].x) / (w[1].x - w[0].x))
+                .unwrap()
+        };
+        // at the pair's pitch (track width and the class gap) elsewhere
+        let pitch = 0.2 + 0.15;
+        for x in [8.0, 11.0, 19.0, 22.0] {
+            assert!((y_at(x) - 5.0 - pitch).abs() < 0.01, "{x}: {}", y_at(x));
+        }
+        assert!(y_at(15.0) > 6.05 + 0.1 + 0.1 - 1e-6, "{}", y_at(15.0));
+        // the ends stay on their pads
+        assert!(close(n.pts[0], pt(4.0, 5.8)) && close(*n.pts.last().unwrap(), pt(26.0, 5.8)));
+        // D_N runs coupled for most of its 22 mm (D_P is one piece, counted by its middle)
+        let after = crate::pair_coupling_of(&geo, 0, 1, 0.5).0;
+        assert!(before == 0.0 && after > 15.0, "{before} -> {after}");
     }
 
     #[test]
