@@ -511,5 +511,5 @@ mod tests {
         assert!(is_new(&spot(0.5, (1, Some(2)), 0.03), &before, 0.1));
         assert!(is_new(&spot(5.0, (1, Some(2)), 0.01), &before, 0.1));
         assert!(is_new(&spot(0.5, (1, Some(3)), 0.01), &before, 0.1));
-}
+    }
 }
