@@ -389,14 +389,18 @@ pins to the inductor, a big pad that reaches its plane through one via. For each
   their clearance, and along the board edge. Each cut runs across the line from the obstacle to
   the nearest point of the spine between the terminals, so the pour gives way on that side only.
   Terminals further apart than `max_span` (12 mm) get no pour (route them wide); a pad the pour
-  no longer reaches gets a warning.
+  no longer reaches gets a warning. Several `from` terminals that one pour cannot join (the
+  two VBUS pin groups of a USB-C receptacle with the signal pins between them) get one pour
+  each to the `to` pads, with a warning; join them on another layer if they must share the
+  current.
 - A net with a plane gets, at every terminal, locked vias for the current (IPC-2221 per via; the
   `from` terminals share the current, every `to` terminal takes all of it) on rings just off the
   pad (the holes stay out of the pad; vias already touching it count), free by the same rules as
   stitching vias except that the part's own courtyard is allowed, and a small pour joining pad
   and vias. A via only counts where it lands in the copper of a plane of the net: inside the
   plane zone with room for the via and its clearance, and outside the zones of other nets on
-  that layer with a higher priority (KiCad fills those first).
+  that layer with a higher priority (KiCad fills those first). When vias would fit beside the
+  pad but the plane has no copper there, the warning says so (extend the plane zone).
 
 Courtyards count by their outline where the courtyard lines close (an L or T shaped module
 courtyard leaves the room beside its stem free), by their box otherwise. The same holds for the
@@ -432,7 +436,7 @@ all connections, 19 instead of 36 Gummiband clearance violations, none near the 
 After routing, on the written file. A path names a net, its current and optionally its terminals:
 `from` (source pads as `REF.PAD`, `REF.*` for every pad of the part on the net, pins in parallel
 joined with `+` as one terminal; several terminals share the current evenly) and `to` (sink
-pads, any of them may take the current). A net with two pins gets its terminals automatically; a
+pads, any of them may take the current; `+` is allowed there too). A net with two pins gets its terminals automatically; a
 glob without terminals expands to its nets. Without `paths` the nets of the wide classes are
 checked.
 
@@ -450,7 +454,10 @@ has copper) is put on a 0.05 mm raster, and two numbers are measured between the
 - `cross_section_mm`: the total cross-section, a minimum cut on the raster where parallel copper
   adds up and every via counts with what its barrel carries. Copper that is a band of the full
   width anyway cannot be cut, so the cut runs through narrower copper and vias only; a cut at an
-  angle through narrow copper counts a little short (the safe side).
+  angle through narrow copper counts a little short (the safe side). On a net with a lot of
+  copper (a ground net with a plane and pours) the cut is measured in a window around the
+  terminals, smaller until it fits; the copper outside it does not count (the safe side) and a
+  note gives the window.
 
 The cross-section decides: a path is `ok` when it reaches the required width (within half a
 raster cell), else `FLAG` with the position and layer of the cut, marked `via` when a via barrel

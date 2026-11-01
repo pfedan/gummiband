@@ -378,6 +378,10 @@ pub struct Neck {
     pub cut_mm: Option<f64>,
     /// Where that cut lies, if it is below the limit.
     pub cut_at: Option<(Point, LayerId)>,
+    /// The copper was too large for the cut on the whole board (a ground net with planes and
+    /// pours): the cut was measured in a window around the terminals, copper outside it left
+    /// out (on the safe side). The window in board mm.
+    pub cut_window: Option<Rect>,
 }
 
 /// The narrowest cross-section of `net` between the source terminals and the sinks: pads,
@@ -622,14 +626,48 @@ pub fn neck(
         changes_layer: false,
         cut_mm: None,
         cut_at: None,
+        cut_window: None,
     };
     if src_cells.iter().any(Vec::is_empty) || sink_cells.is_empty() || !joins(0.0) {
         return out;
     }
     out.connected = true;
     if o.required > 0.0 {
-        let cells: usize = layers.iter().map(|&l| cu[l].iter().filter(|x| **x).count()).sum();
-        if cells <= 3_000_000 {
+        const MAX_CELLS: usize = 3_000_000;
+        let count = |cu: &[Vec<bool>]| -> usize { layers.iter().map(|&l| cu[l].iter().filter(|x| **x).count()).sum() };
+        let mut cells = count(&cu);
+        // too much copper for the flow on the whole board (planes and pours of a ground net):
+        // a window around the terminals, growing smaller until it fits
+        let mut cu_cut: Option<Vec<Vec<bool>>> = None;
+        if cells > MAX_CELLS {
+            let mut bb = Rect::empty();
+            for &(_, i) in src_cells.iter().flatten().chain(sink_cells.iter()) {
+                bb.add(g.center(i));
+            }
+            let diag = (bb.width().powi(2) + bb.height().powi(2)).sqrt();
+            let mut grow = (0.3 * diag).max(5.0);
+            while grow >= 1.0 {
+                let win = bb.grow(grow);
+                let masked: Vec<Vec<bool>> = cu
+                    .iter()
+                    .map(|m| {
+                        m.iter()
+                            .enumerate()
+                            .map(|(i, &x)| x && win.contains(g.center(i)))
+                            .collect()
+                    })
+                    .collect();
+                cells = count(&masked);
+                if cells <= MAX_CELLS {
+                    out.cut_window = Some(win);
+                    cu_cut = Some(masked);
+                    break;
+                }
+                grow *= 0.75;
+            }
+        }
+        let cu_cut: &[Vec<bool>] = cu_cut.as_deref().unwrap_or(&cu);
+        if cells <= MAX_CELLS {
             let mut worst: Option<(f64, Option<(Point, LayerId)>)> = None;
             // copper that is a band of the required width anyway cannot be the cut: only narrower
             // copper in parallel and the via barrels are left to add up
@@ -659,7 +697,7 @@ pub fn neck(
                 let r = min_cut(
                     &g,
                     &layers,
-                    &cu,
+                    cu_cut,
                     &wide,
                     &o.layer_factor,
                     &joints,
