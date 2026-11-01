@@ -1602,14 +1602,14 @@ impl Gummiband {
             let c = c.grow(-0.05);
             let mut hits: Vec<String> = b
                 .courtyards
-                .iter()
-                .filter(|(r, o)| **r != p.reference && c.overlaps(o))
-                .map(|(r, _)| r.clone())
+                .keys()
+                .filter(|r| **r != p.reference && b.courtyards_overlap(&p.reference, r, 0.05))
+                .cloned()
                 .collect();
             hits.sort();
             let mut w: Vec<String> = hits
                 .into_iter()
-                .map(|r| format!("courtyard box of {} overlaps {r}", p.reference))
+                .map(|r| format!("courtyard of {} overlaps {r}", p.reference))
                 .collect();
             let bb = b.bbox();
             if c.min.x < bb.min.x || c.min.y < bb.min.y || c.max.x > bb.max.x || c.max.y > bb.max.y {
@@ -2544,7 +2544,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Move a part to a new position (and rotation) in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. Without rotation the tracks around it follow like rubber bands (follow: false switches that off): its own tracks stretch, other nets give way within their clearances, and the part stops short where nothing can give way any more (a warning says where). `warnings` also names courtyard boxes it now overlaps (boxes only: drc has the exact answer).",
+        description = "Move a part to a new position (and rotation) in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. Without rotation the tracks around it follow like rubber bands (follow: false switches that off): its own tracks stretch, other nets give way within their clearances, and the part stops short where nothing can give way any more (a warning says where). `warnings` also names courtyards it now overlaps (by their outlines; drc has the exact answer).",
         output_schema = schema_for_output::<AddLockedOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]

@@ -158,6 +158,7 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
     }
     r.finish_outline();
     r.finish_openings();
+    r.b.cut_planes();
     r.read_groups(&root);
     if !matches!(opts.keep, KeepCopper::None) {
         r.b.add_island_pins();
@@ -225,6 +226,81 @@ fn pts(n: &Node) -> Vec<Point> {
     n.child("pts")
         .map(|p| p.children("xy").filter_map(xy).collect())
         .unwrap_or_default()
+}
+
+/// The courtyard of a footprint as closed polygons on the board: rectangles, polygons and
+/// circles as they are, lines and arcs chained end to end into loops. Empty if a piece of the
+/// courtyard does not close (the box stays the courtyard then).
+fn courtyard_polygons(fp: &Node, pos: Point, rot: f64) -> Vec<Polygon> {
+    let map = |q: Point| pos + kicad_rot(q, rot);
+    let me = 0.02;
+    let mut polys = Vec::new();
+    let mut chains: Vec<Vec<Point>> = Vec::new();
+    for g in fp.args() {
+        let Some(h) = g.head() else { continue };
+        if !matches!(g.child_str("layer"), Some("F.CrtYd") | Some("B.CrtYd")) {
+            continue;
+        }
+        match h {
+            "fp_rect" => {
+                let (Some(a), Some(b)) = (child_xy(g, "start"), child_xy(g, "end")) else {
+                    continue;
+                };
+                polys.push(Polygon::new(
+                    [a, pt(b.x, a.y), b, pt(a.x, b.y)].into_iter().map(map).collect(),
+                ));
+            }
+            "fp_poly" => {
+                let ps: Vec<Point> = pts(g).into_iter().map(map).collect();
+                if ps.len() >= 3 {
+                    polys.push(Polygon::new(ps));
+                }
+            }
+            "fp_circle" => {
+                let (Some(c), Some(e)) = (child_xy(g, "center"), child_xy(g, "end")) else {
+                    continue;
+                };
+                polys.push(circle_polygon(map(c), c.dist(e), me));
+            }
+            "fp_line" => {
+                let (Some(a), Some(b)) = (child_xy(g, "start"), child_xy(g, "end")) else {
+                    continue;
+                };
+                chains.push(vec![map(a), map(b)]);
+            }
+            "fp_arc" => {
+                let (Some(a), Some(m), Some(b)) = (child_xy(g, "start"), child_xy(g, "mid"), child_xy(g, "end")) else {
+                    continue;
+                };
+                chains.push(arc_polyline(map(a), map(m), map(b), me));
+            }
+            _ => {}
+        }
+    }
+    // join the open pieces end to end until each closes
+    let tol = 1e-3;
+    while let Some(mut cur) = chains.pop() {
+        loop {
+            let (first, last) = (cur[0], *cur.last().unwrap());
+            if cur.len() > 2 && first.dist(last) < tol {
+                cur.pop();
+                polys.push(Polygon::new(cur));
+                break;
+            }
+            let Some(i) = chains
+                .iter()
+                .position(|c| c[0].dist(last) < tol || c.last().unwrap().dist(last) < tol)
+            else {
+                return Vec::new();
+            };
+            let mut next = chains.swap_remove(i);
+            if next[0].dist(last) >= tol {
+                next.reverse();
+            }
+            cur.extend(next.into_iter().skip(1));
+        }
+    }
+    polys
 }
 
 /// KiCad rotates counter-clockwise on screen with y pointing down.
@@ -321,6 +397,10 @@ impl Reader {
         }
         if let Some(v) = g("min_track_width") {
             rules.min_track_width = v;
+            rules.kicad_min_width = rules.kicad_min_width.max(v);
+        }
+        if let Some(v) = g("min_connection") {
+            rules.kicad_min_width = rules.kicad_min_width.max(v);
         }
         if let Some(v) = g("min_copper_edge_clearance") {
             rules.edge_clearance = v;
@@ -655,6 +735,10 @@ impl Reader {
         }
         if court.width() > 0.0 {
             self.b.courtyards.insert(reference.clone(), court);
+            let polys = courtyard_polygons(fp, pos, rot);
+            if !polys.is_empty() {
+                self.b.courtyard_shapes.insert(reference.clone(), polys);
+            }
         }
         for g in fp.args() {
             if let Some(h) = g.head()
@@ -1038,11 +1122,9 @@ impl Reader {
         for l in layers.iter() {
             if self.b.layers[l as usize].is_plane {
                 self.b.nets[net as usize].planes.insert(l);
-                self.b.planes.push(Plane {
-                    net,
-                    layer: l,
-                    outline: Polygon::new(outline.clone()),
-                });
+                let mut plane = Plane::new(net, l, Polygon::new(outline.clone()));
+                plane.priority = z.child_f64("priority").unwrap_or(0.0) as i64;
+                self.b.planes.push(plane);
             } else if opts.zones_as_obstacles || reserved {
                 let clearance = self.clearance_of(Some(net));
                 self.push_obstacle(Obstacle {
@@ -1387,6 +1469,49 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A T shaped courtyard of lines closes into its outline, not its box; zones on a plane
+    /// layer are cut by the higher priority zones of other nets.
+    #[test]
+    fn courtyard_outline_and_plane_cut() {
+        let text = r#"(kicad_pcb (version 20240108) (generator "test")
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" power) (31 "B.Cu" signal) (47 "F.CrtYd" user))
+  (net 0 "") (net 1 "A") (net 2 "B")
+  (gr_rect (start 0 0) (end 60 60) (layer "Edge.Cuts"))
+  (footprint "RF_Module:X" (layer "F.Cu") (at 30 30)
+    (property "Reference" "U1")
+    (fp_line (start -20 -20) (end 20 -20) (layer "F.CrtYd"))
+    (fp_line (start 20 -20) (end 20 -10) (layer "F.CrtYd"))
+    (fp_line (start 20 -10) (end 5 -10) (layer "F.CrtYd"))
+    (fp_line (start 5 10) (end 5 -10) (layer "F.CrtYd"))
+    (fp_line (start 5 10) (end -5 10) (layer "F.CrtYd"))
+    (fp_line (start -5 10) (end -5 -10) (layer "F.CrtYd"))
+    (fp_line (start -5 -10) (end -20 -10) (layer "F.CrtYd"))
+    (fp_line (start -20 -10) (end -20 -20) (layer "F.CrtYd")))
+  (zone (net 1) (net_name "A") (layer "In1.Cu") (priority 1)
+    (polygon (pts (xy 1 1) (xy 59 1) (xy 59 59) (xy 1 59))))
+  (zone (net 2) (net_name "B") (layer "In1.Cu") (priority 3)
+    (polygon (pts (xy 10 40) (xy 30 40) (xy 30 50) (xy 10 50))))
+)"#;
+        let kb = parse_board(text.to_string(), None, &ReadOptions::default()).unwrap();
+        let b = &kb.board;
+        let bbox = b.courtyards["U1"];
+        assert!((bbox.width() - 40.0).abs() < 1e-9 && (bbox.height() - 30.0).abs() < 1e-9);
+        // beside the stem: in the box, not in the courtyard
+        assert!(bbox.contains(pt(15.0, 35.0)));
+        assert!(!b.in_courtyard("U1", pt(15.0, 35.0), 0.2));
+        assert!(b.in_courtyard("U1", pt(30.0, 35.0), 0.0));
+        assert!(b.in_courtyard("U1", pt(15.0, 15.0), 0.0));
+        assert!(b.in_courtyard("U1", pt(24.9, 35.0), 0.2));
+        let (na, nb) = (b.net_id("A").unwrap(), b.net_id("B").unwrap());
+        let a = b.planes.iter().find(|p| p.net == na).unwrap();
+        let bp = b.planes.iter().find(|p| p.net == nb).unwrap();
+        assert_eq!(a.cut.len(), 1);
+        assert!(bp.cut.is_empty());
+        assert!(!a.covers(pt(20.0, 45.0)) && bp.covers(pt(20.0, 45.0)));
+        assert!(a.covers(pt(20.0, 30.0)));
+        assert!(!a.holds(pt(20.0, 39.0), 1.5) && a.holds(pt(20.0, 37.0), 1.5));
+    }
 
     /// Text on copper blocks the router, text elsewhere does not.
     #[test]

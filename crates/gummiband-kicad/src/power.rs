@@ -982,6 +982,8 @@ pub struct ViaRoom<'a> {
     /// Courtyards a via may sit in all the same (the part the vias belong to).
     own_parts: Vec<String>,
     foreign_zones: Vec<&'a ZoneFill>,
+    /// A via must land in the copper of a plane of its net (see [`ViaRoom::into_plane`]).
+    into_plane: bool,
 }
 
 impl<'a> ViaRoom<'a> {
@@ -1003,6 +1005,7 @@ impl<'a> ViaRoom<'a> {
             margin,
             avoid_courtyards,
             own_parts: Vec::new(),
+            into_plane: false,
             foreign_zones: zf
                 .iter()
                 .filter(|z| z.net != Some(net) && !b.layers[z.layer as usize].is_plane)
@@ -1014,6 +1017,19 @@ impl<'a> ViaRoom<'a> {
     pub fn allow_in(mut self, parts: Vec<String>) -> Self {
         self.own_parts = parts;
         self
+    }
+
+    /// Vias must land in the copper of a plane of the net: inside its zone outline, outside the
+    /// higher priority zones of other nets on the layer, with room for the via and the clearance.
+    pub fn into_plane(mut self) -> Self {
+        self.into_plane = true;
+        self
+    }
+
+    /// Whether a via at p reaches a plane of the net.
+    pub fn reaches_plane(&self, p: Point) -> bool {
+        let need = self.r + self.own;
+        self.b.planes.iter().any(|pl| pl.net == self.net && pl.holds(p, need))
     }
 
     fn edge_dist(&self, p: Point) -> f64 {
@@ -1037,10 +1053,13 @@ impl<'a> ViaRoom<'a> {
         if placed.iter().any(|q| q.dist(p) < self.pitch()) {
             return false;
         }
+        if self.into_plane && !self.reaches_plane(p) {
+            return false;
+        }
         if self.avoid_courtyards
-            && b.courtyards
-                .iter()
-                .any(|(part, c)| !self.own_parts.contains(part) && c.grow(r).contains(p))
+            && b.courtyards_at(p, r)
+                .into_iter()
+                .any(|part| !self.own_parts.iter().any(|o| o == part))
         {
             return false;
         }

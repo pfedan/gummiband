@@ -86,6 +86,8 @@ enum Piece {
     Via {
         c: crate::geom::Point,
         r: f64,
+        /// Drill diameter (0 for a branch point without hole).
+        drill: f64,
         net: NetId,
     },
 }
@@ -134,6 +136,7 @@ impl<'a> Copper<'a> {
             pieces.push(Piece::Via {
                 c: v.at,
                 r: v.diameter / 2.0,
+                drill: v.drill,
                 net: v.net,
             });
         }
@@ -163,7 +166,13 @@ impl<'a> Copper<'a> {
             layer,
             net,
         });
-        let vias = vias.iter().map(|&(c, d)| Piece::Via { c, r: d / 2.0, net });
+        let drill = self.board.class_of(net).via_drill;
+        let vias = vias.iter().map(|&(c, d)| Piece::Via {
+            c,
+            r: d / 2.0,
+            drill,
+            net,
+        });
         segs.chain(vias).all(|p| self.violations(&p, None).is_empty())
     }
 
@@ -219,8 +228,31 @@ impl<'a> Copper<'a> {
                 required: board.rules.edge_clearance,
             });
         }
+        let h2h = board.rules.hole_to_hole;
         for j in self.oidx.query(&bb) {
             let o = &board.obstacles[j as usize];
+            // hole to hole holds for every net, the own one too (KiCad's hole_to_hole)
+            if let (Piece::Via { c, drill, .. }, Some(h)) = (p, o.hole)
+                && *drill > 0.0
+            {
+                let oc = o.shape.bbox().center();
+                let d = c.dist(oc) - h - drill / 2.0;
+                // the same via, kept and in the geometry as well
+                let itself = o.net == Some(net) && c.dist(oc) < 1e-3;
+                if !itself && d < h2h - 1e-4 {
+                    out.push(Violation {
+                        what: format!(
+                            "hole_to_hole {}~{}",
+                            board.nets[net as usize].name,
+                            o.net.map_or("-".to_string(), |n| board.nets[n as usize].name.clone())
+                        ),
+                        nets: (net, o.net),
+                        at: *c,
+                        actual: d,
+                        required: h2h,
+                    });
+                }
+            }
             if o.net == Some(net) && o.kind != ObstacleKind::Hole {
                 continue;
             }
@@ -278,6 +310,33 @@ impl<'a> Copper<'a> {
                 continue;
             }
             let q = &self.pieces[j as usize];
+            if let (
+                Piece::Via { c, drill, net: n1, .. },
+                Piece::Via {
+                    c: c2,
+                    drill: d2,
+                    net: n2,
+                    ..
+                },
+            ) = (p, q)
+                && *drill > 0.0
+                && *d2 > 0.0
+                && c.dist(*c2) > 1e-3
+            {
+                let d = c.dist(*c2) - drill / 2.0 - d2 / 2.0;
+                if d < h2h - 1e-4 {
+                    out.push(Violation {
+                        what: format!(
+                            "hole_to_hole {}~{}",
+                            board.nets[*n1 as usize].name, board.nets[*n2 as usize].name
+                        ),
+                        nets: (*n1, Some(*n2)),
+                        at: *c,
+                        actual: d,
+                        required: h2h,
+                    });
+                }
+            }
             let (qnet, d, both_layers) = match (p, q) {
                 (
                     Piece::Seg { a, b, r, layer, .. },
@@ -289,8 +348,8 @@ impl<'a> Copper<'a> {
                         net: n2,
                     },
                 ) => (*n2, seg_seg_dist(*a, *b, *c, *d) - r - r2, layer == l2),
-                (Piece::Seg { a, b, r, .. }, Piece::Via { c, r: r2, net: n2 })
-                | (Piece::Via { c, r: r2, net: n2 }, Piece::Seg { a, b, r, .. }) => {
+                (Piece::Seg { a, b, r, .. }, Piece::Via { c, r: r2, net: n2, .. })
+                | (Piece::Via { c, r: r2, net: n2, .. }, Piece::Seg { a, b, r, .. }) => {
                     let n = if matches!(p, Piece::Via { .. }) {
                         match q {
                             Piece::Seg { net, .. } => *net,
@@ -301,7 +360,12 @@ impl<'a> Copper<'a> {
                     };
                     (n, point_seg_dist(*c, *a, *b) - r - r2, true)
                 }
-                (Piece::Via { c, r, .. }, Piece::Via { c: c2, r: r2, net: n2 }) => (*n2, c.dist(*c2) - r - r2, true),
+                (
+                    Piece::Via { c, r, .. },
+                    Piece::Via {
+                        c: c2, r: r2, net: n2, ..
+                    },
+                ) => (*n2, c.dist(*c2) - r - r2, true),
             };
             if qnet == net || !both_layers {
                 continue;
@@ -352,6 +416,23 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
 /// (`!A.intersectsCourtyard(..)`) sees it the same way, with the shape of the track.
 fn min_widths(board: &Board, geo: &Geometry) -> Vec<Violation> {
     let mut out = Vec::new();
+    // the board minimum holds everywhere, in exempt courtyards too (a taper or a neck below it
+    // is what KiCad reports as track_width or connection_width)
+    let floor = board.rules.width_floor();
+    for t in &geo.tracks {
+        for w in t.pts.windows(2) {
+            let width = t.piece_width(w[0], w[1]);
+            if floor > 0.0 && width < floor - 1e-6 && w[0].dist(w[1]) > 1e-6 {
+                out.push(Violation {
+                    what: format!("width {} below the board minimum", board.nets[t.net as usize].name),
+                    nets: (t.net, None),
+                    at: w[0].lerp(w[1], 0.5),
+                    actual: width,
+                    required: floor,
+                });
+            }
+        }
+    }
     for t in &geo.tracks {
         let cls = board.class_of(t.net);
         let Some(min) = cls.min_width else {
@@ -741,6 +822,72 @@ pub(crate) mod tests {
             origin: None,
             resting: false,
         }
+    }
+
+    /// Hole to hole holds for the own net too: a routed via next to a locked via of its net, and
+    /// two routed vias of one net; the board minimum width holds in exempt courtyards as well.
+    #[test]
+    fn same_net_holes_and_the_board_minimum_width() {
+        let mut b = current_board();
+        b.classes[0].min_width = None;
+        b.obstacles.push(crate::board::Obstacle {
+            shape: Shape::Circle {
+                c: pt(5.0, 5.0),
+                r: 0.4,
+            },
+            layers: b.all_layers(),
+            net: Some(0),
+            kind: ObstacleKind::Via,
+            hole: Some(0.2),
+            clearance: 0.2,
+            pin: None,
+            locked: true,
+        });
+        // 0.55 mm apart: the holes are 0.15 mm apart, 0.25 needed
+        let near = |x: f64| Geometry {
+            tracks: Vec::new(),
+            vias: vec![via(x)],
+        };
+        let v = check(&b, &near(5.55));
+        assert!(v.iter().any(|v| v.what.starts_with("hole_to_hole")), "{v:?}");
+        assert!(
+            check(&b, &near(6.0))
+                .iter()
+                .all(|v| !v.what.starts_with("hole_to_hole"))
+        );
+        // the kept via itself in the geometry is no violation
+        assert!(
+            check(&b, &near(5.0))
+                .iter()
+                .all(|v| !v.what.starts_with("hole_to_hole"))
+        );
+        let two = Geometry {
+            tracks: Vec::new(),
+            vias: vec![via(7.0), via(7.55)],
+        };
+        assert_eq!(
+            check(&b, &two)
+                .iter()
+                .filter(|v| v.what.starts_with("hole_to_hole"))
+                .count(),
+            1
+        );
+
+        // a track tapered to 0.105 mm under a board minimum of 0.127 mm
+        let mut t = line((1.0, 2.0), (9.0, 2.0), 0);
+        t.width = 0.105;
+        t.neck_w = 0.105;
+        let geo = Geometry {
+            tracks: vec![t],
+            vias: Vec::new(),
+        };
+        assert!(check(&b, &geo).iter().all(|v| !v.what.contains("board minimum")));
+        b.rules.kicad_min_width = 0.127;
+        let v = check(&b, &geo);
+        assert!(
+            v.iter().any(|v| v.what.contains("board minimum") && v.is_width()),
+            "{v:?}"
+        );
     }
 
     /// IPC-2221 as the rules see it: a 0.4 mm via carries what 0.18 mm of 2 oz outer copper

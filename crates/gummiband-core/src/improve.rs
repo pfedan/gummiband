@@ -497,10 +497,10 @@ fn place_new_vias(tracks: &mut [Track], vias: &mut [Via], planes: &[crate::board
         // made through that plane, also one that only shares the via (GB_PLANE_HOLD; GB_PLANE_LOG
         // says when it would happen)
         let r = v.diameter / 2.0;
-        let home = planes.iter().find(|pl| pl.net == v.net && pl.outline.contains(v.at));
+        let home = planes.iter().find(|pl| pl.net == v.net && pl.covers(v.at));
         if let Some(pl) = home {
-            let floor = (r + 0.3).min(pl.outline.boundary_dist(v.at));
-            let stays = pl.outline.contains(p) && pl.outline.boundary_dist(p) >= floor;
+            let floor = (r + 0.3).min(pl.edge_dist(v.at));
+            let stays = pl.holds(p, floor);
             if !stays {
                 if ideas().plane_log {
                     eprintln!(
@@ -2052,6 +2052,8 @@ pub(crate) fn taper_spots(board: &Board, geo: &Geometry) -> Option<Geometry> {
                 let Some(min) = board.class_of(net).min_width else {
                     continue;
                 };
+                // never below the board minimum (KiCad: connection_width, track_width)
+                let min = min.max(board.rules.width_floor());
                 for (ti, t) in g.tracks.iter().enumerate().filter(|(_, t)| t.net == net) {
                     for (ei, e) in t.elems.iter().enumerate() {
                         let (chords, width) = elem_widths(t, e);
@@ -2642,11 +2644,11 @@ mod tests {
         assert_eq!(vias[0].at, at);
         // the same via in the plane of its net, whose border runs just past the sleeping track:
         // the way out leaves the plane, so with the hold it stays
-        let plane = crate::board::Plane {
-            net: 2,
-            layer: 1,
-            outline: crate::geom::Polygon::new(vec![pt(-5.0, -5.0), pt(15.0, -5.0), pt(15.0, 1.2), pt(-5.0, 1.2)]),
-        };
+        let plane = crate::board::Plane::new(
+            2,
+            1,
+            crate::geom::Polygon::new(vec![pt(-5.0, -5.0), pt(15.0, -5.0), pt(15.0, 1.2), pt(-5.0, 1.2)]),
+        );
         let mut tracks = vec![
             track(1, vec![pt(0.0, 1.0), pt(10.0, 1.0)], true),
             track(2, vec![site, pt(5.0, 5.0)], false),
