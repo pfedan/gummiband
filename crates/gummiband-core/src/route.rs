@@ -2921,7 +2921,8 @@ impl<'a> Router<'a> {
         let mut decap_pair: HashSet<(usize, usize)> = HashSet::new();
         if let Some(pat) = &self.cfg.patterns {
             if self.cfg.share_fanouts {
-                for s in &pat.shares {
+                let only = std::env::var("GB_SHARE_KIND").ok();
+                for s in pat.shares.iter().filter(|s| only.as_deref().is_none_or(|k| k == s.kind)) {
                     for &o in &s.others {
                         leader.insert(o, (s.leader, s.kind == "decap" && self.cfg.decaps_first));
                     }
@@ -3377,6 +3378,17 @@ impl<'a> Router<'a> {
                                 );
                             }
                         }
+                        if self.detour_bridge(ci) {
+                            // a pin that was to share the fan-out of a neighbour took vias or a
+                            // long way to it: it fans out on its own instead
+                            self.rip_up(ci);
+                            if let Goal::Pins(t) = std::mem::replace(&mut self.conns[ci].goal, Goal::Plane) {
+                                for p in t {
+                                    self.pending[p] = self.pending[p].saturating_sub(1);
+                                }
+                            }
+                            continue;
+                        }
                         return true;
                     }
                 }
@@ -3384,6 +3396,23 @@ impl<'a> Router<'a> {
             }
         }
         false
+    }
+
+    /// True if connection ci joins a pin of a plane net to a neighbour that has the fan-out
+    /// ([`RouterConfig::share_fanouts`]), and its route is no short way on one layer.
+    fn detour_bridge(&self, ci: usize) -> bool {
+        let c = &self.conns[ci];
+        let Goal::Pins(t) = &c.goal else { return false };
+        if !self.cfg.share_fanouts || !self.board.planes.iter().any(|p| p.net == c.net) {
+            return false;
+        }
+        if !self.conn_vias[ci].is_empty() {
+            return true;
+        }
+        let from = self.board.pins[c.from].pos;
+        let straight = t.iter().map(|&p| self.board.pins[p].pos.dist(from)).fold(f64::INFINITY, f64::min);
+        let way: f64 = self.conn_points(ci).windows(2).map(|w| w[0].dist(w[1])).sum();
+        way > 2.0 * straight + 1.0
     }
 
     /// Connections whose routes pass close to the straight line of a failed connection.
