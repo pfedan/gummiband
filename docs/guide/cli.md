@@ -87,9 +87,13 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | `--via-pitch MM` | 0.5 | Grid pitch of the candidate via positions. Finer grids allow more via places and cost memory and time. |
 | `--via-cost MM` | 3.0 | Cost of a via in millimetres of track. Lower gives more vias and shorter tracks; the search varies the value around what you give. |
 | `--pair-pull W` | 0 (off) | Experimental. Differential pairs are recognised by net name as KiCad pairs them (`_P`/`_N`, `DP`/`DN`, `+`/`-`). With a weight above 0 the first net of a pair is routed normally and the second gets a cost bonus for staying next to it. The output then reports how much of the pair length runs coupled (same layer, at most 1 mm apart). Limits: the spacing is only roughly kept, there is no impedance control and no length matching, and on small boards the pull can cost many clearance violations. Try 1 on boards with real pairs and compare the DRC. |
-| `--pairs` | off | Experimental. Route each differential pair as one wide track and split it into two parallel tracks. Width and gap come from `diff_pair_gap` and `track_width` rules in the `.kicad_dru` (also per `(layer inner)` or `(layer outer)`), then from the net class. Output and `--report` list every pair. Keeps pairs together, but costs connections on dense boards and can leave clearance errors and shorts next to pads and vias (seen on Lichtschnitzel at J1, on `diff_pairs` at a via, on Jetson 81 instead of 51 open connections): always check the result with the KiCad DRC. |
-| `--pair-skew MM` | 0.1 | With `--pairs`: length difference left within a pair; the shorter track gets bumps where they fit. A `skew` rule may ask for less. |
+| `--pairs` | off | Experimental. Route each differential pair as one wide track and split it into two parallel tracks. A pair is coupled only if a `diff_pair_gap` rule or a net class of its own (not `Default`) marks it as one; a `MOTOR_P`/`MOTOR_N` in the default class without such a rule stays two nets (`--pair-all` couples it anyway). Width and gap come from `diff_pair_gap` and `track_width` rules in the `.kicad_dru` (also per `(layer inner)` or `(layer outer)`), then from the net class. Output and `--report` list every pair. Keeps pairs together, but costs connections on dense boards and can leave clearance errors and shorts next to pads and vias (seen on Lichtschnitzel at J1, on `diff_pairs` at a via, on Jetson 81 instead of 51 open connections): always check the result with the KiCad DRC. |
+| `--pair-all` | off | With `--pairs`: couple every pair recognised by name, also without a pair rule or net class. |
+| `--pair-skew MM` | 0.1 | With `--pairs`: length difference left within a pair; the shorter track gets bumps where they fit. A `skew` rule with `(within_diff_pairs)` may ask for less. |
 | `--pair-zdiff OHM` | none | With `--pairs`: target differential impedance, sets the track width per layer from the stackup (estimate after IPC-2141), the gap stays. |
+| `--no-tune` | off | Leave the lengths as routed. By default, when the `.kicad_dru` has `length` or `skew` rules, the finished routing gets meanders that bring the nets that are too short into range, see [Length matching](concepts.md#length-matching). |
+| `--tune-amplitude MM` | 1 | Highest meander bump (centre line above the original line). |
+| `--tune-spacing W` | 2 | Air between neighbouring meander legs, in track widths (at least the clearance). |
 | `--layer-dirs W` | 0.5 | Weight of preferred directions per layer: the routing layers alternate horizontal and vertical, and running against the grain costs extra. A soft cost, used by every third run of the portfolio, so the search has candidates with and without it. 0 switches it off. |
 
 A good default for a real board with a few hundred connections is the plain `--keep-locked`: 14
@@ -144,6 +148,13 @@ wrote 83 items to routed.kicad_pcb
   as two separate nets, with the reason), width and gap, the estimated differential impedance
   from the stackup (0 if the stackup is unknown), both track lengths, the remaining skew, vias
   and polarity swaps through the pair's vias.
+- `length tuning: N nets, M reached their length`: with `length` or `skew` rules, how many nets
+  the meanders were to lengthen and how many got there; one line for each net that did not
+  (before, after, aim, `(as a pair)` for a pair meandered as a band).
+- `length rules: ...`: every `length`, `skew`, `diff_pair_uncoupled` and `diff_pair_gap` rule
+  of the `.kicad_dru` with the nets (or pairs) it holds for, measured as the KiCad DRC measures
+  them, and one line per net out of range with its length and, for skew, its distance to the
+  longest net of the group. `gummiband lengths` prints the same for any routed file.
 - `length lower bound`: an estimate of the shortest possible total signal length (minimum
   spanning trees, Steiner corrected). The percentage says how far the result is above it; plane
   fan-outs are not in the bound, so the real distance is smaller.
@@ -182,6 +193,11 @@ wrote 83 items to routed.kicad_pcb
 With `--pairs` the report also has `pairs`: one entry per differential pair with `p`, `n`,
 `wide`, `note` (why a pair was not routed wide, if so), `width`, `gap`, `length_p`, `length_n`,
 `skew`, `vias`, `swaps` and `zdiff`.
+
+With length rules the report has `matching` (every rule: `rule`, `kind`, `value` with `min`,
+`opt`, `max`, `within_pairs`, and `nets` with `net`, `length`, `skew`, `target`, `ok`) and, unless
+`--no-tune`, `length_tuning` (`nets`: `net`, `before`, `after`, `aim`, `coupled`; `patterns`: one
+per meander with its nets, layer, base line and settings).
 
 `violations[].nets` is the routed net and the other net (or null for an obstacle without a net,
 such as the board edge or a hole). Positions are board millimetres as KiCad shows them. Scripts
@@ -308,6 +324,21 @@ gummiband strip board.kicad_pcb -o stripped.kicad_pcb [--keep-locked] [--keep-zo
 Removes all tracks, arcs and vias and the copper zones on the routing layers (pours on plane
 layers stay). This is how the benchmarks make an unrouted board out of a finished one.
 `--keep-locked` keeps locked tracks and vias, `--keep-zones` keeps the outer pours.
+
+## `gummiband lengths`
+
+```bash
+gummiband lengths routed.kicad_pcb [--nets 'DQ*,CLK*'] [--json]
+```
+
+Measures a routed board as the KiCad DRC does and checks the `length`, `skew`,
+`diff_pair_uncoupled` and `diff_pair_gap` rules of its `.kicad_dru`: net lengths with the via
+heights from the stackup and the pad-to-die lengths, the skew within each group (a rule holds for
+the nets it wins, the last matching rule per kind; the target is the longest net), the coupled and
+uncoupled length of each differential pair. Tracks of KiCad tuning patterns count for the length
+and stay out of the coupling, as in KiCad. `--nets` also lists the lengths of these nets (glob
+patterns). On the Antmicro DDR5 testbed the lengths equal those of the DRC to 0.0001 mm; the
+uncoupled length can differ, KiCad's coupling test has corner cases this one does not copy.
 
 ## Judging a result with KiCad
 

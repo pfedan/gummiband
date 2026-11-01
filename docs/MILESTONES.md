@@ -58,7 +58,15 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   violations, Lichtschnitzel 347/348 instead of 348/348. Open: the KiCad DRC is not clean yet (`diff_pairs` 1 short at a via, Lichtschnitzel near J1), the
   lost connections on dense boards, more than one wide track per pair
   (branches, USB-C with both connector rows), necks for fine pitch, a crossover without a via,
-  matching between pairs (`length` rules), the router knowing about polarity.
+  the router knowing about polarity. Since 2026-11-01 pairs are coupled only where a
+  `diff_pair_gap` rule or `--pair-all` asks for it, and the uncoupled length is reported.
+- Length matching (2026-11-01): `length`, `skew` and `diff_pair_uncoupled` rules read as KiCad
+  groups them, lengths measured as the KiCad DRC does (equal to 0.0001 mm on the DDR5 testbed),
+  `gummiband lengths`, meanders for nets and pairs that are too short, written as KiCad tuning
+  patterns. Measured on `matching` and Antmicro's DDR5 testbed (see `docs/guide/benchmarks.md`):
+  the clock reaches its window, but on DDR5 only 7 of 22 nets reach their length. Open: room for
+  meanders in tight bundles (the router reserves none), phase matching near the source, carrying
+  the pair to its end and breakout zones, via pairs, the open end with pairs.
 - Rule engine: more custom rule conditions (positions, footprints, layers).
 - More than two signal layers (pulled forward with the synthetic 4 layer benchmarks).
 - Alternative placements as portfolio variants (smaller, square, round outlines with the

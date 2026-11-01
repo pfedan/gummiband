@@ -87,7 +87,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
-| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `move_parts?`, `fixed?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `air?`, `prefer_width?`, `angles?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
+| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `move_parts?`, `fixed?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_all?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
 | `angles_45` | `path`, `output?`, `nets?` | path of the written `<input>.45.kicad_pcb`, runs of track looked at and changed, length before and after, pieces off the grid, sharp corners, Gummiband's violations before and after |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?` | PNG (image content) and its path, region, pixels per mm |
@@ -238,7 +238,10 @@ stay). Defaults match the CLI: `runs` 14 (a constant, so results do not depend o
 `geometry_generations` 3, `via_pitch` 0.5 mm, `via_cost` 3.0, `layer_dirs` 0.5 (preferred
 directions per layer for every third run, 0 = off), `pair_pull` 0 (experimental pull between the
 nets of a differential pair), `pairs` false (experimental: a pair as one wide track that is split
-in two, see the CLI guide), `pair_skew` 0.1 mm, `pair_zdiff` none, `negotiate` 0 (experimental negotiated routing, 20 rounds
+in two, see the CLI guide; only pairs with a pair rule or a net class of their own, `pair_all`
+true for every pair), `pair_skew` 0.1 mm, `pair_zdiff` none, `tune` true (meanders for the
+`length` and `skew` rules of the `.kicad_dru`, written as KiCad tuning patterns),
+`tune_amplitude` 1 mm, `negotiate` 0 (experimental negotiated routing, 20 rounds
 work well and take about twice the time), `air` 0 mm, `prefer_width` 0 (off), `angles` `"any"` (`"45"` turns the result into
 conventional 45 degree routing as a last step, like `--angles 45`). `seed` picks the search seed
 (default fixed): the same seed gives the same result, another one a different try. `keep_all`
@@ -269,7 +272,10 @@ Result fields: `board`, `moved`, `input`, `output`, `seconds`, `threads`, `conne
 `length_mm`, `violations`), `pairs` (with `pairs`), `coupling` (every recognised pair, whatever
 the settings: `p`, `n`, `coupled_mm` within width + gap + 0.1 mm of the partner on the same layer,
 `length_mm` of both nets, `vias_p`, `vias_n`), `notes` (hints, such as pairs routed without
-`pair_pull` or `pairs`), `nets` (per routed net, longest first: `net`,
+`pair_pull` or `pairs`), `length_tuning` (every net the tuning aimed at: `net`, `before_mm`,
+`after_mm`, `aim_mm`, `as_pair`), `length_rules` (every length, skew, uncoupled and gap rule
+after the tuning, measured as the KiCad DRC measures: `rule`, `kind`, `min_mm`, `opt_mm`,
+`max_mm`, `nets`, `failed` with `net`, `length_mm`, `skew_mm`), `nets` (per routed net, longest first: `net`,
 `length_mm`, `vias`, `min_width_mm`, `max_width_mm`), `blocked` (per unrouted connection the
 `nets` that run in its way, a neighbourhood estimate rather than an exact analysis, meant for
 choosing what to prioritize, skip or move), `copied`, `angles_45` (with `angles` `"45"`:

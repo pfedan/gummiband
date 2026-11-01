@@ -241,6 +241,33 @@ track and split afterwards.
 Width, gap and via gap per layer come from `diff_pair_gap` and `track_width` rules in the
 `.kicad_dru`, then the net class. `--pair-zdiff` sets the width per layer from the stackup with the
 IPC-2141 formulas (microstrip outside, symmetric stripline inside); the report gives the estimate.
+A pair is merged only if a `diff_pair_gap` rule or a net class of its own marks it as a pair
+(`Board::coupled_pairs`; `--pair-all` merges every pair recognised by name).
+
+## Length rules and tuning
+
+`gummiband-kicad::dru::match_rules` reads the `length`, `skew`, `diff_pair_uncoupled` and
+`diff_pair_gap` constraints as KiCad groups them: per net and kind the last rule whose condition
+holds wins (`Board::match_rules`). `matching.rs` measures as KiCad's DRC does
+(`LENGTH_DELAY_CALCULATION`, `DRC_TEST_PROVIDER_MATCHED_LENGTH`,
+`DRC_TEST_PROVIDER_DIFF_PAIR_COUPLING`): tracks joined into runs where exactly two ends meet, the
+part inside a via (and inside a pad, for runs ending in its centre) straightened, vias over the
+layers they really connect with the stackup distance (outer copper in full, inner copper half),
+pad-to-die lengths; skew against the longest net of a group; coupling of exactly parallel lines
+(within KiCad's int32 tolerance) and of arcs about nearly the same centre, if nothing lies between
+and the gap fits the rule. Tracks of tuning patterns stay out of the coupling, as in KiCad.
+
+`tune.rs` runs after the routing (and after the 45 degree step) when the board has such rules.
+It computes an aim per net (length window first, then the skew groups against their longest
+net), then places meanders: per straight line of the track, slots of `4r` along the line
+(`2r` = track width plus the leg spacing), per slot the side and the highest bump that keeps the
+clearance to all foreign copper and the edge (bisection on the height), then one common cap on
+the heights, found by bisection, so that the gain matches the need; below the gain of one low
+bump, a single bump with a smaller radius. A pair whose two nets both need length is tuned on
+the lines where its two tracks run side by side: the bumps are planned for the centre line with
+the width of the whole band, and both tracks are its offsets, so both gain the same. The meander
+becomes a track of its own (the original track is split around it) and a `tune::Pattern`, which
+the writer turns into a KiCad `tuning_pattern` group (base line, target, settings, members).
 
 ## Search
 

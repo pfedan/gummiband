@@ -399,6 +399,11 @@ pub struct RouteIn {
     /// directions, chamfered corners, a few percent more length). It never adds a clearance
     /// violation; where no 45 degree path fits, a piece keeps its angle (see `angles_45`).
     pub angles: Option<String>,
+    /// Meanders for the length and skew rules of the .kicad_dru (default true; without such
+    /// rules nothing is tuned). Each meander is written as a KiCad tuning pattern.
+    pub tune: Option<bool>,
+    /// Highest meander bump in mm (default 1).
+    pub tune_amplitude: Option<f64>,
     /// Maximum number of violations listed (default 50; the total is always given).
     pub max_violations: Option<usize>,
 }
@@ -611,6 +616,42 @@ pub struct PairOut {
     pub swaps: usize,
 }
 
+/// A length, skew, uncoupled or gap rule of the .kicad_dru and how the result keeps it, measured
+/// as KiCad's DRC measures.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LengthRuleOut {
+    pub rule: String,
+    /// "length", "skew", "skew within pairs", "uncoupled" or "gap".
+    pub kind: String,
+    pub min_mm: Option<f64>,
+    pub opt_mm: Option<f64>,
+    pub max_mm: Option<f64>,
+    /// Nets (pairs for uncoupled) the rule holds for.
+    pub nets: usize,
+    /// Those out of range.
+    pub failed: Vec<LengthNetOut>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LengthNetOut {
+    pub net: String,
+    /// Length as KiCad measures it (for uncoupled: the uncoupled length).
+    pub length_mm: f64,
+    /// Difference to the longest net of the group, for skew rules.
+    pub skew_mm: Option<f64>,
+}
+
+/// A net the length tuning lengthened.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TunedOut {
+    pub net: String,
+    pub before_mm: f64,
+    pub after_mm: f64,
+    pub aim_mm: f64,
+    /// Meandered together with its pair partner.
+    pub as_pair: bool,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CouplingOut {
     pub p: String,
@@ -678,6 +719,10 @@ pub struct RouteOut {
     pub copied: Vec<String>,
     /// What the 45 degree step did, with `angles` "45".
     pub angles_45: Option<AnglesOut>,
+    /// The length tuning: every net it aimed at.
+    pub length_tuning: Vec<TunedOut>,
+    /// The length, skew, uncoupled and gap rules of the .kicad_dru after the tuning.
+    pub length_rules: Vec<LengthRuleOut>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1513,6 +1558,18 @@ fn route_blocking(
             sharp_corners: st.sharp_corners,
         }
     });
+    let tuned = (p.tune != Some(false) && !b.match_rules.is_empty()).then(|| {
+        let cfg = gummiband_core::tune::TuneConfig {
+            style: if p.angles.as_deref() == Some("45") {
+                gummiband_core::tune::Style::Chamfer
+            } else {
+                gummiband_core::tune::Style::Round
+            },
+            amplitude: p.tune_amplitude.unwrap_or(1.0),
+            ..Default::default()
+        };
+        gummiband_core::tune::tune(b, &mut res.geometry, &cfg)
+    });
     let seconds = t0.elapsed().as_secs_f64();
     let viol = gummiband_core::check::check(b, &res.geometry);
 
@@ -1520,8 +1577,11 @@ fn route_blocking(
     let changes = gummiband_core::import::soft_changes(b, &res.geometry);
     let rests = |origin: Option<u32>, list: &[bool]| origin.is_some_and(|o| !list[o as usize]);
     let mut items = Vec::new();
+    let mut of_track: Vec<std::ops::Range<usize>> = Vec::with_capacity(res.geometry.tracks.len());
     for t in &res.geometry.tracks {
+        let start = items.len();
         if rests(t.origin, &changes.chains) {
+            of_track.push(start..start);
             continue;
         }
         for e in &t.elems {
@@ -1543,6 +1603,32 @@ fn route_blocking(
                 },
             });
         }
+        of_track.push(start..items.len());
+    }
+    for pat in tuned.iter().flat_map(|r| &r.patterns) {
+        let members: Vec<usize> = pat
+            .tracks
+            .iter()
+            .filter_map(|&i| of_track.get(i))
+            .flat_map(|r| r.clone())
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        items.push(write::Item::Pattern(Box::new(write::PatternItem {
+            layer: pat.layer,
+            net: pat.nets[0],
+            base: pat.base[0],
+            base_coupled: pat.base.get(1).copied(),
+            rounded: pat.rounded,
+            width: pat.width,
+            gap: pat.gap,
+            amplitude: pat.amplitude,
+            spacing: pat.spacing,
+            target: pat.aim,
+            length: gummiband_core::matching::net_length(b, &res.geometry, pat.nets[0]).total(),
+            members,
+        })));
     }
     for v in &res.geometry.vias {
         if v.drill == 0.0 || rests(v.origin, &changes.nodes) {
@@ -1644,10 +1730,54 @@ fn route_blocking(
             names.join(", ")
         ));
     }
+    let length_tuning: Vec<TunedOut> = tuned
+        .iter()
+        .flat_map(|r| &r.nets)
+        .map(|n| TunedOut {
+            net: n.net.clone(),
+            before_mm: r3(n.before),
+            after_mm: r3(n.after),
+            aim_mm: r3(n.aim),
+            as_pair: n.coupled,
+        })
+        .collect();
+    let length_rules: Vec<LengthRuleOut> = gummiband_core::matching::check(b, &res.geometry)
+        .into_iter()
+        .map(|r| {
+            use gummiband_core::board::MatchKind;
+            LengthRuleOut {
+                kind: match (r.kind, r.within_pairs) {
+                    (MatchKind::Length, _) => "length",
+                    (MatchKind::Skew, false) => "skew",
+                    (MatchKind::Skew, true) => "skew within pairs",
+                    (MatchKind::Uncoupled, _) => "uncoupled",
+                    (MatchKind::Gap, _) => "gap",
+                }
+                .to_string(),
+                min_mm: r.value.min,
+                opt_mm: r.value.opt,
+                max_mm: r.value.max,
+                nets: r.nets.len(),
+                failed: r
+                    .nets
+                    .iter()
+                    .filter(|n| !n.ok)
+                    .map(|n| LengthNetOut {
+                        net: n.net.clone(),
+                        length_mm: r3(n.length),
+                        skew_mm: n.skew.map(r3),
+                    })
+                    .collect(),
+                rule: r.rule,
+            }
+        })
+        .collect();
     let st = &res.stats;
     let out = RouteOut {
         moved,
         angles_45,
+        length_tuning,
+        length_rules,
         coupling,
         notes,
         nets: nets_out,
