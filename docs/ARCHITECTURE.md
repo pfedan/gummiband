@@ -157,8 +157,11 @@ the portals, where a wrap around a far pivot could swing past a neighbour.
 
 ## Importing existing copper
 
-For finishing nets on a routed board (`--keep-all --nets ... --shove`) the unlocked tracks and
-vias of the other nets are no obstacles but part of the topology (`gummiband-core::import`).
+For finishing nets on a routed board (`--keep-all --nets`, shove on by default) the unlocked
+tracks and vias of the other nets are no obstacles but part of the topology
+(`gummiband-core::import`). `finish_nets` drives it for the CLI and the MCP server: when a
+connection still finds no way, the nets near its pins give way in growing circles, and the try
+with the fewest open connections, then violations is kept.
 
 - Board side: `Board::soften` builds chains from the file's items: a chain is a run of one width
   between two nodes. Nodes are vias, branches, open ends and changes of width; ends in a pad stay

@@ -53,6 +53,13 @@ Standing decisions of the project owner, kept here so that they survive any sess
   their relaxation. The night series measured 12 % and 15 % less cost after 20 minutes on
   Lichtschnitzel and Arty, KiCad DRC clean in 5 of 7 runs against 3 of 7. Each part keeps a switch
   to turn it off; the other ideas of that night stay off.
+- The algorithms use the freedoms a board leaves them by default, a switch only turns one off
+  (Daniel, 2026-11-01). Everything that is not locked may give way within the rules. First step:
+  finishing nets (`--keep-all --nets`, MCP `keep_all` with `nets`) shoves the unlocked tracks of
+  the other nets aside, and if a connection still finds no way, the nets near its pins give way
+  within 8 mm; the try with the fewest open connections is kept, so giving way never costs a
+  connection. In the night series of 2026-11-01 plain left 4 of 16 re-laid nets open, shove none.
+  Next in line: tapering at tight spots, shove in the open end, moving parts.
 - Convergence means that bold changes no longer help, not that some number of rounds went by. When
   it is reached, the user gets the results that differ in vias and length, not one of them.
 - Copper does not have to lie at the limit: `--air` gives it a reserve where there is room. On by

@@ -29,7 +29,7 @@ the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board 
 look at problems. To pre-route a critical part by hand (datasheet layout): part_info -> \
 add_locked_copper -> route the returned board id. move_part and add_zone edit the same working \
 copy. To change one net on a routed board: load the routed file -> route with keep_all, nets and \
-reroute. To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short), add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
+reroute (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short), add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
 Routing is CPU heavy (seconds to minutes); routes run one at a time.";
 
 // ------------------------------------------------------------------------------ session
@@ -327,6 +327,15 @@ pub struct RouteIn {
     /// With `keep_all` and `nets`: remove the unlocked tracks and vias of those nets first and
     /// route them anew. Without it a net that is already connected stays as it is.
     pub reroute: Option<bool>,
+    /// With `keep_all` and `nets`: the unlocked tracks of the other nets are part of the topology,
+    /// so a connection passes between them and they shift aside; what it does not touch stays as
+    /// it is in the file (default true; false keeps them where they are).
+    pub shove: Option<bool>,
+    /// With `keep_all` and `nets`: if a connection finds no way, the unlocked tracks of other nets
+    /// within this many mm of its pins give way and are routed again, in growing steps up to this
+    /// radius; the try with the fewest open connections is kept (default 8; 0: nothing gives
+    /// way). Locked copper and plane nets never move.
+    pub give: Option<f64>,
     /// Seed of the search. The same seed gives the same result; another one a different try.
     pub seed: Option<u64>,
     /// Weight of the pull between the nets of differential pairs (default 0: off; 1 is a good
@@ -1320,20 +1329,26 @@ fn route_blocking(
             bail!("no net named {n:?} (see list_nets)");
         }
     }
-    let (board, skipped) = apply_options(&kb.board, &options, &only);
-    let b = &board;
+    // finishing nets on a routed board: the unlocked tracks of the other nets shift aside and, if
+    // that is not enough, give way
+    let finishing = p.keep_all == Some(true) && !only.is_empty();
+    if !finishing && (p.shove == Some(true) || p.give.is_some_and(|g| g > 0.0)) {
+        bail!("shove and give need keep_all and nets");
+    }
+    let shove = finishing && p.shove != Some(false);
+    let give = if finishing {
+        p.give.unwrap_or(gummiband_core::DEFAULT_GIVE)
+    } else {
+        0.0
+    };
+    // the nets left out of this call, for the result
+    let (_, skipped) = apply_options(&kb.board, &options, &only);
+    let (mut board, _) = apply_options(&kb.board, &options, &[]);
     let runs = p.runs.filter(|&r| r > 0).unwrap_or(gummiband_core::DEFAULT_RUNS);
     let t0 = std::time::Instant::now();
-    let tuned;
-    let b = match p.pair_zdiff {
-        Some(z) if p.pairs == Some(true) => {
-            let mut c = b.clone();
-            gummiband_core::pairs::apply_zdiff(&mut c, z);
-            tuned = c;
-            &tuned
-        }
-        _ => b,
-    };
+    if let (Some(z), Some(true)) = (p.pair_zdiff, p.pairs) {
+        gummiband_core::pairs::apply_zdiff(&mut board, z);
+    }
     let angles_45 = match p.angles.as_deref() {
         None | Some("any") => false,
         Some("45") => true,
@@ -1361,19 +1376,26 @@ fn route_blocking(
         air: p.air.unwrap_or(0.0),
         prefer_width: p.prefer_width.unwrap_or(0.0),
     };
-    let (res, pair_reports) = if p.pairs == Some(true) {
-        let cfg = gummiband_core::pairs::PairConfig {
-            skew: p.pair_skew.unwrap_or(0.1),
-            zdiff: p.pair_zdiff,
-        };
-        let (_, res, reports) = gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, &search_cfg, &cfg);
-        (res, reports)
-    } else {
-        (
-            gummiband_core::route_board(b, &sub_cfg, &router_cfg, &search_cfg).1,
-            Vec::new(),
-        )
-    };
+    let finished = gummiband_core::finish_nets(&board, &only, shove, give, |b| {
+        if p.pairs == Some(true) {
+            let cfg = gummiband_core::pairs::PairConfig {
+                skew: p.pair_skew.unwrap_or(0.1),
+                zdiff: p.pair_zdiff,
+            };
+            gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, &search_cfg, &cfg)
+        } else {
+            let (sub, res) = gummiband_core::route_board(b, &sub_cfg, &router_cfg, &search_cfg);
+            (sub, res, Vec::new())
+        }
+    });
+    let gummiband_core::Finished {
+        board: routed,
+        res,
+        extra: pair_reports,
+        given,
+        ..
+    } = finished;
+    let b = &routed;
     let mut res = res;
     let angles_45 = angles_45.then(|| {
         let st = gummiband_core::octo::octilinear(b, &mut res.geometry);
@@ -1388,8 +1410,14 @@ fn route_blocking(
     let seconds = t0.elapsed().as_secs_f64();
     let viol = gummiband_core::check::check(b, &res.geometry);
 
+    // with shove: what rests of the other nets stays in the file as it is
+    let changes = gummiband_core::import::soft_changes(b, &res.geometry);
+    let rests = |origin: Option<u32>, list: &[bool]| origin.is_some_and(|o| !list[o as usize]);
     let mut items = Vec::new();
     for t in &res.geometry.tracks {
+        if rests(t.origin, &changes.chains) {
+            continue;
+        }
         for e in &t.elems {
             items.push(match *e {
                 Elem::Line(a, bb) => write::Item::Track {
@@ -1411,6 +1439,9 @@ fn route_blocking(
         }
     }
     for v in &res.geometry.vias {
+        if v.drill == 0.0 || rests(v.origin, &changes.nodes) {
+            continue;
+        }
         items.push(write::Item::Via {
             at: v.at,
             diameter: v.diameter,
@@ -1419,12 +1450,14 @@ fn route_blocking(
         });
     }
     let keep_all = p.keep_all == Some(true);
+    let mut strip_nets = reroute_nets(&p);
+    strip_nets.extend(given.iter().cloned());
     let opts = write::StripOptions {
         unlocked: !keep_all,
         locked: !keep_locked && !keep_all,
         zone_layers: vec![],
-        nets: reroute_nets(&p),
-        items: Vec::new(),
+        nets: strip_nets,
+        items: changes.strip.clone(),
     };
     let ranges = write::strip_ranges(&kb, &opts);
     std::fs::write(&output, write::patch(&kb, &ranges, &items))

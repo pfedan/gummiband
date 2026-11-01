@@ -437,6 +437,116 @@ fn mutate(best: &Candidate, rng: &mut Rng) -> Genome {
     g
 }
 
+/// Give way radius of [`finish_nets`] in mm when nothing else is asked for: the same as the
+/// plugin's *Finish selected nets*.
+pub const DEFAULT_GIVE: f64 = 8.0;
+
+/// One try of [`finish_nets`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct GiveTry {
+    /// Radius in mm around the pins of the open connections (0: the first try, nothing gave way).
+    pub radius: f64,
+    /// Nets that gave way.
+    pub given: usize,
+    /// Connections left open, and clearance violations.
+    pub open: usize,
+    pub violations: usize,
+}
+
+/// The try that [`finish_nets`] keeps.
+pub struct Finished<T> {
+    /// The board of the result: the nets asked for and those that gave way have connections,
+    /// the others are copper.
+    pub board: Board,
+    pub sub: Substrate,
+    pub res: RouteResult,
+    /// What the route of that try returned besides.
+    pub extra: T,
+    /// The nets whose unlocked copper gave way: the result replaces it.
+    pub given: std::collections::BTreeSet<String>,
+    /// Every try in order, and the one kept.
+    pub tries: Vec<GiveTry>,
+    pub kept: usize,
+}
+
+/// Route only `nets` on a board with kept copper (all nets if it is empty); the rest stays. With
+/// `shove` the unlocked tracks of the other nets are part of the topology and shift aside where a
+/// new connection needs the room ([`Board::soften`]). If a connection of `nets` still finds no
+/// way, the unlocked tracks of other nets near its pins give way and are routed again, within 2,
+/// 4, 8 ... mm up to `give` (0: nothing gives way). The try with the fewest open connections,
+/// then the fewest clearance violations is kept; on a tie the earlier one, it moves less. So
+/// giving way can only help: a try that breaks a net that gave way loses against the one before.
+pub fn finish_nets<T>(
+    board: &Board,
+    nets: &[String],
+    shove: bool,
+    give: f64,
+    route: impl Fn(&Board) -> (Substrate, RouteResult, T),
+) -> Finished<T> {
+    let mut given = std::collections::BTreeSet::new();
+    let mut radius = 0.0;
+    let mut tries: Vec<GiveTry> = Vec::new();
+    let mut kept: Option<Finished<T>> = None;
+    loop {
+        let mut b = board.only_nets(nets, &given);
+        if shove {
+            b.soften(nets);
+        }
+        let (sub, res, extra) = route(&b);
+        let t = GiveTry {
+            radius,
+            given: given.len(),
+            open: res.stats.unrouted.len(),
+            violations: check::check(&b, &res.geometry).len(),
+        };
+        // around what was asked for; a net that gave way must not widen the circle
+        let asked: Vec<String> = res
+            .stats
+            .unrouted
+            .iter()
+            .filter(|u| nets.iter().any(|n| u.starts_with(&format!("{n} from "))))
+            .cloned()
+            .collect();
+        let better = kept.as_ref().is_none_or(|k| {
+            let best = &tries[k.kept];
+            (t.open, t.violations) < (best.open, best.violations)
+        });
+        tries.push(t);
+        if better {
+            kept = Some(Finished {
+                board: b,
+                sub,
+                res,
+                extra,
+                given: given.clone(),
+                tries: Vec::new(),
+                kept: tries.len() - 1,
+            });
+        }
+        if asked.is_empty() || give <= 0.0 {
+            break;
+        }
+        // the circle grows until it takes in nets that can give way: a net without two pins
+        // could not be routed again
+        let before = given.len();
+        while given.len() == before && radius < give {
+            radius = (radius * 2.0).max(2.0).min(give);
+            given.extend(board.nets_near_pins(&asked, radius).into_iter().filter(|n| {
+                !nets.contains(n)
+                    && board
+                        .net_id(n)
+                        .is_some_and(|id| board.nets[id as usize].pins.len() >= 2)
+            }));
+        }
+        if given.len() == before {
+            break;
+        }
+    }
+    let mut k = kept.expect("one try at least");
+    k.tries = tries;
+    k
+}
+
 /// Route a board (see [`route_fixed`]). With movable parts and clearance problems left, parts
 /// next to the problems are shifted and the whole search runs again on the shifted board, for
 /// a few placement rounds; the best result over all rounds wins.

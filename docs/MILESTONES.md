@@ -274,6 +274,16 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   neighbour (USB_DN at the USB-C pins, Arty /~{MR}: the clearance check reports it); a dense
   board with no room in the topology stays unrouted (ULX3S, `--give` is the fallback there); a
   new connection may leave kept copper a little before its open end, which leaves a stub.
+- Finishing nets uses shove and give by default (2026-11-01, `gummiband_core::finish_nets` for
+  the CLI and the MCP server; `--no-shove` and `--give 0`, MCP `shove: false` and `give: 0`
+  switch them off). Give is a fallback: every circle is a try, and the try with the fewest open
+  connections, then violations wins, the earlier one on a tie. A circle that takes in no new net
+  is not routed again. Night series data (one net stripped and laid again on the main result of
+  seed 1, 2 threads): plain left LED_D0, LED_D3 and BUCK_EN open on Lichtschnitzel and UART_EN on
+  Arty, shove laid all 16 nets, near the old length, three to four times faster on Arty. Give
+  alone within 3 mm completed three of the four but broke four connections around BUCK_EN; the
+  new rule keeps the try before in such a case. With the new defaults all 16 nets give the same
+  file as `--shove` before, byte for byte.
 - Adaptive track width: as wide as the surroundings allow, instead of one neck width per zone.
 - A new via in the plane of its net stays in it (open end, 2026-11-01, default since 60ab967,
   `GB_PLANE_HOLD=0` switches it off). `place_new_vias` moved such a via along its track past a

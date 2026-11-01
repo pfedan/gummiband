@@ -57,14 +57,19 @@ enum Cmd {
         keep_all: bool,
         /// With --keep-all --nets: if a connection finds no way, let the unlocked tracks of other
         /// nets within this many mm of its pin give way (they are routed again), growing in
-        /// steps up to this radius. 0: nothing moves.
-        #[arg(long, default_value_t = 0.0)]
-        give: f64,
+        /// steps up to this radius; the try with the fewest open connections is kept. 0: nothing
+        /// gives way [default: 8 with --keep-all --nets, else 0]
+        #[arg(long)]
+        give: Option<f64>,
         /// With --keep-all --nets: the unlocked tracks of other nets are threaded into the
         /// topology, so a connection passes between them and they shift aside. What it does not
-        /// touch stays as it is in the file.
-        #[arg(long)]
+        /// touch stays as it is in the file. On by default with --keep-all --nets (not with
+        /// --move-parts or --until-stop); this flag insists on it.
+        #[arg(long, conflicts_with = "no_shove")]
         shove: bool,
+        /// With --keep-all --nets: the tracks of other nets stay where they are (no shove).
+        #[arg(long)]
+        no_shove: bool,
         /// Route only these nets, comma separated (the others stay as they are).
         #[arg(long, value_delimiter = ',')]
         nets: Vec<String>,
@@ -361,6 +366,7 @@ fn main() -> Result<()> {
             keep_all,
             give,
             shove,
+            no_shove,
             nets,
             runs,
             via_pitch,
@@ -392,12 +398,20 @@ fn main() -> Result<()> {
             net_priorities,
             angles,
         } => {
-            if until_stop && (shove || give > 0.0 || pairs) {
+            if until_stop && (shove || give.is_some_and(|g| g > 0.0) || pairs) {
                 anyhow::bail!("--until-stop does not work with --shove, --give or --pairs");
             }
             if shove && (!keep_all || nets.is_empty() || move_parts) {
                 anyhow::bail!("--shove needs --keep-all and --nets, and fixed parts");
             }
+            // finishing nets on a routed board: the unlocked tracks of the other nets shift aside
+            // and, if that is not enough, give way; --no-shove and --give 0 switch that off
+            let finishing = keep_all && !nets.is_empty() && !until_stop;
+            if keep_all && !nets.is_empty() && until_stop {
+                println!("with --until-stop the tracks of other nets stay where they are (no shove, no give)");
+            }
+            let shove = shove || (finishing && !no_shove && !move_parts);
+            let give = give.unwrap_or(if finishing { gummiband_core::DEFAULT_GIVE } else { 0.0 });
             if placements > 0 && (keep_all || !nets.is_empty() || pairs) {
                 anyhow::bail!("--placements routes the whole board: not with --keep-all, --nets or --pairs");
             }
@@ -555,50 +569,41 @@ fn main() -> Result<()> {
                 println!("movable parts: {}", b.movable.len());
             }
             // the nets asked for, and the nets that give way when a connection finds no way
-            let mut given: std::collections::BTreeSet<String> = Default::default();
-            let mut radius = 0.0;
-            let mut pair_reports = Vec::new();
-            let (routed_board, sub, res) = loop {
-                let mut board = b.only_nets(&nets, &given);
-                if shove {
-                    board.soften(&nets);
-                }
-                let (sub, res) = if pairs {
+            let finished = gummiband_core::finish_nets(b, &nets, shove, give, |board| {
+                let out = if pairs {
                     let pair_cfg = gummiband_core::pairs::PairConfig {
                         skew: pair_skew,
                         zdiff: pair_zdiff,
                     };
-                    let (sub, res, reports) =
-                        gummiband_core::pairs::route_pairs(&board, &sub_cfg, &router_cfg, &search_cfg, &pair_cfg);
-                    pair_reports = reports;
-                    (sub, res)
+                    gummiband_core::pairs::route_pairs(board, &sub_cfg, &router_cfg, &search_cfg, &pair_cfg)
                 } else {
-                    gummiband_core::route_board(&board, &sub_cfg, &router_cfg, &search_cfg)
+                    let (sub, res) = gummiband_core::route_board(board, &sub_cfg, &router_cfg, &search_cfg);
+                    (sub, res, Vec::new())
                 };
                 gummiband_core::prof::report();
-                if res.stats.unrouted.is_empty() || nets.is_empty() || radius >= give {
-                    break (board, sub, res);
-                }
-                radius = (radius * 2.0).max(2.0).min(give);
-                // around what was asked for; a net that gave way must not widen the circle
-                let asked: Vec<String> = res
-                    .stats
-                    .unrouted
-                    .iter()
-                    .filter(|u| nets.iter().any(|n| u.starts_with(&format!("{n} from "))))
-                    .cloned()
-                    .collect();
-                if asked.is_empty() {
-                    break (board, sub, res);
-                }
-                let more = b.nets_near_pins(&asked, radius);
-                let before = given.len();
-                given.extend(more.into_iter().filter(|n| !nets.contains(n)));
-                println!("give way within {radius} mm: {} nets", given.len());
-                if given.len() == before && radius >= give {
-                    break (board, sub, res);
-                }
-            };
+                out
+            });
+            for t in finished.tries.iter().skip(1) {
+                println!(
+                    "give way within {} mm: {} nets, {} open, {} violations",
+                    t.radius, t.given, t.open, t.violations
+                );
+            }
+            if finished.tries.len() > 1 {
+                let k = &finished.tries[finished.kept];
+                println!(
+                    "kept: {} nets gave way, {} open, {} violations",
+                    k.given, k.open, k.violations
+                );
+            }
+            let gummiband_core::Finished {
+                board: routed_board,
+                sub,
+                res,
+                extra: pair_reports,
+                given,
+                ..
+            } = finished;
             let b = &routed_board;
             let mut res = res;
             let dt = t0.elapsed();

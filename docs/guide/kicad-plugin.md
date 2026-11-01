@@ -113,7 +113,7 @@ at instead of rerouting the board:
 4. The additions arrive as one undo step. There is no dialog: the action runs with the defaults
    (14 runs, via cost 3.0) and without geometry generations, so it is quick.
 
-This is the plugin's form of `gummiband route --keep-all --nets A,B --shove --give 8`. The
+This is the plugin's form of `gummiband route --keep-all --nets A,B` (it passes `--shove --give 8`, the defaults there). The
 button is new and not yet tested live in KiCad. Refill the zones (B) before you run the DRC:
 after vias moved, stale plane fills report errors that are not there. Moved vias lose their
 teardrop settings.
