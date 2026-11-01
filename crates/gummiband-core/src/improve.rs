@@ -2032,7 +2032,7 @@ fn learn(
             "ideas {generation}: cost aims {} laid {laid} won {wins}, pruned {pruned}",
             costly.len()
         );
-        if ideas.window > 0.0 && generation % 24 == 0 {
+        if ideas.window > 0.0 && generation.is_multiple_of(24) {
             let w: Vec<usize> = WINDOW
                 .iter()
                 .map(|c| c.swap(0, std::sync::atomic::Ordering::Relaxed))
@@ -2043,7 +2043,7 @@ fn learn(
                 100.0 * w[2] as f64 / w[1].max(1) as f64
             );
         }
-        if ideas.bandit && generation % 24 == 0 {
+        if ideas.bandit && generation.is_multiple_of(24) {
             let share: Vec<String> = (0..ARMS)
                 .map(|k| format!("{:.0}/{:.0}", bandit.wins[k], bandit.tries[k]))
                 .collect();
