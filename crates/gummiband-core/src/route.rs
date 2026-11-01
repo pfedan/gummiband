@@ -1923,7 +1923,7 @@ impl<'a> Router<'a> {
 
     fn in_plane(&self, p: Point, net: NetId) -> bool {
         let (r, _, _) = self.via_size(net);
-        self.board.planes.iter().any(|pl| pl.net == net && pl.holds(p, r + 0.3))
+        self.board.planes.iter().any(|pl| pl.net == net && pl.takes_via(p, r))
     }
 
     /// A via or branch point of the soft copper: it stays for good.
