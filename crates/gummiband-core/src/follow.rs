@@ -246,6 +246,10 @@ pub fn follow_steps(
 /// problem that only moves from one pair of nets to another counts as new, one that only splits
 /// into pieces does not.
 fn is_new(s: &check::Spot, before: &[check::Spot], moved: f64) -> bool {
+    // a micrometre is rounding, not a problem
+    if s.missing < 0.001 && !s.short {
+        return false;
+    }
     let key = |n: (u32, Option<u32>)| {
         let b = n.1.unwrap_or(u32::MAX);
         (n.0.min(b), n.0.max(b))

@@ -324,6 +324,7 @@ impl Mesh {
                 row += 1;
             }
         }
+        quiet_spade_panics();
         let mut skipped_constraints = 0usize;
         let mut steiner_handles = Vec::new();
         for p in steiner {
@@ -864,6 +865,22 @@ fn build_pad_sites(board: &Board, shared: &Shared) -> Vec<Site> {
         }
     }
     out
+}
+
+/// The assertions spade trips over on nearly degenerate constraints are caught above and only
+/// cost that constraint; their panic message would still reach the console once per mesh. The
+/// hook stays for every other panic.
+fn quiet_spade_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let spade = info.location().is_some_and(|l| l.file().contains("spade"));
+            if !spade {
+                previous(info);
+            }
+        }));
+    });
 }
 
 #[cfg(test)]
