@@ -3208,6 +3208,34 @@ impl<'a> Router<'a> {
         }
     }
 
+    /// Experiment `GB_VIP_EARLY=empty`: the nets of the connections that find no way on the
+    /// empty board without a via in a pad, and one with it. Such a pad lies in a pocket on its
+    /// layer that fixed copper closes, not the tracks of a run, so no routing order gets it out.
+    /// Plane fan-outs are left out. Call it after [`Router::plan`], before anything is routed.
+    pub fn pocket_nets(&mut self) -> Vec<NetId> {
+        let vip = self.cfg.via_in_pad;
+        let mut buf = std::mem::take(&mut self.search_buf);
+        let mut nets: Vec<NetId> = Vec::new();
+        for ci in 0..self.conns.len() {
+            let net = self.conns[ci].net;
+            if self.conns[ci].goal == Goal::Plane || nets.contains(&net) {
+                continue;
+            }
+            self.cfg.via_in_pad = false;
+            if self.search(ci, &mut buf).is_some() {
+                continue;
+            }
+            self.cfg.via_in_pad = true;
+            if self.search(ci, &mut buf).is_some() {
+                nets.push(net);
+            }
+        }
+        self.cfg.via_in_pad = vip;
+        self.search_buf = buf;
+        nets.sort_unstable();
+        nets
+    }
+
     pub fn route_one(&mut self, ci: usize) -> bool {
         for _ in 0..3 {
             let mut buf = std::mem::take(&mut self.search_buf);
