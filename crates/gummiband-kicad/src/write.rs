@@ -550,11 +550,39 @@ pub fn add_zone(
             layer,
             priority,
             name: "",
-            solid: false,
+            connect: PadConnect::Thermal,
+            spoke: DEFAULT_SPOKE,
         },
         outline,
         ids,
     )
+}
+
+/// Thermal spoke width (KiCad's thermal_bridge_width) of the zones the tools write, mm.
+pub const DEFAULT_SPOKE: f64 = 0.3;
+
+/// How the pads of the zone's net join the zone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PadConnect {
+    /// Thermal reliefs on every pad.
+    #[default]
+    Thermal,
+    /// Solid copper on every pad.
+    Solid,
+    /// Thermal reliefs on through hole pads, SMD pads solid (KiCad "thru_hole_only").
+    ThermalTht,
+}
+
+impl PadConnect {
+    /// From the MCP names "thermal", "solid" and "thermal_tht".
+    pub fn parse(s: &str) -> Option<PadConnect> {
+        match s {
+            "thermal" => Some(PadConnect::Thermal),
+            "solid" => Some(PadConnect::Solid),
+            "thermal_tht" | "thru_hole_only" => Some(PadConnect::ThermalTht),
+            _ => None,
+        }
+    }
 }
 
 /// What [`add_zone_named`] writes besides the outline.
@@ -564,8 +592,10 @@ pub struct ZoneSpec<'a> {
     pub priority: u32,
     /// Zone name; "gb:..." keeps the zone an obstacle for the router (see `read::GB_ZONE_PREFIX`).
     pub name: &'a str,
-    /// Pads join the zone solid instead of with thermal reliefs (power pours).
-    pub solid: bool,
+    /// How pads join the zone (power pours solid).
+    pub connect: PadConnect,
+    /// Thermal spoke width in mm.
+    pub spoke: f64,
 }
 
 /// [`add_zone`] with a name and the pad connection.
@@ -585,18 +615,19 @@ pub fn add_zone_named(kb: &KicadBoard, text: &str, z: &ZoneSpec, outline: &[Poin
     } else {
         format!("(name {}) ", quote(z.name))
     };
-    let connect = if z.solid {
-        "(connect_pads yes (clearance 0.2))"
-    } else {
-        "(connect_pads (clearance 0.2))"
+    let connect = match z.connect {
+        PadConnect::Solid => "(connect_pads yes (clearance 0.2))",
+        PadConnect::ThermalTht => "(connect_pads thru_hole_only (clearance 0.2))",
+        PadConnect::Thermal => "(connect_pads (clearance 0.2))",
     };
     let zone = format!(
         "\t(zone {net_item} (layer {}) (uuid \"{}\") {zname}(hatch edge 0.5) (priority {}) \
          {connect} (min_thickness 0.2) (fill yes (thermal_gap 0.3) \
-         (thermal_bridge_width 0.3)) (polygon (pts {pts})))\n",
+         (thermal_bridge_width {})) (polygon (pts {pts})))\n",
         quote(&kb.layer_names[z.layer as usize]),
         gen_id.next(),
         z.priority,
+        f(z.spoke.max(0.1)),
     );
     let end = text.rfind(')').unwrap_or(text.len());
     format!("{}{}{}", &text[..end], zone, &text[end..])

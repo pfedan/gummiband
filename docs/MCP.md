@@ -85,7 +85,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `part_info` | `board`, `reference` | value, position, rotation, locked, sheet, pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
 | `move_part` | `board`, `reference`, `x`, `y`, `rotation?`, `follow?` | id and path of the working copy with the footprint at its new position, `items_added`, `warnings` |
 | `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?` | id and path of the working copy, the new poses, decoupling assignment, crossings, smallest courtyard distance, pins off their plane, with `semantic` inductors and groups, `warnings` |
-| `add_zone` | `board`, `net`, `layer`, `points`, `priority?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
+| `add_zone` | `board`, `net`, `layer`, `points`, `priority?`, `pad_connection?`, `thermal_spoke_width?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `width?`, `reset?` | the net's options and effective priority |
 | `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `move_parts?`, `fixed?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `patterns?`, `pair_pull?`, `pairs?`, `pair_all?`, `pair_breakouts?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `via_pass?`, `open_end_seconds?`, `open_via_cost?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `tune_spacing?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
@@ -93,7 +93,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `power_plan` | `board`, `currents? [{net, amps, short_amps?}]`, `temp_rise?`, `apply?` | per power net the IPC-2221 width per layer, the track width to route with, vias per layer change, planes and zones, advice; board notes (GND plane, reference planes); the widths as `.kicad_dru` rules; with `apply` the widths stored as net options |
 | `current_check` | `path`, `paths? [{net, amps, short_amps?, from?, to?, name?}]`, `temp_rise?`, `refill?`, `max_segments?` | per current path the narrow segments, the narrowest single band and the total cross-section between the terminals (pours and vias included) with their position, vias against the current, verdict `ok` or `FLAG` |
 | `power_copper` | `board`, `paths [{net, amps, short_amps?, from, to?, layer?, name?}]`, `temp_rise?`, `margin?`, `max_span?`, `via_diameter?`, `via_drill?`, `priority?` | id and path of the working copy with "gb:" power pours over the pads of each path and, for plane nets, locked via fields with a pour into the plane; per pour its outline, area, what cut it, vias needed and placed; a `current_check` of the pours; `warnings` |
-| `ground_pour` | `path`, `net?`, `layers?`, `pitch?`, `edge_pitch?`, `edge_inset?`, `avoid_courtyards?`, `via_diameter?`, `via_drill?`, `priority?`, `output?` | id and path of `<input>.gnd.kicad_pcb` with ground zones on the outer layers and locked stitching vias, `warnings` |
+| `ground_pour` | `path`, `net?`, `layers?`, `pitch?`, `edge_pitch?`, `edge_inset?`, `avoid_courtyards?`, `via_diameter?`, `via_drill?`, `priority?`, `pad_connection?`, `thermal_spoke_width?`, `output?` | id and path of `<input>.gnd.kicad_pcb` with ground zones on the outer layers and locked stitching vias, `warnings` |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?`, `refill?` | PNG (image content) and its path, region, pixels per mm |
 
@@ -201,7 +201,10 @@ full length, so an input chain stays in order. The result then lists `coils` (in
 Preliminary, tested on small boards only. Adds a copper zone of `net` on `layer` with the
 outline `points` (`[x, y]` in mm, at least three) and `priority` (default 0) to the working copy.
 On a KiCad power layer the zone becomes a plane the router connects to with vias; on a routing
-layer it is kept like any other zone. Gummiband does not fill zones: KiCad does it when it fills
+layer it is kept like any other zone. `pad_connection` sets how the pads of the net join it:
+`thermal` (default, thermal reliefs), `solid`, or `thermal_tht` (reliefs on through hole pads,
+SMD pads solid); `thermal_spoke_width` (default 0.3 mm) widens the spokes for pins that carry
+amperes (four spokes of 0.3 mm carry about what a 1.2 mm track carries). Gummiband does not fill zones: KiCad does it when it fills
 the zones, and `drc` runs with a refill, so the result is judged correctly.
 
 ```json
@@ -470,7 +473,10 @@ grid spot tries eight neighbours a quarter pitch away, and spots next to an exis
 net are skipped). A via goes only where it keeps the clearance plus 0.3 mm to copper of other
 nets on every layer, the hole to hole distance, the edge clearance, out of rule areas that
 forbid vias, of other nets' zones on routing layers and of courtyards (`avoid_courtyards`). A
-layer that already has a zone of the net is left as it is; `warnings` name zones of other nets
+layer that already has a zone of the net is left as it is (the small `gb:` pours of
+`power_copper` do not count); `pad_connection` and `thermal_spoke_width` work as for `add_zone`
+(`solid` clears KiCad's `starved_thermal` where the spokes find no room, at the cost of harder
+soldering for small passives); `warnings` name zones of other nets
 whose priority does not beat the pour. The output `<input>.gnd.kicad_pcb` is loaded as a new
 board. The zones are filled with kicad-cli before the file is handed back (a warning says so if
 that fails), so `render` and KiCad show the pours right away. A via the fill does not reach shows
