@@ -35,6 +35,8 @@ pub struct Track {
     /// Widths fitted to the surroundings after the geometry step: (zone, width). A piece takes
     /// the smallest of those it touches, instead of the neck width.
     pub fitted: Vec<(crate::geom::Rect, f64)>,
+    /// The track ends on a track of its net, and not on a pad or a via.
+    pub tap: bool,
 }
 
 impl Track {
@@ -111,6 +113,16 @@ impl Router<'_> {
             End::Pin(p) => self.board.pins[p].pos,
             End::Via(site) => self.site_point(site),
             End::Point(p) => p,
+            End::Tap(sid, e) => {
+                let s = self.segs[sid as usize].as_ref().unwrap();
+                match s.crossings.iter().position(|c| c.e == e) {
+                    Some(k) => {
+                        let (l, r) = self.portal(sid, k);
+                        (l.p + r.p) * 0.5
+                    }
+                    None => self.end_point(s.start),
+                }
+            }
         }
     }
 
@@ -448,6 +460,7 @@ impl Router<'_> {
                     })
                 };
                 let track = |pts: Vec<Point>, elems: Vec<Elem>| Track {
+                    tap: matches!(s.end, End::Tap(..)),
                     pts,
                     elems,
                     width: s.width,

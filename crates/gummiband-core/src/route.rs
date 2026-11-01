@@ -48,6 +48,9 @@ pub struct RouterConfig {
     /// Extra cost (mm) for passing right next to a pad of another net that still waits for its
     /// route: keeps the escape of dense pin rows free.
     pub escape_cost: f64,
+    /// A connection may end on a track of its net, next to where that crosses an edge. Whatever
+    /// rips up a segment has to rip up what ends on it, see `improve.rs`.
+    pub taps: bool,
     /// Hot spots (centre, extra clearance in mm) where an earlier geometry had violations: the
     /// capacity model asks for more room there, so the topology spreads out.
     pub hotspots: std::sync::Arc<Vec<(Point, f64)>>,
@@ -73,6 +76,7 @@ impl Default for RouterConfig {
             margin: 0.01,
             via_in_pad: false,
             escape_cost: env("GB_ESCAPE", 0.0),
+            taps: false,
             hotspots: Default::default(),
             vip_nets: Default::default(),
         }
@@ -101,6 +105,8 @@ pub enum End {
     Via(u32),
     /// A point on kept copper of the net.
     Point(Point),
+    /// On a segment of the net, where it crosses this edge.
+    Tap(u32, u32),
 }
 
 /// One crossing of a route segment: edge e, left from triangle `from`.
@@ -245,6 +251,11 @@ enum NK {
     GoalSite {
         site: u32,
     },
+    /// On segment `seg`, next to its crossing of edge `e`.
+    GoalTap {
+        seg: u32,
+        e: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -367,6 +378,7 @@ fn key(k: &NK) -> (u8, u32, u32) {
         NK::GoalVia { site } => (3, site, 0),
         NK::Site { site, li } => (4, site, li as u32),
         NK::GoalSite { site } => (5, site, 0),
+        NK::GoalTap { seg, e } => (6, seg, e),
     }
 }
 
@@ -1942,6 +1954,7 @@ impl<'a> Router<'a> {
             }
         };
         let nl = self.nl();
+        let tappable = self.tappable(ci);
 
         // a search that reaches its limit leaves a large table: clearing that for every small
         // search would cost more than growing a new one now and then
@@ -1996,7 +2009,9 @@ impl<'a> Router<'a> {
                 block_len,
                 via_up,
             });
-            open.push(Open(g + h(pos), (nodes.len() - 1) as u32));
+            // a way to the net right here: the pins of the goal say nothing about it
+            let f = if matches!(kind, NK::GoalTap { .. }) { g } else { g + h(pos) };
+            open.push(Open(f, (nodes.len() - 1) as u32));
         };
 
         for (li, m) in self.sub.m.iter().enumerate() {
@@ -2251,7 +2266,7 @@ impl<'a> Router<'a> {
                 t.push((node.pos, li));
             }
             match node.kind {
-                NK::GoalPin { .. } | NK::GoalVia { .. } | NK::GoalSite { .. } => {
+                NK::GoalPin { .. } | NK::GoalVia { .. } | NK::GoalSite { .. } | NK::GoalTap { .. } => {
                     let mut chain = vec![node];
                     let mut p = node.parent;
                     while p != u32::MAX {
@@ -2285,6 +2300,22 @@ impl<'a> Router<'a> {
                             idx,
                         );
                         continue;
+                    }
+                    // right next to a track of the net that is not on this side of the gap
+                    if free && entry < 3 && !tappable.is_empty() {
+                        let e = m.tri_edges[t as usize][entry as usize];
+                        let list = &self.cross[lu][e as usize];
+                        let slot = slot as usize;
+                        let next = [slot.checked_sub(1), Some(slot)];
+                        if let Some(&seg) = next
+                            .iter()
+                            .flatten()
+                            .filter_map(|&i| list.get(i))
+                            .find(|s| tappable.contains(s))
+                        {
+                            push(best, nodes, open, NK::GoalTap { seg, e }, node.pos, node.g, idx);
+                            continue;
+                        }
                     }
                     // via in pad: a plane fan-out may end on a via inside the source pad
                     if !free
@@ -2684,6 +2715,7 @@ impl<'a> Router<'a> {
                     End::Via(site)
                 }
                 Some(NK::GoalPin { pin }) => End::Pin(pin),
+                Some(NK::GoalTap { seg, e }) => End::Tap(seg, e),
                 // through hole layer change: the run ends at that pin
                 // or at a kept via of the net
                 _ => match self.tri_pin(li as usize, last_t) {
@@ -2732,7 +2764,7 @@ impl<'a> Router<'a> {
         let m = &self.sub.m[li];
         let vert = |e: End| match e {
             End::Via(site) => m.site_vert.get(&site).copied(),
-            End::Pin(_) | End::Point(_) => None,
+            End::Pin(_) | End::Point(_) | End::Tap(..) => None,
         };
         let vpos = |t: u32, v: u32| CPos::Vertex(m.tris[t as usize].iter().position(|&x| x == v).unwrap_or(0) as u8);
         let mut chords: Vec<(u32, Chord)> = Vec::new();
@@ -3389,11 +3421,16 @@ impl<'a> Router<'a> {
             }
             for &sid in &self.conn_segs[ci] {
                 let s = self.segs[sid as usize].as_ref().unwrap();
-                let nodes = [s.start, s.end].map(|e| match e {
+                let node = |e: End| match e {
                     End::Pin(p) => Some(pin(p)),
                     End::Via(v) => Some(site(v)),
-                    End::Point(_) => None,
-                });
+                    End::Point(_) | End::Tap(..) => None,
+                };
+                let tapped = |e: End| match e {
+                    End::Tap(sid, _) => self.segs[sid as usize].as_ref().and_then(|s| node(s.start)),
+                    e => node(e),
+                };
+                let nodes = [tapped(s.start), tapped(s.end)];
                 if let [Some(a), Some(b)] = nodes {
                     join(a, b);
                 }
@@ -3449,6 +3486,60 @@ impl<'a> Router<'a> {
     pub(crate) fn net_splits(&self, net: NetId) -> usize {
         let open = (0..self.conns.len()).filter(|&ci| self.conns[ci].net == net && self.conn_segs[ci].is_empty());
         self.net_pieces(net).saturating_sub(open.count())
+    }
+
+    /// The segments connection `ci` may end on: of its net, and not on its side of the gap it
+    /// closes. Pairs stay out, their tracks must run together to the end.
+    fn tappable(&self, ci: usize) -> HashSet<u32> {
+        let c = &self.conns[ci];
+        if !self.cfg.taps || c.goal == Goal::Plane || self.partner.contains_key(&c.net) {
+            return HashSet::new();
+        }
+        let mine = self.net_side(c.net, c.from);
+        (0..self.conns.len())
+            .filter(|&cj| cj != ci && self.conns[cj].net == c.net)
+            .flat_map(|cj| self.conn_segs[cj].iter().copied())
+            .filter(|&sid| {
+                let s = self.segs[sid as usize].as_ref().unwrap();
+                !mine.contains(&s.start) && !mine.contains(&s.end)
+            })
+            .collect()
+    }
+
+    /// The ends of the routed segments of `net` that hang together with pin `from`.
+    fn net_side(&self, net: NetId, from: usize) -> Vec<End> {
+        let segs: Vec<&Seg> = (0..self.conns.len())
+            .filter(|&cj| self.conns[cj].net == net)
+            .flat_map(|cj| self.conn_segs[cj].iter())
+            .filter_map(|&sid| self.segs[sid as usize].as_ref())
+            .collect();
+        let group = self.pin_group[from];
+        let mut side: Vec<End> = vec![End::Pin(from)];
+        loop {
+            let holds = |side: &[End], e: End| {
+                side.iter().any(|&x| match (x, e) {
+                    (End::Pin(a), End::Pin(b)) => self.pin_group[a] == self.pin_group[b],
+                    (End::Via(a), End::Via(b)) => a == b,
+                    _ => false,
+                }) || matches!(e, End::Pin(p) if self.pin_group[p] == group)
+            };
+            let before = side.len();
+            for s in &segs {
+                let end = match s.end {
+                    // what ends on a segment hangs together with that segment
+                    End::Tap(sid, _) => self.segs[sid as usize].as_ref().map_or(s.end, |o| o.start),
+                    e => e,
+                };
+                match (holds(&side, s.start), holds(&side, end)) {
+                    (true, false) => side.push(end),
+                    (false, true) => side.push(s.start),
+                    _ => {}
+                }
+            }
+            if side.len() == before {
+                return side;
+            }
+        }
     }
 
     /// Where connection `ci` runs: its pin and the middle of every mesh edge it crosses.

@@ -13,7 +13,7 @@ use crate::board::Board;
 use crate::geom::{Point, Rect};
 use crate::index::FastMap;
 use crate::realize::{Geometry, Track, Via};
-use crate::route::{Goal, Router, seg_param_intersection};
+use crate::route::{End, Goal, Router, seg_param_intersection};
 use crate::topo::Substrate;
 use crate::{Candidate, Genome, Rng, Search, SearchConfig, candidate, check, relax};
 
@@ -226,11 +226,18 @@ fn bold(s: &State, level: usize, rng: &mut Rng) -> Move {
 fn with_shared_vias(r: &Router, conns: &mut Vec<usize>, from: usize) {
     let mut i = from;
     while i < conns.len() {
-        for &v in &r.conn_vias[conns[i]] {
-            for cj in 0..r.conns.len() {
-                if r.conn_vias[cj].contains(&v) && !conns.contains(&cj) {
-                    conns.push(cj);
-                }
+        for cj in 0..r.conns.len() {
+            if conns.contains(&cj) {
+                continue;
+            }
+            let via = r.conn_vias[conns[i]].iter().any(|v| r.conn_vias[cj].contains(v));
+            // and what ends on one of its tracks goes with it
+            let ends_on = |sid: &u32| match r.segs[*sid as usize].as_ref().map(|s| s.end) {
+                Some(End::Tap(seg, _)) => r.conn_segs[conns[i]].contains(&seg),
+                _ => false,
+            };
+            if via || r.conn_segs[cj].iter().any(ends_on) {
+                conns.push(cj);
             }
         }
         i += 1;
@@ -319,6 +326,7 @@ fn warm_start(s: &State, r: &Router, fresh: Geometry, segs: &[u32], sites: &[u32
         tracks.push(t);
         tags.push(sid);
     }
+    relax::snap_taps(&mut tracks);
     if thread {
         place_new_vias(&mut tracks, &mut vias, &r.board.planes, ideas().plane_hold);
     }
@@ -1210,6 +1218,7 @@ fn rebuild<'a>(board: &'a Board, sub: &Substrate, c: &Candidate) -> Option<State
     r.reorder(|x| genome.get(&(x.net, x.from)).copied().unwrap_or(f64::MAX));
     r.run();
     r.cfg.hotspots = Default::default();
+    r.cfg.taps = true;
     let (fresh, segs, sites) = r.tagged_geometry();
     let same = fresh.tracks.len() == c.geo.tracks.len()
         && fresh.vias.len() == c.geo.vias.len()
@@ -1241,7 +1250,10 @@ fn loose_ends(board: &Board, geo: &Geometry, nets: &[u32]) -> Vec<String> {
                     && pin.obstacles.iter().any(|&o| board.obstacles[o].shape.dist_to_point(p) < 0.01)
             });
             let on_track = geo.tracks.iter().enumerate().any(|(tj, o)| {
-                tj != ti && o.net == t.net && o.pts.iter().any(|q| q.dist(p) < 1e-4)
+                tj != ti
+                    && o.net == t.net
+                    && o.layer == t.layer
+                    && o.pts.windows(2).any(|w| crate::geom::point_seg_dist(p, w[0], w[1]) < 1e-3)
             });
             if !on_via && !on_pad && !on_track {
                 out.push(format!("track {ti} net {} ends free at {:.3} {:.3}", board.nets[t.net as usize].name, p.x, p.y));
@@ -2419,6 +2431,7 @@ mod tests {
             origin: None,
             resting,
             fitted: Vec::new(),
+            tap: false,
         };
         // the site lies under a sleeping track, the way of the new track leads over it
         let site = pt(5.0, 0.5);
@@ -2553,6 +2566,82 @@ mod tests {
         assert_eq!(spots.len(), 3);
         assert!((spots[0].missing - 0.05).abs() < 1e-9 && spots[0].at.x == 0.5);
         assert!(spots[2].short && !spots[0].short);
+    }
+
+    /// A net of three pads: the third is farther from both others than they are from each other,
+    /// so that the plan connects those two first, and it can reach their track instead of a pad.
+    fn tee_board() -> Board {
+        let mut b = twisted_board();
+        b.nets.truncate(1);
+        b.pins.clear();
+        b.obstacles.clear();
+        b.nets[0].pins.clear();
+        for (i, at) in [pt(10.0, 6.0), pt(20.0, 6.0), pt(15.0, 16.0)].into_iter().enumerate() {
+            let (lo, hi) = (at + pt(-0.6, -0.3), at + pt(0.6, 0.3));
+            b.obstacles.push(Obstacle {
+                shape: Shape::Polygon(Polygon::new(vec![lo, pt(hi.x, lo.y), hi, pt(lo.x, hi.y)])),
+                layers: LayerSet::single(0),
+                net: Some(0),
+                kind: ObstacleKind::Pad,
+                hole: None,
+                clearance: 0.1,
+                pin: Some(i),
+                locked: false,
+            });
+            b.pins.push(Pin {
+                name: format!("J{i}.1"),
+                footprint: format!("J{i}"),
+                net: 0,
+                pos: at,
+                layers: LayerSet::single(0),
+                obstacles: vec![i],
+                size: (0.6, 1.2),
+            });
+            b.nets[0].pins.push(i);
+        }
+        b
+    }
+
+    #[test]
+    fn a_connection_ends_on_a_track_of_its_net() {
+        let b = tee_board();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        r.run();
+        assert_eq!(r.net_pieces(0), 1);
+        let long = |r: &Router| r.geometry().tracks.iter().map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>()).sum::<f64>();
+        let before = long(&r);
+        r.cfg.taps = true;
+        let ci = (0..r.conns.len()).find(|&ci| r.conns[ci].from == 2).unwrap();
+        r.rip_up(ci);
+        assert!(r.route_one(ci));
+        let end = r.segs[*r.conn_segs[ci].last().unwrap() as usize].as_ref().unwrap().end;
+        assert!(matches!(end, End::Tap(..)), "{end:?}");
+        assert_eq!(r.net_pieces(0), 1);
+        assert!(long(&r) < before, "{} against {before}", long(&r));
+        let mut geo = r.geometry();
+        assert_eq!(geo.tracks.iter().filter(|t| t.tap).count(), 1);
+        relax::snap_taps(&mut geo.tracks);
+        relax::relax(&b, &sub, &mut geo, &relax::RelaxConfig { iterations: 60, ..Default::default() });
+        assert!(loose_ends(&b, &geo, &all_nets(&b)).is_empty());
+    }
+
+    #[test]
+    fn what_ends_on_a_track_goes_with_it() {
+        let b = tee_board();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        r.run();
+        r.cfg.taps = true;
+        let ci = (0..r.conns.len()).find(|&ci| r.conns[ci].from == 2).unwrap();
+        r.rip_up(ci);
+        r.route_one(ci);
+        let other = (0..r.conns.len()).find(|&c| c != ci).unwrap();
+        let mut conns = vec![other];
+        with_shared_vias(&r, &mut conns, 0);
+        assert!(conns.contains(&ci));
     }
 
     #[test]

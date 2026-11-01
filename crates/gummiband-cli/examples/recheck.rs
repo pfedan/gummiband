@@ -81,6 +81,7 @@ fn main() {
                     origin: None,
                     resting: false,
                     fitted: Vec::new(),
+                    tap: false,
                 });
             }
             _ => {}

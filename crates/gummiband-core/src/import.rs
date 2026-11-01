@@ -849,6 +849,7 @@ impl Router<'_> {
                 origin: Some(imp.chain),
                 resting: !bent,
                 fitted: Vec::new(),
+                tap: false,
             });
         }
         // what could not be traced is still there
@@ -865,6 +866,7 @@ impl Router<'_> {
                 origin: Some(c),
                 resting: true,
                 fitted: Vec::new(),
+                tap: false,
             });
         }
         let base = self.sub.shared.soft_base as u32;
