@@ -6,6 +6,15 @@ use crate::geom::{Point, Polygon, Rect, Shape};
 
 /// Distance kept from rule areas: KiCad flags a track that merely touches one.
 pub const KEEPOUT_GAP: f64 = 0.02;
+/// Copper thickness of a layer without a stackup (1 oz).
+pub const COPPER_MM: f64 = 0.035;
+/// Plating of a via barrel (IPC class 2 average).
+pub const PLATING_MM: f64 = 0.025;
+
+/// Cross-section of a via barrel of `drill` mm in mm².
+fn barrel_mm2(drill: f64) -> f64 {
+    std::f64::consts::PI * (drill + PLATING_MM) * PLATING_MM
+}
 
 pub type LayerId = u8;
 pub type NetId = u32;
@@ -692,6 +701,88 @@ impl Board {
 
     pub fn class_of(&self, net: NetId) -> &NetClass {
         &self.classes[self.nets[net as usize].class as usize]
+    }
+
+    /// How wide a track can be where it arrives at pin p: the narrow side of the pad, and at
+    /// fine pitch the pitch to the next foreign pin of the part minus the clearance `clr`.
+    pub fn pin_room(&self, p: usize, clr: f64) -> f64 {
+        let pin = &self.pins[p];
+        let pitch = self
+            .pins
+            .iter()
+            .filter(|q| q.footprint == pin.footprint && q.net != pin.net)
+            .map(|q| q.pos.dist(pin.pos))
+            .fold(f64::INFINITY, f64::min);
+        pin.size.0.min(pin.size.1).min(pitch - clr - 0.02)
+    }
+
+    /// True if the class of pin p has a minimum width rule with exempt parts and the copper at
+    /// the pin is narrower than that minimum: such a pin ends a branch of its net, and the
+    /// current between the other pins never passes it.
+    pub fn narrow_pin(&self, p: usize) -> bool {
+        let cls = self.class_of(self.pins[p].net);
+        match cls.min_width {
+            Some(min) if !cls.neck_refs.is_empty() => {
+                self.pin_room(p, cls.clearance.max(self.rules.min_clearance)) < min - 1e-9
+            }
+            _ => false,
+        }
+    }
+
+    /// Copper thickness of a layer in mm, from the stackup (35 um without one).
+    pub fn copper_thickness(&self, layer: LayerId) -> f64 {
+        self.stackup
+            .iter()
+            .find(|s| s.copper == Some(layer) && s.thickness > 0.0)
+            .map_or(COPPER_MM, |s| s.thickness)
+    }
+
+    /// The copper a minimum width rule is made for: the thicker outer layer.
+    fn reference_copper(&self) -> f64 {
+        let last = self.layers.len().saturating_sub(1) as LayerId;
+        self.copper_thickness(0).max(self.copper_thickness(last))
+    }
+
+    /// What a piece `w` mm wide on `layer` carries, as the width of a track on the outer
+    /// copper. IPC-2221: I = k dT^0.44 A^0.725 with k = 0.048 outside and 0.024 inside, so
+    /// the rise drops out of every comparison.
+    pub fn current_width(&self, layer: LayerId, w: f64) -> f64 {
+        let outer = layer == 0 || layer as usize + 1 == self.layers.len();
+        let k: f64 = if outer { 1.0 } else { 0.5 };
+        k.powf(1.0 / 0.725) * w * self.copper_thickness(layer) / self.reference_copper()
+    }
+
+    /// What vias of these drills carry together, as the width of a track on the outer copper:
+    /// a barrel is an inner conductor with the plating as its thickness, and parallel barrels
+    /// add their currents.
+    pub fn via_current_width(&self, drills: impl IntoIterator<Item = f64>) -> f64 {
+        let sum: f64 = drills.into_iter().map(|d| 0.5 * barrel_mm2(d).powf(0.725)).sum();
+        sum.powf(1.0 / 0.725) / self.reference_copper()
+    }
+
+    /// How many vias of `drill` carry what `w` mm of outer copper carry (at least one).
+    pub fn vias_for(&self, w: f64, drill: f64) -> usize {
+        let n = 2.0 * (w * self.reference_copper() / barrel_mm2(drill)).powf(0.725);
+        ((n - 1e-9).ceil() as usize).max(1)
+    }
+
+    /// What the copper of a current path of the net carries at least, as a width: the minimum
+    /// of the width rule of its class. Not for a net of a differential pair, whose width is a
+    /// matter of its impedance ([`Board::in_diff_pair`]).
+    pub fn current_min(&self, net: NetId) -> Option<f64> {
+        self.class_of(net).min_width.filter(|_| !self.in_diff_pair(net))
+    }
+
+    /// Whether the net is one of a differential pair ([`Board::diff_pairs`]).
+    pub fn in_diff_pair(&self, net: NetId) -> bool {
+        let n = &self.nets[net as usize];
+        n.pins.len() >= 2
+            && [('P', 'N'), ('N', 'P'), ('+', '-'), ('-', '+')].iter().any(|&(a, b)| {
+                n.name
+                    .strip_suffix(a)
+                    .and_then(|stem| self.net_id(&format!("{stem}{b}")))
+                    .is_some_and(|j| self.nets[j as usize].pins.len() >= 2)
+            })
     }
 
     /// Clearance between copper of two nets: the larger of both class clearances.

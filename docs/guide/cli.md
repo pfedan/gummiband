@@ -164,8 +164,17 @@ wrote 83 items to routed.kicad_pcb
   fan-outs are not in the bound, so the real distance is smaller.
 - `clearance check`: Gummiband's own check with a histogram by kind: `track` and `via` for two
   routed nets too close to each other, `pad`, `locked-track`, `locked-via`, `keepout`, `zone`,
-  `hole`, `graphic` for a track too close to that kind of obstacle, `edge` for the board edge.
-  KiCad's DRC is stricter in places and the final judge.
+  `hole`, `graphic` for a track too close to that kind of obstacle, `edge` for the board edge,
+  `width` for a piece below the minimum of a `track_width (min ...)` rule out of the courtyards
+  the rule exempts, and `current` for a net with such a rule (not of a differential pair) whose
+  widest way between two pins that can take that width carries less, vias included (see
+  [Track width and necking](concepts.md#track-width-and-necking)). KiCad's DRC is stricter in
+  places and the final judge.
+- `current paths: N vias added next to their layer changes` appears when layer changes of such
+  nets got the vias that carry their current.
+- `run of seed N in generation G lost: ...` means that one router run tripped over an
+  inconsistency of its own and was dropped; the search goes on with the others. It is worth a bug
+  report with the board.
 
 ### The JSON report
 

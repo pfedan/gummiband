@@ -48,7 +48,8 @@ negotiated congestion), not any existing product's code.
         |
         v
  Check (gummiband-core::check) and writer (gummiband-kicad)
-   clearance check in the core, then new segments/arcs/vias into a copy of the board;
+   clearance check in the core, then new segments/arcs/vias into a copy of the board
+   (a track whose ends fall on the same nanometre is left out: KiCad takes it for a crossing);
    kicad-cli pcb drc as the final judge
 ```
 
@@ -112,9 +113,28 @@ each layer stays planar by construction.
 - Capacity: packing of all crossings on an edge with end demands, apex bounds, net class
   clearances and custom rule clearances between net pairs.
 - Track width: net class width; near pins it may neck down to 0.25 mm if no minimum width rule
-  forbids it (or inside the courtyards a rule exempts).
+  forbids it (or inside the courtyards a rule exempts). Under such a rule a line that leaves the
+  courtyard is cut where a track of the class width would no longer reach into it, wherever a
+  track gets its shape (`realize::zone_cuts`: the band, the taut pass, the widening), so only the
+  piece into the courtyard is narrow and the round end of the wide one stays out of it. On the
+  finished geometry the necks widen piece by piece as far as there is room
+  (`relax::widen_necks`).
+- Layer changes on current paths: a connection between two pins that take the minimum width of
+  their class (`Board::current_min`: not for the nets of a differential pair) pays as many vias
+  per layer change as carry that width (`Router::via_factor`, `Board::vias_for`, IPC-2221), and
+  at the very end (`relax::stitch_vias`, after the placement rounds) the missing vias go next to
+  the via, in a row on a straight track with a piece of the other layer over them or around it
+  with a piece on each layer, tested with the rules of the check (`check::Copper::clear`).
+- A chain whose new vias split triangles is checked before it is committed: consecutive
+  triangles must still be neighbours, and a via must still be a corner of the triangles the
+  chain arrives from and leaves through, since another via of the same chain may have split one
+  of them; otherwise the connection is searched again (`Router::commit`). A run that still trips
+  over its own topology is lost and counts as one that routed nothing (`evaluate`), so the
+  search goes on.
 - Multi pin nets: Prim order, each new pin to the tree; overlapping pads of one net count as
-  one pin.
+  one pin. Under a minimum width rule with exempt courtyards the pins that cannot take the
+  minimum (`Board::narrow_pin`) join last, so that each ends a branch and the current between
+  two other pins never passes a neck.
 - Rip-up and reroute of connections near a failed one, via-in-pad as a last resort for
   fan-outs.
 
@@ -192,7 +212,11 @@ with the fewest open connections, then violations is kept.
 3. Taut pass: straight shortcuts wherever they keep all clearances (removes the waves).
 4. Fillets: every corner is rounded with the largest arc that keeps all clearances; the output
    uses real KiCad arcs.
-5. Clearance check in the core; the KiCad DRC is the final judge in the benchmark.
+5. Clearance check in the core; for the nets with such a rule the pieces below the minimum out
+   of exempt courtyards (`width`) and the widest way through their copper between the pins that
+   can take the minimum (`current` where it carries less: copper by layer and thickness, a layer
+   change by the barrels of all vias that join the same copper, `Board::current_width`,
+   `Board::via_current_width`); the KiCad DRC is the final judge in the benchmark.
 6. Optional, `--angles 45` (`octo.rs`): the finished tracks become conventional 45 degree
    routing. Per track a greedy walk along its path: the farthest point reachable with two legs on
    the grid (or a Z of three), else a staircase or the old piece; then 45 degree chamfers on the
@@ -393,6 +417,14 @@ so that neighbours and vias give way in chains. A spot that has no room for that
 track its whole length. After that `relax::prefer_width` lets every piece of track grow in steps of
 0.025 mm, round by round so that a bundle shares its room, drops wider stretches under 1.5 mm and
 ramps every change of width by one step per piece.
+
+The last step tapers (`improve::taper_spots`, on by default since 2026-11-01, `GB_TAPER=0`
+switches it off): a spot that misses its clearance by at most 50 µm gets the nearest line or arc
+of a net whose class has a minimum width rule narrower as a whole, so that its edge moves back by
+the deficit and 2 µm, never below the minimum. The width goes to point zones in the middle of its
+pieces and of its chord, as `relax::prefer_width` sets them: the file has one width per arc, and a
+zone around the spot would also reach a neck next to it and make it as wide as the taper. Three
+rounds; the result counts only with fewer violations.
 
 ## Local patterns
 

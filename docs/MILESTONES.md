@@ -317,6 +317,41 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   alone within 3 mm completed three of the four but broke four connections around BUCK_EN; the
   new rule keeps the try before in such a case. With the new defaults all 16 nets give the same
   file as `--shove` before, byte for byte.
+- Tapering at tight spots is on by default (2026-11-01, `improve::taper_spots`, `GB_TAPER=0`
+  switches it off): a line or arc that misses its clearance by at most 50 µm gets narrower, never
+  below the minimum width of its class and never wider anywhere. Lichtschnitzel is the only bench
+  board with minimum width rules (USB pair, input and output paths); seeds 1 to 4 on the main of
+  that morning (before parts moved by default), own check: plain runs 10 instead of 20
+  violations, the open end with 60 generations 0 instead of 10 (seed 3 had nothing to taper). The
+  KiCad numbers are those of the current paths below, which came in the same pull request. The
+  first version narrowed everything in a
+  square of 0.4 mm around the spot, and a whole arc whose chord reached it got that width: on
+  seed 3 a neck of VBUS_F at the USB chip went from 0.25 to 0.72 mm and came 0.15 mm too close to
+  a pin, which only KiCad saw, because the own check measures the pieces of an arc and the file
+  has one width per arc. Now the width goes to whole elements. Open: what remains are clearances
+  of classes without a minimum width (VBUS_P at U6 pad 10, `PowerStage`) and copper slivers of
+  zones.
+- Current paths keep their width (2026-11-01, Daniel's question about the neck of VBUS_F). A neck
+  that a minimum width rule allows in a courtyard is for the pin there: it ends at the edge of
+  the courtyard, half the track width outside it, because KiCad tests the shape of the track
+  against the courtyard. The own check measures the widest way through the copper between two
+  pins that take the minimum width, vias counted by IPC-2221 (`current`), and a layer change on
+  such a way gets as many vias as carry its current (`relax::stitch_vias`, `GB_STITCH=0` switches
+  it off): in a row on the straight end of a track, or around the via with a piece of copper on
+  each layer. The router counts those vias in the price of the layer change. Nets of a
+  differential pair are left out: their width is a matter of impedance. Lichtschnitzel, seeds 1
+  to 4 plain and 1, 2, 4 with the open end (60 generations), the main before PR #45 against the
+  same main with tapering and these changes, KiCad DRC with zones refilled: 2 errors instead of
+  15, no unconnected item in either series. Main: the VBUS_P neck at U6 pad 10 in one run (10
+  errors, 19 µm), four copper slivers, a dangling track. Branch: a clearance of 1.6 µm between a
+  pad of R61 and a via, and a crossing that KiCad reports for a track of no length on a via
+  (from the open end, also in main's files; such tracks are no longer written). The own check
+  finds a current path short of its width in 4 of the 7 branch runs: a layer change with a
+  single via where nothing fits next to it (USB_DP, the CC1 vias and R112 around it). Open:
+  reserve the room for those vias in the search. On the way the router lost a run to a panic: a
+  via of a chain split the triangle that another via of the same chain leaves through; such a
+  chain is refused now, and a run that panics all the same counts as lost instead of ending the
+  search.
 - Adaptive track width: as wide as the surroundings allow, instead of one neck width per zone.
 - A new via in the plane of its net stays in it (open end, 2026-11-01, default since 60ab967,
   `GB_PLANE_HOLD=0` switches it off). `place_new_vias` moved such a via along its track past a

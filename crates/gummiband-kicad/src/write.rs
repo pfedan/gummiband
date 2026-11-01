@@ -143,7 +143,7 @@ pub fn patch(kb: &KicadBoard, remove: &[Range<usize>], items: &[Item]) -> String
     let mut ids = UuidGen::new(text.len() as u64 ^ n_items as u64);
     let mut uuids: Vec<String> = Vec::with_capacity(items.len());
     for it in items {
-        if matches!(it, Item::Pattern(_)) {
+        if matches!(it, Item::Pattern(_)) || no_length(it) {
             uuids.push(String::new());
             continue;
         }
@@ -169,6 +169,7 @@ fn write_pattern(kb: &KicadBoard, p: &PatternItem, id: &str, uuids: &[String], o
         .members
         .iter()
         .filter_map(|&i| uuids.get(i))
+        .filter(|u| !u.is_empty())
         .map(String::as_str)
         .collect();
     members.sort();
@@ -226,6 +227,18 @@ fn write_pattern(kb: &KicadBoard, p: &PatternItem, id: &str, uuids: &[String], o
         props.join("\n\t\t"),
         members.iter().map(|m| format!("\"{m}\"")).collect::<Vec<_>>().join(" ")
     );
+}
+
+/// A track or arc whose ends fall on the same nanometre of the file. It has no copper of its own
+/// (what ends there meets at that point anyway), and KiCad's DRC takes such a dot for a crossing
+/// of the tracks around it, so it is not written.
+fn no_length(it: &Item) -> bool {
+    let nm = |p: Point| ((p.x * 1e6).round(), (p.y * 1e6).round());
+    match *it {
+        Item::Track { a, b, .. } => nm(a) == nm(b),
+        Item::Arc { a, mid, b, .. } => nm(a) == nm(b) && nm(a) == nm(mid),
+        _ => false,
+    }
 }
 
 fn net_ref(kb: &KicadBoard, net: NetId) -> String {
@@ -640,5 +653,35 @@ mod tests {
     #[test]
     fn an_unknown_reference_is_an_error() {
         assert!(place_footprint(BOARD, "R2", 0.0, 0.0, None).is_err());
+    }
+
+    /// A track of no length (in the open end one can end up on a via, both ends on it) is left
+    /// out: KiCad reported such a dot as a crossing with a track that passes the via.
+    #[test]
+    fn a_track_of_no_length_is_not_written() {
+        let text = r#"(kicad_pcb (version 20240108) (generator "test")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "") (net 1 "A")
+  (footprint "R" (at 10 20) (property "Reference" "R1" (at 0 0 0))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "A")))
+)"#;
+        let kb = crate::read::parse_board(text.to_string(), None, &crate::read::ReadOptions::default()).unwrap();
+        let net = kb.board.net_id("A").unwrap();
+        let p = gummiband_core::geom::pt(10.0, 20.0);
+        let track = |b: Point| Item::Track {
+            a: p,
+            b,
+            width: 0.25,
+            layer: 0,
+            net,
+        };
+        let items = [
+            track(p),
+            track(p + gummiband_core::geom::pt(2e-7, 0.0)),
+            track(gummiband_core::geom::pt(12.0, 20.0)),
+        ];
+        let out = patch(&kb, &[], &items);
+        assert_eq!(out.matches("(segment").count(), 1, "{out}");
+        assert!(out.contains("(end 12 20)"), "{out}");
     }
 }

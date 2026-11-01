@@ -100,9 +100,39 @@ one), so a whole fan-out narrows alike.
 Necks stay narrow only where they must. After the geometry is drawn, every narrow piece is
 widened step by step (0.05 mm) to the widest width that still keeps all clearances to pads, vias
 and other tracks, up to the class width; a net that would gain a violation keeps its old taper.
-One limit: where a minimum width rule allows the narrow width only inside a courtyard, a piece
-that leaves the courtyard stays narrow rather than break the rule, so a short stretch of thinner
-track can remain just outside a connector.
+Where a minimum width rule allows the narrow width only inside a courtyard, the neck ends with
+the courtyard: every line that leaves it is cut where a track of the class width would no longer
+reach into it, half that width outside its edge, so that the round end of the wide piece stays
+out of the courtyard and off the pads in it. The piece outside has the class width, the way
+KiCad's rule reads it (a piece whose copper touches the courtyard is exempt, the next one is
+not). The geometry steps see that piece at its full width from the start, so the tracks around
+keep their room for it. The own check reports a `width` violation for a piece below the minimum
+whose copper touches no exempt courtyard.
+
+Such a rule also keeps the current wide. In a net of the class, the pins that cannot take the
+minimum width (fine pitch, small pads) are connected last, each as a branch of its own: the way
+between two other pins never passes a neck, and a narrow track to a sense pin carries no current.
+The own check reports a `current` violation where the widest way between two pins that can take
+the width carries less than the minimum anyway. It counts copper by what it carries after
+IPC-2221 (the temperature rise drops out of the comparison): a piece on an inner or thinner layer
+counts for less than on the outer copper the rule is made for, and a layer change counts with all
+vias that join the same copper on both sides, each barrel an inner conductor with 25 µm of
+plating. A 0.4 mm via carries what 0.18 mm of 2 oz outer copper carry, so a 4.1 A rule of
+0.69 mm needs three of them, five for 1.44 mm. In the search a layer change of a connection
+between two such pins costs as many vias as it needs, and at the end the router puts the missing
+vias next to the one it placed: in a row on the straight end of one of its tracks with a piece of
+the other layer over them, or where that has no room, around it with a piece of copper on each
+layer, wherever they keep every clearance, the hole to hole distance and out of the pads
+(`GB_STITCH=0` switches that off). The nets of a differential pair are left out: there the width
+rule is about the impedance. KiCad's DRC sees neither case: its rule exempts every track that
+touches the courtyard, however long it is, and it knows no currents.
+
+The very last step uses the same freedom at tight spots: where a track still misses its
+clearance by a few micrometres, at most 50 µm, it gets narrower right there, as much as the
+clearance needs and 2 µm more, never below the minimum of a `track_width (min ...)` rule of its
+class. A wide power track through a gap that is just too narrow is a matter of width, not of the
+way. Only classes with such a rule have this freedom, and the result counts only with fewer
+violations. `GB_TAPER=0` switches it off.
 
 `--net-widths` overrides the class width per net.
 
@@ -114,7 +144,7 @@ A net class can have three widths, all set in KiCad:
 |---|---|---|
 | Class width | Board Setup > Net Classes, *Track Width* | The width it routes with. |
 | Target | Custom rule, `track_width (opt ...)` | At the end the tracks grow up to it where there is room. |
-| Minimum | Custom rule, `track_width (min ...)` | The floor for necks at fine pitch pins. |
+| Minimum | Custom rule, `track_width (min ...)` | The floor for necks at fine pitch pins and for tapering at tight spots. |
 
 ```
 (rule "Power widths"

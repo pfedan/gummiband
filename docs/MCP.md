@@ -292,7 +292,9 @@ has the footprints at their new positions, and `moved` lists them with their shi
 Result fields: `board`, `moved`, `input`, `output`, `seconds`, `threads`, `connections`, `routed`,
 `unrouted` (list of `net: pad -> pad`), `vias`, `length_mm`, `items_written`, `skipped_nets`,
 `violations_total`, `violations_by_kind`, `violations` (first `max_violations`, default 50:
-`what`, `x`, `y`, `actual_mm`, `required_mm`, `nets` [routed net, other net or null]),
+`what`, `x`, `y`, `actual_mm`, `required_mm`, `nets` [routed net, other net or null]; the kinds
+are those of the CLI's `clearance check`, and for `width` and `current` the two values are
+widths),
 `portfolio` (per run: `generation`, `seed`, `fanout_first`, `routed`, `connections`, `vias`,
 `length_mm`, `violations`), `pairs` (with `pairs`), `coupling` (every recognised pair, whatever
 the settings: `p`, `n`, `coupled_mm` within width + gap + 0.1 mm of the partner on the same layer,

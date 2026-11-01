@@ -2020,11 +2020,17 @@ fn relax_window(
     ok
 }
 
-/// `GB_TAPER`: where a track still comes too close to something at the end and the rules of its
-/// net class allow a narrower track (a minimum width below the class width), the pieces there
-/// get as much narrower as the clearance needs and 2 µm more, never below the minimum. A spot
-/// that misses a few micrometres (a wide power track through a gap that is just too narrow)
-/// is a matter of the width, not of the way: the search would try for hours to find another.
+/// Where a track still comes too close to something at the end and the rules of its net class
+/// allow a narrower track (a minimum width below the class width), the line or arc there gets as
+/// much narrower as the clearance needs and 2 µm more, never below the minimum. A spot that misses
+/// a few micrometres (a wide power track through a gap that is just too narrow) is a matter of the
+/// width, not of the way: the search would try for hours to find another. On by default, the
+/// result counts only with fewer violations; `GB_TAPER=0` switches it off.
+///
+/// The width goes to whole elements, the way the file writes them (an arc has one width), and
+/// only to the element that gets narrower: a zone around the spot would also reach a neighbour
+/// that is narrower still, a neck, and make it as wide as the taper (on Lichtschnitzel a neck of
+/// 0.25 mm at the USB chip became 0.72 mm, and KiCad found it 0.15 mm too close to a pin).
 pub(crate) fn taper_spots(board: &Board, geo: &Geometry) -> Option<Geometry> {
     let before = check::check(board, geo);
     if before.is_empty() {
@@ -2034,32 +2040,44 @@ pub(crate) fn taper_spots(board: &Board, geo: &Geometry) -> Option<Geometry> {
     for _ in 0..3 {
         let viol = check::check(board, &g);
         let mut changed = false;
-        for v in &viol {
+        for v in viol.iter().filter(|v| !v.is_width()) {
             let need = v.required - v.actual + 0.002;
             // a few micrometres to some ten: a taper, not a neck
             if need <= 0.0 || need > 0.05 {
                 continue;
             }
-            // the nearest piece of a net of the spot whose class may get narrower by that much
-            let mut near: Option<(f64, usize, f64)> = None;
+            // the nearest element of a net of the spot whose class may get narrower by that much
+            let mut near: Option<(f64, usize, usize, f64)> = None;
             for net in [Some(v.nets.0), v.nets.1].into_iter().flatten() {
                 let Some(min) = board.class_of(net).min_width else {
                     continue;
                 };
                 for (ti, t) in g.tracks.iter().enumerate().filter(|(_, t)| t.net == net) {
-                    for w in t.pts.windows(2) {
-                        let width = t.piece_width(w[0], w[1]);
-                        let d = crate::geom::point_seg_dist(v.at, w[0], w[1]) - width / 2.0;
+                    for (ei, e) in t.elems.iter().enumerate() {
+                        let (chords, width) = elem_widths(t, e);
+                        let d = chords
+                            .iter()
+                            .map(|&(a, b, w)| crate::geom::point_seg_dist(v.at, a, b) - w / 2.0)
+                            .fold(f64::INFINITY, f64::min);
                         if d < v.required + 0.01 && width - 2.0 * need >= min - 1e-9 && near.is_none_or(|n| d < n.0) {
-                            near = Some((d, ti, width - 2.0 * need));
+                            near = Some((d, ti, ei, width - 2.0 * need));
                         }
                     }
                 }
             }
-            if let Some((_, ti, w)) = near {
-                let mut zone = Rect::empty();
-                zone.add(v.at);
-                g.tracks[ti].fitted.push((zone.grow(0.2), w));
+            if let Some((_, ti, ei, w)) = near {
+                // a point zone in the middle of every piece and of the chord, as `prefer_width`
+                // sets them: they reach this element and no other
+                let t = &mut g.tracks[ti];
+                let (chords, _) = elem_widths(t, &t.elems[ei]);
+                let (a, b) = match t.elems[ei] {
+                    crate::realize::Elem::Line(a, b) | crate::realize::Elem::Arc(a, _, b) => (a, b),
+                };
+                for m in chords.iter().map(|&(p, q, _)| (p + q) * 0.5).chain([(a + b) * 0.5]) {
+                    let mut zone = Rect::empty();
+                    zone.add(m);
+                    t.fitted.push((zone.grow(1e-6), w));
+                }
                 changed = true;
             }
         }
@@ -2072,6 +2090,21 @@ pub(crate) fn taper_spots(board: &Board, geo: &Geometry) -> Option<Geometry> {
         eprintln!("taper: {} violations instead of {}", after.len(), before.len());
         g
     })
+}
+
+/// The pieces of element `e` of `t` with their widths, and the width of the element: the
+/// narrowest of its pieces and of its chord, which is the one the file gets.
+fn elem_widths(t: &Track, e: &crate::realize::Elem) -> (Vec<(Point, Point, f64)>, f64) {
+    let pts = crate::realize::flatten(std::slice::from_ref(e));
+    let chords: Vec<(Point, Point, f64)> = pts
+        .windows(2)
+        .map(|c| (c[0], c[1], t.piece_width(c[0], c[1])))
+        .collect();
+    let (a, b) = match *e {
+        crate::realize::Elem::Line(a, b) | crate::realize::Elem::Arc(a, _, b) => (a, b),
+    };
+    let width = chords.iter().map(|c| c.2).fold(t.piece_width(a, b), f64::min);
+    (chords, width)
 }
 
 /// For the log: relaxations through [`relax_window`], the tracks they had and those they relaxed.
@@ -2671,6 +2704,97 @@ mod tests {
             widest = ws.iter().fold(widest, |a, &b| a.max(b));
         }
         assert!(widest > 0.39, "{widest}");
+    }
+
+    /// A taper narrows the element at the spot and nothing else: the neck next to it keeps its
+    /// width in the file, where an arc has one width, and not only in the check.
+    #[test]
+    fn a_taper_never_widens_a_neighbour() {
+        let mut b = Board::default();
+        b.rules.min_clearance = 0.1;
+        b.layers = vec![Layer {
+            name: "F.Cu".into(),
+            is_plane: false,
+        }];
+        b.outline = vec![Polygon::new(vec![pt(0., 0.), pt(30., 0.), pt(30., 20.), pt(0., 20.)])];
+        b.classes = vec![NetClass {
+            name: "Power".into(),
+            track_width: 0.5,
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            min_width: Some(0.4),
+            // the neck lies in the courtyard of U1
+            neck_refs: vec!["U1".into()],
+            ..Default::default()
+        }];
+        for name in ["P", "Q", "R"] {
+            b.nets.push(Net {
+                name: name.into(),
+                class: 0,
+                pins: Vec::new(),
+                planes: LayerSet::default(),
+                priority: 0,
+            });
+        }
+        let pad = |net: u32, lo: Point, hi: Point| Obstacle {
+            shape: Shape::Polygon(Polygon::new(vec![lo, pt(hi.x, lo.y), hi, pt(lo.x, hi.y)])),
+            layers: LayerSet::single(0),
+            net: Some(net),
+            kind: ObstacleKind::Pad,
+            hole: None,
+            clearance: 0.2,
+            pin: None,
+            locked: false,
+        };
+        // Q is 10 µm too close to the wide track; R is clear of the neck at 0.25 mm, not at 0.48
+        b.obstacles.push(pad(1, pt(8.9, 10.44), pt(9.4, 10.84)));
+        b.obstacles.push(pad(2, pt(10.4, 10.7), pt(10.8, 11.1)));
+        let xs = [8.1, 8.4, 8.7, 9.0, 9.3, 9.6];
+        let mut elems: Vec<Elem> = xs
+            .windows(2)
+            .map(|x| Elem::Line(pt(x[0], 10.0), pt(x[1], 10.0)))
+            .collect();
+        elems.push(Elem::Arc(pt(9.6, 10.0), pt(10.6, 10.3), pt(11.6, 10.0)));
+        let mut neck = Rect::empty();
+        neck.add(pt(9.7, 9.0));
+        neck.add(pt(12.0, 11.0));
+        b.courtyards.insert("U1".into(), neck);
+        let track = Track {
+            pts: crate::realize::flatten(&elems),
+            elems,
+            width: 0.5,
+            layer: 0,
+            net: 0,
+            necks: vec![neck],
+            neck_w: 0.25,
+            origin: None,
+            resting: false,
+            fitted: Vec::new(),
+            pattern: None,
+            seg: u32::MAX,
+            tap: None,
+        };
+        let geo = Geometry {
+            tracks: vec![track],
+            vias: Vec::new(),
+        };
+        let written = |g: &Geometry| -> Vec<f64> {
+            let t = &g.tracks[0];
+            t.elems
+                .iter()
+                .map(|e| match *e {
+                    Elem::Line(a, b) | Elem::Arc(a, _, b) => t.piece_width(a, b),
+                })
+                .collect()
+        };
+        assert_eq!(check::check(&b, &geo).len(), 3);
+        let g = taper_spots(&b, &geo).expect("a taper");
+        assert!(check::check(&b, &g).is_empty());
+        let (w0, w1) = (written(&geo), written(&g));
+        assert!(w0.iter().zip(&w1).all(|(a, b)| b <= a), "{w0:?} {w1:?}");
+        assert_eq!(w1[5], 0.25, "{w1:?}");
+        assert!((w1[2] - 0.476).abs() < 1e-9 && w1[0] == 0.5, "{w1:?}");
     }
 
     #[test]

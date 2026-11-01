@@ -15,9 +15,9 @@ use crate::sexpr::Node;
 
 const MIL: f64 = 0.0254;
 /// Copper thickness when the board has no stackup (1 oz).
-pub const DEFAULT_COPPER_MM: f64 = 0.035;
+pub const DEFAULT_COPPER_MM: f64 = gummiband_core::board::COPPER_MM;
 /// Via plating thickness (IPC class 2 average).
-pub const VIA_PLATING_MM: f64 = 0.025;
+pub const VIA_PLATING_MM: f64 = gummiband_core::board::PLATING_MM;
 
 fn k(outer: bool) -> f64 {
     if outer { 0.048 } else { 0.024 }
@@ -46,10 +46,7 @@ pub fn via_amps(drill: f64, dt: f64) -> f64 {
 
 /// Copper thickness of a layer from the stackup, 35 um without one.
 pub fn copper_mm(b: &Board, layer: LayerId) -> f64 {
-    b.stackup
-        .iter()
-        .find(|s| s.copper == Some(layer) && s.thickness > 0.0)
-        .map_or(DEFAULT_COPPER_MM, |s| s.thickness)
+    b.copper_thickness(layer)
 }
 
 /// Outer copper layer (first or last of the board).
