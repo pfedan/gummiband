@@ -94,6 +94,7 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | `--no-tune` | off | Leave the lengths as routed. By default, when the `.kicad_dru` has `length` or `skew` rules, the finished routing gets meanders that bring the nets that are too short into range, see [Length matching](concepts.md#length-matching). |
 | `--tune-amplitude MM` | 1 | Highest meander bump (centre line above the original line). |
 | `--tune-spacing W` | 2 | Air between neighbouring meander legs, in track widths (at least the clearance). |
+| `--patterns LIST` | none | Hints from local patterns of the board (`gummiband info` lists them), comma separated: `decaps` connects a decoupling capacitor to its IC pin before everything else, `rows` lets the open end lay the connections of a pin row again in pin order, `shares` lets pins of a plane net next to each other reach the plane through one via. `all` or `none`. Experimental, see [MILESTONES](../MILESTONES.md#local-patterns) for what they gave so far. |
 | `--layer-dirs W` | 0.5 | Weight of preferred directions per layer: the routing layers alternate horizontal and vertical, and running against the grain costs extra. A soft cost, used by every third run of the portfolio, so the search has candidates with and without it. 0 switches it off. |
 
 A good default for a real board with a few hundred connections is the plain `--keep-locked`: 14
