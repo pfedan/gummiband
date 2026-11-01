@@ -93,6 +93,13 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   Lichtschnitzel 968 and 961 instead of 991 and 1007 (246 and 246 vias instead of 258 and 271), Arty
   365 and 405 instead of 371 and 448 (111 and 128 vias instead of 114 and 151). Generations of 4
   mutants were not better (986, 976, 396, 400).
+- Board caches, 2026-11-01, results byte for byte the same: every via site keeps its distance to the
+  board edge, and the board grids of the relaxation (edge mask, obstacle cells, near obstacles) are
+  built once per board instead of in every relaxation. Corne has an edge of 449 pieces in 74
+  outlines: completing the two open connections of a finished run (`--keep-all --nets`, one thread)
+  takes 283 s instead of more than 1200 s; in the open end (Mac, seed 1, 4 threads) generation 90
+  instead of 7 after 20 minutes, 480/482 after 705 s instead of 1909 s. Lichtschnitzel and Arty: no
+  measurable change (the grids were 0.2 % of a run).
 
 ## Open: fine pitch fan-out (Corne)
 
@@ -218,6 +225,30 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
     last connection on most seeds is `/right/D+` from `rR4.1`, whose pad lies in a pocket: it has
     to leave through a via in the pad. A site that had a via once stays split, so a via in a pad
     that was ripped up cannot come back to that site.
+    Measured on 2026-11-01 (cloud: normal search, 2 threads; Mac: open end of 20 minutes, 4 threads,
+    KiCad DRC; seed 1 unless named): allowing the vertices of a split pad site on the other layers
+    again (`GB_PAD_REUSE=1`, off by default) routes `/right/D+` through a via in the pad as in the
+    original, 478/482 instead of 476/482 in the cloud; on the Mac the open end then loses
+    `/right/QSPI_SD2` instead (480/482). On seeds 2 and 3 (one thread) `/right/D+` is routed without
+    it, and it changes nothing. Naming the net (`GB_VIP_NETS=/right/D+`: a via in the pad at any
+    time) gives the first complete Corne of the series, 482/482 on the Mac, KiCad 0 unconnected and
+    12 errors. `GB_VIP_LEARN=1` (a net that needed the last resort once may take it at any time)
+    learns 40 nets on its way, ends the normal search with 472 instead of 474, and the open end does
+    not start: the learned nets outlive the run, so it does not repeat. `GB_VIP_RETRY=1` learns from
+    the result instead: the winner again, in its own order, with a via in a pad at any time for the
+    nets it left open. Cloud: 477/482 instead of 476/482; seed 2: 475 either way (`/right/D+` routed
+    without it); seed 3: 475 either way (`/right/D+` routed without it). Mac: 480/482 (open
+    `/right/KEY4`, `/right/USB_VBUS_PIN`), KiCad 2 unconnected and 116 errors against 15 without the
+    switch, 67 instead of 90 generations in 20 minutes. `GB_VIP_RETRY=each` first routes the winner
+    once per open net, with a via in a pad for that net alone, and keeps only the nets that then
+    route more. It keeps two of the eight, and the run is the same as with all of them, byte for
+    byte in the cloud and generation by generation on the Mac: the other nets never took a via in a
+    pad. What costs is the late decision; `GB_VIP_NETS` decides before the search and completes
+    Corne. `GB_VIP_EARLY` (9ce567f) looks for the net before the generations and finds none, in the
+    cloud with seed 1: on the empty board no connection between pins needs a via in a pad, D+
+    included (`=empty`), so the tracks of its neighbours close the pocket, not fixed copper; after
+    the portfolio 14 nets are open, D+ among them, and none routes more on its own with one (`=1`).
+    Open: the via in a pad as a gene of the search, which the mutations give and take.
 - Negotiated routing: done as an option, `route --negotiate N` (see ARCHITECTURE). Measured on
   2026-10-30 with `--runs 14 --generations 1 --negotiate 20`, KiCad DRC against the plain run:
   `fine_pitch_mixed` 0 open and 0 errors instead of 8 and 7, `four_signal_layers` 0 open instead
@@ -244,6 +275,43 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   board with no room in the topology stays unrouted (ULX3S, `--give` is the fallback there); a
   new connection may leave kept copper a little before its open end, which leaves a stub.
 - Adaptive track width: as wide as the surroundings allow, instead of one neck width per zone.
+- A new via in the plane of its net stays in it (open end, 2026-11-01, default since 60ab967,
+  `GB_PLANE_HOLD=0` switches it off). `place_new_vias` moved such a via along its track past a
+  sleeping track and out of the plane; the connection still counted as made through the plane, KiCad
+  found it open and the via dangling. In 4 of 49 finished runs of the night series without the hold
+  that reported every connection, on Lichtschnitzel (J10 pad 2, `+5V_A`) and Arty (U2 pad 24,
+  `/FTDI_3V3`), also with the settings of main. With the hold: 0 of 5; the cost after 20 minutes
+  against A without it, seed by seed: Lichtschnitzel +0.9 %; Arty +3.5 %, +3.1 %, +3.8 %; on Arty at
+  the same generation of the open end (700): -0.8 %, +0.5 %, +4.3 %, so part of the price is speed
+  (the runs reached 0.61 to 0.79 generations per second). Open: count a plane connection as made
+  only when its via lies in the plane, checked in the judgement of every mutant and at the end of a
+  run; that would keep the moves that leave the net connected another way, which the hold forbids as
+  well.
+- Night series of open end ideas, 2026-11-01: Mac, 20 minutes per run, three runs of 4 threads side
+  by side, cost 2 per via, 0.05 per mm and 10000 per open connection, KiCad DRC at the end. All
+  switches stay off in the code (`improve::Ideas`).
+  - Combination A (`GB_BANDIT=1 GB_AIM_COST=0.25 GB_PRUNE=1`) against main, median over the seeds:
+    Lichtschnitzel -12 % (4 and 4 seeds), Arty -15 % (3 and 3); fewer vias, a little more length;
+    KiCad DRC clean in 5 of 7 runs against 3 of 7. Seed by seed: Lichtschnitzel -13.3 %, -11.5 %,
+    -5.1 %, -13.8 %; Arty -9.7 %, -17.6 %, -15.5 %.
+  - A without geometry generations (`--geometry-generations 0`) against A: Lichtschnitzel -4.9 %,
+    -6.1 %, -3.5 %; Arty -4.2 %, +3.3 %, +0.2 %; the open end starts at about 17 s instead of 42 s.
+  - B (A plus `GB_MERGE`, `GB_SPOT_FADE`, `GB_TAPER`) against A: Lichtschnitzel -1.7 %, -3.9 %; Arty
+    +1.0 %, -0.3 %.
+  - Single ideas against main, seed 1, `GB_VIA_PRICE`: Lichtschnitzel -7.5 %, Arty -2.5 %;
+    `GB_BANDIT`: Lichtschnitzel -7.9 %, Arty -6.3 %; `GB_AIM_COST=0.25`: Lichtschnitzel -8.7 %, Arty
+    +7.5 %; `GB_PRUNE`: Lichtschnitzel +2.9 %, Arty -1.5 %; `GB_MERGE`: Lichtschnitzel +1.5 %, Arty
+    +3.7 %; `GB_SPOT_FADE`: Lichtschnitzel -1.9 %; `GB_TAPER`: Lichtschnitzel 0.0 % (KiCad DRC clean
+    against 3 errors: the spot at R61 is gone).
+  - `--via-cost 10` on main: Lichtschnitzel -6.5 %, -16.8 %; Arty +2.5 %, -11.6 %; on top of A:
+    Lichtschnitzel 0.0 %; Arty +5.4 %.
+  - 12 threads in one run (Lichtschnitzel, main, seed 1): cost 468.7 after 20 minutes with 1.6 times
+    the generations of 4 threads; the best of three seeds with 4 threads: 454.0.
+  - Mutant trace of A (Lichtschnitzel, seed 1, `GB_MUTANT_LOG`): moves at random places bring 78 %
+    of the saved cost in 63 % of the time; moves at clearance spots mostly remove the flaw penalty;
+    93 % of the saving is in after 10 minutes.
+  - ULX3S, 40 minutes: main and A both 655/796, A with 305 instead of 370 vias. The open connections
+    are no search problem: the original routes signals on In2.
 
 ## M4b: GPU experiment
 
