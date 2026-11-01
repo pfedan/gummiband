@@ -52,7 +52,7 @@ because they fit only one board. *Defaults* brings back the values below.
 | Via grid pitch | 0.5 mm | `--via-pitch` | Spacing of the sites where vias may go. Finer finds more ways through tight spots and takes longer. |
 | Layer direction weight | 0.5 | `--layer-dirs` | How strongly every third run prefers horizontal and vertical tracks on alternating layers. |
 | Via removal factor | 4.0 | `--via-pass` | Factor on the via cost in the pass that routes connections with vias again and keeps what has fewer vias. |
-| Negotiation rounds | 0 | `--negotiate` | Experimental second search in which connections compete for room. 20 rounds work well and take about twice the time. |
+| Negotiation rounds | 0 | `--negotiate` | A second search from the start in which connections compete for room. 20 rounds work well and take about twice the time. With 0 the search negotiates on its own when it leaves a few connections open. |
 | Worker threads | 0 (all) | `--threads` | How many cores the run may use. The result does not depend on it. |
 | Relax on the GPU | off | `GB_GPU=1` | Experimental, macOS only: runs most of the track relaxation as a compute shader. Needs a binary built with `--features gpu`; with a normal binary the run stays on the CPU and the message box says so. Results differ between GPUs, so use the CPU for a final run. |
 | 45 degree tracks | off | `--angles 45` | Turns the any-angle tracks and arcs into conventional 45 degree routing at the end, with chamfered corners. A few percent more length, no new clearance violations; where no 45 degree path fits, a piece keeps its angle. See [Conventional 45 degree tracks](concepts.md#conventional-45-degree-tracks). |

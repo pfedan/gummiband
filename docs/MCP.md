@@ -267,7 +267,8 @@ in two, see the CLI guide; only pairs with a pair rule or a net class of their o
 true for every pair), `pair_skew` 0.1 mm, `pair_zdiff` none, `tune` true (meanders for the
 `length` and `skew` rules of the `.kicad_dru`, written as KiCad tuning patterns),
 `tune_amplitude` 1 mm, `tune_spacing` 2 track widths between meander legs, `negotiate` 0
-(experimental negotiated routing, 20 rounds work well and take about twice the time), `via_pass`
+(negotiated routing from the start, 20 rounds work well and take about twice the time; with 0
+the search negotiates on its own when it leaves a few connections open), `via_pass`
 4 (factor on the via cost in the pass that routes connections with vias again and keeps what has
 fewer vias, 0 = off), `open_end_seconds` 0 (off; a value keeps improving the result for that many
 seconds after the normal search, like `--until-stop` with a time budget, and `open_via_cost`,

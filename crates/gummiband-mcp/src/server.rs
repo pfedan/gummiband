@@ -443,8 +443,9 @@ pub struct RouteIn {
     pub via_pitch: Option<f64>,
     /// Via cost in mm of track (default 3, as the CLI).
     pub via_cost: Option<f64>,
-    /// Experimental: rounds of negotiated routing in a second search (default 0: off; 20 works
-    /// well and takes about twice the time).
+    /// Rounds of negotiated routing from the start, in a second search (20 works well and takes
+    /// about twice the time). With the default 0 the search negotiates on its own when the plain
+    /// one leaves a few connections open.
     pub negotiate: Option<usize>,
     /// Factor on the via cost in the pass that routes connections with vias again and keeps
     /// what has fewer vias (default 4; 0: off), as `gummiband route --via-pass`.
