@@ -35,8 +35,10 @@ pub struct Track {
     /// Widths fitted to the surroundings after the geometry step: (zone, width). A piece takes
     /// the smallest of those it touches, instead of the neck width.
     pub fitted: Vec<(crate::geom::Rect, f64)>,
-    /// The track ends on a track of its net, and not on a pad or a via.
-    pub tap: bool,
+    /// The router's segment of this track (`u32::MAX`: none).
+    pub seg: u32,
+    /// The segment its end lies on, when that is a track of its net and not a pad or a via.
+    pub tap: Option<u32>,
 }
 
 impl Track {
@@ -460,7 +462,11 @@ impl Router<'_> {
                     })
                 };
                 let track = |pts: Vec<Point>, elems: Vec<Elem>| Track {
-                    tap: matches!(s.end, End::Tap(..)),
+                    seg: sid,
+                    tap: match s.end {
+                        End::Tap(on, _) => Some(on),
+                        _ => None,
+                    },
                     pts,
                     elems,
                     width: s.width,

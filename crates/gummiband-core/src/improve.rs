@@ -2431,7 +2431,8 @@ mod tests {
             origin: None,
             resting,
             fitted: Vec::new(),
-            tap: false,
+            seg: u32::MAX,
+            tap: None,
         };
         // the site lies under a sleeping track, the way of the new track leads over it
         let site = pt(5.0, 0.5);
@@ -2621,7 +2622,7 @@ mod tests {
         assert_eq!(r.net_pieces(0), 1);
         assert!(long(&r) < before, "{} against {before}", long(&r));
         let mut geo = r.geometry();
-        assert_eq!(geo.tracks.iter().filter(|t| t.tap).count(), 1);
+        assert_eq!(geo.tracks.iter().filter(|t| t.tap.is_some()).count(), 1);
         relax::snap_taps(&mut geo.tracks);
         relax::relax(&b, &sub, &mut geo, &relax::RelaxConfig { iterations: 60, ..Default::default() });
         assert!(loose_ends(&b, &geo, &all_nets(&b)).is_empty());

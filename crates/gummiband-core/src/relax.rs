@@ -75,12 +75,12 @@ struct Rail {
     len: f64,
 }
 
-/// The tracks of `tracks` that end on a track of their net, each with those it can end on.
+/// The tracks of `tracks` that end on a track of their net, each with the track it ends on.
 fn tap_targets(tracks: &[Track]) -> Vec<(usize, Vec<usize>)> {
     let mut out = Vec::new();
-    for (ti, t) in tracks.iter().enumerate().filter(|(_, t)| t.tap) {
-        let same = |(tj, o): &(usize, &Track)| *tj != ti && o.net == t.net && o.layer == t.layer && !o.pts.is_empty();
-        let others: Vec<usize> = tracks.iter().enumerate().filter(same).map(|x| x.0).collect();
+    for (ti, t) in tracks.iter().enumerate().filter(|(_, t)| t.tap.is_some()) {
+        let on = |(_, o): &(usize, &Track)| Some(o.seg) == t.tap;
+        let others: Vec<usize> = tracks.iter().enumerate().filter(on).map(|x| x.0).collect();
         if !others.is_empty() {
             out.push((ti, others));
         }
@@ -1379,6 +1379,7 @@ pub fn relax_while(
             origin: t.origin,
             resting: !awake[ti],
             fitted: std::mem::take(&mut t.fitted),
+            seg: t.seg,
             tap: t.tap,
         };
     }
