@@ -193,6 +193,20 @@ fn initialize_list_load_route() {
     let out = dir.join("tiny.routed.kicad_pcb");
     assert_eq!(r["output"], out.display().to_string());
     assert!(std::fs::read_to_string(&out).unwrap().contains("(segment"));
+    // the knobs of the CLI the tool took in later: the open end with a time budget stops by
+    // itself, the via pass can be switched off, the meander spacing is taken
+    let t0 = std::time::Instant::now();
+    let r = s.call(
+        "route",
+        json!({"board": "b1", "runs": 1, "generations": 0, "open_end_seconds": 1.0, "open_via_cost": 10.0,
+            "via_pass": 0.0, "tune_spacing": 1.5}),
+    );
+    assert_eq!(r["routed"], 1, "{r}");
+    assert!(
+        t0.elapsed().as_secs() < 60,
+        "the open end did not stop: {:?}",
+        t0.elapsed()
+    );
 
     // pre-routing: look at a part, lock copper in a working copy, route around it
     let part = s.call("part_info", json!({"board": "b1", "reference": "R1"}));

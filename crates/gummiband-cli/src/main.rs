@@ -718,6 +718,7 @@ fn main() -> Result<()> {
                         zdiff: pair_zdiff,
                         all: pair_all,
                         room: tune_room.then(|| tune_cfg.clone()),
+                        angles45: angles == Angles::Deg45,
                     };
                     gummiband_core::pairs::route_pairs(board, &sub_cfg, &router_cfg, &search_cfg, &pair_cfg)
                 } else {
@@ -789,7 +790,17 @@ fn main() -> Result<()> {
             let octo = (angles == Angles::Deg45).then(|| {
                 let before = gummiband_core::check::check(b, &res.geometry).len();
                 let t1 = std::time::Instant::now();
-                let st = gummiband_core::octo::octilinear(b, &mut res.geometry);
+                // the two tracks of a pair that went onto the grid as one wide track stay as
+                // they are; their ends and what was routed on its own afterwards do not
+                let wide: Vec<gummiband_core::board::NetId> = pair_reports
+                    .iter()
+                    .filter(|r| r.wide)
+                    .flat_map(|r| [b.net_id(&r.p), b.net_id(&r.n)])
+                    .flatten()
+                    .collect();
+                let st = gummiband_core::octo::octilinear_only(b, &mut res.geometry, &|t| {
+                    !(wide.contains(&t.net) && t.seg == u32::MAX)
+                }, &|_, _| false);
                 let secs = t1.elapsed().as_secs_f64();
                 let after = gummiband_core::check::check(b, &res.geometry).len();
                 println!(

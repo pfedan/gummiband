@@ -447,6 +447,18 @@ pub struct RouteIn {
     /// about twice the time). With the default 0 the search negotiates on its own when the plain
     /// one leaves a few connections open.
     pub negotiate: Option<usize>,
+    /// Factor on the via cost in the pass that routes connections with vias again and keeps
+    /// what has fewer vias (default 4; 0: off), as `gummiband route --via-pass`.
+    pub via_pass: Option<f64>,
+    /// Open end: after the normal search keep improving for this many seconds, then finish the
+    /// best result (default 0: off), as `--until-stop` with a time budget instead of a stop line.
+    /// Mutants take a few connections around one spot out and lay them again; when that stops
+    /// helping, bolder side branches take over. No placement rounds while it runs.
+    pub open_end_seconds: Option<f64>,
+    /// With open_end_seconds: what a via is worth in mm of track when the open end judges its
+    /// results (default 20). Lower gives more vias and shorter tracks, higher fewer vias and
+    /// longer ones.
+    pub open_via_cost: Option<f64>,
     /// Reserve in mm on top of the clearances that the finished copper gets where there is room
     /// (default 0). The result stays only if it brings no new violation.
     pub air: Option<f64>,
@@ -463,6 +475,8 @@ pub struct RouteIn {
     pub tune: Option<bool>,
     /// Highest meander bump in mm (default 1).
     pub tune_amplitude: Option<f64>,
+    /// Air between neighbouring meander legs in track widths, at least the clearance (default 2).
+    pub tune_spacing: Option<f64>,
     /// Maximum number of violations listed (default 50; the total is always given).
     pub max_violations: Option<usize>,
 }
@@ -1589,9 +1603,20 @@ fn route_blocking(
         pair_pull: p.pair_pull.unwrap_or(0.0),
         layer_dirs: p.layer_dirs.unwrap_or(0.5),
         negotiate: p.negotiate.unwrap_or(0),
+        via_pass: p.via_pass.unwrap_or(4.0),
         ..Default::default()
     }
     .with_hints(&hints);
+    // the open end of the CLI stops on a line on stdin; here a time budget sets the stop flag
+    let open_end = p.open_end_seconds.filter(|&s| s > 0.0).map(|secs| {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let set = flag.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+            set.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        flag
+    });
     let search_cfg = gummiband_core::SearchConfig {
         population: runs,
         generations: p.generations.unwrap_or(3),
@@ -1599,10 +1624,10 @@ fn route_blocking(
         frames: false,
         progress: None,
         seed: p.seed,
-        open_end: None,
+        open_end,
         air: p.air.unwrap_or(0.0),
         prefer_width: p.prefer_width.unwrap_or(0.0),
-        open_via_cost: gummiband_core::DEFAULT_OPEN_VIA_COST,
+        open_via_cost: p.open_via_cost.unwrap_or(gummiband_core::DEFAULT_OPEN_VIA_COST),
     };
     let tune_cfg = gummiband_core::tune::TuneConfig {
         style: if p.angles.as_deref() == Some("45") {
@@ -1611,7 +1636,7 @@ fn route_blocking(
             gummiband_core::tune::Style::Round
         },
         amplitude: p.tune_amplitude.unwrap_or(1.0),
-        ..Default::default()
+        spacing: p.tune_spacing.unwrap_or(2.0),
     };
     let tune = p.tune != Some(false);
     let finished = gummiband_core::finish_nets(&board, &only, shove, give, |b| {
@@ -1621,6 +1646,7 @@ fn route_blocking(
                 zdiff: p.pair_zdiff,
                 all: p.pair_all.unwrap_or(false),
                 room: tune.then(|| tune_cfg.clone()),
+                angles45: angles_45,
             };
             gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, &search_cfg, &cfg)
         } else {
@@ -1653,7 +1679,18 @@ fn route_blocking(
         }
     }
     let angles_45 = angles_45.then(|| {
-        let st = gummiband_core::octo::octilinear(b, &mut res.geometry);
+        let wide: Vec<gummiband_core::board::NetId> = pair_reports
+            .iter()
+            .filter(|r| r.wide)
+            .flat_map(|r| [b.net_id(&r.p), b.net_id(&r.n)])
+            .flatten()
+            .collect();
+        let st = gummiband_core::octo::octilinear_only(
+            b,
+            &mut res.geometry,
+            &|t| !(wide.contains(&t.net) && t.seg == u32::MAX),
+            &|_, _| false,
+        );
         AnglesOut {
             length_before_mm: r3(st.length_before),
             length_after_mm: r3(st.length_after),

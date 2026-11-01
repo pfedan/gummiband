@@ -68,7 +68,12 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   meanders (2026-11-01): before the meanders the nets that are too short are widened to the
   width of their meander and push their neighbours aside, undone in halves where that would add
   a clearance error; DDR5 10 instead of 16 of 29 out of range, 14 of 23 nets reach their length,
-  KiCad skew errors 9 instead of 14, pair gap 6 instead of 22, 0 clearance. Open: room in the
+  KiCad skew errors 9 instead of 14, pair gap 6 instead of 22, 0 clearance. Pairs and 45 degrees
+  (2026-11-01): with `--pairs --angles 45` the wide track goes onto the grid before the split,
+  so both tracks stay parallel; a pair end whose repair finds no way gives up the pair (single
+  tracks) before it keeps crossed tracks. `diff_pairs` 8 instead of 13 KiCad errors (pair gap 1
+  instead of 11, 99 % instead of 95 % coupled), Lichtschnitzel 0 instead of 12 errors and 1
+  instead of 3 open, but its USB pair then runs as single tracks. Open: room in the
   router itself, phase matching near the source, carrying the pair to its end and breakout
   zones, via pairs, the open end with pairs.
 - Rule engine: more custom rule conditions (positions, footprints, layers).

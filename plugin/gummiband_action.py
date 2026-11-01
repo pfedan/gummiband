@@ -309,6 +309,9 @@ class MetricsWindow(wx.Frame if wx is not None else object):
         self.course = wx.Panel(panel, size=(420, 90))
         self.course.SetBackgroundStyle(wx.BG_STYLE_PAINT)
         self.course.Bind(wx.EVT_PAINT, self.paint)
+        # the course is drawn for its size: a larger window gets a larger chart
+        self.course.Bind(wx.EVT_SIZE, lambda event: (self.course.Refresh(), event.Skip()))
+        self.hint_text, self.hint_width = "", 0
         self.hint = wx.StaticText(panel, label="")
         self.accept_button = wx.Button(panel, label="Accept current result")
         self.accept_button.Disable()
@@ -323,17 +326,33 @@ class MetricsWindow(wx.Frame if wx is not None else object):
         box = wx.BoxSizer(wx.VERTICAL)
         box.Add(self.phase, 0, wx.ALL, 12)
         box.Add(grid, 0, wx.LEFT | wx.RIGHT | wx.EXPAND, 12)
-        box.Add(self.course, 0, wx.ALL | wx.EXPAND, 12)
+        box.Add(self.course, 1, wx.ALL | wx.EXPAND, 12)
         box.Add(self.hint, 0, wx.LEFT | wx.RIGHT | wx.EXPAND, 12)
         box.Add(buttons, 0, wx.ALL | wx.EXPAND, 12)
         panel.SetSizer(box)
         box.SetSizeHints(self)
+        panel.Bind(wx.EVT_SIZE, self.on_size)
         self.CenterOnScreen()
+
+    def set_hint(self, text: str):
+        """The hint below the course, wrapped to the width of the window."""
+        width = max(self.course.GetSize().width, 200)
+        if (text, width) == (self.hint_text, self.hint_width):
+            return
+        self.hint_text, self.hint_width = text, width
+        self.hint.SetLabel(text)
+        self.hint.Wrap(width)
+        self.Layout()
+
+    def on_size(self, event):
+        event.Skip()
+        # wrap again after the sizer has given the course its new width
+        wx.CallAfter(lambda: self and self.set_hint(self.hint_text))
 
     def on_accept(self, _event):
         self.take = True
         self.accept_button.Disable()
-        self.hint.SetLabel("Finishing the best result...")
+        self.set_hint("Finishing the best result...")
 
     def on_cancel(self, _event):
         self.go_on = False
@@ -364,7 +383,7 @@ class MetricsWindow(wx.Frame if wx is not None else object):
         v["level"].SetLabel(f"{p.get('level', 0)} of {p.get('top', 0)}" if p.get("top") else "0")
         if p.get("generation", 0) > 0 and not self.take:
             self.accept_button.Enable()
-            self.hint.SetLabel("Even bold changes do not help any more. Accepting the result is "
+            self.set_hint("Even bold changes do not help any more. Accepting the result is "
                                "recommended."
                                if runner.converged(p) else "")
         self.course.Refresh()

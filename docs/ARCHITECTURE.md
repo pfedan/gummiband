@@ -263,14 +263,22 @@ track and split afterwards.
    via that holds both vias of the pair. The pads of an end merge into one pin (their hull, if it
    keeps its distance from foreign copper). A pair has one wide track, between its two ends
    farthest apart; other pins get single tracks in the last pass.
-2. The normal search and geometry steps route that net.
+2. The normal search and geometry steps route that net. With `--angles 45` the wide tracks go
+   onto the grid here, in one `octo` run with all other tracks (each wide track a little wider,
+   so that the mitred outer corner of its two tracks fits); the first and last `max(1, 3 w)` mm
+   of every wide track are held (`octo::octilinear_only` with a `hold` per element), because the
+   split decides there how the tracks leave the pads and where the vias go.
 3. Split: the centre line is offset to both sides, arcs stay arcs, folds on the inner side of tight
    bends are cut out. The tracks leave the pads straight and join the curves past the pad tips.
+   After the 45 degree step the outer side of a corner of at most 45 degrees is mitred, so both
+   tracks stay on the grid, and the side of the pads the band leaves to is judged 1 mm along it.
 4. Polarity: if the P pad lies on different sides at the two ends, the pair changes sides through
    one of its vias (vias in line instead of side by side). Without a via the pair is routed as two
    single nets.
 5. Repair: clearance problems within 6 mm of an end take the tracks and vias away up to the last
-   problem; the normal router connects pad and track end. If that finds no way, the end stays.
+   problem; the normal router connects pad and track end. If that finds no way, the pair is given
+   up and its nets are routed as single tracks (reported as such); only if they find no way
+   either do the ends that found no way keep the two tracks they had.
 6. Last pass: what is still open is routed around everything as single tracks.
 7. Tuning: the shorter track of a path gets 45 degree bumps on its outer side, where they fit,
    down to `--pair-skew` or a `skew` rule.
