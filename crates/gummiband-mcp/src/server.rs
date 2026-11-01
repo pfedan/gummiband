@@ -346,6 +346,11 @@ pub struct AddZoneIn {
     pub points: Vec<[f64; 2]>,
     /// Zone priority (default 0).
     pub priority: Option<u32>,
+    /// How the pads of the net join the zone: "thermal" (default), "solid" or "thermal_tht"
+    /// (reliefs on through hole pads, SMD pads solid).
+    pub pad_connection: Option<String>,
+    /// Width of the thermal spokes in mm (default 0.3); wider for pins that carry amperes.
+    pub thermal_spoke_width: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1442,7 +1447,24 @@ impl Gummiband {
                 .layer_id(&p.layer)
                 .with_context(|| format!("no layer {:?}", p.layer))?;
             let pts: Vec<_> = p.points.iter().map(|q| gummiband_core::geom::pt(q[0], q[1])).collect();
-            Ok(write::add_zone(kb, text, net, layer, &pts, p.priority.unwrap_or(0), 1))
+            let connect = match p.pad_connection.as_deref() {
+                None => write::PadConnect::Thermal,
+                Some(s) => write::PadConnect::parse(s)
+                    .with_context(|| format!("pad_connection {s:?}: use thermal, solid or thermal_tht"))?,
+            };
+            let spoke = p.thermal_spoke_width.unwrap_or(write::DEFAULT_SPOKE);
+            if spoke <= 0.0 {
+                bail!("thermal_spoke_width must be positive");
+            }
+            let spec = write::ZoneSpec {
+                net,
+                layer,
+                priority: p.priority.unwrap_or(0),
+                name: "",
+                connect,
+                spoke,
+            };
+            Ok(write::add_zone_named(kb, text, &spec, &pts, 1))
         })?;
         let out = AddLockedOut {
             board: id,

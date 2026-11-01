@@ -112,8 +112,15 @@ pub struct GroundPourIn {
     /// Net of the pours and vias (default "GND").
     pub net: Option<String>,
     /// Layers for the pours (default: the outer copper layers). A layer that already has a zone
-    /// of the net is left as it is.
+    /// of the net is left as it is; the small "gb:" pours of power_copper do not count.
     pub layers: Option<Vec<String>>,
+    /// How the pads of the net join the pours: "thermal" (default, thermal reliefs), "solid"
+    /// (no reliefs: clears KiCad's starved_thermal where spokes find no room, harder to solder
+    /// for small passives) or "thermal_tht" (reliefs on through hole pads, SMD pads solid).
+    pub pad_connection: Option<String>,
+    /// Width of the thermal spokes in mm (default 0.3). Four spokes carry about what a track of
+    /// four times the width carries; a connector pin for several amperes wants wider ones.
+    pub thermal_spoke_width: Option<f64>,
     /// Grid pitch of the stitching vias in mm (default 5, 0 = no grid).
     pub pitch: Option<f64>,
     /// Spacing of the via row along the board edge in mm (default 3, 0 = no edge row).
@@ -1261,7 +1268,8 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
             layer: *layer,
             priority: prio,
             name,
-            solid: true,
+            connect: write::PadConnect::Solid,
+            spoke: write::DEFAULT_SPOKE,
         };
         text = write::add_zone_named(kb, &text, &spec, outline, 0x7c0 + i as u64);
     }
@@ -1309,8 +1317,21 @@ pub fn ground_pour(p: &GroundPourIn) -> Result<(PathBuf, GroundPourOut)> {
     let prio = p.priority.unwrap_or(0);
     let mut warnings = Vec::new();
     let mut zone_layers = Vec::new();
+    let connect = match p.pad_connection.as_deref() {
+        None => write::PadConnect::Thermal,
+        Some(s) => write::PadConnect::parse(s)
+            .with_context(|| format!("pad_connection {s:?}: use thermal, solid or thermal_tht"))?,
+    };
+    let spoke = p.thermal_spoke_width.unwrap_or(write::DEFAULT_SPOKE);
+    if spoke <= 0.0 {
+        bail!("thermal_spoke_width must be positive");
+    }
     for &l in &layers {
-        if zf.iter().any(|z| z.net == Some(net) && z.layer == l) {
+        // the small "gb:" pours of power_copper are no ground pour
+        let full = |z: &&power::ZoneFill| {
+            z.net == Some(net) && z.layer == l && !z.name.starts_with(gummiband_kicad::read::GB_ZONE_PREFIX)
+        };
+        if zf.iter().any(|z| full(&z)) {
             warnings.push(format!(
                 "{} already has a {nname} zone, left as it is",
                 layer_name(b, l)
@@ -1384,7 +1405,15 @@ pub fn ground_pour(p: &GroundPourIn) -> Result<(PathBuf, GroundPourOut)> {
         write::add_locked(&kb, &items)
     };
     for (i, &l) in zone_layers.iter().enumerate() {
-        text = write::add_zone(&kb, &text, net, l, &outline.pts, prio, 0x9d0 + i as u64);
+        let spec = write::ZoneSpec {
+            net,
+            layer: l,
+            priority: prio,
+            name: "",
+            connect,
+            spoke,
+        };
+        text = write::add_zone_named(&kb, &text, &spec, &outline.pts, 0x9d0 + i as u64);
     }
     let out_path = match &p.output {
         Some(o) => PathBuf::from(o),

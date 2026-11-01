@@ -426,4 +426,21 @@ fn power_copper_pours_a_path_before_routing() {
     assert_eq!(r["connections"], 1, "{r}");
     assert_eq!(r["routed"], 1, "{r}");
     assert_eq!(r["violations"], json!([]), "{r}");
+
+    // a pour of A after routing: the small "gb:" pour on F.Cu is no reason to leave F.Cu out,
+    // and the pads join solid with the spoke width asked for
+    let g = s.call(
+        "ground_pour",
+        json!({"path": work, "net": "A", "pitch": 0, "edge_pitch": 0,
+               "pad_connection": "thermal_tht", "thermal_spoke_width": 0.6}),
+    );
+    assert_eq!(g["zones_added"], json!(["F.Cu", "B.Cu"]), "{g}");
+    let text = std::fs::read_to_string(dir.join("tiny.prerouted.gnd.kicad_pcb")).unwrap();
+    assert_eq!(text.matches("(connect_pads thru_hole_only").count(), 2, "{text}");
+    assert_eq!(text.matches("(thermal_bridge_width 0.6)").count(), 2, "{text}");
+    let bad = s.call_err(
+        "ground_pour",
+        json!({"path": work, "net": "A", "pad_connection": "spokes"}),
+    );
+    assert!(bad.contains("thermal_tht"), "{bad}");
 }
