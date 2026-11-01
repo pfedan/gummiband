@@ -118,6 +118,10 @@ enum Cmd {
         /// `diff_pair_gap` rule or a net class of their own marks as differential pairs.
         #[arg(long)]
         pair_all: bool,
+        /// With --pairs: let the wide track end at the pads as before, instead of at a point
+        /// just outside them with two single tracks to the pads (breakout zones).
+        #[arg(long)]
+        no_breakouts: bool,
         /// Experimental: rounds of negotiated routing before the rip-up passes (0 = off).
         /// Connections may overfill edges and cross for a rising price, see docs/ARCHITECTURE.md.
         #[arg(long, default_value_t = 0)]
@@ -497,6 +501,7 @@ fn main() -> Result<()> {
             pair_skew,
             pair_zdiff,
             pair_all,
+            no_breakouts,
             generations,
             geometry_generations,
             seed,
@@ -717,6 +722,7 @@ fn main() -> Result<()> {
                         all: pair_all,
                         room: tune_room.then(|| tune_cfg.clone()),
                         angles45: angles == Angles::Deg45,
+                        breakouts: !no_breakouts,
                     };
                     gummiband_core::pairs::route_pairs(board, &sub_cfg, &router_cfg, &search_cfg, &pair_cfg)
                 } else {

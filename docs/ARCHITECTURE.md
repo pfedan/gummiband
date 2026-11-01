@@ -249,7 +249,13 @@ track and split afterwards.
 1. Merge: the two nets become one net whose track is as wide as both tracks and their gap, with a
    via that holds both vias of the pair. The pads of an end merge into one pin (their hull, if it
    keeps its distance from foreign copper). A pair has one wide track, between its two ends
-   farthest apart; other pins get single tracks in the last pass.
+   farthest apart; other pins get single tracks in the last pass. Breakout zones (on unless
+   `--no-breakouts`): the wide track of an end starts at a point just outside the pads, towards
+   the other end (else on the other side), where the hull of the pads and the end of the wide
+   track keeps its distance from foreign copper. That hull is the pin, so nothing else runs
+   where the two tracks go to the pads, and the pads themselves block the wide track, so it
+   cannot run over them. An end on a part with more pins of the pair (a USB-C socket) stays at
+   its pads.
 2. The normal search and geometry steps route that net. With `--angles 45` the wide tracks go
    onto the grid here, in one `octo` run with all other tracks (each wide track a little wider,
    so that the mitred outer corner of its two tracks fits); the first and last `max(1, 3 w)` mm
@@ -259,6 +265,9 @@ track and split afterwards.
    bends are cut out. The tracks leave the pads straight and join the curves past the pad tips.
    After the 45 degree step the outer side of a corner of at most 45 degrees is mitred, so both
    tracks stay on the grid, and the side of the pads the band leaves to is judged 1 mm along it.
+   At a breakout the band may leave its start in any direction: the tracks go straight out of
+   the pads towards it, and which of them takes which side of the band is what keeps the links
+   (to a point 1 mm along the band) from crossing, else the shorter.
 4. Polarity: if the P pad lies on different sides at the two ends, the pair changes sides through
    one of its vias (vias in line instead of side by side). Without a via the pair is routed as two
    single nets.
