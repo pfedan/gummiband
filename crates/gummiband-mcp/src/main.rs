@@ -4,6 +4,7 @@
 //! run the KiCad DRC and render PNG images of board regions. See docs/MCP.md.
 
 mod external;
+mod practice;
 mod server;
 
 use anyhow::Result;

@@ -83,6 +83,11 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   copper through MCP tools as locked tracks, vias and zones, checks it, and then lets the
   autorouter do the rest around it. Done: `part_info`, `add_locked_copper` (tracks, vias).
   Still open: locked zones, checking a region.
+- Good practice around the router (idea from Daniel: the controlling agent sets the rules, the
+  router does the heavy lifting, the agent finishes): `power_plan` (currents to widths, pours,
+  planes, vias, `.kicad_dru` rules, widths as net options), `current_check` (narrowest band and
+  total cross-section of every current path, vias included), `ground_pour` (ground zones and
+  stitching vias) and the prompt `good_practice` that runs a board end to end.
 - Blocks (fixed blocks): a KiCad group or placed design block (parts plus their pre-routed locked copper, e.g. the datasheet
   layout of a converter) moves only as a whole under --move-parts; inside it nothing changes.
 

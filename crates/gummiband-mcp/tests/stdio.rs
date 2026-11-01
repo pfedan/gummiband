@@ -145,12 +145,15 @@ fn initialize_list_load_route() {
             "add_locked_copper",
             "add_zone",
             "angles_45",
+            "current_check",
             "drc",
+            "ground_pour",
             "list_nets",
             "load_board",
             "move_part",
             "part_info",
             "place_parts",
+            "power_plan",
             "render",
             "route",
             "set_net_options"
@@ -285,4 +288,68 @@ fn initialize_list_load_route() {
 
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn good_practice_plan_check_and_pour() {
+    let dir = std::env::temp_dir().join(format!("gummiband-mcp-practice-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let pcb = dir.join("tiny.kicad_pcb");
+    std::fs::write(&pcb, tiny_board()).unwrap();
+
+    let mut s = Server::start();
+    s.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}),
+    );
+    s.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+
+    // the workflow prompt
+    let prompts = s.request("prompts/list", json!({}));
+    assert_eq!(prompts["prompts"][0]["name"], "good_practice", "{prompts}");
+    let p = s.request(
+        "prompts/get",
+        json!({"name": "good_practice", "arguments": {"path": "/x/board.kicad_pcb", "currents": "A 2 A"}}),
+    );
+    let text = p["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("/x/board.kicad_pcb") && text.contains("power_plan") && text.contains("A 2 A"));
+
+    // plan: 2 A on net A needs more than the 0.2 mm default width (1 oz, no stackup)
+    s.call("load_board", json!({"path": pcb.display().to_string()}));
+    let plan = s.call(
+        "power_plan",
+        json!({"board": "b1", "currents": [{"net": "A", "amps": 2.0}], "apply": true}),
+    );
+    let w = plan["nets"][0]["track_width_mm"].as_f64().unwrap();
+    assert!(w > 0.5 && w < 1.0, "{plan}");
+    assert_eq!(plan["applied"][0]["net"], "A", "{plan}");
+    assert!(plan["dru_rules"].as_str().unwrap().contains("A.NetName == 'A'"), "{plan}");
+
+    // the route takes the width
+    let r = s.call("route", json!({"board": "b1", "runs": 1, "generations": 0}));
+    assert_eq!(r["routed"], 2, "{r}");
+    let a = r["nets"].as_array().unwrap().iter().find(|n| n["net"] == "A").unwrap().clone();
+    assert!(a["min_width_mm"].as_f64().unwrap() > w - 0.01, "{a}");
+
+    // check: the two pin net gets its cross-section measured automatically
+    let out = dir.join("tiny.routed.kicad_pcb");
+    let c = s.call(
+        "current_check",
+        json!({"path": out, "paths": [{"net": "A", "amps": 2.0}, {"net": "B", "amps": 2.0}]}),
+    );
+    assert_eq!(c["paths"][0]["verdict"], "ok", "{c}");
+    assert!(c["paths"][0]["neck"]["width_mm"].as_f64().unwrap() >= w - 0.06, "{c}");
+    // net B kept the 0.2 mm default: flagged with a position
+    assert!(c["paths"][1]["verdict"].as_str().unwrap().starts_with("FLAG"), "{c}");
+    assert!(c["paths"][1]["neck"]["x"].is_number(), "{c}");
+    assert_eq!(c["flagged"], 1, "{c}");
+
+    // pour: zones of B on both layers and stitching vias clear of net A
+    let g = s.call("ground_pour", json!({"path": out, "net": "B", "pitch": 4.0, "edge_pitch": 0}));
+    assert_eq!(g["zones_added"], json!(["F.Cu", "B.Cu"]), "{g}");
+    assert!(g["vias_added"].as_u64().unwrap() > 0, "{g}");
+    let text = std::fs::read_to_string(dir.join("tiny.routed.gnd.kicad_pcb")).unwrap();
+    assert_eq!(text.matches("(zone ").count(), 2);
+    assert!(text.contains("(locked yes)"));
 }

@@ -402,3 +402,21 @@ mod tests {
         assert!(s.contains("width=\"5mm\" height=\"5mm\" viewBox=\"10 20 5 5\""), "{s}");
     }
 }
+
+/// A copy of `pcb` in the temp folder with its zones filled by KiCad
+/// (`kicad-cli pcb drc --refill-zones --save-board`, KiCad 9 or newer).
+pub fn refilled(pcb: &Path) -> Result<PathBuf> {
+    let stem = pcb.file_stem().and_then(|s| s.to_str()).unwrap_or("board");
+    let dir = temp_file(&format!("{stem}-filled"), "d")?;
+    std::fs::create_dir_all(&dir)?;
+    let copy = dir.join(format!("{stem}.kicad_pcb"));
+    std::fs::copy(pcb, &copy).with_context(|| format!("copying {}", pcb.display()))?;
+    ensure_project(pcb)?;
+    copy_project_files(pcb, &copy);
+    let report = dir.join("refill.json");
+    run(Command::new(kicad_cli()?)
+        .args(["pcb", "drc", "--refill-zones", "--save-board", "--format", "json", "-o"])
+        .arg(&report)
+        .arg(&copy))?;
+    Ok(copy)
+}
