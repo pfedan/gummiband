@@ -399,7 +399,9 @@ Overlapping zones on a plane layer: the router and `power_copper` see a plane on
 zone of another net with a higher priority covers it, so a via of the lower net does not land
 in the higher net's area.
 
-The pours are zones named `gb:...` with priority 20 and solid pad connections. Gummiband keeps
+The pours are zones named `gb:...` with priority 20 and solid pad connections; a pour that
+overlaps a zone of the same priority on its layer (two via fields of FETs side by side) goes one
+priority up, so KiCad reports no `zones_intersect`. Gummiband keeps
 zones with that prefix as obstacles for other nets even without `zones_as_obstacles`, and counts
 pads under one such pour (and vias in it that reach the plane) as connected, so the router
 neither runs a track across the pour nor routes the joined pads again. The tool writes the

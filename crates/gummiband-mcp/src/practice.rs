@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use gummiband_core::board::{Board, LayerId, NetId, ObstacleKind};
-use gummiband_core::geom::{Point, Shape};
+use gummiband_core::geom::{Point, Polygon, Shape};
 use gummiband_kicad::power::{self, ZoneFill};
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
 use rmcp::schemars::{self, JsonSchema};
@@ -1257,11 +1257,30 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
     } else {
         write::add_locked(kb, &vias)
     };
+    // overlapping zones on one layer must not share a priority (KiCad: zones_intersect), e.g.
+    // the via field pours of two FETs side by side: the later one goes one priority up
+    let mut taken: Vec<(LayerId, u32, Polygon)> = zf
+        .iter()
+        .flat_map(|z| {
+            z.polys
+                .iter()
+                .map(move |q| (z.layer, z.priority.max(0) as u32, q.clone()))
+        })
+        .collect();
     for (i, (net, layer, name, outline)) in zones.iter().enumerate() {
+        let poly = Polygon::new(outline.clone());
+        let mut priority = prio;
+        while taken
+            .iter()
+            .any(|(l, p, q)| *l == *layer && *p == priority && q.dist_to_poly(&poly) <= 0.0)
+        {
+            priority += 1;
+        }
+        taken.push((*layer, priority, poly));
         let spec = write::ZoneSpec {
             net: *net,
             layer: *layer,
-            priority: prio,
+            priority,
             name,
             solid: true,
         };
