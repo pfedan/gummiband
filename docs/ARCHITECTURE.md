@@ -286,7 +286,9 @@ track and split afterwards.
    one of its vias (vias in line instead of side by side). Without a via the pair is routed as two
    single nets.
 5. Repair: clearance problems within 6 mm of an end take the tracks and vias away up to the last
-   problem; the normal router connects pad and track end. If that finds no way, the pair is given
+   problem; the normal router connects pad and track end. If that finds no way, or only one more
+   than three times as long as the straight line plus 3 mm (it would set the aim of its length
+   group), the pair is given
    up and its nets are routed as single tracks (reported as such); only if they find no way
    either do the ends that found no way keep the two tracks they had.
 6. Last pass: what is still open is routed around everything as single tracks.

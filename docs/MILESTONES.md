@@ -81,7 +81,11 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   8), `matching` 7 instead of 13, Lichtschnitzel unchanged (its USB-C end stays at the pads).
   On DDR5 they were worse over 6 seeds (more pair gap and length errors, a pair whose repair
   breaks it into single nets gets meandered as two nets), so they are opt-in (`--breakouts`)
-  until that is understood; ends between the pads of a part (BGA) stay at their pads.
+  until that is understood; ends between the pads of a part (BGA) stay at their pads. A repair
+  whose single track takes a long way round now counts as failed (on DDR5 one 31 mm detour set
+  the aim of the whole command address group): with `--breakouts` DDR5 has 10 to 16 instead of
+  13 to 22 of 29 out of range over 6 seeds, about as many as without; more pair gap errors
+  remain near the breakouts.
   Open: room in the router itself, phase matching near the source, carrying the pair to its
   end, via pairs (the remaining pair errors sit at vias near the ends), the open end with
   pairs.

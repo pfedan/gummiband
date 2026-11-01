@@ -2019,16 +2019,21 @@ pub fn route_pairs(
         let mut b = real.only_nets(&names, &Default::default());
         let kept_from = b.obstacles.len();
         lock_geometry(&mut b, &geo);
+        let first_cut = b.nets.len();
         let cut_map = cut_nets(&mut b, &cuts, kept_from);
         let (_, mut fin) = route_board(&b, sub_cfg, base, &finish);
-        let failed: Vec<(usize, bool)> = fin
-            .stats
-            .unrouted
+        // a cut that found no way, or only a long way round (which would set the aim of its
+        // length group), counts as failed
+        let detour = |i: usize, c: &Cut| {
+            let id = (first_cut + i) as NetId;
+            let routed: f64 = fin.geometry.tracks.iter().filter(|t| t.net == id).map(track_len).sum();
+            routed > 3.0 * real.pins[c.pad].pos.dist(c.at) + 3.0
+        };
+        let failed: Vec<(usize, bool)> = cuts
             .iter()
-            .filter_map(|u| {
-                cuts.iter()
-                    .enumerate()
-                    .find(|(i, _)| u.contains(&format!("~cut{i} from ")))
+            .enumerate()
+            .filter(|&(i, c)| {
+                fin.stats.unrouted.iter().any(|u| u.contains(&format!("~cut{i} from "))) || detour(i, c)
             })
             .map(|(_, c)| (c.path, c.at_start))
             .collect();
