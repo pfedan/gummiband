@@ -91,6 +91,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `angles_45` | `path`, `output?`, `nets?` | path of the written `<input>.45.kicad_pcb`, runs of track looked at and changed, length before and after, pieces off the grid, sharp corners, Gummiband's violations before and after |
 | `power_plan` | `board`, `currents? [{net, amps, short_amps?}]`, `temp_rise?`, `apply?` | per power net the IPC-2221 width per layer, the track width to route with, vias per layer change, planes and zones, advice; board notes (GND plane, reference planes); the widths as `.kicad_dru` rules; with `apply` the widths stored as net options |
 | `current_check` | `path`, `paths? [{net, amps, short_amps?, from?, to?, name?}]`, `temp_rise?`, `refill?`, `max_segments?` | per current path the narrow segments, the narrowest single band and the total cross-section between the terminals (pours and vias included) with their position, vias against the current, verdict `ok` or `FLAG` |
+| `power_copper` | `board`, `paths [{net, amps, short_amps?, from, to?, layer?, name?}]`, `temp_rise?`, `margin?`, `max_span?`, `via_diameter?`, `via_drill?`, `priority?` | id and path of the working copy with "gb:" power pours over the pads of each path and, for plane nets, locked via fields with a pour into the plane; per pour its outline, area, what cut it, vias needed and placed; a `current_check` of the pours; `warnings` |
 | `ground_pour` | `path`, `net?`, `layers?`, `pitch?`, `edge_pitch?`, `edge_inset?`, `avoid_courtyards?`, `via_diameter?`, `via_drill?`, `priority?`, `output?` | id and path of `<input>.gnd.kicad_pcb` with ground zones on the outer layers and locked stitching vias, `warnings` |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?`, `refill?` | PNG (image content) and its path, region, pixels per mm |
@@ -309,11 +310,11 @@ nets. The output goes to `<input>.45.kicad_pcb` by default, with the `.kicad_pro
 {"name": "angles_45", "arguments": {"path": "/abs/path/lichtschnitzel.routed.kicad_pcb"}}
 ```
 
-### Good practice: power_plan, current_check, ground_pour
+### Good practice: power_plan, power_copper, current_check, ground_pour
 
 The router does the heavy lifting; around it go the rules of the craft a careful layouter
 applies: plan the power copper before routing, check the current carrying capacity after it,
-pour ground and stitch it. These three tools and the prompt `good_practice` (below) cover that,
+pour ground and stitch it. These four tools and the prompt `good_practice` (below) cover that,
 so an agent can take a board from netlist to DRC in one go. Currents follow IPC-2221
 (I = k * dT^0.44 * A^0.725, A in mil², k = 0.048 outer, 0.024 inner, default rise 20 K) with the
 copper thickness of each layer from the board's stackup (35 um without one). A via counts with
@@ -347,6 +348,43 @@ them on the next `load_board`. `apply: true` stores the widths as net options (`
 {"name": "power_plan", "arguments": {"board": "b1", "apply": true, "currents": [
   {"net": "*VBUS_RAW", "amps": 4.1}, {"net": "VBUS_F", "amps": 4.1},
   {"net": "*/SW_?", "amps": 8}, {"net": "*OUT?_5V", "amps": 4, "short_amps": 7}]}}
+```
+
+#### power_copper
+
+Before routing, for current paths a track carries badly: a converter's switch node from its
+pins to the inductor, a big pad that reaches its plane through one via. For each path:
+
+- A net without plane gets one pour over its `from` and `to` pads on the layer they share (outer
+  first, or `layer`): the convex hull of the pads grown by `margin` (0.5 mm), cut back by straight
+  lines wherever copper, holes, rule areas or reserved zones of other nets come closer than
+  their clearance, and along the board edge. Each cut runs across the line from the obstacle to
+  the nearest point of the spine between the terminals, so the pour gives way on that side only.
+  Terminals further apart than `max_span` (12 mm) get no pour (route them wide); a pad the pour
+  no longer reaches gets a warning.
+- A net with a plane gets, at every terminal, locked vias for the current (IPC-2221 per via; the
+  `from` terminals share the current, every `to` terminal takes all of it) on rings just off the
+  pad (the holes stay out of the pad; vias already touching it count), free by the same rules as
+  stitching vias except that the part's own courtyard is allowed, and a small pour joining pad
+  and vias.
+
+The pours are zones named `gb:...` with priority 20 and solid pad connections. Gummiband keeps
+zones with that prefix as obstacles for other nets even without `zones_as_obstacles`, and counts
+pads under one such pour (and vias in it that reach the plane) as connected, so the router
+neither runs a track across the pour nor routes the joined pads again. The tool writes the
+working copy `<input>.prerouted.kicad_pcb` (like `add_locked_copper`); route the returned board.
+It ends with a `current_check` of the pour paths (the zone outline counts until KiCad fills it).
+
+On the Lichtschnitzel benchmark, buck A: the switch node pour (U4.5 to U4.9 into L1.1, 8 A)
+gives way to U4.10 and the exposed GND pad and measures 3.5 mm cross-section against 1.74 mm
+required; L1.2 gets 7 vias of 0.3 mm into the `+5V_A` plane instead of one. Routed afterwards:
+all connections, 19 instead of 36 Gummiband clearance violations, none near the converter.
+
+```json
+{"name": "power_copper", "arguments": {"board": "b1", "paths": [
+  {"name": "buck A SW", "net": "/Power/SW_A", "amps": 8,
+   "from": ["U4.5+U4.6+U4.7+U4.8+U4.9"], "to": ["L1.1"]},
+  {"name": "buck A out", "net": "+5V_A", "amps": 8, "from": ["L1.2"]}]}}
 ```
 
 #### current_check
@@ -396,8 +434,8 @@ shows that `VBUS_F` and `VBUS_IN` each pass a single 0.4 mm via (about 1.6 A) on
 ```
 
 A flag is fixed by widening the net (`set_net_options` width, then `route` with `keep_all`,
-`nets` and `reroute`), a pour over the neck (`add_zone`), more vias or locked copper, then
-another check.
+`nets` and `reroute`), a pour over the neck (`add_zone`, or `power_copper` before the next
+route), more vias or locked copper, then another check.
 
 #### ground_pour
 
@@ -511,6 +549,9 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
   and treats both board sides as one space.
 - Not reachable through MCP yet: creating a board, and per net widths and priorities
   from files (`--net-widths`, `--net-priorities`; both go through `set_net_options`).
+- `power_copper` shapes a pour as a convex hull cut by straight lines: obstacles between the
+  terminals cost more copper than needed, and a terminal behind another net's pad is lost (a
+  warning says so). It does not move parts; the via fields sit on rings around the pad.
 - `current_check` measures on a raster (0.05 mm, coarser on very large nets); it does not weigh
   the length of a neck, and the cross-section is skipped for nets of more than three million
   copper cells. `ground_pour` does not yet check that the fill reaches every via (the DRC does).

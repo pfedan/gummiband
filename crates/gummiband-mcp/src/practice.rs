@@ -1,6 +1,7 @@
-//! Good practice around routing: power planning before (`power_plan`), current carrying checks
-//! (`current_check`) and ground pours with stitching vias (`ground_pour`) after, and the
-//! `good_practice` prompt that walks an agent through a whole board.
+//! Good practice around routing: power planning and power copper before (`power_plan`,
+//! `power_copper`), current carrying checks (`current_check`) and ground pours with stitching
+//! vias (`ground_pour`) after, and the `good_practice` prompt that walks an agent through a
+//! whole board.
 
 use std::path::{Path, PathBuf};
 
@@ -80,6 +81,9 @@ pub struct PathIn {
     pub to: Option<Vec<String>>,
     /// A name for the table, optional.
     pub name: Option<String>,
+    /// power_copper only: the layer of the pour (default the layer all terminal pads share,
+    /// outer first).
+    pub layer: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -125,6 +129,28 @@ pub struct GroundPourIn {
     pub priority: Option<u32>,
     /// Output file (default <input>.gnd.kicad_pcb).
     pub output: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PowerCopperIn {
+    /// Board id from load_board.
+    pub board: String,
+    /// Current paths with `from` pads (and `to` pads for a net without plane). A net without
+    /// plane gets one pour over all its terminal pads; a net with a plane gets, at every `from`
+    /// and `to` terminal, vias into the plane for the current (the `from` terminals share it, every
+    /// `to` terminal takes all of it) and a small pour that joins pad and vias.
+    pub paths: Vec<PathIn>,
+    /// Allowed temperature rise in K (default 20).
+    pub temp_rise: Option<f64>,
+    /// How far the pour reaches beyond the hull of its pads, mm (default 0.5).
+    pub margin: Option<f64>,
+    /// Terminals further apart than this (mm, default 12) get no pour: route them wide.
+    pub max_span: Option<f64>,
+    /// Via size of the via fields, default the net class.
+    pub via_diameter: Option<f64>,
+    pub via_drill: Option<f64>,
+    /// Zone priority of the pours (default 20, above ground pours).
+    pub priority: Option<u32>,
 }
 
 // ------------------------------------------------------------------------------ outputs
@@ -635,6 +661,37 @@ pub fn power_plan(kb: &KicadBoard, id: &str, p: &PowerPlanIn) -> Result<(PowerPl
     ))
 }
 
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PourOut {
+    pub name: String,
+    pub net: String,
+    /// "pour" (pads joined on one layer) or "via field" (pad to plane).
+    pub kind: String,
+    pub layer: String,
+    pub terminals: Vec<String>,
+    pub amps: f64,
+    /// Track width the current needs on the pour's layer.
+    pub required_width_mm: f64,
+    pub area_mm2: f64,
+    pub vias_needed: usize,
+    pub vias_added: usize,
+    /// What the hull gave way to.
+    pub cut_by: Vec<String>,
+    pub outline: Vec<[f64; 2]>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PowerCopperOut {
+    /// Id of the working copy with the pours; route this one.
+    pub board: String,
+    pub path: String,
+    pub pours: Vec<PourOut>,
+    pub warnings: Vec<String>,
+    /// current_check of the pours before routing (pour paths only, zone outlines unless
+    /// kicad-cli refilled them).
+    pub check: Option<CurrentCheckOut>,
+}
+
 // ---------------------------------------------------------------------------- current check
 
 /// Pins of `net` named by "REF.PAD" or "REF.*".
@@ -694,6 +751,7 @@ pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
                     from: None,
                     to: None,
                     name: None,
+                    layer: None,
                 })
                 .collect()
         }
@@ -962,6 +1020,263 @@ pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
     })
 }
 
+// ---------------------------------------------------------------------------- power copper
+
+/// Pad copper of pins on a layer, as polygons.
+fn pad_polys(b: &Board, pins: &[usize], layer: LayerId) -> Vec<gummiband_core::geom::Polygon> {
+    pins.iter()
+        .flat_map(|&p| b.pins[p].obstacles.iter())
+        .map(|&o| &b.obstacles[o])
+        .filter(|o| o.layers.has(layer))
+        .map(|o| o.shape.to_polygon(0.01))
+        .collect()
+}
+
+fn groups_of(b: &Board, net: NetId, specs: &[String]) -> Result<Vec<Vec<usize>>> {
+    specs
+        .iter()
+        .map(|s| {
+            let mut g = Vec::new();
+            for part in s.split('+') {
+                g.extend(pins_of(b, net, part.trim())?);
+            }
+            Ok(g)
+        })
+        .collect()
+}
+
+fn area(pts: &[Point]) -> f64 {
+    gummiband_core::geom::Polygon::new(pts.to_vec()).signed_area().abs()
+}
+
+/// Lay out power copper before routing: per current path a pour over its pads or via fields
+/// into its plane, as "gb:" zones (the router keeps other nets out and counts the pads under a
+/// pour as joined) and locked vias. Returns the new board text and the report (board and path
+/// filled in by the caller).
+pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, PowerCopperOut)> {
+    let b = &kb.board;
+    let dt = p.temp_rise.unwrap_or(DEFAULT_RISE);
+    let margin = p.margin.unwrap_or(0.5);
+    let max_span = p.max_span.unwrap_or(12.0);
+    let prio = p.priority.unwrap_or(20);
+    let zf = power::zones(kb);
+    let mut warnings = Vec::new();
+    let mut pours: Vec<PourOut> = Vec::new();
+    let mut zones: Vec<(NetId, LayerId, String, Vec<Point>)> = Vec::new();
+    let mut vias: Vec<write::Item> = Vec::new();
+    for q in &p.paths {
+        let net = b
+            .net_id(&q.net)
+            .with_context(|| format!("no net named {:?} (power_copper takes exact names)", q.net))?;
+        let nname = b.nets[net as usize].name.clone();
+        let label = q.name.clone().unwrap_or_else(|| nname.clone());
+        let from = groups_of(b, net, q.from.as_deref().unwrap_or(&[]))?;
+        let to = groups_of(b, net, q.to.as_deref().unwrap_or(&[]))?;
+        if from.is_empty() {
+            bail!("{label}: give the from pads");
+        }
+        let amps = q.amps.max(q.short_amps.unwrap_or(0.0));
+        let all: Vec<usize> = from.iter().chain(to.iter()).flatten().copied().collect();
+        let layer = match &q.layer {
+            Some(l) => b.layer_id(l).with_context(|| format!("no layer {l:?}"))?,
+            None => {
+                let mut ls: Vec<LayerId> = (0..b.layers.len() as LayerId)
+                    .filter(|&l| !b.layers[l as usize].is_plane && all.iter().all(|&x| b.pins[x].layers.has(l)))
+                    .collect();
+                ls.sort_by_key(|&l| !power::is_outer(b, l));
+                match ls.first() {
+                    Some(&l) => l,
+                    None => {
+                        warnings.push(format!("{label}: the pads share no routing layer, give layer"));
+                        continue;
+                    }
+                }
+            }
+        };
+        if b.layers[layer as usize].is_plane {
+            bail!("{label}: {} is a plane layer", layer_name(b, layer));
+        }
+        let cu = power::copper_mm(b, layer);
+        let need = power::ipc_width(amps, cu, power::is_outer(b, layer), dt);
+        let names = |g: &[usize]| g.iter().map(|&x| b.pins[x].name.clone()).collect::<Vec<_>>().join("+");
+        let has_plane = !b.nets[net as usize].planes.is_empty();
+        if !has_plane {
+            if to.is_empty() {
+                warnings.push(format!("{label}: {nname} has no plane, give the to pads for a pour"));
+                continue;
+            }
+            let center = |g: &[usize]| {
+                g.iter().fold(Point { x: 0.0, y: 0.0 }, |s, &x| s + b.pins[x].pos) * (1.0 / g.len().max(1) as f64)
+            };
+            let span = from
+                .iter()
+                .flat_map(|f| to.iter().map(move |t| center(f).dist(center(t))))
+                .fold(0.0, f64::max);
+            if span > max_span {
+                warnings.push(format!(
+                    "{label}: terminals {span:.1} mm apart (max_span {max_span}): no pour, route it {} mm wide",
+                    r3(need)
+                ));
+                continue;
+            }
+            let terms = pad_polys(b, &all, layer);
+            let spine: Vec<(Point, Point)> = from
+                .iter()
+                .flat_map(|f| to.iter().map(move |t| (center(f), center(t))))
+                .collect();
+            let Some(pour) = power::pour_outline(b, net, layer, &terms, &spine, margin) else {
+                warnings.push(format!("{label}: no room for a pour on {}", layer_name(b, layer)));
+                continue;
+            };
+            if !pour.lost.is_empty() {
+                warnings.push(format!(
+                    "{label}: the pour does not reach every pad (other copper in between): route the rest"
+                ));
+            }
+            let name = format!("{}power {nname}", gummiband_kicad::read::GB_ZONE_PREFIX);
+            pours.push(PourOut {
+                name: name.clone(),
+                net: nname.clone(),
+                kind: "pour".into(),
+                layer: layer_name(b, layer),
+                terminals: from.iter().chain(to.iter()).map(|g| names(g)).collect(),
+                amps,
+                required_width_mm: r3(need),
+                area_mm2: r3(area(&pour.outline)),
+                vias_needed: 0,
+                vias_added: 0,
+                cut_by: pour.cut_by.clone(),
+                outline: pour.outline.iter().map(|x| [r3(x.x), r3(x.y)]).collect(),
+            });
+            zones.push((net, layer, name, pour.outline));
+            continue;
+        }
+        // a plane net: vias from each terminal into the plane
+        let c = b.class_of(net);
+        let (dia, drill) = (
+            p.via_diameter.unwrap_or(c.via_diameter),
+            p.via_drill.unwrap_or(c.via_drill),
+        );
+        let per_via = power::via_amps(drill, dt);
+        let placed_before: Vec<Point> = vias
+            .iter()
+            .filter_map(|v| match v {
+                write::Item::Via { at, .. } => Some(*at),
+                _ => None,
+            })
+            .collect();
+        let mut placed_all = placed_before;
+        for (gi, g) in from.iter().chain(to.iter()).enumerate() {
+            let share = if gi < from.len() {
+                amps / from.len() as f64
+            } else {
+                amps
+            };
+            let count = (share / per_via - 1e-9).ceil().max(1.0) as usize;
+            let pad = pad_polys(b, g, layer);
+            if pad.is_empty() {
+                warnings.push(format!(
+                    "{label}: {} has no copper on {}",
+                    names(g),
+                    layer_name(b, layer)
+                ));
+                continue;
+            }
+            let parts: Vec<String> = g.iter().map(|&x| b.pins[x].footprint.clone()).collect();
+            let room = power::ViaRoom::new(b, &zf, net, dia, drill, 0.15, true).allow_in(parts);
+            // vias of the net that already touch the pad count
+            let have: Vec<Point> = b
+                .obstacles
+                .iter()
+                .filter(|o| o.net == Some(net) && o.kind == ObstacleKind::Via)
+                .filter_map(|o| match o.shape {
+                    Shape::Circle { c, r } if pad.iter().any(|x| x.dist_to_point(c) <= r) => Some(c),
+                    _ => None,
+                })
+                .collect();
+            let missing = count.saturating_sub(have.len());
+            let mut spots = power::via_field(&room, &pad, missing, &placed_all);
+            let mut terms = pad.clone();
+            terms.extend(
+                spots
+                    .iter()
+                    .map(|&s| gummiband_core::geom::circle_polygon(s, dia / 2.0, 0.01)),
+            );
+            let pour = power::pour_outline(b, net, layer, &terms, &[], 0.2);
+            if let Some(pour) = &pour {
+                // a via the cut left outside the pour and off the pad does not count
+                let lost: Vec<Point> = pour
+                    .lost
+                    .iter()
+                    .filter(|&&i| i >= pad.len())
+                    .map(|&i| spots[i - pad.len()])
+                    .collect();
+                spots.retain(|s| !lost.contains(s) || pad.iter().any(|x| x.dist_to_point(*s) <= dia / 2.0));
+            }
+            if have.len() + spots.len() < count {
+                warnings.push(format!(
+                    "{label}: room for {} of {count} vias at {}: add more by hand or use a larger drill",
+                    have.len() + spots.len(),
+                    names(g)
+                ));
+            }
+            for &s in &spots {
+                vias.push(write::Item::Via {
+                    at: s,
+                    diameter: dia,
+                    drill,
+                    net,
+                });
+                placed_all.push(s);
+            }
+            let name = format!("{}vias {nname} {}", gummiband_kicad::read::GB_ZONE_PREFIX, names(g));
+            let outline = pour.as_ref().map(|x| x.outline.clone()).unwrap_or_default();
+            pours.push(PourOut {
+                name: name.clone(),
+                net: nname.clone(),
+                kind: "via field".into(),
+                layer: layer_name(b, layer),
+                terminals: vec![names(g)],
+                amps: r3(share),
+                required_width_mm: r3(power::ipc_width(share, cu, power::is_outer(b, layer), dt)),
+                area_mm2: r3(area(&outline)),
+                vias_needed: count,
+                vias_added: spots.len(),
+                cut_by: pour.as_ref().map(|x| x.cut_by.clone()).unwrap_or_default(),
+                outline: outline.iter().map(|x| [r3(x.x), r3(x.y)]).collect(),
+            });
+            if !spots.is_empty() && outline.len() >= 3 {
+                zones.push((net, layer, name, outline));
+            }
+        }
+    }
+    let mut text = if vias.is_empty() {
+        kb.text.clone()
+    } else {
+        write::add_locked(kb, &vias)
+    };
+    for (i, (net, layer, name, outline)) in zones.iter().enumerate() {
+        let spec = write::ZoneSpec {
+            net: *net,
+            layer: *layer,
+            priority: prio,
+            name,
+            solid: true,
+        };
+        text = write::add_zone_named(kb, &text, &spec, outline, 0x7c0 + i as u64);
+    }
+    Ok((
+        text,
+        PowerCopperOut {
+            board: String::new(),
+            path: String::new(),
+            pours,
+            warnings,
+            check: None,
+        },
+    ))
+}
+
 // ----------------------------------------------------------------------------- ground pour
 
 pub fn ground_pour(p: &GroundPourIn) -> Result<(PathBuf, GroundPourOut)> {
@@ -1133,7 +1448,10 @@ notes: a solid GND plane on an inner layer next to the main signal layer (add_zo
 board; on two layers keep B.Cu for a GND pour), planes or pours for nets too wide for a track \
 (add_zone on an outer layer, priority above the GND pour), the datasheet layout of converters, \
 eFuses and their input and output loops as locked copper (part_info, add_locked_copper), enough \
-vias per pin into the planes (power_plan gives the count). If you can write files, append \
+vias per pin into the planes (power_plan gives the count). Paths a track carries badly get \
+power_copper with their from and to pads: the switch node of a converter from its pins to the \
+inductor, a large pad of a plane net (inductor, output capacitor, connector) into its plane. \
+Route the board id it returns. If you can write files, append \
 power_plan's dru_rules to the project's .kicad_dru and load_board again, so KiCad's DRC enforces \
 the widths too. Lock what has its place: connectors, mounting holes, power stages (pass them as \
 fixed to place_parts and route). Keep the switch node of a converter \

@@ -153,6 +153,7 @@ fn initialize_list_load_route() {
             "move_part",
             "part_info",
             "place_parts",
+            "power_copper",
             "power_plan",
             "render",
             "route",
@@ -370,4 +371,41 @@ fn good_practice_plan_check_and_pour() {
     let text = std::fs::read_to_string(dir.join("tiny.routed.gnd.kicad_pcb")).unwrap();
     assert_eq!(text.matches("(zone ").count(), 2);
     assert!(text.contains("(locked yes)"));
+}
+
+#[test]
+fn power_copper_pours_a_path_before_routing() {
+    let dir = std::env::temp_dir().join(format!("gummiband-mcp-copper-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let pcb = dir.join("tiny.kicad_pcb");
+    std::fs::write(&pcb, tiny_board()).unwrap();
+
+    let mut s = Server::start();
+    s.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}),
+    );
+    s.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    s.call("load_board", json!({"path": pcb.display().to_string()}));
+    let c = s.call(
+        "power_copper",
+        json!({"board": "b1", "paths": [{"net": "A", "amps": 3.0, "from": ["R1.1"], "to": ["R2.1"]}]}),
+    );
+    let pour = &c["pours"][0];
+    assert_eq!(pour["kind"], "pour", "{c}");
+    assert_eq!(pour["layer"], "F.Cu", "{c}");
+    // R1.2 of net B sits next to R1.1: the pour gives way to it and still joins both pads
+    assert_eq!(pour["cut_by"], json!(["pad R1.2 (B)"]), "{c}");
+    assert_eq!(c["warnings"], json!([]), "{c}");
+    assert_eq!(c["check"]["paths"][0]["verdict"], "ok", "{c}");
+    let work = dir.join("tiny.prerouted.kicad_pcb");
+    let text = std::fs::read_to_string(&work).unwrap();
+    assert!(text.contains("(name \"gb:power A\")") && text.contains("(connect_pads yes"), "{text}");
+
+    // the pour joins A already: only B is left to route, and it keeps out of the pour
+    let r = s.call("route", json!({"board": c["board"], "runs": 1, "generations": 0}));
+    assert_eq!(r["connections"], 1, "{r}");
+    assert_eq!(r["routed"], 1, "{r}");
+    assert_eq!(r["violations"], json!([]), "{r}");
 }

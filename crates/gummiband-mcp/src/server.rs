@@ -2299,6 +2299,93 @@ impl Gummiband {
     }
 
     #[tool(
+        description = "Lay out power copper before routing, for current paths that a track carries badly (a converter's switch node, a pad into a plane through one via): for a net without plane one pour over its from and to pads on their layer (convex hull grown by margin, cut back from other nets' copper, holes and the edge), for a plane net at each terminal a field of locked vias for the current (IPC-2221 per via) and a small pour joining them to the pad. The pours are zones named \"gb: ...\": the router keeps other nets out and treats the pads under one pour as connected. Writes the working copy <input>.prerouted.kicad_pcb; route the returned board id. Reports the pours, what cut them and a current_check of the pours.",
+        output_schema = schema_for_output::<practice::PowerCopperOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn power_copper(
+        &self,
+        Parameters(p): Parameters<practice::PowerCopperIn>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let me = self.clone();
+        let res = blocking(move || {
+            let mut out = None;
+            let (id, path) = me.edit_copy(&p.board, |kb, _| {
+                let (text, o) = practice::power_copper(kb, &p)?;
+                out = Some(o);
+                Ok(text)
+            })?;
+            let mut out = out.context("power_copper made no report")?;
+            out.board = id;
+            out.path = path.clone();
+            // the pours carry their current already: measure them before routing
+            let pour_paths: Vec<practice::PathIn> = p
+                .paths
+                .iter()
+                .filter(|q| out.pours.iter().any(|x| x.kind == "pour" && x.net == q.net))
+                .cloned()
+                .collect();
+            if !pour_paths.is_empty() {
+                let check = practice::current_check(&practice::CurrentCheckIn {
+                    path: path.clone(),
+                    paths: Some(pour_paths),
+                    temp_rise: p.temp_rise,
+                    refill: None,
+                    max_segments: Some(3),
+                });
+                match check {
+                    Ok(c) => out.check = Some(c),
+                    Err(e) => out.warnings.push(format!("current_check of the pours failed: {e:#}")),
+                }
+            }
+            Ok(out)
+        })
+        .await;
+        match res {
+            Ok(out) => {
+                let lines: Vec<String> = out
+                    .pours
+                    .iter()
+                    .map(|x| {
+                        if x.kind == "pour" {
+                            format!("{} pour on {} ({} mm²)", x.net, x.layer, x.area_mm2)
+                        } else {
+                            format!(
+                                "{} {} of {} vias at {}",
+                                x.net,
+                                x.vias_added,
+                                x.vias_needed,
+                                x.terminals.join(", ")
+                            )
+                        }
+                    })
+                    .collect();
+                let verdicts = out
+                    .check
+                    .as_ref()
+                    .map(|c| {
+                        c.paths
+                            .iter()
+                            .map(|q| format!("{}: {}", q.name, q.verdict))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    })
+                    .unwrap_or_default();
+                let s = format!(
+                    "Power copper in {} (board {}): {}. {} {}",
+                    out.path,
+                    out.board,
+                    lines.join("; "),
+                    verdicts,
+                    out.warnings.join(" ")
+                );
+                ok(s, &out)
+            }
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
         description = "Pour ground after routing: adds zones of the ground net (default GND) over the board outline on the outer layers (default) and locked stitching vias on a grid and along the board edge where they are clear of other nets, holes, rule areas, other nets' pours and courtyards. Writes <input>.gnd.kicad_pcb and loads it; KiCad fills the zones (drc refills them).",
         output_schema = schema_for_output::<practice::GroundPourOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
