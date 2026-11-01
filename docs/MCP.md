@@ -266,8 +266,9 @@ nets of a differential pair), `pairs` false (experimental: a pair as one wide tr
 in two, see the CLI guide; only pairs with a pair rule or a net class of their own, `pair_all`
 true for every pair), `pair_skew` 0.1 mm, `pair_zdiff` none, `tune` true (meanders for the
 `length` and `skew` rules of the `.kicad_dru`, written as KiCad tuning patterns),
-`tune_amplitude` 1 mm, `negotiate` 0 (experimental negotiated routing, 20 rounds
-work well and take about twice the time), `air` 0 mm, `prefer_width` 0 (off), `angles` `"any"` (`"45"` turns the result into
+`tune_amplitude` 1 mm, `negotiate` 0 (negotiated routing from the start, 20 rounds work well and
+take about twice the time; with 0 the search negotiates on its own when it leaves a few
+connections open), `air` 0 mm, `prefer_width` 0 (off), `angles` `"any"` (`"45"` turns the result into
 conventional 45 degree routing as a last step, like `--angles 45`). `seed` picks the search seed
 (default fixed): the same seed gives the same result, another one a different try. `keep_all`
 keeps every track and via of the input and adds to it, like `--keep-all` on the command line;
