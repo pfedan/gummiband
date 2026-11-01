@@ -35,6 +35,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // parsed once
 enum Cmd {
     /// Print a summary of a board.
     Info {
@@ -87,6 +88,13 @@ enum Cmd {
         /// every third run of the portfolio; 0 = off.
         #[arg(long, default_value_t = 0.5)]
         layer_dirs: f64,
+        /// Hints from local patterns of the board, comma separated: `shares` (pins of a plane net
+        /// next to each other share one fan-out via), `decaps` (a decoupling capacitor is
+        /// connected to its IC pin first, its via serves both), `rows` (the open end re-lays the
+        /// connections of a pin row in pin order), `all` or `none`. `gummiband info` lists the
+        /// patterns it finds.
+        #[arg(long, default_value = "none")]
+        patterns: String,
         /// Factor on the via cost in the pass that routes connections with vias again and
         /// keeps what has fewer vias (0 = off).
         #[arg(long, default_value_t = 4.0)]
@@ -421,6 +429,10 @@ fn main() -> Result<()> {
                 routable,
                 conns
             );
+            println!("patterns:");
+            for line in gummiband_core::patterns::find(b).summary(b) {
+                println!("  {line}");
+            }
             println!("planes:");
             for p in &b.planes {
                 let r = p.outline.bbox();
@@ -477,6 +489,7 @@ fn main() -> Result<()> {
             via_pitch,
             via_cost,
             layer_dirs,
+            patterns,
             pair_pull,
             via_pass,
             negotiate,
@@ -544,6 +557,7 @@ fn main() -> Result<()> {
                 via_pitch,
                 ..Default::default()
             };
+            let hints = gummiband_core::patterns::hints(&patterns).map_err(|e| anyhow::anyhow!("--patterns: {e}"))?;
             let router_cfg = RouterConfig {
                 via_cost,
                 layer_dirs,
@@ -551,7 +565,8 @@ fn main() -> Result<()> {
                 via_pass,
                 negotiate,
                 ..Default::default()
-            };
+            }
+            .with_hints(&hints);
             // a line on stdin ends the run; so does a closed stdin, nothing can come any more
             let open_end = until_stop.then(|| {
                 let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1085,6 +1100,7 @@ fn main() -> Result<()> {
                     "vias": st.vias,
                     "length_mm": st.length,
                     "length_lower_bound_mm": gummiband_core::length_lower_bound(b),
+                    "patterns": gummiband_core::patterns::find(b).named(b),
                     "angles_45": octo,
                     "length_tuning": tuned,
                     "items_written": items,
@@ -1100,6 +1116,8 @@ fn main() -> Result<()> {
                         "generation": r.generation,
                         "seed": r.seed,
                         "fanout_first": r.fanout_first,
+                        "layer_dirs": r.layer_dirs,
+                        "via_cost": r.via_cost,
                         "routed": r.routed,
                         "connections": r.conns,
                         "vias": r.vias,

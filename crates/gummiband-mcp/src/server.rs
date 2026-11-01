@@ -68,6 +68,22 @@ pub struct PartInfoOut {
     pub neighbours: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BoardPatternsIn {
+    /// Board id from load_board.
+    pub board: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct BoardPatternsOut {
+    /// One line per kind of pattern.
+    pub summary: Vec<String>,
+    /// Pin rows (part, pins in order, pitch, side the tracks leave to), pad grids (BGA),
+    /// decoupling capacitors (IC pin, capacitor pins), shared plane fan-outs (leader pin with the
+    /// via, the pins that connect to it) and buses (two parts, nets, order kept).
+    pub patterns: serde_json::Value,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AddLockedOut {
     /// Id of the working copy with the locked copper; route this one.
@@ -399,6 +415,9 @@ pub struct RouteIn {
     pub pair_all: Option<bool>,
     /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
     pub layer_dirs: Option<f64>,
+    /// Hints from the local patterns of board_patterns, comma separated: shares, decaps, rows,
+    /// all or none (default none), as `gummiband route --patterns`.
+    pub patterns: Option<String>,
     /// Generations of the evolutionary order search after the portfolio (default 3).
     pub generations: Option<usize>,
     /// Generations that select by clearance violations after the geometry step (default 3, as
@@ -1033,6 +1052,19 @@ impl Gummiband {
         })
     }
 
+    fn patterns_of(&self, p: BoardPatternsIn) -> Result<(String, BoardPatternsOut)> {
+        self.with_entry(&p.board, |e| {
+            let b = &e.kb.board;
+            let found = gummiband_core::patterns::find(b);
+            let summary = found.summary(b);
+            let out = BoardPatternsOut {
+                patterns: serde_json::to_value(found.named(b))?,
+                summary: summary.clone(),
+            };
+            Ok((summary.join("\n"), out))
+        })
+    }
+
     fn part(&self, p: PartInfoIn) -> Result<(String, PartInfoOut)> {
         self.with_entry(&p.board, |e| {
             let b = &e.kb.board;
@@ -1550,13 +1582,15 @@ fn route_blocking(
         via_pitch: p.via_pitch.unwrap_or(0.5),
         ..Default::default()
     };
+    let hints = gummiband_core::patterns::hints(p.patterns.as_deref().unwrap_or("none")).map_err(anyhow::Error::msg)?;
     let router_cfg = RouterConfig {
         via_cost: p.via_cost.unwrap_or(3.0),
         pair_pull: p.pair_pull.unwrap_or(0.0),
         layer_dirs: p.layer_dirs.unwrap_or(0.5),
         negotiate: p.negotiate.unwrap_or(0),
         ..Default::default()
-    };
+    }
+    .with_hints(&hints);
     let search_cfg = gummiband_core::SearchConfig {
         population: runs,
         generations: p.generations.unwrap_or(3),
@@ -2102,6 +2136,18 @@ impl Gummiband {
     )]
     async fn list_nets(&self, Parameters(p): Parameters<ListNetsIn>) -> Result<CallToolResult, ErrorData> {
         match self.nets(p) {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Local patterns of a loaded board that the router can use as hints: pin rows of a part, pad grids (BGA), decoupling capacitors with the IC pin they serve, pins of a plane net that can share one fan-out via, buses between two parts. Use it to understand the structure of a board before routing or pre-routing; `route` takes `patterns` to use them.",
+        output_schema = schema_for_output::<BoardPatternsOut>(),
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn board_patterns(&self, Parameters(p): Parameters<BoardPatternsIn>) -> Result<CallToolResult, ErrorData> {
+        match self.patterns_of(p) {
             Ok((s, out)) => ok(s, &out),
             Err(e) => fail(format!("{e:#}")),
         }
