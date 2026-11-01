@@ -108,7 +108,10 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
 
     r.read_layers(&root, opts);
     r.read_stackup(&root);
-    r.b.thickness = root.child("general").and_then(|g| g.child_f64("thickness")).unwrap_or(1.6);
+    r.b.thickness = root
+        .child("general")
+        .and_then(|g| g.child_f64("thickness"))
+        .unwrap_or(1.6);
     r.mask_margin = root
         .child("setup")
         .and_then(|s| s.child_f64("pad_to_mask_clearance"))
@@ -1190,7 +1193,10 @@ impl Reader {
         }
         let font = effects.and_then(|e| e.child("font"));
         let size = font.and_then(|f| f.child_f64s("size")).unwrap_or_default();
-        let (h, w) = (size.first().copied().unwrap_or(1.0), size.get(1).copied().unwrap_or(1.0));
+        let (h, w) = (
+            size.first().copied().unwrap_or(1.0),
+            size.get(1).copied().unwrap_or(1.0),
+        );
         let stroke = font.and_then(|f| f.child_f64("thickness")).unwrap_or(0.15);
         let lines = text.split(['\n', '\r']).filter(|l| !l.is_empty()).count().max(1);
         let longest = text.split(['\n', '\r']).map(|l| l.chars().count()).max().unwrap_or(0);
@@ -1369,11 +1375,22 @@ mod tests {
   (gr_text "SILK" (at 10 40 0) (layer "F.SilkS") (effects (font (size 1 1))))
 )"#;
         let kb = parse_board(text.to_string(), None, &ReadOptions::default()).unwrap();
-        let shapes: Vec<_> = kb.board.obstacles.iter().filter(|o| o.kind == ObstacleKind::Graphic).collect();
+        let shapes: Vec<_> = kb
+            .board
+            .obstacles
+            .iter()
+            .filter(|o| o.kind == ObstacleKind::Graphic)
+            .collect();
         assert_eq!(shapes.len(), 1);
         let bb = shapes[0].shape.bbox();
-        assert!((bb.min.x - 9.9).abs() < 1e-9 && (bb.max.x - (9.9 + 3.6)).abs() < 1e-9, "{bb:?}");
-        assert!((bb.min.y - 19.4).abs() < 1e-9 && (bb.max.y - 20.6).abs() < 1e-9, "{bb:?}");
+        assert!(
+            (bb.min.x - 9.9).abs() < 1e-9 && (bb.max.x - (9.9 + 3.6)).abs() < 1e-9,
+            "{bb:?}"
+        );
+        assert!(
+            (bb.min.y - 19.4).abs() < 1e-9 && (bb.max.y - 20.6).abs() < 1e-9,
+            "{bb:?}"
+        );
     }
 
     fn mask_board(body: &str) -> Board {

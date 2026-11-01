@@ -106,6 +106,10 @@ enum Cmd {
         /// from the board's stackup; the gap stays.
         #[arg(long)]
         pair_zdiff: Option<f64>,
+        /// With --pairs: couple every pair recognised by name. Without it only pairs that a
+        /// `diff_pair_gap` rule or a net class of their own marks as differential pairs.
+        #[arg(long)]
+        pair_all: bool,
         /// Experimental: rounds of negotiated routing before the rip-up passes (0 = off).
         /// Connections may overfill edges and cross for a rising price, see docs/ARCHITECTURE.md.
         #[arg(long, default_value_t = 0)]
@@ -341,7 +345,12 @@ fn print_matching(rules: &[gummiband_core::matching::RuleMatch]) {
             .filter_map(|(k, x)| x.map(|x| format!("{k} {x}")))
             .collect::<Vec<_>>()
             .join(" ");
-        println!("  rule {} ({kind} {range}): {} of {} ok", r.rule, r.nets.len() - r.failed(), r.nets.len());
+        println!(
+            "  rule {} ({kind} {range}): {} of {} ok",
+            r.rule,
+            r.nets.len() - r.failed(),
+            r.nets.len()
+        );
         for n in r.nets.iter().filter(|n| !n.ok) {
             match n.skew {
                 Some(s) => println!("    {}: {:.4} mm, skew {:+.4}", n.net, n.length, s),
@@ -460,6 +469,7 @@ fn main() -> Result<()> {
             pairs,
             pair_skew,
             pair_zdiff,
+            pair_all,
             generations,
             geometry_generations,
             seed,
@@ -660,6 +670,7 @@ fn main() -> Result<()> {
                     let pair_cfg = gummiband_core::pairs::PairConfig {
                         skew: pair_skew,
                         zdiff: pair_zdiff,
+                        all: pair_all,
                     };
                     gummiband_core::pairs::route_pairs(board, &sub_cfg, &router_cfg, &search_cfg, &pair_cfg)
                 } else {
@@ -791,7 +802,7 @@ fn main() -> Result<()> {
             }
             for r in &pair_reports {
                 println!(
-                    "  pair {} / {}: {}, width {:.3} gap {:.3}, {:.0} ohm, {:.2} / {:.2} mm, skew {:.3} mm, {} vias, {} swaps {}",
+                    "  pair {} / {}: {}, width {:.3} gap {:.3}, {:.0} ohm, {:.2} / {:.2} mm, skew {:.3} mm, uncoupled {:.2} mm, {} vias, {} swaps {}",
                     r.p,
                     r.n,
                     if r.wide { "wide" } else { "single" },
@@ -801,11 +812,14 @@ fn main() -> Result<()> {
                     r.length_p,
                     r.length_n,
                     r.skew,
+                    r.uncoupled,
                     r.vias,
                     r.swaps,
                     r.note
                 );
             }
+            let matching = gummiband_core::matching::check(b, &res.geometry);
+            print_matching(&matching);
             let viol = gummiband_core::check::check(b, &res.geometry);
             let spots = gummiband_core::check::spots(&viol).len();
             println!("clearance check: {} violations at {spots} spots", viol.len());
@@ -897,68 +911,69 @@ fn main() -> Result<()> {
                 );
             }
             let rests = |origin: Option<u32>, list: &[bool]| origin.is_some_and(|o| !list[o as usize]);
-            let write_result = |geometry: &gummiband_core::realize::Geometry, path: &std::path::Path| -> Result<usize> {
-                let mut items = Vec::new();
-                for t in &geometry.tracks {
-                    if rests(t.origin, &changes.chains) {
-                        continue;
+            let write_result =
+                |geometry: &gummiband_core::realize::Geometry, path: &std::path::Path| -> Result<usize> {
+                    let mut items = Vec::new();
+                    for t in &geometry.tracks {
+                        if rests(t.origin, &changes.chains) {
+                            continue;
+                        }
+                        for e in &t.elems {
+                            items.push(match *e {
+                                Elem::Line(a, b) => write::Item::Track {
+                                    width: t.piece_width(a, b),
+                                    a,
+                                    b,
+                                    layer: t.layer,
+                                    net: t.net,
+                                },
+                                Elem::Arc(a, mid, b) => write::Item::Arc {
+                                    width: t.piece_width(a, b),
+                                    a,
+                                    mid,
+                                    b,
+                                    layer: t.layer,
+                                    net: t.net,
+                                },
+                            });
+                        }
                     }
-                    for e in &t.elems {
-                        items.push(match *e {
-                            Elem::Line(a, b) => write::Item::Track {
-                                width: t.piece_width(a, b),
-                                a,
-                                b,
-                                layer: t.layer,
-                                net: t.net,
-                            },
-                            Elem::Arc(a, mid, b) => write::Item::Arc {
-                                width: t.piece_width(a, b),
-                                a,
-                                mid,
-                                b,
-                                layer: t.layer,
-                                net: t.net,
-                            },
+                    for v in &geometry.vias {
+                        if v.drill == 0.0 || rests(v.origin, &changes.nodes) {
+                            continue;
+                        }
+                        items.push(write::Item::Via {
+                            at: v.at,
+                            diameter: v.diameter,
+                            drill: v.drill,
+                            net: v.net,
                         });
                     }
-                }
-                for v in &geometry.vias {
-                    if v.drill == 0.0 || rests(v.origin, &changes.nodes) {
-                        continue;
+                    let opts = write::StripOptions {
+                        unlocked: !keep_all,
+                        locked: !keep_locked && !keep_all,
+                        zone_layers: vec![],
+                        nets: given.iter().cloned().collect(),
+                        items: changes.strip.clone(),
+                    };
+                    let ranges = write::strip_ranges(&kb, &opts);
+                    let text = write::patch(&kb, &ranges, &items);
+                    let text = if res.offsets.is_empty() {
+                        text
+                    } else {
+                        write::move_footprints(&text, &res.offsets, &kb.board.blocks)?
+                    };
+                    let text = if teardrops {
+                        write::enable_teardrops(&text)?
+                    } else {
+                        text
+                    };
+                    std::fs::write(path, text)?;
+                    if teardrops {
+                        track_end_teardrops(&board, path)?;
                     }
-                    items.push(write::Item::Via {
-                        at: v.at,
-                        diameter: v.diameter,
-                        drill: v.drill,
-                        net: v.net,
-                    });
-                }
-                let opts = write::StripOptions {
-                    unlocked: !keep_all,
-                    locked: !keep_locked && !keep_all,
-                    zone_layers: vec![],
-                    nets: given.iter().cloned().collect(),
-                    items: changes.strip.clone(),
+                    Ok(items.len())
                 };
-                let ranges = write::strip_ranges(&kb, &opts);
-                let text = write::patch(&kb, &ranges, &items);
-                let text = if res.offsets.is_empty() {
-                    text
-                } else {
-                    write::move_footprints(&text, &res.offsets, &kb.board.blocks)?
-                };
-                let text = if teardrops {
-                    write::enable_teardrops(&text)?
-                } else {
-                    text
-                };
-                std::fs::write(path, text)?;
-                if teardrops {
-                    track_end_teardrops(&board, path)?;
-                }
-                Ok(items.len())
-            };
             let items = write_result(&res.geometry, &output)?;
             // the results the open end leaves to choose from, next to the output
             for (i, (st, geometry)) in res.alternatives.iter().enumerate() {
@@ -986,6 +1001,7 @@ fn main() -> Result<()> {
                     "routed": st.routed,
                     "unrouted": st.unrouted,
                     "pairs": pair_reports,
+                    "matching": matching,
                     "vias": st.vias,
                     "length_mm": st.length,
                     "length_lower_bound_mm": gummiband_core::length_lower_bound(b),
@@ -1205,13 +1221,29 @@ fn main() -> Result<()> {
             let st = &r.stats;
             println!(
                 "moved {} from ({:.3}, {:.3}) to ({:.3}, {:.3}), {} of {} steps; {} tracks and {} vias of {} nets followed, at most {:.3} mm; clearance spots {} -> {}, {secs:.1} s",
-                r.reference, r.from.0, r.from.1, r.to.0, r.to.1, st.steps, st.steps_planned,
-                st.tracks_moved, st.vias_moved, st.nets_moved, st.max_shift, st.spots_before, st.spots_after
+                r.reference,
+                r.from.0,
+                r.from.1,
+                r.to.0,
+                r.to.1,
+                st.steps,
+                st.steps_planned,
+                st.tracks_moved,
+                st.vias_moved,
+                st.nets_moved,
+                st.max_shift,
+                st.spots_before,
+                st.spots_after
             );
             if let Some(why) = &st.stopped {
                 println!("stopped short: {why}");
             }
-            println!("replaced {} items with {} items, wrote {}", r.items_removed, r.items_written, output.display());
+            println!(
+                "replaced {} items with {} items, wrote {}",
+                r.items_removed,
+                r.items_written,
+                output.display()
+            );
             if let Some(path) = svg_out {
                 let mut ob = read_board(
                     &output,
@@ -1279,7 +1311,9 @@ fn main() -> Result<()> {
                     .collect();
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({"rules": rules, "pairs": pairs, "nets": nets_json}))?
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"rules": rules, "pairs": pairs, "nets": nets_json})
+                    )?
                 );
             } else {
                 for (n, l) in &listed {

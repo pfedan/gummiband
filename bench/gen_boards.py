@@ -224,6 +224,7 @@ class Board:
         self.zones = []  # (net, layer)
         self.classes = [("Default", 0.2, 0.15, 0.6, 0.3)]  # name, width, clearance, via dia, drill
         self.patterns = []  # (pattern, class)
+        self.dru = None  # custom rules (.kicad_dru), if any
         self.rules = dict(min_clearance=0.15, min_track_width=0.1, min_hole_clearance=0.2,
                           min_hole_to_hole=0.25, min_via_diameter=0.45, min_via_annular_width=0.1)
         self._uid = 0
@@ -407,6 +408,9 @@ class Board:
         with open(os.path.join(outdir, f"{self.name}.kicad_pro"), "w") as f:
             json.dump(self.pro(), f, indent=2, sort_keys=True)
             f.write("\n")
+        if self.dru:
+            with open(os.path.join(outdir, f"{self.name}.kicad_dru"), "w") as f:
+                f.write("(version 1)\n" + self.dru.strip() + "\n")
         nets = self.nets()
         pins = sum(len(v) for v in nets.values())
         conns = sum(len(v) - 1 for v in nets.values())
@@ -756,12 +760,62 @@ def board_diff_pairs():
         r.pad(1).net = f"P{i + 1}"
         q = b.add(two_terminal("R", f"R{i + 5}"), 42 - i * 6, 31)
         q.pad(1).net = f"P{i + 1}"
+    # the pairs as KiCad knows them: width and gap of the net class, coupled within 0.1 mm skew
+    b.dru = """
+(rule "pairs"
+  (condition "A.inDiffPair('L*')")
+  (constraint track_width (opt 0.2mm))
+  (constraint diff_pair_gap (min 0.2mm) (opt 0.25mm)))
+(rule "pair skew"
+  (condition "A.inDiffPair('L*')")
+  (constraint skew (max 0.1mm) (within_diff_pairs)))
+"""
+    return b
+
+
+def board_matching():
+    """A byte lane (8 data nets and a strobe pair) and a clock pair between two connectors at an
+    angle, with the length rules of a memory interface: one skew group, a length window for the
+    clock, little skew within the clock pair and little uncoupled length."""
+    b = Board("matching", 46, 34, title="2 layers, byte lane and clock pair with length, skew and uncoupled rules")
+    j1 = b.add(fpc("J1", 16, 0.5), 5.5, 19, 90)
+    j2 = b.add(fpc("J2", 16, 0.5), 30, 4.5, 0)
+    names = ["DQ0", "DQ1", "DQ2", "DQ3", "DQS_P", "DQS_N", "DQ4", "DQ5", "DQ6", "DQ7", "G1", "CLK_P", "CLK_N",
+             "G2"]
+    sig1 = [(j1, p) for p in j1.pads if p.num.isdigit() and 2 <= int(p.num) <= 15]
+    sig2 = [(j2, p) for p in j2.pads if p.num.isdigit() and 2 <= int(p.num) <= 15]
+    match_sorted(sig1, sig2, lambda it: j1.world(it[1])[1], lambda it: j2.world(it[1])[0], names)
+    for j in (j1, j2):
+        j.pad(1).net = j.pad(16).net = "GND"
+    for i, (x, y) in enumerate(((18, 18), (24, 24), (34, 20))):
+        r = b.add(two_terminal("C", f"C{i + 1}", "100n"), x, y, 45 * (i % 2))
+        r.pad(1).net = "GND"
+        r.pad(2).net = f"V{i + 1}"
+        q = b.add(two_terminal("C", f"C{i + 4}", "100n"), 40 - i * 7, 30)
+        q.pad(1).net = "GND"
+        q.pad(2).net = f"V{i + 1}"
+    b.dru = """
+(rule "pairs"
+  (condition "A.inDiffPair('*')")
+  (constraint track_width (opt 0.15mm))
+  (constraint diff_pair_gap (min 0.15mm) (opt 0.15mm)))
+(rule "uncoupled"
+  (condition "A.inDiffPair('*')")
+  (constraint diff_pair_uncoupled (max 3mm)))
+(rule "byte lane"
+  (condition "A.NetName == 'DQ?' || A.inDiffPair('DQS')")
+  (constraint skew (max 0.2mm)))
+(rule "clock"
+  (condition "A.inDiffPair('CLK')")
+  (constraint length (min 40mm) (max 41mm))
+  (constraint skew (max 0.05mm) (within_diff_pairs)))
+"""
     return b
 
 
 BOARDS = [board_easy, board_medium, board_bus, board_power_mix, board_crossing, board_qfn_fanout,
           board_four_signal_layers, board_bga_escape, board_bga_dense, board_fine_pitch, board_fine_pitch_mixed,
-          board_diff_pairs]
+          board_diff_pairs, board_matching]
 
 
 def main():

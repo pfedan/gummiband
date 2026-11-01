@@ -237,7 +237,10 @@ fn initialize_list_load_route() {
         json!({"board": kept["board"], "keep_all": true, "nets": ["B"], "output": done}),
     );
     assert_eq!(r["connections"], 0, "{r}");
-    assert_eq!(std::fs::read_to_string(&done).unwrap().matches("(segment").count(), after);
+    assert_eq!(
+        std::fs::read_to_string(&done).unwrap().matches("(segment").count(),
+        after
+    );
 
     // reroute replaces the copper of the net, the other nets stay
     let again = dir.join("tiny.again.kicad_pcb");
@@ -248,7 +251,10 @@ fn initialize_list_load_route() {
     );
     assert_eq!(r["routed"], 1, "{r}");
     assert!(std::fs::read_to_string(&again).unwrap().contains("(segment"));
-    assert!(s.call_err("route", json!({"board": kept["board"], "reroute": true})).contains("reroute"));
+    assert!(
+        s.call_err("route", json!({"board": kept["board"], "reroute": true}))
+            .contains("reroute")
+    );
     assert!(r["blocked"].as_array().unwrap().is_empty(), "{r}");
     // the other nets shift aside or give way by default; both can be switched off
     let still = dir.join("tiny.still.kicad_pcb");

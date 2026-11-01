@@ -60,6 +60,8 @@ pub struct PairReport {
     pub length_p: f64,
     pub length_n: f64,
     pub skew: f64,
+    /// Length that does not run coupled, as KiCad's DRC measures it.
+    pub uncoupled: f64,
     pub vias: usize,
     /// Polarity swaps on the way (through the pair's vias).
     pub swaps: usize,
@@ -74,11 +76,18 @@ pub struct PairConfig {
     /// Target differential impedance in ohm: sets the track width per layer from the stackup,
     /// the gap stays.
     pub zdiff: Option<f64>,
+    /// Couple every pair recognised by name, also those without a pair rule or class of their
+    /// own (see [`Board::coupled_pairs`]).
+    pub all: bool,
 }
 
 impl Default for PairConfig {
     fn default() -> Self {
-        PairConfig { skew: 0.1, zdiff: None }
+        PairConfig {
+            skew: 0.1,
+            zdiff: None,
+            all: false,
+        }
     }
 }
 
@@ -252,11 +261,19 @@ pub fn apply_zdiff(b: &mut Board, zdiff: f64) {
     }
 }
 
-fn merge(board: &Board) -> Merged {
+fn merge(board: &Board, all: bool) -> Merged {
     let mut b = board.clone();
     let mut pairs = Vec::new();
     let mut skipped = Vec::new();
+    let coupled = board.coupled_pairs(all);
     for (p, n) in board.diff_pairs() {
+        if !coupled.contains(&(p, n)) {
+            skipped.push((
+                board.nets[p as usize].name.clone(),
+                "recognised by name only: no diff_pair_gap rule or net class of its own".to_string(),
+            ));
+            continue;
+        }
         let name = |x: NetId| board.nets[x as usize].name.clone();
         let kept = board.obstacles.iter().any(|o| {
             matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via) && (o.net == Some(p) || o.net == Some(n))
@@ -1552,15 +1569,6 @@ pub fn lock_geometry(b: &mut Board, geo: &Geometry) {
     }
 }
 
-/// Track length per net.
-fn net_length(geo: &Geometry, net: NetId) -> f64 {
-    geo.tracks
-        .iter()
-        .filter(|t| t.net == net)
-        .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
-        .sum()
-}
-
 /// Route a board with its differential pairs as wide tracks. Pairs that cannot be merged and
 /// connections the wide tracks leave open are routed as single tracks.
 pub fn route_pairs(
@@ -1570,7 +1578,7 @@ pub fn route_pairs(
     search: &SearchConfig,
     cfg: &PairConfig,
 ) -> (Substrate, RouteResult, Vec<PairReport>) {
-    let merged = merge(board);
+    let merged = merge(board, cfg.all);
     let (sub, mut res) = route_board(&merged.board, sub_cfg, base, search);
     let real = if res.offsets.is_empty() {
         board.clone()
@@ -1685,8 +1693,11 @@ pub fn route_pairs(
     geo.tracks.retain(|t| t.pts.len() >= 2);
     for rep in reports.iter_mut().filter(|r| r.wide) {
         if let (Some(p), Some(n)) = (real.net_id(&rep.p), real.net_id(&rep.n)) {
-            rep.length_p = net_length(&geo, p);
-            rep.length_n = net_length(&geo, n);
+            rep.length_p = crate::matching::net_length(&real, &geo, p).total();
+            rep.length_n = crate::matching::net_length(&real, &geo, n).total();
+            rep.skew = rep.length_p - rep.length_n;
+            let (c, t) = crate::matching::coupling(&real, &geo, p, n, crate::matching::gap_rule(&real, p));
+            rep.uncoupled = (t - c).max(0.0);
             if let Some(z) = real.pair_impedance(p, n) {
                 rep.zdiff = (z * 10.0).round() / 10.0;
             }
@@ -1776,7 +1787,7 @@ mod tests {
     #[test]
     fn a_pair_becomes_two_parallel_tracks_of_equal_length() {
         let b = pair_board();
-        assert_eq!(merge(&b).pairs.len(), 1);
+        assert_eq!(merge(&b, true).pairs.len(), 1);
         let search = SearchConfig {
             population: 2,
             generations: 0,
@@ -1793,7 +1804,10 @@ mod tests {
             &SubstrateConfig::default(),
             &RouterConfig::default(),
             &search,
-            &PairConfig::default(),
+            &PairConfig {
+                all: true,
+                ..PairConfig::default()
+            },
         );
         assert!(res.stats.unrouted.is_empty(), "{:?}", res.stats.unrouted);
         assert_eq!(rep.len(), 1);
@@ -1832,7 +1846,10 @@ mod tests {
             &SubstrateConfig::default(),
             &RouterConfig::default(),
             &search,
-            &PairConfig::default(),
+            &PairConfig {
+                all: true,
+                ..PairConfig::default()
+            },
         );
         assert!(res.stats.unrouted.is_empty(), "{:?}", res.stats.unrouted);
     }

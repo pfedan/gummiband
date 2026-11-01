@@ -113,21 +113,29 @@ pub fn net_length(board: &Board, geo: &Geometry, net: NetId) -> NetLength {
 pub fn coupling(board: &Board, geo: &Geometry, p: NetId, n: NetId, gap: MinOptMax) -> (f64, f64) {
     let tp: Vec<&Track> = geo.tracks.iter().filter(|t| t.net == p).collect();
     let tn: Vec<&Track> = geo.tracks.iter().filter(|t| t.net == n).collect();
-    let total = tp.iter().map(|t| track_len(t)).sum::<f64>().max(tn.iter().map(|t| track_len(t)).sum());
+    let total = tp
+        .iter()
+        .map(|t| track_len(t))
+        .sum::<f64>()
+        .max(tn.iter().map(|t| track_len(t)).sum());
     let others: Vec<&Track> = geo.tracks.iter().filter(|t| t.net != p && t.net != n).collect();
-    let foreign = |a: Point, b: Point, layer: LayerId| -> bool {
-        others.iter().any(|t| {
-            t.layer == layer && t.pts.windows(2).any(|w| geom::seg_seg_dist(a, b, w[0], w[1]) < t.width / 2.0)
-        }) || geo.vias.iter().any(|v| {
-            v.net != p && v.net != n && v.drill > 0.0 && geom::point_seg_dist(v.at, a, b) < v.diameter / 2.0
-        }) || board.obstacles.iter().any(|o| {
-            o.kind == ObstacleKind::Pad
-                && o.net != Some(p)
-                && o.net != Some(n)
-                && o.layers.has(layer)
-                && o.shape.dist_to_seg(a, b) <= 0.0
-        })
-    };
+    let foreign =
+        |a: Point, b: Point, layer: LayerId| -> bool {
+            others.iter().any(|t| {
+                t.layer == layer
+                    && t.pts
+                        .windows(2)
+                        .any(|w| geom::seg_seg_dist(a, b, w[0], w[1]) < t.width / 2.0)
+            }) || geo.vias.iter().any(|v| {
+                v.net != p && v.net != n && v.drill > 0.0 && geom::point_seg_dist(v.at, a, b) < v.diameter / 2.0
+            }) || board.obstacles.iter().any(|o| {
+                o.kind == ObstacleKind::Pad
+                    && o.net != Some(p)
+                    && o.net != Some(n)
+                    && o.layers.has(layer)
+                    && o.shape.dist_to_seg(a, b) <= 0.0
+            })
+        };
     let fits = |g: f64| gap.min.is_none_or(|m| g >= m - EPS) && gap.max.is_none_or(|m| g <= m + EPS);
     let mut coupled = 0.0;
     for a in &tp {
@@ -140,7 +148,9 @@ pub fn coupling(board: &Board, geo: &Geometry, p: NetId, n: NetId, gap: MinOptMa
                             if p0.dist(p1) < 2e-6 || n0.dist(n1) < 2e-6 || !grid_parallel(p0, p1, n0, n1) {
                                 continue;
                             }
-                            let Some((pa, pb, na, nb)) = parallel_projection(p0, p1, n0, n1) else { continue };
+                            let Some((pa, pb, na, nb)) = parallel_projection(p0, p1, n0, n1) else {
+                                continue;
+                            };
                             let (np, nn, d) = nearest(pa, pb, na, nb);
                             if fits(d - half) && !foreign(np, nn, a.layer) {
                                 coupled += na.dist(nb);
@@ -158,7 +168,9 @@ pub fn coupling(board: &Board, geo: &Geometry, p: NetId, n: NetId, gap: MinOptMa
                             {
                                 continue;
                             }
-                            let Some((from, span)) = arc_overlap(p0, pm, p1, cp, n0, nm, n1, cn) else { continue };
+                            let Some((from, span)) = arc_overlap(p0, pm, p1, cp, n0, nm, n1, cn) else {
+                                continue;
+                            };
                             let mid = from + span / 2.0;
                             let at = |c: Point, r: f64| Point {
                                 x: c.x + r * mid.cos(),
@@ -229,10 +241,19 @@ fn parallel_projection(p0: Point, p1: Point, n0: Point, n1: Point) -> Option<(Po
 /// Nearest points of two segments and their distance.
 fn nearest(a0: Point, a1: Point, b0: Point, b1: Point) -> (Point, Point, f64) {
     let mut best = (a0, b0, f64::INFINITY);
-    for (p, s0, s1, first) in [(a0, b0, b1, true), (a1, b0, b1, true), (b0, a0, a1, false), (b1, a0, a1, false)] {
+    for (p, s0, s1, first) in [
+        (a0, b0, b1, true),
+        (a1, b0, b1, true),
+        (b0, a0, a1, false),
+        (b1, a0, a1, false),
+    ] {
         let e = s1 - s0;
         let ll = e.x * e.x + e.y * e.y;
-        let t = if ll > 0.0 { (((p - s0).x * e.x + (p - s0).y * e.y) / ll).clamp(0.0, 1.0) } else { 0.0 };
+        let t = if ll > 0.0 {
+            (((p - s0).x * e.x + (p - s0).y * e.y) / ll).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let q = s0 + e * t;
         let d = p.dist(q);
         if d < best.2 {
@@ -244,7 +265,16 @@ fn nearest(a0: Point, a1: Point, b0: Point, b1: Point) -> (Point, Point, f64) {
 
 /// Overlap of two arcs in angle about the first centre: (start angle, sweep).
 #[allow(clippy::too_many_arguments)]
-fn arc_overlap(p0: Point, pm: Point, p1: Point, cp: Point, n0: Point, nm: Point, n1: Point, cn: Point) -> Option<(f64, f64)> {
+fn arc_overlap(
+    p0: Point,
+    pm: Point,
+    p1: Point,
+    cp: Point,
+    n0: Point,
+    nm: Point,
+    n1: Point,
+    cn: Point,
+) -> Option<(f64, f64)> {
     let interval = |a: Point, m: Point, b: Point, c: Point| {
         let s = sweep(a, m, b, c);
         let a0 = ang(a, c);
@@ -308,16 +338,25 @@ pub fn gap_rule(board: &Board, net: NetId) -> MinOptMax {
 
 /// The partner of a net in its differential pair.
 pub fn partner(board: &Board, net: NetId) -> Option<NetId> {
-    board
-        .diff_pairs()
-        .into_iter()
-        .find_map(|(p, n)| if p == net { Some(n) } else if n == net { Some(p) } else { None })
+    board.diff_pairs().into_iter().find_map(|(p, n)| {
+        if p == net {
+            Some(n)
+        } else if n == net {
+            Some(p)
+        } else {
+            None
+        }
+    })
 }
 
 /// Check every length, skew and uncoupled rule of the board on the geometry.
 pub fn check(board: &Board, geo: &Geometry) -> Vec<RuleMatch> {
     let mut lengths: HashMap<NetId, f64> = HashMap::new();
-    let mut length = |net: NetId| *lengths.entry(net).or_insert_with(|| net_length(board, geo, net).total());
+    let mut length = |net: NetId| {
+        *lengths
+            .entry(net)
+            .or_insert_with(|| net_length(board, geo, net).total())
+    };
     let name = |net: NetId| board.nets[net as usize].name.clone();
     let mut out = Vec::new();
     for r in board.match_rules.iter().filter(|r| r.kind != MatchKind::Gap) {
@@ -364,8 +403,7 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<RuleMatch> {
                     for &x in &g {
                         let l = length(x);
                         let skew = l - longest;
-                        let ok = skew.abs() <= max + EPS
-                            && r.value.min.is_none_or(|m| skew.abs() >= m - EPS);
+                        let ok = skew.abs() <= max + EPS && r.value.min.is_none_or(|m| skew.abs() >= m - EPS);
                         nets.push(NetMatch {
                             net: name(x),
                             length: l,
@@ -421,8 +459,16 @@ pub fn kept_geometry(board: &Board) -> Geometry {
         let Some(net) = c.net else { continue };
         let (elems, width, layer) = match c.kind {
             CopperKind::Line { a, b, width, layer } => (vec![Elem::Line(a, b)], width, layer),
-            CopperKind::Arc { a, mid, b, width, layer } => (vec![Elem::Arc(a, mid, b)], width, layer),
-            CopperKind::Via { at, diameter, drill, .. } => {
+            CopperKind::Arc {
+                a,
+                mid,
+                b,
+                width,
+                layer,
+            } => (vec![Elem::Arc(a, mid, b)], width, layer),
+            CopperKind::Via {
+                at, diameter, drill, ..
+            } => {
                 geo.vias.push(crate::realize::Via {
                     at,
                     diameter,
@@ -455,5 +501,10 @@ pub fn kept_geometry(board: &Board) -> Geometry {
 pub fn summary(results: &[RuleMatch]) -> String {
     let failed: usize = results.iter().map(|r| r.failed()).sum();
     let total: usize = results.iter().map(|r| r.nets.len()).sum();
-    format!("{} rules, {} of {} nets or pairs out of range", results.len(), failed, total)
+    format!(
+        "{} rules, {} of {} nets or pairs out of range",
+        results.len(),
+        failed,
+        total
+    )
 }

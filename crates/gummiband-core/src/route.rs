@@ -456,9 +456,8 @@ impl<'a> Router<'a> {
             let (ObstacleKind::Via, Shape::Circle { c, .. }) = (o.kind, &o.shape) else {
                 return false;
             };
-            let on = |pl: &crate::board::Plane| {
-                Some(pl.net) == o.net && o.layers.has(pl.layer) && pl.outline.contains(*c)
-            };
+            let on =
+                |pl: &crate::board::Plane| Some(pl.net) == o.net && o.layers.has(pl.layer) && pl.outline.contains(*c);
             board.planes.iter().any(on)
         };
         let mut on_plane: Vec<u32> = Vec::new();
@@ -3431,14 +3430,18 @@ impl<'a> Router<'a> {
                 hit.push(cj);
             }
         };
-        let others = self.cross[li][e as usize].iter().map(|&o| self.segs[o as usize].as_ref().unwrap());
+        let others = self.cross[li][e as usize]
+            .iter()
+            .map(|&o| self.segs[o as usize].as_ref().unwrap());
         others.filter(|o| o.net != net).for_each(|o| add(o.conn as usize));
         let m = self.m(li);
         for &t in m.edge_tris[e as usize].iter().filter(|&&t| t != NONE) {
             for &v in &m.tris[t as usize] {
                 let site = m.vert_site[v as usize];
                 if self.vias.get(&site).is_some_and(|via| via.net != net) {
-                    (0..self.conns.len()).filter(|&cj| self.conn_vias[cj].contains(&site)).for_each(&mut add);
+                    (0..self.conns.len())
+                        .filter(|&cj| self.conn_vias[cj].contains(&site))
+                        .for_each(&mut add);
                 }
             }
         }

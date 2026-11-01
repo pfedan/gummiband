@@ -268,7 +268,9 @@ fn warm_start(s: &State, r: &Router, fresh: Geometry, segs: &[u32], sites: &[u32
     let vertex = |li: usize, v: u32| {
         let m = &r.sub.m[li];
         let site = m.vert_site[v as usize];
-        old_vias.get(&site).map_or(m.verts[v as usize], |&i| s.cand.geo.vias[i].at)
+        old_vias
+            .get(&site)
+            .map_or(m.verts[v as usize], |&i| s.cand.geo.vias[i].at)
     };
     let place = |sid: u32, a: Point, b: Point| {
         if new_seg(sid) {
@@ -408,7 +410,8 @@ fn place_new_vias(tracks: &mut [Track], vias: &mut [Via], planes: &[crate::board
         }
         let wrong = |p: Option<Point>| {
             let ways = ends.iter().map(|e| (e, p.map_or(e.2.clone(), |p| from_point(&e.2, p))));
-            ways.map(|(e, way)| wrong_sides(&way, &tracks[e.0], tracks, &boxes, e.3).0).sum::<usize>()
+            ways.map(|(e, way)| wrong_sides(&way, &tracks[e.0], tracks, &boxes, e.3).0)
+                .sum::<usize>()
         };
         let mut least = wrong(None);
         let mut to = None;
@@ -489,7 +492,12 @@ fn judge(board: &Board, c: &mut Candidate) {
     c.stats.shorts = Some(spots.iter().filter(|s| s.short).count());
     c.bad_nets = nets;
     // the shorts first
-    c.hot = spots.iter().filter(|s| s.short).chain(spots.iter().filter(|s| !s.short)).map(|s| s.at).collect();
+    c.hot = spots
+        .iter()
+        .filter(|s| s.short)
+        .chain(spots.iter().filter(|s| !s.short))
+        .map(|s| s.at)
+        .collect();
     c.flaw = spots.iter().map(|s| 300.0 + 700.0 * (s.missing / 0.03).min(1.0)).sum();
 }
 
@@ -775,7 +783,13 @@ fn mutant_traced<'a>(
     let mut cand = candidate(board, &r, geo, routed, s.cand.cfg.clone(), generation);
     judge(board, &mut cand);
     tr.mark(3);
-    if !loose_ends(board, &cand.geo, &conns.iter().map(|&ci| r.conns[ci].net).collect::<Vec<_>>()).is_empty() {
+    if !loose_ends(
+        board,
+        &cand.geo,
+        &conns.iter().map(|&ci| r.conns[ci].net).collect::<Vec<_>>(),
+    )
+    .is_empty()
+    {
         tr.why = "loose";
         return None;
     }
@@ -1115,9 +1129,11 @@ pub(crate) fn make_room(
     let mut before = best.clone();
     judge(board, &mut before);
     let mut c = before.clone();
-    let plain: Vec<(f64, Vec<crate::geom::Rect>)> =
-        c.geo.tracks.iter().map(|t| (t.width, t.necks.clone())).collect();
-    c.geo.tracks.iter_mut().for_each(|t| t.width = t.width.max(target(t.net)));
+    let plain: Vec<(f64, Vec<crate::geom::Rect>)> = c.geo.tracks.iter().map(|t| (t.width, t.necks.clone())).collect();
+    c.geo
+        .tracks
+        .iter_mut()
+        .for_each(|t| t.width = t.width.max(target(t.net)));
     let base = relax::RelaxConfig::default();
     let cfg = relax::RelaxConfig {
         iterations: env("GB_AIR_IT", 120.0) as usize,
@@ -1213,11 +1229,22 @@ fn rebuild<'a>(board: &'a Board, sub: &Substrate, c: &Candidate) -> Option<State
     let (fresh, segs, sites) = r.tagged_geometry();
     let same = fresh.tracks.len() == c.geo.tracks.len()
         && fresh.vias.len() == c.geo.vias.len()
-        && fresh.tracks.iter().zip(&c.geo.tracks).all(|(a, b)| a.net == b.net && a.layer == b.layer);
+        && fresh
+            .tracks
+            .iter()
+            .zip(&c.geo.tracks)
+            .all(|(a, b)| a.net == b.net && a.layer == b.layer);
     if !same {
         return None;
     }
-    let mut cand = candidate(board, &r, c.geo.clone(), c.stats.routed, c.cfg.clone(), c.stats.generation);
+    let mut cand = candidate(
+        board,
+        &r,
+        c.geo.clone(),
+        c.stats.routed,
+        c.cfg.clone(),
+        c.stats.generation,
+    );
     judge(board, &mut cand);
     let mut s = State {
         router: r,
@@ -1238,25 +1265,44 @@ fn loose_ends(board: &Board, geo: &Geometry, nets: &[u32]) -> Vec<String> {
             let on_via = geo.vias.iter().any(|v| v.net == t.net && v.at.dist(p) < 1e-4);
             let on_pad = board.pins.iter().any(|pin| {
                 pin.net == t.net
-                    && pin.obstacles.iter().any(|&o| board.obstacles[o].shape.dist_to_point(p) < 0.01)
+                    && pin
+                        .obstacles
+                        .iter()
+                        .any(|&o| board.obstacles[o].shape.dist_to_point(p) < 0.01)
             });
-            let on_track = geo.tracks.iter().enumerate().any(|(tj, o)| {
-                tj != ti && o.net == t.net && o.pts.iter().any(|q| q.dist(p) < 1e-4)
-            });
+            let on_track = geo
+                .tracks
+                .iter()
+                .enumerate()
+                .any(|(tj, o)| tj != ti && o.net == t.net && o.pts.iter().any(|q| q.dist(p) < 1e-4));
             if !on_via && !on_pad && !on_track {
-                out.push(format!("track {ti} net {} ends free at {:.3} {:.3}", board.nets[t.net as usize].name, p.x, p.y));
+                out.push(format!(
+                    "track {ti} net {} ends free at {:.3} {:.3}",
+                    board.nets[t.net as usize].name, p.x, p.y
+                ));
             }
         }
     }
     for v in geo.vias.iter().filter(|v| nets.contains(&v.net)) {
-        let ends = geo.tracks.iter().filter(|t| t.net == v.net && (t.pts[0].dist(v.at) < 1e-4 || t.pts.last().unwrap().dist(v.at) < 1e-4)).count();
+        let ends = geo
+            .tracks
+            .iter()
+            .filter(|t| t.net == v.net && (t.pts[0].dist(v.at) < 1e-4 || t.pts.last().unwrap().dist(v.at) < 1e-4))
+            .count();
         let plane = board.planes.iter().any(|p| p.net == v.net);
         // a via in a pad needs only the track on the other side
         let on_pad = board.pins.iter().any(|pin| {
-            pin.net == v.net && pin.obstacles.iter().any(|&o| board.obstacles[o].shape.dist_to_point(v.at) < 0.01)
+            pin.net == v.net
+                && pin
+                    .obstacles
+                    .iter()
+                    .any(|&o| board.obstacles[o].shape.dist_to_point(v.at) < 0.01)
         });
         if (ends == 0 || (ends == 1 && !plane && !on_pad)) && v.drill > 0.0 {
-            out.push(format!("via net {} at {:.3} {:.3} has no track", board.nets[v.net as usize].name, v.at.x, v.at.y));
+            out.push(format!(
+                "via net {} at {:.3} {:.3} has no track",
+                board.nets[v.net as usize].name, v.at.x, v.at.y
+            ));
         }
     }
     out
@@ -1348,7 +1394,8 @@ pub(crate) fn run(
         let laid = aimed.iter().filter(|n| n.2.is_some()).count();
         let more = aimed.iter().filter(|n| {
             let parent = if n.0 { side.as_ref().map(|s| &s.0) } else { None }.unwrap_or(&best);
-            n.2.as_ref().is_some_and(|c| c.cand.stats.routed > parent.cand.stats.routed)
+            n.2.as_ref()
+                .is_some_and(|c| c.cand.stats.routed > parent.cand.stats.routed)
         });
         let (aimed, more) = (aimed.len(), more.count());
         if ideas.bandit || ideas.aim_cost > 0.0 || ideas.prune || ideas.merge || ideas.window > 0.0 || ideas.spot_fade {
@@ -1384,7 +1431,9 @@ pub(crate) fn run(
                 best = c;
                 wins += 1;
             } else if c.cand.stats.routed > best.cand.stats.routed
-                && promising.as_ref().is_none_or(|p| open_cost(&c.cand) < open_cost(&p.cand))
+                && promising
+                    .as_ref()
+                    .is_none_or(|p| open_cost(&c.cand) < open_cost(&p.cand))
             {
                 promising = Some(c);
             }
@@ -1418,7 +1467,15 @@ pub(crate) fn run(
             }
             for tension in [full.tension, 0.0] {
                 let mut c = best.cand.clone();
-                relax_all(board, sub, &mut c, &relax::RelaxConfig { tension, ..full.clone() });
+                relax_all(
+                    board,
+                    sub,
+                    &mut c,
+                    &relax::RelaxConfig {
+                        tension,
+                        ..full.clone()
+                    },
+                );
                 if better(&c, &best.cand) {
                     best.cand = c;
                     wins += 1;
@@ -2232,7 +2289,11 @@ mod tests {
             shape: Shape::Polygon(Polygon::new(vec![pt(x0, y0), pt(x1, y0), pt(x1, y1), pt(x0, y1)])),
             layers: LayerSet::single(0),
             net: None,
-            kind: ObstacleKind::Keepout { vias: true, tracks: true, mask: false },
+            kind: ObstacleKind::Keepout {
+                vias: true,
+                tracks: true,
+                mask: false,
+            },
             hole: None,
             clearance: 0.0,
             pin: None,
@@ -2325,7 +2386,10 @@ mod tests {
         let r = &s.router;
         let (hit, way) = r.way_through(open[0], 1.5).unwrap();
         assert_eq!(hit.iter().map(|&c| r.conns[c].net).collect::<Vec<_>>(), [0]);
-        assert!(way.iter().any(|p| p.y > 14.6 && p.y < 15.2 && p.x > 15.0 && p.x < 25.0), "{way:?}");
+        assert!(
+            way.iter().any(|p| p.y > 14.6 && p.y < 15.2 && p.x > 15.0 && p.x < 25.0),
+            "{way:?}"
+        );
     }
 
     #[test]
@@ -2381,7 +2445,11 @@ mod tests {
                 shape: Shape::Polygon(Polygon::new(vec![lo, pt(hi.x, lo.y), hi, pt(lo.x, hi.y)])),
                 layers: LayerSet::single(0),
                 net: None,
-                kind: ObstacleKind::Keepout { vias: false, tracks: true, mask: false },
+                kind: ObstacleKind::Keepout {
+                    vias: false,
+                    tracks: true,
+                    mask: false,
+                },
                 hole: None,
                 clearance: 0.0,
                 pin: None,
@@ -2493,9 +2561,13 @@ mod tests {
         assert!(check::check(&b, &res.geometry).is_empty());
         let mut widest: f64 = 0.0;
         for t in &res.geometry.tracks {
-            let ws: Vec<f64> = t.elems.iter().map(|e| match *e {
-                Elem::Line(a, b) | Elem::Arc(a, _, b) => t.piece_width(a, b),
-            }).collect();
+            let ws: Vec<f64> = t
+                .elems
+                .iter()
+                .map(|e| match *e {
+                    Elem::Line(a, b) | Elem::Arc(a, _, b) => t.piece_width(a, b),
+                })
+                .collect();
             assert!(ws.iter().all(|&w| w >= 0.2 - 1e-9 && w <= 0.4 + 1e-9), "{ws:?}");
             assert!(ws.windows(2).all(|w| (w[0] - w[1]).abs() <= 0.025 + 1e-9), "{ws:?}");
             widest = ws.iter().fold(widest, |a, &b| a.max(b));
@@ -2549,7 +2621,13 @@ mod tests {
             actual,
             required: 0.2,
         };
-        let spots = check::spots(&[v(0.0, 1, 0.19), v(0.5, 1, 0.15), v(1.0, 1, 0.18), v(9.0, 1, 0.19), v(0.2, 2, 0.0)]);
+        let spots = check::spots(&[
+            v(0.0, 1, 0.19),
+            v(0.5, 1, 0.15),
+            v(1.0, 1, 0.18),
+            v(9.0, 1, 0.19),
+            v(0.2, 2, 0.0),
+        ]);
         assert_eq!(spots.len(), 3);
         assert!((spots[0].missing - 0.05).abs() < 1e-9 && spots[0].at.x == 0.5);
         assert!(spots[2].short && !spots[0].short);

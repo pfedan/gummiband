@@ -171,7 +171,11 @@ pub fn apply_pair_rules(board: &mut Board, text: &str) {
             for &(p, n) in &pairs {
                 let (a, b) = (&board.nets[p as usize], &board.nets[n as usize]);
                 let base = &a.name[..a.name.len() - 1];
-                if glob(&pat, &a.name) || glob(&pat, &b.name) || glob(&pat, base) || glob(&pat, base.trim_end_matches('_')) {
+                if glob(&pat, &a.name)
+                    || glob(&pat, &b.name)
+                    || glob(&pat, base)
+                    || glob(&pat, base.trim_end_matches('_'))
+                {
                     classes.push(board.classes[a.class as usize].name.clone());
                 }
             }
@@ -282,7 +286,10 @@ pub fn match_rules(board: &Board, text: &str) -> Vec<MatchRule> {
             if matches!(kind, MatchKind::Uncoupled | MatchKind::Gap) && a.pair.is_none() {
                 continue;
             }
-            if let Some(c) = (0..cands.len()).rev().find(|&c| cands[c].0 == kind && eval(&cands[c].4, &a, &none)) {
+            if let Some(c) = (0..cands.len())
+                .rev()
+                .find(|&c| cands[c].0 == kind && eval(&cands[c].4, &a, &none))
+            {
                 won[c].push(i as NetId);
             }
         }
@@ -529,7 +536,11 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
 
 fn parse_expr(s: &str) -> Option<Expr> {
     let toks = tokenize(s)?;
-    let mut p = Parser { t: toks, i: 0, known: None };
+    let mut p = Parser {
+        t: toks,
+        i: 0,
+        known: None,
+    };
     let e = p.or()?;
     if p.i != p.t.len() {
         return None;
@@ -738,16 +749,19 @@ mod tests {
             kind: "Track",
             net: "/Outputs/OUT1_DATA",
             class: "LEDData",
+            pair: None,
         };
         let b = ItemProps {
             kind: "Track",
             net: "/Outputs/OUT2_DATA",
             class: "LEDData",
+            pair: None,
         };
         let c = ItemProps {
             kind: "Track",
             net: "LED_D1",
             class: "LEDData",
+            pair: None,
         };
         assert!(eval(&rules[0].cond, &a, &b));
         assert!(!eval(&rules[0].cond, &a, &c));

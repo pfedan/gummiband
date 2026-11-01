@@ -355,6 +355,9 @@ pub struct RouteIn {
     /// With pairs: target differential impedance in ohm; sets the track width per layer from
     /// the stackup, the gap stays.
     pub pair_zdiff: Option<f64>,
+    /// With pairs: couple every pair recognised by name (default false: only pairs with a
+    /// `diff_pair_gap` rule or a net class of their own).
+    pub pair_all: Option<bool>,
     /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
     pub layer_dirs: Option<f64>,
     /// Generations of the evolutionary order search after the portfolio (default 3).
@@ -1476,6 +1479,7 @@ fn route_blocking(
             let cfg = gummiband_core::pairs::PairConfig {
                 skew: p.pair_skew.unwrap_or(0.1),
                 zdiff: p.pair_zdiff,
+                all: p.pair_all.unwrap_or(false),
             };
             gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, &search_cfg, &cfg)
         } else {
