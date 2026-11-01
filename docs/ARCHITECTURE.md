@@ -288,7 +288,19 @@ neighbours as they really are (`Router::threaded`: on every edge between the rea
 neighbours, a taut polyline through those portals), with the vias at their real places. And the
 site of a new via can lie behind a track that has moved over it since: its track then crosses that
 track an odd number of times, which no push undoes, so the via goes along its track past the
-crossing if that leaves fewer such crossings on all its tracks (`place_new_vias`).
+crossing if that leaves fewer such crossings on all its tracks (`place_new_vias`). A via in the
+plane of its net does not go where it would leave that plane: a connection can count as made
+through the plane at that via, and outside it KiCad sees the connection open and the via dangling
+(`GB_PLANE_HOLD=0` lets it go, as before 2026-11-01).
+
+Three ideas of the night series of 2026-11-01 run by default, combination A (`improve::Ideas`,
+`docs/MILESTONES.md`): the via price of a move reaches up to what a via is worth in the cost of the
+result and is drawn by what has won on this board so far (`GB_BANDIT`, Thompson sampling); a quarter
+of the moves aims at an expensive routed connection (`GB_AIM_COST`, the share); and a mutant that
+cannot beat its parent is dropped before its relaxation (`GB_PRUNE`). Against the open end without
+them the cost after 20 minutes fell by 12 % on Lichtschnitzel and 15 % on Arty (median of 4 and 3
+seeds), with fewer vias and a little more length. `GB_BANDIT=0`, `GB_AIM_COST=0` and `GB_PRUNE=0`
+switch them off; runs without an open end are untouched by them.
 
 The open end does not count violations but spots: all violations of one pair of nets within 2 mm
 are one spot (`check::spots`), because the check reports every short piece of track, so that one

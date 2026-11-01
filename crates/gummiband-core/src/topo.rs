@@ -67,6 +67,10 @@ pub struct Site {
     pub nbrs: Vec<SiteNeighbor>,
     /// Via in pad: the pin whose pad holds the site.
     pub pad: Option<u32>,
+    /// Distance to the board edge (0 outside), as `Board::edge_dist` gives it; NaN where it is not
+    /// known yet (the nodes of soft copper). A board with many cutouts makes that distance dear,
+    /// and the router asks for it at every via site of every search.
+    pub edge: f64,
 }
 
 /// Immutable data shared by all router runs.
@@ -79,7 +83,12 @@ pub struct Shared {
     /// The sites from here on are the nodes of the board's soft copper.
     pub soft_base: usize,
     pub bounds: Rect,
+    /// What the relaxation needs of the board alone, by widest track, margin, reach and layer
+    /// count (see `relax::BoardStatic`); filled on first use.
+    pub(crate) relax_cache: RelaxCache,
 }
+
+pub(crate) type RelaxCache = std::sync::Mutex<Vec<((u64, u64, u64, usize), Arc<crate::relax::BoardStatic>)>>;
 
 /// Triangulation of one routing layer.
 #[derive(Clone)]
@@ -157,6 +166,7 @@ impl Substrate {
             pad_sites: FastMap::default(),
             soft_base: 0,
             bounds,
+            relax_cache: Default::default(),
         };
         shared.sites = build_sites(board, &shared, cfg.via_pitch);
         shared.sites.extend(build_pad_sites(board, &shared));
@@ -170,6 +180,7 @@ impl Substrate {
             p: n.at,
             nbrs: Vec::new(),
             pad: None,
+            edge: f64::NAN,
         }));
         let nsites = shared.sites.len();
         let mut meshes: Vec<Mesh> = layers
@@ -738,7 +749,8 @@ fn build_sites(board: &Board, shared: &Shared, pitch: f64) -> Vec<Site> {
     candidates
         .par_iter()
         .filter_map(|&p| {
-            if board.edge_dist(p) < min_via_r + board.rules.edge_clearance {
+            let edge = board.edge_dist(p);
+            if edge < min_via_r + board.rules.edge_clearance {
                 return None;
             }
             let mut nbrs = Vec::new();
@@ -776,7 +788,12 @@ fn build_sites(board: &Board, shared: &Shared, pitch: f64) -> Vec<Site> {
             if nbrs.iter().any(|n| (n.dist as f64) < min_via_r && copper(n)) {
                 return None;
             }
-            Some(Site { p, nbrs, pad: None })
+            Some(Site {
+                p,
+                nbrs,
+                pad: None,
+                edge,
+            })
         })
         .collect()
 }
@@ -803,7 +820,8 @@ fn build_pad_sites(board: &Board, shared: &Shared) -> Vec<Site> {
             pts.push(pin.pos - dir * d);
         }
         for p in pts {
-            if board.edge_dist(p) < min_via_r + board.rules.edge_clearance {
+            let edge = board.edge_dist(p);
+            if edge < min_via_r + board.rules.edge_clearance {
                 continue;
             }
             let mut nbrs = Vec::new();
@@ -840,6 +858,7 @@ fn build_pad_sites(board: &Board, shared: &Shared) -> Vec<Site> {
                     p,
                     nbrs,
                     pad: Some(pi as u32),
+                    edge,
                 });
             }
         }

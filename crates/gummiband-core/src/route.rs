@@ -51,6 +51,9 @@ pub struct RouterConfig {
     /// Hot spots (centre, extra clearance in mm) where an earlier geometry had violations: the
     /// capacity model asks for more room there, so the topology spreads out.
     pub hotspots: std::sync::Arc<Vec<(Point, f64)>>,
+    /// Nets that may leave or enter a pad through a via in it at any time, not only as the last
+    /// resort (empty by default; the experiment `GB_VIP_RETRY` fills it).
+    pub vip_nets: std::sync::Arc<Vec<NetId>>,
 }
 
 impl Default for RouterConfig {
@@ -71,6 +74,7 @@ impl Default for RouterConfig {
             via_in_pad: false,
             escape_cost: env("GB_ESCAPE", 0.0),
             hotspots: Default::default(),
+            vip_nets: Default::default(),
         }
     }
 }
@@ -1429,7 +1433,12 @@ impl<'a> Router<'a> {
                 return false;
             }
         }
-        if self.board.edge_dist(p) < r + self.board.rules.edge_clearance {
+        let edge = if s.edge.is_nan() {
+            self.board.edge_dist(p)
+        } else {
+            s.edge
+        };
+        if edge < r + self.board.rules.edge_clearance {
             return false;
         }
         let (cx, cy) = Self::via_cell(p);
@@ -1880,6 +1889,13 @@ impl<'a> Router<'a> {
             .and_then(|p| self.guides.get(p))
             .map(|g| g.as_slice());
         let net = conn.net;
+        // a via in a pad is a last resort, except for the nets of `GB_VIP_NETS`, with
+        // `GB_VIP_LEARN` the nets that needed one before, and the nets of `cfg.vip_nets`
+        // (experiments)
+        let via_in_pad = self.cfg.via_in_pad
+            || vip_net(&self.board.nets[net as usize].name)
+            || vip_learned(net)
+            || self.cfg.vip_nets.contains(&net);
         let cls = self.board.class_of(net);
         let item = Item {
             net,
@@ -2272,13 +2288,35 @@ impl<'a> Router<'a> {
                     }
                     // via in pad: a plane fan-out may end on a via inside the source pad
                     if !free
-                        && self.cfg.via_in_pad
+                        && via_in_pad
                         && let Some(pin) = self.tri_pin(lu, t)
                         && self.pin_group[pin] == self.pin_group[conn.from]
                         && let Some(list) = self.sub.shared.pad_sites.get(&(pin as u32))
                     {
                         for &site in list {
                             let q = self.site_point(site);
+                            if pad_reuse() && conn.goal != Goal::Plane && !self.sub.site_usable(site) {
+                                // a via in this pad was placed and ripped up: the site stays split,
+                                // but its vertices on the other layers can take a via again
+                                let ok = *vertex_ok.entry(site).or_insert_with(|| self.via_ok_vertex(site, net));
+                                if let Some(existing) = ok {
+                                    let vc = if existing { 0.1 } else { self.cfg.via_cost * 2.0 };
+                                    for l2 in 0..nl {
+                                        if l2 != lu && self.m(l2).site_vert.contains_key(&site) {
+                                            push(
+                                                best,
+                                                nodes,
+                                                open,
+                                                NK::Vert { site, li: l2 as u8 },
+                                                q,
+                                                node.g + node.pos.dist(q) + vc,
+                                                idx,
+                                            );
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
                             let ok = *site_ok.entry(site).or_insert_with(|| self.via_ok_site(site, net));
                             if !self.sub.site_usable(site) || !ok {
                                 continue;
@@ -2408,7 +2446,7 @@ impl<'a> Router<'a> {
                             .filter(|&&s| match self.sub.shared.sites[s as usize].pad {
                                 None => true,
                                 // a via into a target pad ends the connection (last resort)
-                                Some(p) => self.cfg.via_in_pad && is_target(p as usize),
+                                Some(p) => via_in_pad && is_target(p as usize),
                             })
                             .enumerate()
                             .map(|(i, &s)| (self.site_point(s).dist(node.pos), i as u32, s)),
@@ -2675,6 +2713,14 @@ impl<'a> Router<'a> {
         }
         self.conn_segs[ci] = seg_ids;
         self.conn_vias[ci] = via_ids;
+        if vip_learn()
+            && self.conns[ci].goal != Goal::Plane
+            && self.conn_vias[ci]
+                .iter()
+                .any(|&s| self.sub.shared.sites[s as usize].pad.is_some())
+        {
+            learn_vip(net, &self.board.nets[net as usize].name);
+        }
         true
     }
 
@@ -3162,6 +3208,34 @@ impl<'a> Router<'a> {
         }
     }
 
+    /// Experiment `GB_VIP_EARLY=empty`: the nets of the connections that find no way on the
+    /// empty board without a via in a pad, and one with it. Such a pad lies in a pocket on its
+    /// layer that fixed copper closes, not the tracks of a run, so no routing order gets it out.
+    /// Plane fan-outs are left out. Call it after [`Router::plan`], before anything is routed.
+    pub fn pocket_nets(&mut self) -> Vec<NetId> {
+        let vip = self.cfg.via_in_pad;
+        let mut buf = std::mem::take(&mut self.search_buf);
+        let mut nets: Vec<NetId> = Vec::new();
+        for ci in 0..self.conns.len() {
+            let net = self.conns[ci].net;
+            if self.conns[ci].goal == Goal::Plane || nets.contains(&net) {
+                continue;
+            }
+            self.cfg.via_in_pad = false;
+            if self.search(ci, &mut buf).is_some() {
+                continue;
+            }
+            self.cfg.via_in_pad = true;
+            if self.search(ci, &mut buf).is_some() {
+                nets.push(net);
+            }
+        }
+        self.cfg.via_in_pad = vip;
+        self.search_buf = buf;
+        nets.sort_unstable();
+        nets
+    }
+
     pub fn route_one(&mut self, ci: usize) -> bool {
         for _ in 0..3 {
             let mut buf = std::mem::take(&mut self.search_buf);
@@ -3233,6 +3307,11 @@ impl<'a> Router<'a> {
     /// the way, with the points of the way. All on a copy: a via leaves its mark in the mesh even
     /// when it is gone, and a via in a pad needs its site unused. None if there is no way even so.
     pub(crate) fn way_through(&self, ci: usize, crossing: f64) -> Option<(Vec<usize>, Vec<Point>)> {
+        self.way_through_vias(ci, crossing).map(|(hit, way, _)| (hit, way))
+    }
+
+    /// [`Router::way_through`], and how many vias the way takes.
+    pub(crate) fn way_through_vias(&self, ci: usize, crossing: f64) -> Option<(Vec<usize>, Vec<Point>, usize)> {
         let mut r = self.clone();
         r.prices = Some(Prices {
             soft: true,
@@ -3243,7 +3322,8 @@ impl<'a> Router<'a> {
             reserve: 0.0,
             solid: true,
         });
-        r.route_one(ci).then(|| (r.in_the_way(ci), r.conn_points(ci)))
+        r.route_one(ci)
+            .then(|| (r.in_the_way(ci), r.conn_points(ci), r.conn_vias[ci].len()))
     }
 
     /// What connection `ci`, laid through everything, runs into.
@@ -3483,6 +3563,57 @@ fn jitter(seed: u64, x: u64) -> f64 {
     z = z.wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^= z >> 29;
     0.5 + (z % 1000) as f64 / 1000.0
+}
+
+/// Experiment: the nets named in `GB_VIP_NETS` (comma separated) may leave or enter a pad through
+/// a via in it at any time, not only as the last resort of a run. Off when the variable is unset.
+fn vip_net(name: &str) -> bool {
+    static NETS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NETS.get_or_init(|| {
+        std::env::var("GB_VIP_NETS")
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .iter()
+    .any(|n| n == name)
+}
+
+/// Experiment: with `GB_PAD_REUSE=1` a via in the source pad that was ripped up can come back.
+/// Its site stays split after the rip-up and is no longer usable as a site, so without this the
+/// pad has no via-in-pad candidate left (see docs/MILESTONES.md, Corne `rR4.1`).
+fn pad_reuse() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("GB_PAD_REUSE").is_ok_and(|v| v == "1"))
+}
+
+/// `GB_VIP_LEARN=1` (experiment): a net whose connection got through with a via in a pad, the
+/// last resort, may take one at any time from then on, as if `GB_VIP_NETS` named it. A pad in a
+/// pocket then gets its via while the board around it is still open. Plane fan-outs are left out.
+/// The nets are shared by all runs of the process, so with it on the normal search depends on
+/// which run learns first and is no longer the same from run to run.
+fn vip_learn() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("GB_VIP_LEARN").is_ok_and(|v| v == "1"))
+}
+
+fn learned_vips() -> &'static std::sync::Mutex<HashSet<NetId>> {
+    static NETS: std::sync::OnceLock<std::sync::Mutex<HashSet<NetId>>> = std::sync::OnceLock::new();
+    NETS.get_or_init(Default::default)
+}
+
+fn vip_learned(net: NetId) -> bool {
+    vip_learn() && learned_vips().lock().unwrap().contains(&net)
+}
+
+fn learn_vip(net: NetId, name: &str) {
+    if learned_vips().lock().unwrap().insert(net) {
+        eprintln!("via in pad learned: {name}");
+    }
 }
 
 #[cfg(test)]

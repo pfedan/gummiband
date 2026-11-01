@@ -48,6 +48,11 @@ Standing decisions of the project owner, kept here so that they survive any sess
   the finished copper leaves room. Classes other than the default are left alone.
 - In the open end a violation is a spot, weighed by what is missing. Counting pieces of track
   made the search chase the number of pieces in a curve. Plain runs keep their count.
+- The open end runs combination A by default (2026-11-01): the via price of a move drawn by a
+  bandit, a quarter of the moves aimed at expensive connections, hopeless mutants dropped before
+  their relaxation. The night series measured 12 % and 15 % less cost after 20 minutes on
+  Lichtschnitzel and Arty, KiCad DRC clean in 5 of 7 runs against 3 of 7. Each part keeps a switch
+  to turn it off; the other ideas of that night stay off.
 - Convergence means that bold changes no longer help, not that some number of rounds went by. When
   it is reached, the user gets the results that differ in vias and length, not one of them.
 - Copper does not have to lie at the limit: `--air` gives it a reserve where there is room. On by

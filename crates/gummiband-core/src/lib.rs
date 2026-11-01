@@ -466,7 +466,9 @@ pub fn route_board(
     let mut hot = best_score.2.clone();
     let mut rng = Rng(0x91ace);
     for round in 1..=rounds {
-        if (hot.is_empty() && best.1.stats.unrouted.is_empty()) || search.stopped() {
+        // GB_PLACE_AFTER_STOP: an open end that was stopped still gets the fast rounds below
+        let after_stop = search.open_end.is_some() && std::env::var("GB_PLACE_AFTER_STOP").is_ok();
+        if (hot.is_empty() && best.1.stats.unrouted.is_empty()) || (search.stopped() && !after_stop) {
             break;
         }
         let cur = board.with_offsets(&offsets);
@@ -509,7 +511,7 @@ pub fn route_board(
         // a full new search pays off only for a handful of local problems, and only on boards
         // where a search is not expensive; otherwise the fast path above is all there is.
         // By board size and not by the clock: the result must not depend on the machine.
-        if hot.len() > 20 || best.1.stats.conns > 400 {
+        if hot.len() > 20 || best.1.stats.conns > 400 || search.stopped() {
             continue;
         }
         let (sub, mut res) = route_search(&moved, sub_cfg, base, search);
@@ -591,6 +593,25 @@ pub fn route_fixed(
     search: &SearchConfig,
 ) -> (Substrate, RouteResult) {
     let sub = Substrate::build(board, sub_cfg);
+    // experiment `GB_VIP_EARLY`: a via in a pad at any time, decided before the generations, for
+    // the nets that need one; `=empty` asks the empty board (see `Router::pocket_nets`), `=1` the
+    // best of the portfolio (below)
+    let early_mode = std::env::var("GB_VIP_EARLY").unwrap_or_default();
+    let pocket;
+    let base = if early_mode == "empty" && base.vip_nets.is_empty() {
+        let mut r = Router::new(board, &sub, base.clone());
+        r.plan();
+        let nets = r.pocket_nets();
+        let names: Vec<&str> = nets.iter().map(|&n| board.nets[n as usize].name.as_str()).collect();
+        eprintln!("via in pad from the start: {} nets {:?}", nets.len(), names);
+        pocket = RouterConfig {
+            vip_nets: std::sync::Arc::new(nets),
+            ..base.clone()
+        };
+        &pocket
+    } else {
+        base
+    };
     let pop = search.population.max(1);
     let configs: Vec<RouterConfig> = (0..pop)
         .map(|i| RouterConfig {
@@ -649,6 +670,66 @@ pub fn route_fixed(
     for c in rest {
         offer(&mut finalists, c);
     }
+    // `GB_VIP_EARLY=1`: the best of the portfolio is routed again in its order once per net it
+    // left open, with a via in a pad for that net alone; the nets that then route more get one
+    // at any time for the rest of the search, as if `GB_VIP_NETS` named them
+    let early;
+    let base = if early_mode == "1" && base.vip_nets.is_empty() && !best.failed.is_empty() {
+        let mut nets: Vec<NetId> = best.failed.iter().map(|&(n, _)| n).collect();
+        nets.sort_unstable();
+        nets.dedup();
+        let identity: Genome = best.order.iter().enumerate().map(|(i, &k)| (k, i as f64)).collect();
+        let runs: Vec<Vec<NetId>> = std::iter::once(Vec::new())
+            .chain(nets.iter().map(|&n| vec![n]))
+            .collect();
+        let routed: Vec<usize> = runs
+            .par_iter()
+            .map(|v| {
+                let cfg = RouterConfig {
+                    vip_nets: std::sync::Arc::new(v.clone()),
+                    ..best.cfg.clone()
+                };
+                evaluate(board, &sub, cfg, Some(&identity), 0).stats.routed
+            })
+            .collect();
+        let tried = nets.len();
+        let open: Vec<&str> = nets.iter().map(|&n| board.nets[n as usize].name.as_str()).collect();
+        eprintln!("via in pad early: the portfolio leaves {open:?} open");
+        nets = nets
+            .iter()
+            .zip(&routed[1..])
+            .filter(|&(_, &r)| r > routed[0])
+            .map(|(&n, _)| n)
+            .collect();
+        let names: Vec<&str> = nets.iter().map(|&n| board.nets[n as usize].name.as_str()).collect();
+        eprintln!(
+            "via in pad early: {} of {tried} nets route more on their own {:?}",
+            nets.len(),
+            names
+        );
+        if nets.is_empty() {
+            base
+        } else {
+            early = RouterConfig {
+                vip_nets: std::sync::Arc::new(nets),
+                ..base.clone()
+            };
+            let cfg = RouterConfig {
+                vip_nets: early.vip_nets.clone(),
+                ..best.cfg.clone()
+            };
+            let c = evaluate(board, &sub, cfg, Some(&identity), 0);
+            if c.stats.cost() < best.stats.cost() {
+                let old = std::mem::replace(&mut best, c);
+                offer(&mut finalists, old);
+            } else {
+                offer(&mut finalists, c);
+            }
+            &early
+        }
+    } else {
+        base
+    };
     search.report("portfolio", &best.stats);
     if search.frames {
         frames.push((label(&best, "portfolio"), best.geo.clone(), false));
@@ -836,6 +917,66 @@ pub fn route_fixed(
             ));
         }
     }
+    // experiment `GB_VIP_RETRY`: the winner again, with a via in a pad at any time for the nets
+    // it left open, as if `GB_VIP_NETS` named them; it stays only if it routes more, or as many
+    // for less. The nets stay in its configuration, so the open end keeps them and repeats it.
+    // `GB_VIP_RETRY=each` first routes the winner once per such net, with a via in a pad for that
+    // net alone, and keeps only the nets that then route more: a net that does not need a via in
+    // a pad does not get one.
+    let retry = std::env::var("GB_VIP_RETRY").unwrap_or_default();
+    if (retry == "1" || retry == "each") && !best.failed.is_empty() {
+        let mut nets: Vec<NetId> = best.failed.iter().map(|&(n, _)| n).collect();
+        nets.sort_unstable();
+        nets.dedup();
+        let identity: Genome = best.order.iter().enumerate().map(|(i, &k)| (k, i as f64)).collect();
+        if retry == "each" {
+            let generation = best.stats.generation;
+            let plain = evaluate(board, &sub, best.cfg.clone(), Some(&identity), generation)
+                .stats
+                .routed;
+            let alone: Vec<_> = nets
+                .par_iter()
+                .map(|&n| {
+                    let cfg = RouterConfig {
+                        vip_nets: std::sync::Arc::new(vec![n]),
+                        ..best.cfg.clone()
+                    };
+                    evaluate(board, &sub, cfg, Some(&identity), generation).stats.routed
+                })
+                .collect();
+            let tried = nets.len();
+            nets = nets
+                .iter()
+                .zip(alone)
+                .filter(|&(_, r)| r > plain)
+                .map(|(&n, _)| n)
+                .collect();
+            eprintln!(
+                "via in pad retry: {} of {tried} nets route more on their own",
+                nets.len()
+            );
+        }
+        if !nets.is_empty() {
+            let cfg = RouterConfig {
+                vip_nets: std::sync::Arc::new(nets),
+                ..best.cfg.clone()
+            };
+            let c = geo_eval(evaluate(board, &sub, cfg, Some(&identity), best.stats.generation));
+            let better = c.stats.routed > best.stats.routed
+                || (c.stats.routed == best.stats.routed && full_cost(&c) < full_cost(&best));
+            eprintln!(
+                "via in pad retry: {} nets, {} instead of {} connections{}",
+                c.cfg.vip_nets.len(),
+                c.stats.routed,
+                best.stats.routed,
+                if better { ", taken" } else { "" }
+            );
+            if better {
+                best = c;
+                search.report("via in pad retry", &best.stats);
+            }
+        }
+    }
     // polish: a few clearance spots are often left that more rounds without tension resolve
     if best.stats.violations.unwrap_or(0) > 0 && std::env::var("GB_NO_POLISH").is_err() {
         let polish = relax::RelaxConfig {
@@ -930,6 +1071,11 @@ pub fn route_fixed(
             if check::check(board, &best.geo).len() > check::check(board, &plain).len() {
                 best.geo = plain;
             }
+        }
+        if std::env::var("GB_TAPER").is_ok()
+            && let Some(g) = improve::taper_spots(board, &best.geo)
+        {
+            best.geo = g;
         }
         best
     };
