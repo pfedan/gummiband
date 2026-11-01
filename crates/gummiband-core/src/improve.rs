@@ -88,11 +88,12 @@ fn spot(s: &State, rng: &mut Rng) -> (Point, bool) {
         let most = |n: usize| w[..n].iter().copied().fold(0.0, f64::max);
         let draw = |n: usize, rng: &mut Rng| {
             let mut at = rng.unit() * w[..n].iter().sum::<f64>();
-            (0..n).find(|&i| {
-                at -= w[i];
-                at <= 0.0
-            })
-            .unwrap_or(n - 1)
+            (0..n)
+                .find(|&i| {
+                    at -= w[i];
+                    at <= 0.0
+                })
+                .unwrap_or(n - 1)
         };
         if shorts > 0 && roll < 0.4 * most(shorts) {
             return (hot[draw(shorts, rng)], true);
@@ -725,7 +726,10 @@ fn mutant_traced<'a>(
         tr.ripped = conns.len();
         tr.routed = routed as i64 - s.cand.stats.routed as i64;
         tr.vias = r.vias.len() as i64 - s.router.vias.len() as i64;
-        tr.way = conns.iter().map(|&ci| polyline(&r.conn_points(ci)) - polyline(&s.places[ci])).sum();
+        tr.way = conns
+            .iter()
+            .map(|&ci| polyline(&r.conn_points(ci)) - polyline(&s.places[ci]))
+            .sum();
         tr.near_spot = conns.iter().any(|&ci| {
             let near = |p: &Point| s.cand.hot.iter().any(|h| h.dist(*p) < 3.0);
             s.places[ci].iter().any(near) || r.conn_points(ci).iter().any(near)
@@ -807,7 +811,17 @@ fn mutant<'a>(
     go_on: &dyn Fn() -> bool,
 ) -> Option<State<'a>> {
     let Some(out) = mutant_log() else {
-        return mutant_traced(board, sub, s, mv, relax_cfg, generation, floor, go_on, &mut Trace::default());
+        return mutant_traced(
+            board,
+            sub,
+            s,
+            mv,
+            relax_cfg,
+            generation,
+            floor,
+            go_on,
+            &mut Trace::default(),
+        );
     };
     let mut tr = Trace {
         on: true,
@@ -1338,7 +1352,15 @@ pub(crate) fn run(
         });
         let (aimed, more) = (aimed.len(), more.count());
         if ideas.bandit || ideas.aim_cost > 0.0 || ideas.prune || ideas.merge || ideas.window > 0.0 || ideas.spot_fade {
-            learn(&ideas, &mut bandit, &next, side.as_ref().map(|s| &s.0), &best, generation, log);
+            learn(
+                &ideas,
+                &mut bandit,
+                &next,
+                side.as_ref().map(|s| &s.0),
+                &best,
+                generation,
+                log,
+            );
         }
         let mut wins = 0;
         // one more connection, at the price of shorts for now
@@ -1621,7 +1643,10 @@ impl Bandit {
     }
 
     fn fade(&mut self, keep: f64) {
-        self.tries.iter_mut().chain(self.wins.iter_mut()).for_each(|x| *x *= keep);
+        self.tries
+            .iter_mut()
+            .chain(self.wins.iter_mut())
+            .for_each(|x| *x *= keep);
     }
 }
 
@@ -1675,7 +1700,10 @@ fn aim_at_cost(s: &State, bold: usize, rng: &mut Rng) -> Option<Move> {
             }
             let p = &s.places[ci];
             let direct = match &r.conns[ci].goal {
-                Goal::Pins(q) => q.iter().map(|&q| r.board.pins[q].pos.dist(p[0])).fold(f64::INFINITY, f64::min),
+                Goal::Pins(q) => q
+                    .iter()
+                    .map(|&q| r.board.pins[q].pos.dist(p[0]))
+                    .fold(f64::INFINITY, f64::min),
                 Goal::Plane => 0.0,
             };
             // through the middle of the edges even a straight track looks a little longer
@@ -1927,7 +1955,9 @@ fn merge_wins<'a>(
     winners.sort_by(|a, b| open_cost(&a.1.cand).total_cmp(&open_cost(&b.1.cand)));
     let n = parent.router.conns.len();
     let changed = |w: &State| -> Vec<usize> {
-        (0..n).filter(|&ci| route_of(&parent.router, ci) != route_of(&w.router, ci)).collect()
+        (0..n)
+            .filter(|&ci| route_of(&parent.router, ci) != route_of(&w.router, ci))
+            .collect()
     };
     let count = winners.len();
     let mut it = winners.into_iter();
@@ -1991,7 +2021,10 @@ fn learn(
         }
     }
     if log {
-        let costly: Vec<_> = next.iter().filter(|n| n.1.aim.as_ref().is_some_and(|a| a.improve)).collect();
+        let costly: Vec<_> = next
+            .iter()
+            .filter(|n| n.1.aim.as_ref().is_some_and(|a| a.improve))
+            .collect();
         let laid = costly.iter().filter(|n| n.2.is_some()).count();
         let wins = costly.iter().filter(|n| won(n.0, &n.2)).count();
         let pruned = PRUNED.swap(0, std::sync::atomic::Ordering::Relaxed);
@@ -2000,7 +2033,10 @@ fn learn(
             costly.len()
         );
         if ideas.window > 0.0 && generation % 24 == 0 {
-            let w: Vec<usize> = WINDOW.iter().map(|c| c.swap(0, std::sync::atomic::Ordering::Relaxed)).collect();
+            let w: Vec<usize> = WINDOW
+                .iter()
+                .map(|c| c.swap(0, std::sync::atomic::Ordering::Relaxed))
+                .collect();
             line += &format!(
                 ", window {} relaxations, {:.0} % of the tracks",
                 w[0],
