@@ -87,7 +87,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `reset?` | the net's options and effective priority |
-| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `air?`, `prefer_width?`, `angles?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
+| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `move_parts?`, `fixed?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `air?`, `prefer_width?`, `angles?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
 | `angles_45` | `path`, `output?`, `nets?` | path of the written `<input>.45.kicad_pcb`, runs of track looked at and changed, length before and after, pieces off the grid, sharp corners, Gummiband's violations before and after |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?` | PNG (image content) and its path, region, pixels per mm |
@@ -254,7 +254,14 @@ leave the other nets where they are; locked copper and plane nets never move. `o
 to the output if missing, so `drc` and `load_board` work on it. `nets` routes only the listed
 nets for this call.
 
-Result fields: `board`, `input`, `output`, `seconds`, `threads`, `connections`, `routed`,
+Without `keep_all` the geometry generations may shift parts next to clearance problems and open
+connections, while the routed copper follows like rubber bands (`move_parts`, default true
+without `keep_all`, as `--move-parts` of the CLI). Locked footprints, connectors, modules,
+mounting holes, buttons and test points stay, and so do the references in `fixed`. The output
+has the footprints at their new positions, and `moved` lists them with their shift in mm.
+`move_parts` does not go together with `shove`.
+
+Result fields: `board`, `moved`, `input`, `output`, `seconds`, `threads`, `connections`, `routed`,
 `unrouted` (list of `net: pad -> pad`), `vias`, `length_mm`, `items_written`, `skipped_nets`,
 `violations_total`, `violations_by_kind`, `violations` (first `max_violations`, default 50:
 `what`, `x`, `y`, `actual_mm`, `required_mm`, `nets` [routed net, other net or null]),
@@ -364,7 +371,7 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
   `gummiband place`, knows no datasheet layouts (place and lock power stages with `move_part`;
   `semantic` keeps an inductor at its converter, but no via arrays or copper),
   and treats both board sides as one space.
-- Not reachable through MCP yet: creating a board, `--move-parts`, and per net widths and priorities
+- Not reachable through MCP yet: creating a board, and per net widths and priorities
   from files (`--net-widths`, `--net-priorities`; priorities go through `set_net_options`).
 - Progress notifications during long routes, and cancellation (the core has no cancel hook).
 - `route` returns Gummiband's own clearance check; KiCad's verdict needs a `drc` call.

@@ -38,8 +38,9 @@ class RouteOptions:
     finish_nets: Optional[List[str]] = None
     # whether the dialog asks for the animation; frames_dir is what the router gets
     animate: bool = False
-    # let the geometry generations shift parts; the plugin takes the moves over
-    move_parts: bool = False
+    # let the geometry generations shift parts (the router's default); the plugin takes the
+    # moves over
+    move_parts: bool = True
     fixed: Optional[List[str]] = None  # references that never move
     # try this many placements from the netlist, each routed; the best one is kept
     placements: int = 0
@@ -237,9 +238,10 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
     cmd += ["--runs", str(int(opts.runs)), "--via-cost", repr(float(opts.via_cost)),
             "--geometry-generations", str(int(opts.geometry_generations))]
     cmd += _changed(opts, ROUTE_FLAGS)
-    if opts.move_parts:
-        cmd.append("--move-parts")
-    if (opts.move_parts or opts.placements) and opts.fixed:
+    # parts move by default when the whole board is routed; finishing nets keeps them in place
+    if not opts.move_parts and not opts.finish_nets:
+        cmd.append("--no-move-parts")
+    if ((opts.move_parts and not opts.finish_nets) or opts.placements) and opts.fixed:
         cmd += ["--fixed", ",".join(opts.fixed)]
     if opts.pairs:
         cmd.append("--pairs")
