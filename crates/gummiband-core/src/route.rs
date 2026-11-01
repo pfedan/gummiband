@@ -465,8 +465,10 @@ impl<'a> Router<'a> {
                 }
             }
         }
-        // kept copper connects pins: everything on one piece of copper is one pin already
-        let kept = |o: &crate::board::Obstacle| matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via);
+        // kept copper connects pins: everything on one piece of copper is one pin already (a
+        // zone that is an obstacle is a pour laid out before routing, it joins its pads too)
+        let kept =
+            |o: &crate::board::Obstacle| matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via | ObstacleKind::Zone);
         let into_plane = |o: &crate::board::Obstacle| {
             let (ObstacleKind::Via, Shape::Circle { c, .. }) = (o.kind, &o.shape) else {
                 return false;

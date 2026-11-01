@@ -25,6 +25,11 @@ pub enum KeepCopper {
     All,
 }
 
+/// Zones named with this prefix were laid out before routing (power pours): they stay
+/// obstacles for other nets on routing layers and join the pads they cover, whatever
+/// `ReadOptions::zones_as_obstacles` says.
+pub const GB_ZONE_PREFIX: &str = "gb:";
+
 #[derive(Debug, Clone)]
 pub struct ReadOptions {
     pub keep: KeepCopper,
@@ -1028,6 +1033,8 @@ impl Reader {
             return;
         }
         let Some(net) = net else { return };
+        // a zone the tools laid out before routing (power_copper) holds its place like locked copper
+        let reserved = z.child_str("name").is_some_and(|n| n.starts_with(GB_ZONE_PREFIX));
         for l in layers.iter() {
             if self.b.layers[l as usize].is_plane {
                 self.b.nets[net as usize].planes.insert(l);
@@ -1036,7 +1043,7 @@ impl Reader {
                     layer: l,
                     outline: Polygon::new(outline.clone()),
                 });
-            } else if opts.zones_as_obstacles {
+            } else if opts.zones_as_obstacles || reserved {
                 let clearance = self.clearance_of(Some(net));
                 self.push_obstacle(Obstacle {
                     shape: Shape::Polygon(Polygon::new(outline.clone())),

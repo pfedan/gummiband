@@ -967,50 +967,90 @@ pub struct StitchOptions {
     pub avoid_courtyards: bool,
 }
 
-/// Free spots for stitching vias of `o.net`: a grid over the board and a row along the edge,
-/// each spot clear of copper and holes of other nets (on every layer, the via goes through),
-/// of rule areas that forbid vias, of other nets' zones on routing layers and (optionally) of
-/// courtyards; a blocked grid spot tries eight neighbours at a quarter pitch.
-pub fn stitch_spots(b: &Board, zf: &[ZoneFill], o: &StitchOptions) -> Vec<Point> {
-    let r = o.diameter / 2.0;
-    let own = b.clearance(Some(o.net), None);
-    let foreign_zones: Vec<&ZoneFill> = zf
-        .iter()
-        .filter(|z| z.net != Some(o.net) && !b.layers[z.layer as usize].is_plane)
-        .collect();
-    let mut bbox = Rect::empty();
-    for p in &b.outline {
-        let q = p.bbox();
-        bbox.add(q.min);
-        bbox.add(q.max);
+/// Where a via of one net fits: clear of copper and holes of other nets (on every layer, the
+/// via goes through), of rule areas that forbid vias, of other nets' zones on routing layers,
+/// of the board edge, of vias placed before and (optionally) of courtyards.
+pub struct ViaRoom<'a> {
+    b: &'a Board,
+    net: NetId,
+    r: f64,
+    drill: f64,
+    own: f64,
+    margin: f64,
+    avoid_courtyards: bool,
+    /// Courtyards a via may sit in all the same (the part the vias belong to).
+    own_parts: Vec<String>,
+    foreign_zones: Vec<&'a ZoneFill>,
+}
+
+impl<'a> ViaRoom<'a> {
+    pub fn new(
+        b: &'a Board,
+        zf: &'a [ZoneFill],
+        net: NetId,
+        diameter: f64,
+        drill: f64,
+        margin: f64,
+        avoid_courtyards: bool,
+    ) -> ViaRoom<'a> {
+        ViaRoom {
+            b,
+            net,
+            r: diameter / 2.0,
+            drill,
+            own: b.clearance(Some(net), None),
+            margin,
+            avoid_courtyards,
+            own_parts: Vec::new(),
+            foreign_zones: zf
+                .iter()
+                .filter(|z| z.net != Some(net) && !b.layers[z.layer as usize].is_plane)
+                .collect(),
+        }
     }
-    let edge_dist = |p: Point| -> f64 {
-        b.outline
+
+    /// Vias may sit in the courtyards of these parts.
+    pub fn allow_in(mut self, parts: Vec<String>) -> Self {
+        self.own_parts = parts;
+        self
+    }
+
+    fn edge_dist(&self, p: Point) -> f64 {
+        self.b
+            .outline
             .iter()
             .map(|q| q.boundary_dist(p))
             .fold(f64::INFINITY, f64::min)
-    };
-    let free = |p: Point, placed: &[Point]| -> bool {
-        if !b.inside(p) || edge_dist(p) < b.rules.edge_clearance + r {
+    }
+
+    /// Center distance two vias of the net keep.
+    pub fn pitch(&self) -> f64 {
+        2.0 * self.r + self.b.rules.hole_to_hole.max(self.own)
+    }
+
+    pub fn free(&self, p: Point, placed: &[Point]) -> bool {
+        let (b, r) = (self.b, self.r);
+        if !b.inside(p) || self.edge_dist(p) < b.rules.edge_clearance + r {
             return false;
         }
-        if placed
-            .iter()
-            .any(|q| q.dist(p) < o.diameter + b.rules.hole_to_hole.max(own))
+        if placed.iter().any(|q| q.dist(p) < self.pitch()) {
+            return false;
+        }
+        if self.avoid_courtyards
+            && b.courtyards
+                .iter()
+                .any(|(part, c)| !self.own_parts.contains(part) && c.grow(r).contains(p))
         {
-            return false;
-        }
-        if o.avoid_courtyards && b.courtyards.values().any(|c| c.grow(r).contains(p)) {
             return false;
         }
         for x in &b.obstacles {
             if let Some(h) = x.hole {
                 let c = x.shape.bbox().center();
-                if c.dist(p) - h - o.drill / 2.0 < b.rules.hole_to_hole {
+                if c.dist(p) - h - self.drill / 2.0 < b.rules.hole_to_hole {
                     return false;
                 }
             }
-            if x.net == Some(o.net) {
+            if x.net == Some(self.net) {
                 continue;
             }
             let need = match x.kind {
@@ -1020,19 +1060,32 @@ pub fn stitch_spots(b: &Board, zf: &[ZoneFill], o: &StitchOptions) -> Vec<Point>
                     }
                     r
                 }
-                _ => r + x.clearance.max(own) + o.margin,
+                _ => r + x.clearance.max(self.own) + self.margin,
             };
             if x.shape.dist_to_point(p) < need {
                 return false;
             }
         }
-        for z in &foreign_zones {
-            if z.polys.iter().any(|q| q.dist_to_point(p) < r + own + o.margin) {
+        for z in &self.foreign_zones {
+            if z.polys.iter().any(|q| q.dist_to_point(p) < r + self.own + self.margin) {
                 return false;
             }
         }
         true
-    };
+    }
+}
+
+/// Free spots for stitching vias of `o.net`: a grid over the board and a row along the edge,
+/// each spot free by [`ViaRoom`]; a blocked grid spot tries eight neighbours at a quarter pitch.
+pub fn stitch_spots(b: &Board, zf: &[ZoneFill], o: &StitchOptions) -> Vec<Point> {
+    let room = ViaRoom::new(b, zf, o.net, o.diameter, o.drill, o.margin, o.avoid_courtyards);
+    let free = |p: Point, placed: &[Point]| room.free(p, placed);
+    let mut bbox = Rect::empty();
+    for p in &b.outline {
+        let q = p.bbox();
+        bbox.add(q.min);
+        bbox.add(q.max);
+    }
     let mut placed: Vec<Point> = Vec::new();
     if o.edge_pitch > 0.0 {
         for poly in &b.outline {
@@ -1102,8 +1155,258 @@ pub fn stitch_spots(b: &Board, zf: &[ZoneFill], o: &StitchOptions) -> Vec<Point>
     placed
 }
 
+// --------------------------------------------------------------------------- power pours
+
+/// Convex hull of points (counter clockwise in the math sense, clockwise on the y-down board).
+pub fn convex_hull(pts: &[Point]) -> Vec<Point> {
+    let mut p: Vec<Point> = pts.to_vec();
+    p.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    p.dedup_by(|a, b| a.dist(*b) < 1e-9);
+    if p.len() < 3 {
+        return p;
+    }
+    let cross = |o: Point, a: Point, b: Point| (a - o).cross(b - o);
+    let mut h: Vec<Point> = Vec::with_capacity(2 * p.len());
+    for pass in 0..2 {
+        let start = h.len();
+        let it: Box<dyn Iterator<Item = &Point>> = if pass == 0 {
+            Box::new(p.iter())
+        } else {
+            Box::new(p.iter().rev())
+        };
+        for &q in it {
+            while h.len() >= start + 2 && cross(h[h.len() - 2], h[h.len() - 1], q) <= 1e-12 {
+                h.pop();
+            }
+            h.push(q);
+        }
+        h.pop();
+    }
+    h
+}
+
+/// The part of a convex polygon with n·x <= h.
+fn clip(poly: &[Point], n: Point, h: f64) -> Vec<Point> {
+    let mut out = Vec::with_capacity(poly.len() + 1);
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+        let (da, db) = (n.dot(a) - h, n.dot(b) - h);
+        if da <= 0.0 {
+            out.push(a);
+        }
+        if (da < 0.0 && db > 0.0) || (da > 0.0 && db < 0.0) {
+            out.push(a.lerp(b, da / (da - db)));
+        }
+    }
+    out
+}
+
+fn nearest_on(polys: &[Polygon], p: Point) -> Point {
+    let mut best = (f64::INFINITY, p);
+    for q in polys {
+        for (a, b) in q.edges() {
+            let x = seg_nearest(p, a, b);
+            let d = x.dist(p);
+            if d < best.0 {
+                best = (d, x);
+            }
+        }
+    }
+    best.1
+}
+
+fn seg_nearest(p: Point, a: Point, b: Point) -> Point {
+    let d = b - a;
+    let l2 = d.len2();
+    if l2 < 1e-18 {
+        return a;
+    }
+    a + d * ((p - a).dot(d) / l2).clamp(0.0, 1.0)
+}
+
+/// A pour laid out before routing.
+#[derive(Debug, Clone)]
+pub struct Pour {
+    pub outline: Vec<Point>,
+    /// What cut the hull back: "pad U4.10 (net)", "board edge", ...
+    pub cut_by: Vec<String>,
+    /// Indices of the terminals the pour no longer touches.
+    pub lost: Vec<usize>,
+}
+
+/// The outline of a pour of `net` on `layer` over the terminals (pad shapes, via disks as
+/// polygons): their convex hull grown by `margin`, cut back by straight lines wherever copper,
+/// holes, rule areas or reserved zones of other nets or the board edge come closer than their
+/// clearance. Each cut runs across the line from the obstacle to the nearest point of the spine
+/// (the lines between the terminal groups the pour joins; without spine: the nearest terminal),
+/// so the pour gives way on the side of the obstacle only; a terminal it no longer touches is in
+/// `lost`.
+pub fn pour_outline(
+    b: &Board,
+    net: NetId,
+    layer: LayerId,
+    terminals: &[Polygon],
+    spine: &[(Point, Point)],
+    margin: f64,
+) -> Option<Pour> {
+    let anchor = |c: Point| -> Point {
+        let on_spine = spine
+            .iter()
+            .map(|&(a, e)| seg_nearest(c, a, e))
+            .min_by(|x, y| x.dist(c).total_cmp(&y.dist(c)));
+        match on_spine {
+            Some(t) if t.dist(c) > 1e-3 => t,
+            _ => nearest_on(terminals, c),
+        }
+    };
+    let pts: Vec<Point> = terminals.iter().flat_map(|t| t.pts.iter().copied()).collect();
+    let hull = convex_hull(&pts);
+    if hull.len() < 3 {
+        return None;
+    }
+    let mut poly = Polygon::new(hull).grown(margin).pts;
+    let own = b.clearance(Some(net), None);
+    let mut cut_by = Vec::new();
+    // obstacles grown by their clearance, nearest first (they cut the most)
+    let mut obs: Vec<(f64, Polygon, String)> = Vec::new();
+    let names: HashMap<usize, String> = b
+        .pins
+        .iter()
+        .flat_map(|p| p.obstacles.iter().map(move |&o| (o, p.name.clone())))
+        .collect();
+    let bbox = Polygon::new(poly.clone()).bbox().grow(2.0);
+    for (i, x) in b.obstacles.iter().enumerate() {
+        if !x.shape.bbox().overlaps(&bbox) {
+            continue;
+        }
+        let hole = x.hole.filter(|_| x.net != Some(net));
+        let on = x.layers.has(layer) && x.net != Some(net);
+        let gap = match x.kind {
+            ObstacleKind::Keepout { tracks, mask, .. } => {
+                if !tracks || mask || !on {
+                    continue;
+                }
+                0.0
+            }
+            _ if on => x.clearance.max(own).max(b.item_gap(net, x.net)),
+            // a hole of another net through the layer
+            _ if hole.is_some() => b.rules.hole_clearance.max(own),
+            _ => continue,
+        };
+        let shape = x.shape.to_polygon(0.01).grown(gap + 0.01);
+        let what = match (&names.get(&i), x.kind) {
+            (Some(n), _) => format!("pad {n}"),
+            (None, ObstacleKind::Track) => "track".to_string(),
+            (None, ObstacleKind::Via) => "via".to_string(),
+            (None, ObstacleKind::Zone) => "zone".to_string(),
+            (None, ObstacleKind::Keepout { .. }) => "rule area".to_string(),
+            (None, ObstacleKind::Pad) => "pad".to_string(),
+            (None, ObstacleKind::Hole) => "hole".to_string(),
+            (None, ObstacleKind::Graphic) => "copper graphic".to_string(),
+        };
+        let what = match x.net {
+            Some(n) => format!("{what} ({})", b.nets[n as usize].name),
+            None => what,
+        };
+        let c = shape.bbox().center();
+        obs.push((anchor(c).dist(c), shape, what));
+    }
+    obs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, shape, what) in &obs {
+        if poly.len() < 3 || Polygon::new(poly.clone()).dist_to_poly(shape) > 0.0 {
+            continue;
+        }
+        let c = shape.bbox().center();
+        let n = (c - anchor(c)).norm();
+        if !n.x.is_finite() || n.len() < 0.5 {
+            continue;
+        }
+        let h = shape.pts.iter().map(|q| n.dot(*q)).fold(f64::INFINITY, f64::min);
+        poly = clip(&poly, n, h);
+        cut_by.push(what.clone());
+    }
+    // the board edge: cut along every outline side the pour comes near, inside by the clearance
+    let inner: Point = pts.iter().fold(pt(0.0, 0.0), |s, q| s + *q) * (1.0 / pts.len() as f64);
+    for o in &b.outline {
+        for (a, c) in o.edges() {
+            if poly.len() < 3 || Polygon::new(poly.clone()).dist_to_seg(a, c) >= b.rules.edge_clearance {
+                continue;
+            }
+            let d = (c - a).norm();
+            let mut n = pt(-d.y, d.x);
+            if n.dot(inner - a) > 0.0 {
+                n = n * -1.0;
+            }
+            poly = clip(&poly, n, n.dot(a) - b.rules.edge_clearance);
+            cut_by.push("board edge".to_string());
+        }
+    }
+    if poly.len() < 3 {
+        return None;
+    }
+    let out = Polygon::new(poly.clone());
+    let lost = terminals
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| out.dist_to_poly(t) > 0.0)
+        .map(|(i, _)| i)
+        .collect();
+    cut_by.dedup();
+    Some(Pour {
+        outline: poly,
+        cut_by,
+        lost,
+    })
+}
+
+/// Spots for `count` vias of `net` next to a pad (its copper polygons): on rings around the pad,
+/// the first one just off the pad (the hole stays out of the pad, a pour joins them), each spot
+/// free by `room`. Fewer when there is no room.
+pub fn via_field(room: &ViaRoom, pad: &[Polygon], count: usize, existing: &[Point]) -> Vec<Point> {
+    let pts: Vec<Point> = pad.iter().flat_map(|t| t.pts.iter().copied()).collect();
+    let hull = Polygon::new(convex_hull(&pts));
+    let pitch = room.pitch();
+    let mut placed: Vec<Point> = existing.to_vec();
+    let start = placed.len();
+    for ring in 0..4 {
+        if placed.len() - start >= count {
+            break;
+        }
+        let ring_poly = hull.grown(room.r + 0.1 + ring as f64 * pitch);
+        for (a, c) in ring_poly.edges() {
+            let len = a.dist(c);
+            let steps = (len / pitch).floor().max(1.0) as usize;
+            for k in 0..steps {
+                let p = a.lerp(c, (k as f64 + 0.5) / steps as f64);
+                if placed.len() - start < count && room.free(p, &placed) {
+                    placed.push(p);
+                }
+            }
+        }
+    }
+    placed.split_off(start)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hull_and_clip() {
+        let sq = [
+            pt(0.0, 0.0),
+            pt(2.0, 0.0),
+            pt(2.0, 2.0),
+            pt(0.0, 2.0),
+            pt(1.0, 1.0),
+            pt(1.0, 0.0),
+        ];
+        let h = convex_hull(&sq);
+        assert_eq!(h.len(), 4);
+        assert!((Polygon::new(h.clone()).signed_area().abs() - 4.0).abs() < 1e-9);
+        // keep x <= 0.5
+        let c = clip(&h, pt(1.0, 0.0), 0.5);
+        assert!((Polygon::new(c).signed_area().abs() - 1.0).abs() < 1e-9);
+    }
+
     use super::*;
 
     #[test]

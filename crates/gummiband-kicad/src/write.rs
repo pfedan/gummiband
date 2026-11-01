@@ -529,7 +529,35 @@ pub fn add_zone(
     priority: u32,
     ids: u64,
 ) -> String {
-    let name = &kb.board.nets[net as usize].name;
+    add_zone_named(
+        kb,
+        text,
+        &ZoneSpec {
+            net,
+            layer,
+            priority,
+            name: "",
+            solid: false,
+        },
+        outline,
+        ids,
+    )
+}
+
+/// What [`add_zone_named`] writes besides the outline.
+pub struct ZoneSpec<'a> {
+    pub net: NetId,
+    pub layer: LayerId,
+    pub priority: u32,
+    /// Zone name; "gb:..." keeps the zone an obstacle for the router (see `read::GB_ZONE_PREFIX`).
+    pub name: &'a str,
+    /// Pads join the zone solid instead of with thermal reliefs (power pours).
+    pub solid: bool,
+}
+
+/// [`add_zone`] with a name and the pad connection.
+pub fn add_zone_named(kb: &KicadBoard, text: &str, z: &ZoneSpec, outline: &[Point], ids: u64) -> String {
+    let name = &kb.board.nets[z.net as usize].name;
     let net_item = match &kb.net_numbers {
         Some(t) => format!("(net {}) (net_name {})", t.get(name).copied().unwrap_or(0), quote(name)),
         None => format!("(net {})", quote(name)),
@@ -539,12 +567,23 @@ pub fn add_zone(
     for p in outline {
         pts.push_str(&format!("(xy {} {}) ", f(p.x), f(p.y)));
     }
+    let zname = if z.name.is_empty() {
+        String::new()
+    } else {
+        format!("(name {}) ", quote(z.name))
+    };
+    let connect = if z.solid {
+        "(connect_pads yes (clearance 0.2))"
+    } else {
+        "(connect_pads (clearance 0.2))"
+    };
     let zone = format!(
-        "\t(zone {net_item} (layer {}) (uuid \"{}\") (hatch edge 0.5) (priority {priority}) \
-         (connect_pads (clearance 0.2)) (min_thickness 0.2) (fill yes (thermal_gap 0.3) \
+        "\t(zone {net_item} (layer {}) (uuid \"{}\") {zname}(hatch edge 0.5) (priority {}) \
+         {connect} (min_thickness 0.2) (fill yes (thermal_gap 0.3) \
          (thermal_bridge_width 0.3)) (polygon (pts {pts})))\n",
-        quote(&kb.layer_names[layer as usize]),
+        quote(&kb.layer_names[z.layer as usize]),
         gen_id.next(),
+        z.priority,
     );
     let end = text.rfind(')').unwrap_or(text.len());
     format!("{}{}{}", &text[..end], zone, &text[end..])
