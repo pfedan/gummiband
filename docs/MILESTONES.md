@@ -92,8 +92,14 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   on seed 1), `matching` 56 instead of 53 (2 length errors more on one seed), lengths out of
   range on DDR5 53 instead of 52. Few joints qualify (1 to 5 on DDR5); most pair errors sit at
   vias in line, where a pair turns back or changes sides.
+  Vias in line (2026-11-02): a pair that turns back at a via now takes its vias side by side
+  there and changes sides; at most one joint per pair still has vias in line, only where the
+  polarity asks for it (before: every joint where the band turned back). With `--pairs` over
+  seeds 1 to 3 (DDR5 1 to 4) KiCad errors `diff_pairs` 10 instead of 16 (no clearance errors or
+  shorts left), `matching` 28 instead of 53, DDR5 151 instead of 206 (clearance and shorts 8
+  instead of 44, lengths out of range 48 instead of 52), Lichtschnitzel unchanged.
   Open: room in the router itself, phase matching near the source, carrying the pair to its
-  end, vias in line (the remaining pair errors sit there), the open end with pairs.
+  end, the open end with pairs.
 - Rule engine: more custom rule conditions (positions, footprints, layers).
 - More than two signal layers (pulled forward with the synthetic 4 layer benchmarks).
 - Alternative placements as portfolio variants (smaller, square, round outlines with the
