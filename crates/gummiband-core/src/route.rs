@@ -498,8 +498,7 @@ impl<'a> Router<'a> {
             let (ObstacleKind::Via, Shape::Circle { c, .. }) = (o.kind, &o.shape) else {
                 return false;
             };
-            let on =
-                |pl: &crate::board::Plane| Some(pl.net) == o.net && o.layers.has(pl.layer) && pl.outline.contains(*c);
+            let on = |pl: &crate::board::Plane| Some(pl.net) == o.net && o.layers.has(pl.layer) && pl.covers(*c);
             board.planes.iter().any(on)
         };
         let mut on_plane: Vec<u32> = Vec::new();
@@ -1865,10 +1864,7 @@ impl<'a> Router<'a> {
 
     fn in_plane(&self, p: Point, net: NetId) -> bool {
         let (r, _, _) = self.via_size(net);
-        self.board
-            .planes
-            .iter()
-            .any(|pl| pl.net == net && pl.outline.contains(p) && pl.outline.boundary_dist(p) >= r + 0.3)
+        self.board.planes.iter().any(|pl| pl.net == net && pl.holds(p, r + 0.3))
     }
 
     /// A via or branch point of the soft copper: it stays for good.
@@ -1986,7 +1982,7 @@ impl<'a> Router<'a> {
                             .board
                             .planes
                             .iter()
-                            .any(|pl| pl.net == net && pn.layers.has(pl.layer) && pl.outline.contains(pn.pos))
+                            .any(|pl| pl.net == net && pn.layers.has(pl.layer) && pl.covers(pn.pos))
                 }
             }
         };
@@ -2982,9 +2978,9 @@ impl<'a> Router<'a> {
                 self.plane_groups.contains(&self.pin_group[p])
                     || n.pins.iter().any(|&q| {
                         self.pin_group[q] == self.pin_group[p]
-                            && b.planes.iter().any(|pl| {
-                                pl.net == net && b.pins[q].layers.has(pl.layer) && pl.outline.contains(b.pins[q].pos)
-                            })
+                            && b.planes
+                                .iter()
+                                .any(|pl| pl.net == net && b.pins[q].layers.has(pl.layer) && pl.covers(b.pins[q].pos))
                     })
             };
             if has_plane {
@@ -3900,11 +3896,7 @@ mod tests {
     fn a_kept_via_into_the_plane_needs_no_fan_out() {
         let mut b = crate::topo::tests::two_pad_board();
         b.layers[1].is_plane = true;
-        b.planes.push(crate::board::Plane {
-            net: 0,
-            layer: 1,
-            outline: b.outline[0].clone(),
-        });
+        b.planes.push(crate::board::Plane::new(0, 1, b.outline[0].clone()));
         b.obstacles.push(crate::board::Obstacle {
             shape: Shape::Circle { c: pt(2., 5.), r: 0.3 },
             layers: b.all_layers(),

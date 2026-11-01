@@ -219,7 +219,7 @@ fn reaches_plane(board: &Board, p: usize) -> bool {
     board
         .planes
         .iter()
-        .any(|pl| pl.net == pin.net && pin.layers.has(pl.layer) && pl.outline.contains(pin.pos))
+        .any(|pl| pl.net == pin.net && pin.layers.has(pl.layer) && pl.covers(pin.pos))
 }
 
 /// Find the patterns of a board.

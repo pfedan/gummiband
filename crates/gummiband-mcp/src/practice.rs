@@ -1183,7 +1183,9 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
                 continue;
             }
             let parts: Vec<String> = g.iter().map(|&x| b.pins[x].footprint.clone()).collect();
-            let room = power::ViaRoom::new(b, &zf, net, dia, drill, 0.15, true).allow_in(parts);
+            let room = power::ViaRoom::new(b, &zf, net, dia, drill, 0.15, true)
+                .allow_in(parts)
+                .into_plane();
             // vias of the net that already touch the pad count
             let have: Vec<Point> = b
                 .obstacles
