@@ -217,6 +217,8 @@ pub struct Router<'a> {
     pending: Vec<u32>,
     /// Prices while a negotiation runs and in the passes after it.
     prices: Option<Prices>,
+    /// Connections that went with a track they ended on, see [`Router::rip_up`].
+    pub(crate) torn: Vec<usize>,
     /// Buffers of the search, kept to avoid growing them again for every connection.
     search_buf: SearchBuf,
     /// Debugging: positions expanded by the last search of a traced connection.
@@ -418,6 +420,7 @@ impl<'a> Router<'a> {
                 .any(|o| matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via)),
             pending: vec![0; board.pins.len()],
             prices: None,
+            torn: Vec::new(),
             soft_on: false,
             soft_lost: Vec::new(),
         };
@@ -2836,9 +2839,31 @@ impl<'a> Router<'a> {
         id
     }
 
+    /// Take a connection out. What ends on one of its tracks loses its hold, so it goes as well;
+    /// such connections are in `torn` for the caller to lay again.
     pub fn rip_up(&mut self, ci: usize) {
+        let gone = self.rip_one(ci);
+        if !self.cfg.taps {
+            return;
+        }
+        let mut gone = gone;
+        while let Some(sid) = gone.pop() {
+            let ends_on = |cj: usize| {
+                let on = |s: &u32| matches!(self.segs[*s as usize].as_ref().map(|x| x.end), Some(End::Tap(seg, _)) if seg == sid);
+                self.conn_segs[cj].iter().any(on)
+            };
+            let hanging: Vec<usize> = (0..self.conns.len()).filter(|&cj| ends_on(cj)).collect();
+            for cj in hanging {
+                self.torn.push(cj);
+                gone.extend(self.rip_one(cj));
+            }
+        }
+    }
+
+    fn rip_one(&mut self, ci: usize) -> Vec<u32> {
         let net = self.conns[ci].net;
         self.guides.remove(&net);
+        let gone = self.conn_segs[ci].clone();
         for sid in std::mem::take(&mut self.conn_segs[ci]) {
             let Some(s) = self.segs[sid as usize].take() else {
                 continue;
@@ -2854,6 +2879,7 @@ impl<'a> Router<'a> {
         for v in std::mem::take(&mut self.conn_vias[ci]) {
             self.remove_via(v);
         }
+        gone
     }
 
     // ------------------------------------------------------------------ driver

@@ -747,6 +747,15 @@ fn mutant_traced<'a>(
     if let Some(aim) = &mv.aim {
         clear_ways(&mut r, aim, &mut conns, &mut lost);
     }
+    // what lost the track it ended on on the way
+    for ci in std::mem::take(&mut r.torn) {
+        if r.conn_segs[ci].is_empty() {
+            if !conns.contains(&ci) {
+                conns.push(ci);
+            }
+            r.route_one(ci);
+        }
+    }
     let routed = r.conn_segs.iter().filter(|c| !c.is_empty()).count();
     if tr.on {
         tr.ripped = conns.len();
@@ -2736,6 +2745,26 @@ mod tests {
             },
         );
         assert!(loose_ends(&b, &geo, &all_nets(&b)).is_empty());
+    }
+
+    #[test]
+    fn ripping_a_track_takes_what_ends_on_it() {
+        let b = tee_board();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        r.run();
+        r.cfg.taps = true;
+        let ci = (0..r.conns.len()).find(|&ci| r.conns[ci].from == 2).unwrap();
+        r.rip_up(ci);
+        r.route_one(ci);
+        let other = (0..r.conns.len()).find(|&c| c != ci).unwrap();
+        r.torn.clear();
+        r.rip_up(other);
+        assert_eq!(r.torn, vec![ci]);
+        assert!(r.conn_segs[ci].is_empty());
+        // nothing points at the track that is gone
+        let _ = r.geometry();
     }
 
     #[test]
