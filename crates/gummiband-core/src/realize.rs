@@ -461,7 +461,21 @@ impl Router<'_> {
         {
             {
                 let s = self.segs[sid as usize].as_ref().unwrap();
-                let elems = self.seg_path(sid);
+                let mut elems = self.seg_path(sid);
+                if self.board.class_of(s.net).min_width.is_some() && !s.necks.is_empty() {
+                    elems = elems
+                        .into_iter()
+                        .flat_map(|e| match e {
+                            Elem::Line(a, b) => {
+                                let mut pts = vec![a];
+                                pts.extend(zone_cuts(a, b, &s.necks, s.width));
+                                pts.push(b);
+                                pts.windows(2).map(|w| Elem::Line(w[0], w[1])).collect()
+                            }
+                            e => vec![e],
+                        })
+                        .collect();
+                }
                 let pts = flatten(&elems);
                 let layer = self.sub.layers[s.li as usize];
                 // the stretches on kept copper of the net need no new track
@@ -525,6 +539,42 @@ impl Router<'_> {
             }
         }
     }
+}
+
+/// Where the segment a-b, on its way into or out of one of the zones, comes within reach of it
+/// for a track of `width`: half the width and a micrometre (in order from a). Cut there, a line
+/// keeps its width up to its neck zone, and its round end stays out of the zone. Under a minimum
+/// width rule the neck of a track ends with the courtyard that allows it, the way KiCad's rule
+/// sees it: a piece that touches the courtyard may be narrow, the next one is outside.
+pub fn zone_cuts(a: Point, b: Point, zones: &[crate::geom::Rect], width: f64) -> Vec<Point> {
+    const OUT: f64 = 1e-3;
+    let len = a.dist(b);
+    if len < 4.0 * OUT {
+        return Vec::new();
+    }
+    let mut ts: Vec<f64> = Vec::new();
+    for r in zones.iter().filter(|r| r.touches_seg(a, b)) {
+        if let Some((t0, t1)) = r.grow(width / 2.0 + OUT).clip_seg(a, b) {
+            ts.push(t0);
+            ts.push(t1);
+        }
+    }
+    ts.retain(|&t| t * len > OUT && (1.0 - t) * len > OUT);
+    ts.sort_by(f64::total_cmp);
+    ts.dedup_by(|x, y| (*x - *y).abs() * len < 1e-6);
+    ts.into_iter().map(|t| a + (b - a) * t).collect()
+}
+
+/// A polyline with the cuts of [`zone_cuts`] in its pieces.
+pub fn cut_at_zones(pts: &[Point], zones: &[crate::geom::Rect], width: f64) -> Vec<Point> {
+    let mut out: Vec<Point> = Vec::with_capacity(pts.len());
+    for (i, &p) in pts.iter().enumerate() {
+        if i > 0 {
+            out.extend(zone_cuts(pts[i - 1], p, zones, width));
+        }
+        out.push(p);
+    }
+    out
 }
 
 /// Tangent path from `start` around the wraps to `end`, with arcs on the wraps.
@@ -689,6 +739,33 @@ pub fn funnel(portals: &[(Point, Point)]) -> Vec<Point> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A line is cut where a track of its width would start to reach into the neck zone it
+    /// enters or leaves, and nowhere else.
+    #[test]
+    fn lines_are_cut_where_they_leave_a_zone() {
+        let mut zone = crate::geom::Rect::empty();
+        zone.add(pt(4., 4.));
+        zone.add(pt(6., 6.));
+        let cuts = |a: (f64, f64), b: (f64, f64)| zone_cuts(pt(a.0, a.1), pt(b.0, b.1), &[zone], 0.75);
+        let out = cuts((5., 5.), (12., 5.));
+        assert!(out.len() == 1 && out[0].dist(pt(6.376, 5.)) < 1e-9, "{out:?}");
+        let through = cuts((0., 5.), (10., 5.));
+        assert!(
+            through.len() == 2 && through[0].dist(pt(3.624, 5.)) < 1e-9 && through[1].dist(pt(6.376, 5.)) < 1e-9,
+            "{through:?}"
+        );
+        assert!(cuts((4.5, 5.), (5.5, 5.)).is_empty());
+        assert!(cuts((0., 0.), (1., 1.)).is_empty());
+        // a line that passes the zone without entering it keeps its width
+        assert!(cuts((0., 6.2), (10., 6.2)).is_empty());
+        // the piece into the zone touches it; the next one does not, and neither does its end
+        let p = cut_at_zones(&[pt(5., 5.), pt(12., 5.)], &[zone], 0.75);
+        assert!(
+            zone.touches_seg(p[0], p[1]) && zone.dist_seg(p[1], p[2]) > 0.75 / 2.0,
+            "{p:?}"
+        );
+    }
 
     #[test]
     fn funnel_bends_around_a_corner() {

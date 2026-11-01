@@ -651,17 +651,7 @@ impl<'a> Router<'a> {
         let clr = cls.clearance.max(self.board.rules.min_clearance);
         let pad_w = pins
             .iter()
-            .map(|&p| {
-                let pin = &self.board.pins[p];
-                let pitch = self
-                    .board
-                    .pins
-                    .iter()
-                    .filter(|q| q.footprint == pin.footprint && q.net != pin.net)
-                    .map(|q| q.pos.dist(pin.pos))
-                    .fold(f64::INFINITY, f64::min);
-                pin.size.0.min(pin.size.1).min(pitch - clr - 0.02).min(0.4)
-            })
+            .map(|&p| self.board.pin_room(p, clr).min(0.4))
             .fold(f64::INFINITY, f64::min);
         let neck_w = self.board.rules.min_track_width.max(pad_w).min(cls.track_width);
         if neck_w >= cls.track_width - 1e-9 {
@@ -1420,6 +1410,22 @@ impl<'a> Router<'a> {
         )
     }
 
+    /// How many vias a layer change of connection ci takes: one, or on a current path (between
+    /// two pins that take the minimum width of their class, [`Board::current_min`]) as many as
+    /// carry what that width carries ([`Board::vias_for`]).
+    fn via_factor(&self, ci: usize) -> f64 {
+        let c = &self.conns[ci];
+        let Some(min) = self.board.current_min(c.net) else {
+            return 1.0;
+        };
+        match &c.goal {
+            Goal::Pins(goal) if !self.board.narrow_pin(c.from) && goal.iter().any(|&p| !self.board.narrow_pin(p)) => {
+                self.board.vias_for(min, self.via_size(c.net).1) as f64
+            }
+            _ => 1.0,
+        }
+    }
+
     fn via_info(&self, net: NetId) -> ViaInfo {
         let (r, drill, clearance) = self.via_size(net);
         ViaInfo {
@@ -1914,6 +1920,8 @@ impl<'a> Router<'a> {
             || vip_learned(net)
             || self.cfg.vip_nets.contains(&net);
         let cls = self.board.class_of(net);
+        // a layer change on a current path takes as many vias as carry the current
+        let via_cost = self.cfg.via_cost * self.via_factor(ci);
         let item = Item {
             net,
             w: cls.track_width,
@@ -2340,7 +2348,7 @@ impl<'a> Router<'a> {
                                 // but its vertices on the other layers can take a via again
                                 let ok = *vertex_ok.entry(site).or_insert_with(|| self.via_ok_vertex(site, net));
                                 if let Some(existing) = ok {
-                                    let vc = if existing { 0.1 } else { self.cfg.via_cost * 2.0 };
+                                    let vc = if existing { 0.1 } else { via_cost * 2.0 };
                                     for l2 in 0..nl {
                                         if l2 != lu && self.m(l2).site_vert.contains_key(&site) {
                                             push(
@@ -2369,7 +2377,7 @@ impl<'a> Router<'a> {
                                         open,
                                         NK::GoalSite { site },
                                         q,
-                                        node.g + node.pos.dist(q) + self.cfg.via_cost,
+                                        node.g + node.pos.dist(q) + via_cost,
                                         idx,
                                     );
                                 }
@@ -2383,7 +2391,7 @@ impl<'a> Router<'a> {
                                             open,
                                             NK::Site { site, li: l2 as u8 },
                                             q,
-                                            node.g + node.pos.dist(q) + self.cfg.via_cost * 2.0,
+                                            node.g + node.pos.dist(q) + via_cost * 2.0,
                                             idx,
                                         );
                                     }
@@ -2441,7 +2449,7 @@ impl<'a> Router<'a> {
                         let Some(existing) = ok else {
                             continue;
                         };
-                        let mut vc = if existing { 0.1 } else { self.cfg.via_cost };
+                        let mut vc = if existing { 0.1 } else { via_cost };
                         if let Some(s) = soft {
                             if let Some((ep, es)) = entry_pos {
                                 vc += s.crossing * self.chords_crossed(t, lu, net, ep, es, CPos::Vertex(i)) as f64;
@@ -2526,7 +2534,7 @@ impl<'a> Router<'a> {
                         if own_vias.iter().any(|v| v.dist(q) < hole_gap) {
                             continue;
                         }
-                        let mut vc = self.cfg.via_cost;
+                        let mut vc = via_cost;
                         if let Some(s) = soft {
                             if let Some((ep, es)) = entry_pos {
                                 vc += s.crossing * self.half_chords_crossed(t, lu, net, q, ep, es) as f64;
@@ -2554,7 +2562,7 @@ impl<'a> Router<'a> {
                                 open,
                                 NK::GoalSite { site },
                                 q,
-                                node.g + d + vc - self.cfg.via_cost * 0.5,
+                                node.g + d + vc - via_cost * 0.5,
                                 idx,
                             );
                             continue;
@@ -2680,6 +2688,27 @@ impl<'a> Router<'a> {
                 && !matches!(w[1].kind, NK::Vert { .. } | NK::GoalVia { .. })
             {
                 return false;
+            }
+            // a via and the triangles the chain arrives at it from and leaves it through must
+            // still meet: another via of the chain may have split one of them
+            if let (NK::Tri { t, li, .. }, NK::Vert { site, .. } | NK::GoalVia { site }) = (w[0].kind, w[1].kind) {
+                let m = self.m(li as usize);
+                if m.site_vert.get(&site).is_some_and(|v| !m.tris[t as usize].contains(v)) {
+                    return false;
+                }
+            }
+            if let (NK::Vert { site, li }, NK::Tri { t, li: l2, entry, .. }) = (w[0].kind, w[1].kind)
+                && li == l2
+                && entry < 3
+            {
+                let m = self.m(li as usize);
+                let from = m.other_tri(m.tri_edges[t as usize][entry as usize], t);
+                if m.site_vert
+                    .get(&site)
+                    .is_some_and(|v| from == NONE || !m.tris[from as usize].contains(v))
+                {
+                    return false;
+                }
             }
         }
         let conn = self.conns[ci].clone();
@@ -2933,17 +2962,25 @@ impl<'a> Router<'a> {
                 }
                 continue;
             }
-            // Prim order: each new pin connects to the pins already in the tree
+            // Prim order: each new pin connects to the pins already in the tree. Pins too narrow
+            // for the minimum width of the class join after all others, so that each ends a
+            // branch and no current between two other pins passes its neck.
             let pins = &reps;
             if pins.len() < 2 {
                 continue;
             }
+            let narrow: Vec<bool> = pins.iter().map(|&p| b.narrow_pin(p)).collect();
+            let first = narrow.iter().position(|&n| !n).unwrap_or(0);
             let mut in_tree = vec![false; pins.len()];
-            in_tree[0] = true;
-            let mut dist: Vec<f64> = pins.iter().map(|&p| b.pins[p].pos.dist(b.pins[pins[0]].pos)).collect();
+            in_tree[first] = true;
+            let mut dist: Vec<f64> = pins
+                .iter()
+                .map(|&p| b.pins[p].pos.dist(b.pins[pins[first]].pos))
+                .collect();
             for _ in 1..pins.len() {
+                let wide_left = (0..pins.len()).any(|k| !in_tree[k] && !narrow[k]);
                 let (k, d) = (0..pins.len())
-                    .filter(|&k| !in_tree[k])
+                    .filter(|&k| !in_tree[k] && !(wide_left && narrow[k]))
                     .map(|k| (k, dist[k]))
                     .min_by(|a, b| a.1.total_cmp(&b.1))
                     .unwrap();
@@ -3823,6 +3860,53 @@ mod tests {
         let wide = view(1.0);
         assert!(Router::slot_interval(&wide, [2, 2], 1, &mut lo).is_some());
         assert!(Router::slot_overflow(&wide, [2, 2], 1, &mut lo).0.abs() < 1e-9);
+    }
+
+    /// Under a minimum width rule a fine pitch pin between two wide ones joins last: the two
+    /// wide pins connect to each other, and the narrow one hangs on them as a branch.
+    #[test]
+    fn a_narrow_pin_is_never_on_the_way() {
+        let mut b = crate::topo::tests::two_pad_board();
+        b.classes[0].track_width = 0.75;
+        b.classes[0].min_width = Some(0.69);
+        b.classes[0].neck_refs = vec!["U1".into()];
+        let mut other = b.nets[0].clone();
+        other.name = "B".into();
+        other.pins = vec![3];
+        b.nets.push(other);
+        // the narrow pin in the middle, with a pin of another net 0.5 mm next to it
+        for (i, (x, net)) in [(5.0, 0), (5.5, 1)].into_iter().enumerate() {
+            let mut o = b.obstacles[0].clone();
+            o.shape = Shape::Polygon(crate::geom::roundrect_polygon(pt(x, 5.), 0.25, 0.8, 0.0, 0.0, 0.005));
+            o.net = Some(net);
+            o.pin = Some(2 + i);
+            b.obstacles.push(o);
+            let mut p = b.pins[0].clone();
+            p.name = format!("U1.{}", i + 1);
+            p.footprint = "U1".into();
+            p.net = net;
+            p.pos = pt(x, 5.);
+            p.obstacles = vec![2 + i];
+            p.size = (0.25, 0.8);
+            b.pins.push(p);
+        }
+        b.nets[0].pins = vec![0, 2, 1];
+        assert!(b.narrow_pin(2) && !b.narrow_pin(0) && !b.narrow_pin(1));
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        let goal = |from: usize| match &r.conns.iter().find(|c| c.from == from).unwrap().goal {
+            Goal::Pins(p) => p.clone(),
+            Goal::Plane => Vec::new(),
+        };
+        assert_eq!(r.conns.len(), 2);
+        assert_eq!(goal(1), vec![0]);
+        assert_eq!(goal(2), vec![0, 1]);
+        // without the rule the nearest pin joins first, as always
+        b.classes[0].min_width = None;
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        assert!(r.conns.iter().any(|c| c.from == 2 && c.goal == Goal::Pins(vec![0])));
     }
 
     /// Two nets that cross on the pad layer: a board where A runs left to right and B top to

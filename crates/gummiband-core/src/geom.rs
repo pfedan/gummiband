@@ -109,23 +109,49 @@ impl Rect {
     }
     /// True if the segment a-b has a point in the rectangle (clipping against the slabs).
     pub fn touches_seg(&self, a: Point, b: Point) -> bool {
+        self.clip_seg(a, b).is_some()
+    }
+
+    /// The part of the segment a-b in the rectangle, as parameters (0 at a, 1 at b).
+    pub fn clip_seg(&self, a: Point, b: Point) -> Option<(f64, f64)> {
         let (mut t0, mut t1) = (0.0f64, 1.0f64);
         let d = b - a;
         for (p, q, lo, hi) in [(a.x, d.x, self.min.x, self.max.x), (a.y, d.y, self.min.y, self.max.y)] {
             if q.abs() < 1e-15 {
                 if p < lo || p > hi {
-                    return false;
+                    return None;
                 }
             } else {
                 let (u, v) = ((lo - p) / q, (hi - p) / q);
                 t0 = t0.max(u.min(v));
                 t1 = t1.min(u.max(v));
                 if t0 > t1 {
-                    return false;
+                    return None;
                 }
             }
         }
-        true
+        Some((t0, t1))
+    }
+
+    /// Distance from the segment a-b to the rectangle, 0 where they touch.
+    pub fn dist_seg(&self, a: Point, b: Point) -> f64 {
+        if self.touches_seg(a, b) {
+            return 0.0;
+        }
+        let to_box = |p: Point| {
+            let dx = (self.min.x - p.x).max(p.x - self.max.x).max(0.0);
+            let dy = (self.min.y - p.y).max(p.y - self.max.y).max(0.0);
+            dx.hypot(dy)
+        };
+        [
+            self.min,
+            pt(self.max.x, self.min.y),
+            self.max,
+            pt(self.min.x, self.max.y),
+        ]
+        .into_iter()
+        .map(|c| point_seg_dist(c, a, b))
+        .fold(to_box(a).min(to_box(b)), f64::min)
     }
     pub fn width(&self) -> f64 {
         self.max.x - self.min.x

@@ -272,8 +272,56 @@ fn evaluate(
     generation: usize,
 ) -> Candidate {
     prof::time(prof::Slot::Evaluate, || {
-        evaluate_inner(board, sub, cfg, genome, generation)
+        // a run that trips over an inconsistency of its own topology is lost, not the search
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            evaluate_inner(board, sub, cfg.clone(), genome, generation)
+        }));
+        run.unwrap_or_else(|e| {
+            let what = e
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| e.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            eprintln!("run of seed {} in generation {generation} lost: {what}", cfg.seed);
+            lost_run(board, sub, cfg, generation)
+        })
     })
+}
+
+/// A run that did not finish counts as one that routed nothing.
+fn lost_run(board: &Board, sub: &Substrate, cfg: RouterConfig, generation: usize) -> Candidate {
+    let mut r = Router::new(board, sub, cfg.clone());
+    r.plan();
+    let order: Vec<(NetId, usize)> = r.conns.iter().map(|c| (c.net, c.from)).collect();
+    let stats = RunStats {
+        seed: cfg.seed,
+        fanout_first: cfg.fanout_first,
+        via_cost: cfg.via_cost,
+        layer_dirs: cfg.layer_dirs,
+        via_pass: cfg.via_pass,
+        generation,
+        conns: order.len(),
+        routed: 0,
+        vias: 0,
+        length: 0.0,
+        unrouted: order
+            .iter()
+            .map(|&(n, p)| format!("{} from {}", board.nets[n as usize].name, board.pins[p].name))
+            .collect(),
+        blocked: Vec::new(),
+        violations: None,
+        shorts: None,
+    };
+    Candidate {
+        stats,
+        geo: Geometry::default(),
+        failed: order.clone(),
+        order,
+        bad_nets: Vec::new(),
+        hot: Vec::new(),
+        flaw: 0.0,
+        cfg,
+    }
 }
 
 fn evaluate_inner(
@@ -565,8 +613,40 @@ pub fn finish_nets<T>(
 
 /// Route a board (see [`route_fixed`]). With movable parts and clearance problems left, parts
 /// next to the problems are shifted and the whole search runs again on the shifted board, for
-/// a few placement rounds; the best result over all rounds wins.
+/// a few placement rounds; the best result over all rounds wins. At the end the layer changes
+/// of current paths get the vias they need ([`relax::stitch_vias`]; `GB_STITCH=0`: off).
 pub fn route_board(
+    board: &Board,
+    sub_cfg: &SubstrateConfig,
+    base: &RouterConfig,
+    search: &SearchConfig,
+) -> (Substrate, RouteResult) {
+    let (sub, mut res) = place_and_route(board, sub_cfg, base, search);
+    if std::env::var("GB_STITCH").map_or(true, |v| v != "0") {
+        let moved;
+        let b = if res.offsets.is_empty() {
+            board
+        } else {
+            moved = board.with_offsets(&res.offsets);
+            &moved
+        };
+        // nothing moves any more; what makes a new clearance problem is not kept
+        let mut geo = res.geometry.clone();
+        let added = relax::stitch_vias(b, &mut geo);
+        if added > 0 {
+            let clearances = |g: &Geometry| check::check(b, g).iter().filter(|v| !v.is_width()).count();
+            if clearances(&geo) <= clearances(&res.geometry) {
+                eprintln!("current paths: {added} vias added next to their layer changes");
+                res.geometry = geo;
+                res.stats.vias += added;
+            }
+        }
+    }
+    (sub, res)
+}
+
+/// [`route_board`] up to the vias of the current paths.
+fn place_and_route(
     board: &Board,
     sub_cfg: &SubstrateConfig,
     base: &RouterConfig,
@@ -1207,9 +1287,20 @@ pub fn route_fixed(
             if bad.is_empty() {
                 break;
             }
-            for t in best.geo.tracks.iter_mut().filter(|t| bad.contains(&t.net)) {
-                let neck = t.neck_w;
-                t.fitted.iter_mut().for_each(|f| f.1 = neck);
+            for (t, p) in best
+                .geo
+                .tracks
+                .iter_mut()
+                .zip(&plain.tracks)
+                .filter(|(t, _)| bad.contains(&t.net))
+            {
+                if board.class_of(t.net).min_width.is_some() {
+                    // a cut piece out of the zone may not be narrow: the track as it was
+                    *t = p.clone();
+                } else {
+                    let neck = t.neck_w;
+                    t.fitted.iter_mut().for_each(|f| f.1 = neck);
+                }
             }
         }
         // the known pairs above may have got more spots; the open end does not give back what it won

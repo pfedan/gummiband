@@ -6,11 +6,11 @@
 
 use rayon::prelude::*;
 
-use crate::board::{Board, LayerId, ObstacleKind};
-use crate::geom::{Point, Rect, point_seg_dist, point_seg_offset, pt};
+use crate::board::{Board, LayerId, LayerSet, ObstacleKind};
+use crate::geom::{Point, Rect, Shape, point_seg_dist, point_seg_offset, pt};
 use crate::index::{GridIndex, PointGrid, axis_cell};
 use crate::prof::{self, Slot};
-use crate::realize::{Elem, Geometry, Track};
+use crate::realize::{Elem, Geometry, Track, Via};
 use crate::topo::Substrate;
 
 #[cfg(feature = "gpu")]
@@ -1551,7 +1551,10 @@ fn taut(
             continue;
         }
         let (net, layer, c) = (t.net, t.layer, clr(t.net));
-        let clear = |a: Point, b: Point, pieces: &[(Point, Point, u32)], idx: &GridIndex| -> bool {
+        // under a minimum width rule a line that leaves its neck zone is cut where its full
+        // width would reach into the zone, and keeps that width outside (`realize::zone_cuts`)
+        let ruled = board.class_of(net).min_width.is_some() && !t.necks.is_empty();
+        let clear_piece = |a: Point, b: Point, pieces: &[(Point, Point, u32)], idx: &GridIndex| -> bool {
             let w = t.piece_width(a, b);
             let mut r = Rect::empty();
             r.add(a);
@@ -1625,10 +1628,33 @@ fn taut(
             }
             true
         };
+        let clear = |a: Point, b: Point, pieces: &[(Point, Point, u32)], idx: &GridIndex| -> bool {
+            if !ruled {
+                return clear_piece(a, b, pieces, idx);
+            }
+            let mut from = a;
+            for to in crate::realize::zone_cuts(a, b, &t.necks, t.width)
+                .into_iter()
+                .chain([b])
+            {
+                if !clear_piece(from, to, pieces, idx) {
+                    return false;
+                }
+                from = to;
+            }
+            true
+        };
+        let cut = |p: Vec<Point>| {
+            if ruled {
+                crate::realize::cut_at_zones(&p, &t.necks, t.width)
+            } else {
+                p
+            }
+        };
         let pts = &tracks[ti];
         let n = pts.len();
         if n <= 2 {
-            let p = simplify(pts, 0.0005);
+            let p = cut(simplify(pts, 0.0005));
             result.push((p.clone(), p.windows(2).map(|w| Elem::Line(w[0], w[1])).collect()));
             continue;
         }
@@ -1679,7 +1705,7 @@ fn taut(
             out.push(pts[j]);
             i = j;
         }
-        let out = simplify(&out, 0.0005);
+        let out = cut(simplify(&out, 0.0005));
         // round the corners with the largest arcs that keep all clearances
         let mut elems: Vec<Elem> = Vec::new();
         let mut flat: Vec<Point> = vec![out[0]];
@@ -1831,30 +1857,35 @@ impl CellLists {
 
 /// Tracks stay narrow only where they must: a piece inside a neck zone takes the full width if
 /// that keeps all clearances to obstacles, vias and other tracks. The zones shrink to the pieces
-/// that stay narrow. Only for the finished geometry: the track shapes do not change.
+/// that stay narrow. A line that leaves a zone is cut as well, so that it is wide where it is
+/// out of the zone; under a minimum width rule it is cut where the full width would reach into
+/// the zone, and the piece outside keeps the width of the track ([`crate::realize::zone_cuts`]).
+/// Only for the finished geometry: the track shapes do not change.
 pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
     let bounds = board.bbox().grow(5.0);
     // a straight piece has one width: long ones are cut, so that one tight spot stays local
     for t in geo.tracks.iter_mut().filter(|t| !t.necks.is_empty()) {
-        // a minimum width rule allows a narrow piece only if it touches the zone, so a piece
-        // that leaves the zone stays in one
-        let free = board.class_of(t.net).min_width.is_none();
-        let may_cut = |a: Point, b: Point, necks: &[Rect]| {
-            a.dist(b) > 0.5
-                && if free {
-                    necks.iter().any(|r| r.touches_seg(a, b))
-                } else {
-                    necks.iter().any(|r| r.contains(a) && r.contains(b))
-                }
-        };
+        let ruled = board.class_of(t.net).min_width.is_some();
         let mut elems = Vec::with_capacity(t.elems.len());
         for e in &t.elems {
             match *e {
-                Elem::Line(a, b) if may_cut(a, b, &t.necks) => {
+                Elem::Line(a, b) if ruled && !crate::realize::zone_cuts(a, b, &t.necks, t.width).is_empty() => {
+                    let mut pts = vec![a];
+                    pts.extend(crate::realize::zone_cuts(a, b, &t.necks, t.width));
+                    pts.push(b);
+                    elems.extend(pts.windows(2).map(|w| Elem::Line(w[0], w[1])));
+                }
+                e => elems.push(e),
+            }
+        }
+        let mut cut = Vec::with_capacity(elems.len());
+        for e in elems {
+            match e {
+                Elem::Line(a, b) if a.dist(b) > 0.5 && t.necks.iter().any(|r| r.touches_seg(a, b)) => {
                     let n = (a.dist(b) / 0.3).ceil() as usize;
                     let at = |i: usize| a + (b - a) * (i as f64 / n as f64);
-                    elems.extend((0..n).map(|i| Elem::Line(at(i), at(i + 1))));
+                    cut.extend((0..n).map(|i| Elem::Line(at(i), at(i + 1))));
                     // all of it was narrow so far, and stays so until it is found to fit
                     for i in 0..n {
                         let mut r = Rect::empty();
@@ -1862,11 +1893,11 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
                         t.fitted.push((r.grow(1e-6), t.neck_w));
                     }
                 }
-                e => elems.push(e),
+                e => cut.push(e),
             }
         }
-        t.pts = crate::realize::flatten(&elems);
-        t.elems = elems;
+        t.pts = crate::realize::flatten(&cut);
+        t.elems = cut;
     }
     let mut idx = GridIndex::new(bounds, 1.0);
     let mut pieces: Vec<(Point, Point, u32)> = Vec::new();
@@ -1931,7 +1962,9 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
             }
             true
         };
-        // the widest step that fits, piece by piece
+        // the widest step that fits, piece by piece; the minimum of a width rule is a step of
+        // its own
+        let min = board.class_of(net).min_width;
         let fitted: Vec<(Rect, f64)> = t
             .pts
             .windows(2)
@@ -1939,10 +1972,12 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
             .map(|p| {
                 let neck = t.piece_width(p[0], p[1]);
                 let steps = ((t.width - neck) / 0.05).floor() as usize;
-                let best = (0..=steps)
-                    .map(|i| t.width - i as f64 * 0.05)
-                    .find(|&w| fits(p[0], p[1], w))
-                    .unwrap_or(neck);
+                let mut widths: Vec<f64> = (0..=steps).map(|i| t.width - i as f64 * 0.05).collect();
+                if let Some(m) = min.filter(|&m| m > neck && m < t.width && !widths.contains(&m)) {
+                    let at = widths.iter().position(|&w| w < m).unwrap_or(widths.len());
+                    widths.insert(at, m);
+                }
+                let best = widths.into_iter().find(|&w| fits(p[0], p[1], w)).unwrap_or(neck);
                 let mut r = Rect::empty();
                 r.add((p[0] + p[1]) * 0.5);
                 (r.grow(1e-6), best)
@@ -1950,6 +1985,197 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
             .collect();
         geo.tracks[ti].fitted = fitted;
     }
+}
+
+/// A row of [`stitch_vias`]: the pieces of copper from the via (layer and end) and the new vias.
+type StitchRow = (Vec<(LayerId, Point)>, Vec<Point>);
+
+/// A layer change on a current path carries what its tracks carry: a via that joins copper of
+/// the minimum width of its class on two layers gets as many more vias next to it as that takes
+/// ([`Board::vias_for`]), in a row on the straight end of one of its tracks with a piece of the
+/// other layer's copper over them, or where those have no room around the via, with a piece of
+/// copper from it on each layer. Only where they keep the clearances of the check, the hole to
+/// hole distance, and stay out of the pads; kept copper of the file stays as it is. Returns how
+/// many vias it added.
+pub fn stitch_vias(board: &Board, geo: &mut Geometry) -> usize {
+    let near = 1e-3;
+    let mut added = 0;
+    for vi in 0..geo.vias.len() {
+        let v = geo.vias[vi].clone();
+        if v.drill <= 0.0 || v.resting {
+            continue;
+        }
+        let cls = board.class_of(v.net);
+        let Some(min) = board.current_min(v.net) else {
+            continue;
+        };
+        let need = board.vias_for(min, v.drill);
+        if need <= 1 {
+            continue;
+        }
+        // the wide copper at the via: per track that ends there its layer, direction and how
+        // far it runs on straight and wide
+        let mut arms: Vec<(LayerId, Point, f64)> = Vec::new();
+        let mut wide = LayerSet::default();
+        for t in geo.tracks.iter().filter(|t| t.net == v.net && t.pts.len() > 1) {
+            let pts: Vec<Point> = if t.pts[0].dist(v.at) < near {
+                t.pts.clone()
+            } else if t.pts[t.pts.len() - 1].dist(v.at) < near {
+                t.pts.iter().rev().copied().collect()
+            } else {
+                continue;
+            };
+            let carries = |a: Point, b: Point| board.current_width(t.layer, t.piece_width(a, b)) >= min - 1e-9;
+            if !carries(pts[0], pts[1]) {
+                continue;
+            }
+            wide.insert(t.layer);
+            let u = (pts[1] - pts[0]).norm();
+            let mut len = 0.0;
+            for w in pts.windows(2) {
+                let d = w[1] - w[0];
+                if u.cross(d).abs() > 1e-6 * d.len() || u.dot(d) <= 0.0 || !carries(w[0], w[1]) {
+                    break;
+                }
+                len += d.len();
+            }
+            arms.push((t.layer, u, len));
+        }
+        // a wide pad of the net under the via is wide copper as well
+        for &p in board.nets[v.net as usize]
+            .pins
+            .iter()
+            .filter(|&&p| !board.narrow_pin(p))
+        {
+            for &o in &board.pins[p].obstacles {
+                let o = &board.obstacles[o];
+                if o.shape.dist_to_point(v.at) < near {
+                    o.layers.iter().for_each(|l| wide.insert(l));
+                }
+            }
+        }
+        if wide.iter().count() < 2 {
+            continue;
+        }
+        let pitch = v.drill + board.rules.hole_to_hole + 0.02;
+        let on_arm = |q: Point, &(_, u, len): &(LayerId, Point, f64)| {
+            let d = q - v.at;
+            let along = d.dot(u);
+            along > near && along <= len + near && (d - u * along).len() < near
+        };
+        // the vias of an earlier row
+        let have = 1 + geo
+            .vias
+            .iter()
+            .enumerate()
+            .filter(|&(j, w)| j != vi && w.net == v.net && w.drill > 0.0 && arms.iter().any(|a| on_arm(w.at, a)))
+            .count();
+        if have >= need {
+            continue;
+        }
+        let clr = cls.clearance.max(board.rules.min_clearance);
+        let hole_room = |at: Point, placed: &[Point]| -> bool {
+            let gap = board.rules.hole_to_hole;
+            geo.vias
+                .iter()
+                .filter(|w| w.drill > 0.0)
+                .all(|w| w.at.dist(at) >= (w.drill + v.drill) / 2.0 + gap - 1e-9)
+                && placed.iter().all(|p| p.dist(at) >= v.drill + gap - 1e-9)
+                && board
+                    .obstacles
+                    .iter()
+                    .filter(|o| o.hole.is_some())
+                    .all(|o| o.shape.bbox().center().dist(at) >= o.hole.unwrap() + v.drill / 2.0 + gap - 1e-9)
+        };
+        let pad = Shape::Circle {
+            c: v.at,
+            r: v.diameter / 2.0,
+        };
+        let off_pads = |at: Point| {
+            let pad = match pad {
+                Shape::Circle { r, .. } => Shape::Circle { c: at, r },
+                _ => unreachable!(),
+            };
+            board.nets[v.net as usize].pins.iter().all(|&p| {
+                board.pins[p]
+                    .obstacles
+                    .iter()
+                    .all(|&o| board.obstacles[o].shape.dist(&pad) >= clr - 1e-9)
+            })
+        };
+        let copper = crate::check::Copper::new(board, geo);
+        let width = cls.track_width.max(min);
+        arms.sort_by(|a, b| b.2.total_cmp(&a.2));
+        // where the vias go: in a row on the straight end of a track, the longest first, else
+        // around the via; a via off the copper of a wide layer gets a piece of it from the via
+        let mut dirs: Vec<(Point, f64)> = arms.iter().map(|a| (a.1, a.2)).collect();
+        dirs.extend((0..8).map(|i| {
+            let a = i as f64 * std::f64::consts::FRAC_PI_4;
+            (crate::geom::pt(a.cos(), a.sin()), f64::INFINITY)
+        }));
+        // per direction: the pieces of copper from the via (layer, end) and the vias
+        let mut rows: Vec<StitchRow> = Vec::new();
+        let mut placed: Vec<Point> = Vec::new();
+        for (u, len) in dirs {
+            let mut pieces: Vec<(LayerId, Point)> = Vec::new();
+            let mut row = Vec::new();
+            for k in 1.. {
+                if have + placed.len() >= need || pitch * k as f64 > len + near {
+                    break;
+                }
+                let at = v.at + u * (pitch * k as f64);
+                let segs: Vec<(Point, Point, f64, LayerId)> = wide
+                    .iter()
+                    .filter(|&l| !arms.iter().any(|a| a.0 == l && on_arm(at, a)))
+                    .map(|l| (v.at, at, width, l))
+                    .collect();
+                if !hole_room(at, &placed) || !off_pads(at) || !copper.clear(v.net, &segs, &[(at, v.diameter)]) {
+                    break;
+                }
+                for &(_, _, _, l) in &segs {
+                    match pieces.iter_mut().find(|p| p.0 == l) {
+                        Some(p) => p.1 = at,
+                        None => pieces.push((l, at)),
+                    }
+                }
+                row.push(at);
+                placed.push(at);
+            }
+            if !row.is_empty() {
+                rows.push((pieces, row));
+            }
+        }
+        for (pieces, row) in rows {
+            for (layer, end) in pieces {
+                let elems = vec![Elem::Line(v.at, end)];
+                geo.tracks.push(Track {
+                    pts: crate::realize::flatten(&elems),
+                    elems,
+                    width,
+                    layer,
+                    net: v.net,
+                    necks: Vec::new(),
+                    neck_w: width,
+                    origin: None,
+                    resting: false,
+                    fitted: Vec::new(),
+                    pattern: None,
+                    seg: u32::MAX,
+                    tap: None,
+                });
+            }
+            for at in row {
+                geo.vias.push(Via {
+                    at,
+                    origin: None,
+                    resting: false,
+                    ..v.clone()
+                });
+                added += 1;
+            }
+        }
+    }
+    added
 }
 
 /// A piece of track of one width while tracks grow: an element of the track.
@@ -2185,5 +2411,160 @@ mod tests {
         let mut pts = vec![pt(0.0, 0.0), pt(0.1, -0.2)];
         follow(&r, &mut pts, false);
         assert_eq!(pts[1], pt(0.1, -0.2));
+    }
+
+    /// A layer change between two tracks of a 4.1 A rule gets the two vias it lacks, in a row on
+    /// one of the tracks with a piece of the other layer over them; where that piece would come
+    /// too close to other copper, the row goes the other way.
+    #[test]
+    fn a_layer_change_on_a_current_path_gets_its_vias() {
+        use crate::check::tests::{current_board, line, via};
+        let mut b = current_board();
+        let geo = || Geometry {
+            tracks: vec![line((2., 5.), (5., 5.), 0), line((5., 5.), (8., 5.), 1)],
+            vias: vec![via(5.)],
+        };
+        let mut g = geo();
+        assert_eq!(stitch_vias(&b, &mut g), 2);
+        assert!(
+            crate::check::check(&b, &g).is_empty(),
+            "{:?}",
+            crate::check::check(&b, &g)
+        );
+        assert_eq!(stitch_vias(&b, &mut g), 0, "a second run adds nothing");
+        // a pad of another net under the top track, on the bottom
+        b.nets.push(crate::board::Net {
+            name: "B".into(),
+            class: 0,
+            pins: Vec::new(),
+            planes: LayerSet::default(),
+            priority: 0,
+        });
+        let mut o = b.obstacles[1].clone();
+        o.shape = Shape::Polygon(crate::geom::Polygon::new(vec![
+            pt(3.6, 5.5),
+            pt(4.4, 5.5),
+            pt(4.4, 6.0),
+            pt(3.6, 6.0),
+        ]));
+        o.net = Some(1);
+        o.pin = None;
+        b.obstacles.push(o);
+        let mut g = geo();
+        assert_eq!(stitch_vias(&b, &mut g), 2);
+        assert!(
+            crate::check::check(&b, &g).is_empty(),
+            "{:?}",
+            crate::check::check(&b, &g)
+        );
+        assert!(g.vias.iter().all(|v| v.at.x >= 5.0 - 1e-9), "{:?}", g.vias);
+    }
+
+    /// Under a minimum width rule a line that leaves its neck zone is cut at the zone: in the zone
+    /// it takes what fits there, outside it keeps the width of the track, also where that is too
+    /// wide (the check reports it: a neck outside the courtyard is no way out).
+    #[test]
+    fn a_ruled_neck_ends_at_its_zone() {
+        use crate::board::{Layer, LayerSet, Net, NetClass, Obstacle};
+        use crate::geom::{Polygon, Shape};
+        let mut b = Board::default();
+        b.rules.min_clearance = 0.1;
+        b.layers = vec![Layer {
+            name: "F.Cu".into(),
+            is_plane: false,
+        }];
+        b.outline = vec![Polygon::new(vec![pt(0., 0.), pt(20., 0.), pt(20., 10.), pt(0., 10.)])];
+        b.classes = vec![NetClass {
+            name: "Input".into(),
+            track_width: 0.75,
+            clearance: 0.2,
+            via_diameter: 0.8,
+            via_drill: 0.4,
+            min_width: Some(0.69),
+            neck_refs: vec!["U1".into()],
+            ..Default::default()
+        }];
+        for name in ["VBUS", "OTHER"] {
+            b.nets.push(Net {
+                name: name.into(),
+                class: 0,
+                pins: Vec::new(),
+                planes: LayerSet::default(),
+                priority: 0,
+            });
+        }
+        let mut zone = Rect::empty();
+        zone.add(pt(4., 4.));
+        zone.add(pt(6., 6.));
+        // the courtyard of U1
+        b.courtyards.insert("U1".into(), zone);
+        let track = |elems: Vec<Elem>| Track {
+            pts: crate::realize::flatten(&elems),
+            elems,
+            width: 0.75,
+            layer: 0,
+            net: 0,
+            necks: vec![zone],
+            neck_w: 0.25,
+            origin: None,
+            resting: false,
+            fitted: Vec::new(),
+            pattern: None,
+            seg: u32::MAX,
+            tap: None,
+        };
+        let widen = |b: &Board| {
+            let sub = Substrate::build(b, &crate::topo::SubstrateConfig::default());
+            let mut geo = Geometry {
+                tracks: vec![track(vec![Elem::Line(pt(5., 5.), pt(12., 5.))])],
+                vias: Vec::new(),
+            };
+            widen_necks(b, &sub, &mut geo);
+            geo
+        };
+        let widths = |geo: &Geometry| -> Vec<(Point, Point, f64)> {
+            let t = &geo.tracks[0];
+            t.elems
+                .iter()
+                .map(|e| match *e {
+                    Elem::Line(a, b) | Elem::Arc(a, _, b) => (a, b, t.piece_width(a, b)),
+                })
+                .collect()
+        };
+        // with room all of it is wide, also the end in the zone
+        let open = widen(&b);
+        assert!(widths(&open).iter().all(|w| w.2 == 0.75), "{:?}", widths(&open));
+        let pad = |x: f64, y: f64| Obstacle {
+            shape: Shape::Polygon(Polygon::new(vec![pt(x, y), pt(x + 1., y), pt(x + 1., 6.), pt(x, 6.)])),
+            layers: LayerSet::single(0),
+            net: Some(1),
+            kind: ObstacleKind::Pad,
+            hole: None,
+            clearance: 0.2,
+            pin: None,
+            locked: false,
+        };
+        // a pad next to the line outside the zone: the line stays wide there and the check
+        // reports the clearance; the narrow piece ends where the round end of the wide one
+        // stays out of the zone
+        for y in [5.555, 5.5] {
+            b.obstacles = vec![pad(8., y)];
+            let geo = widen(&b);
+            let w = widths(&geo);
+            for &(a, c, wd) in &w {
+                assert!(zone.touches_seg(a, c) || wd == 0.75, "{w:?}");
+                assert!(!zone.touches_seg(a, c) || a.x.max(c.x) < 6.0 + 0.375 + 2e-3, "{w:?}");
+            }
+            assert!(!crate::check::check(&b, &geo).is_empty());
+        }
+        // a pad next to the end in the zone: there the line narrows to what fits
+        b.obstacles = vec![pad(4.6, 5.5)];
+        let geo = widen(&b);
+        let w = widths(&geo);
+        assert!(crate::check::check(&b, &geo).is_empty(), "{w:?}");
+        assert!(w.iter().any(|x| x.2 < 0.75 && x.2 >= 0.25), "{w:?}");
+        for &(a, c, wd) in &w {
+            assert!(zone.touches_seg(a, c) || wd == 0.75, "{w:?}");
+        }
     }
 }

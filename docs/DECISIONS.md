@@ -59,7 +59,15 @@ Standing decisions of the project owner, kept here so that they survive any sess
   the other nets aside, and if a connection still finds no way, the nets near its pins give way
   within 8 mm; the try with the fewest open connections is kept, so giving way never costs a
   connection. In the night series of 2026-11-01 plain left 4 of 16 re-laid nets open, shove none.
-  Next in line: tapering at tight spots, shove in the open end, moving parts.
+  Second step: the last step tapers a track at a spot that misses its clearance by a few
+  micrometres, down to the minimum width of its class and never wider elsewhere. A neck that a
+  minimum width rule allows in a courtyard is for the pin there, not for the current: the way
+  between two pins that can take the minimum never passes one (Daniel's question about VBUS_F,
+  2026-11-01), even where KiCad's DRC would let it pass; the neck ends at the edge of the
+  courtyard, and a layer change on such a way gets the vias that carry its current (IPC-2221;
+  the current check of PR #43 found single 0.4 mm vias on the 4.1 A paths of the finished board).
+  Parts move by default since PR #40. Next in line: negotiation when the generations leave connections open,
+  shove in the open end, the via in a pad as a gene of the search.
 - Convergence means that bold changes no longer help, not that some number of rounds went by. When
   it is reached, the user gets the results that differ in vias and length, not one of them.
 - Copper does not have to lie at the limit: `--air` gives it a reserve where there is room. On by

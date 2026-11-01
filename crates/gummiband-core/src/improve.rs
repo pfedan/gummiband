@@ -1982,7 +1982,7 @@ pub(crate) fn taper_spots(board: &Board, geo: &Geometry) -> Option<Geometry> {
     for _ in 0..3 {
         let viol = check::check(board, &g);
         let mut changed = false;
-        for v in &viol {
+        for v in viol.iter().filter(|v| !v.is_width()) {
             let need = v.required - v.actual + 0.002;
             // a few micrometres to some ten: a taper, not a neck
             if need <= 0.0 || need > 0.05 {
@@ -2666,6 +2666,8 @@ mod tests {
             via_diameter: 0.6,
             via_drill: 0.3,
             min_width: Some(0.4),
+            // the neck lies in the courtyard of U1
+            neck_refs: vec!["U1".into()],
             ..Default::default()
         }];
         for name in ["P", "Q", "R"] {
@@ -2699,6 +2701,7 @@ mod tests {
         let mut neck = Rect::empty();
         neck.add(pt(9.7, 9.0));
         neck.add(pt(12.0, 11.0));
+        b.courtyards.insert("U1".into(), neck);
         let track = Track {
             pts: crate::realize::flatten(&elems),
             elems,
@@ -2710,6 +2713,9 @@ mod tests {
             origin: None,
             resting: false,
             fitted: Vec::new(),
+            pattern: None,
+            seg: u32::MAX,
+            tap: None,
         };
         let geo = Geometry {
             tracks: vec![track],

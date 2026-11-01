@@ -1,5 +1,6 @@
 //! The own clearance check on a routed file, to hold it against the KiCad DRC of the same file.
-//! Usage: recheck BOARD.kicad_pcb
+//! Usage: recheck BOARD.kicad_pcb [NET]: with a net, also the widest way through its copper
+//! from every pin to every other (what the `current` check measures).
 use std::collections::HashMap;
 
 use gummiband_core::check;
@@ -118,5 +119,25 @@ fn main() {
             name(s.nets.1),
             s.missing
         );
+    }
+    if let Some(n) = std::env::args().nth(2).and_then(|n| b.net_id(&n)) {
+        let pins = &b.nets[n as usize].pins;
+        let pin = |i: usize| {
+            let p = pins[i];
+            format!("{}{}", b.pins[p].name, if b.narrow_pin(p) { " (narrow)" } else { "" })
+        };
+        for i in 0..pins.len() {
+            let (width, at) = check::widest_ways(b, &geo, n, i);
+            for j in (i + 1..pins.len()).filter(|&j| width[j] > f64::NEG_INFINITY) {
+                println!(
+                    "  {} to {}: {:.3} mm, narrowest at {:.2} {:.2}",
+                    pin(i),
+                    pin(j),
+                    width[j],
+                    at[j].x,
+                    at[j].y
+                );
+            }
+        }
     }
 }
