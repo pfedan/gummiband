@@ -104,6 +104,13 @@ One limit: where a minimum width rule allows the narrow width only inside a cour
 that leaves the courtyard stays narrow rather than break the rule, so a short stretch of thinner
 track can remain just outside a connector.
 
+The very last step uses the same freedom at tight spots: where a track still misses its
+clearance by a few micrometres, at most 50 µm, it gets narrower right there, as much as the
+clearance needs and 2 µm more, never below the minimum of a `track_width (min ...)` rule of its
+class. A wide power track through a gap that is just too narrow is a matter of width, not of the
+way. Only classes with such a rule have this freedom, and the result counts only with fewer
+violations. `GB_TAPER=0` switches it off.
+
 `--net-widths` overrides the class width per net.
 
 ## Wider tracks where there is room
@@ -114,7 +121,7 @@ A net class can have three widths, all set in KiCad:
 |---|---|---|
 | Class width | Board Setup > Net Classes, *Track Width* | The width it routes with. |
 | Target | Custom rule, `track_width (opt ...)` | At the end the tracks grow up to it where there is room. |
-| Minimum | Custom rule, `track_width (min ...)` | The floor for necks at fine pitch pins. |
+| Minimum | Custom rule, `track_width (min ...)` | The floor for necks at fine pitch pins and for tapering at tight spots. |
 
 ```
 (rule "Power widths"

@@ -380,6 +380,12 @@ track its whole length. After that `relax::prefer_width` lets every piece of tra
 0.025 mm, round by round so that a bundle shares its room, drops wider stretches under 1.5 mm and
 ramps every change of width by one step per piece.
 
+The last step tapers (`improve::taper_spots`, on by default since 2026-11-01, `GB_TAPER=0`
+switches it off): a spot that misses its clearance by at most 50 µm gets the nearest piece of a
+net whose class has a minimum width rule narrower, within 0.2 mm of the spot, so that its edge
+moves back by the deficit and 2 µm, never below the minimum. Three rounds; the result counts only
+with fewer violations.
+
 ## Parallelism
 
 - Portfolio: N independent router runs (different orders and seeds), one per core.

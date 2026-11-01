@@ -1223,7 +1223,7 @@ pub fn route_fixed(
                 best.geo = plain;
             }
         }
-        if std::env::var("GB_TAPER").is_ok()
+        if std::env::var("GB_TAPER").map_or(true, |v| v != "0")
             && let Some(g) = improve::taper_spots(board, &best.geo)
         {
             best.geo = g;
