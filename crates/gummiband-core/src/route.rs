@@ -1885,8 +1885,9 @@ impl<'a> Router<'a> {
             .and_then(|p| self.guides.get(p))
             .map(|g| g.as_slice());
         let net = conn.net;
-        // a via in a pad is a last resort, except for the nets of `GB_VIP_NETS` (experiment)
-        let via_in_pad = self.cfg.via_in_pad || vip_net(&self.board.nets[net as usize].name);
+        // a via in a pad is a last resort, except for the nets of `GB_VIP_NETS` and, with
+        // `GB_VIP_LEARN`, the nets that needed one before (experiments)
+        let via_in_pad = self.cfg.via_in_pad || vip_net(&self.board.nets[net as usize].name) || vip_learned(net);
         let cls = self.board.class_of(net);
         let item = Item {
             net,
@@ -2704,6 +2705,14 @@ impl<'a> Router<'a> {
         }
         self.conn_segs[ci] = seg_ids;
         self.conn_vias[ci] = via_ids;
+        if vip_learn()
+            && self.conns[ci].goal != Goal::Plane
+            && self.conn_vias[ci]
+                .iter()
+                .any(|&s| self.sub.shared.sites[s as usize].pad.is_some())
+        {
+            learn_vip(net, &self.board.nets[net as usize].name);
+        }
         true
     }
 
@@ -3544,6 +3553,31 @@ fn vip_net(name: &str) -> bool {
 fn pad_reuse() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("GB_PAD_REUSE").is_ok_and(|v| v == "1"))
+}
+
+/// `GB_VIP_LEARN=1` (experiment): a net whose connection got through with a via in a pad, the
+/// last resort, may take one at any time from then on, as if `GB_VIP_NETS` named it. A pad in a
+/// pocket then gets its via while the board around it is still open. Plane fan-outs are left out.
+/// The nets are shared by all runs of the process, so with it on the normal search depends on
+/// which run learns first and is no longer the same from run to run.
+fn vip_learn() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("GB_VIP_LEARN").is_ok_and(|v| v == "1"))
+}
+
+fn learned_vips() -> &'static std::sync::Mutex<HashSet<NetId>> {
+    static NETS: std::sync::OnceLock<std::sync::Mutex<HashSet<NetId>>> = std::sync::OnceLock::new();
+    NETS.get_or_init(Default::default)
+}
+
+fn vip_learned(net: NetId) -> bool {
+    vip_learn() && learned_vips().lock().unwrap().contains(&net)
+}
+
+fn learn_vip(net: NetId, name: &str) {
+    if learned_vips().lock().unwrap().insert(net) {
+        eprintln!("via in pad learned: {name}");
+    }
 }
 
 #[cfg(test)]
