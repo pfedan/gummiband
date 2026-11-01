@@ -573,6 +573,9 @@ pub struct RouteIn {
     /// With pairs, experimental: the wide track ends just outside the pads, two single tracks
     /// connect them (default false).
     pub pair_breakouts: Option<bool>,
+    /// With pairs, experimental: two vias side by side are one via pair, a capsule that turns
+    /// with the wide track (default false).
+    pub pair_via_pairs: Option<bool>,
     /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
     pub layer_dirs: Option<f64>,
     /// Hints from the local patterns of board_patterns, comma separated: shares, decaps, rows,
@@ -1985,6 +1988,7 @@ fn route_blocking(
                 room: tune.then(|| tune_cfg.clone()),
                 angles45: angles_45,
                 breakouts: p.pair_breakouts.unwrap_or(false),
+                via_pairs: p.pair_via_pairs.unwrap_or(false),
             };
             gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, search, &cfg)
         } else {

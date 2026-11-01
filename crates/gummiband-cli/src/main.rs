@@ -122,6 +122,10 @@ enum Cmd {
         /// with two single tracks to the pads (breakout zones).
         #[arg(long)]
         breakouts: bool,
+        /// Experimental, with --pairs: two vias side by side are one via pair, a capsule that
+        /// turns with the wide track, in place of the circle around both.
+        #[arg(long)]
+        via_pairs: bool,
         /// Rounds of negotiated routing from the start, in a second search next to the plain one.
         /// Connections may overfill edges and cross for a rising price, see docs/ARCHITECTURE.md.
         /// With 0 the search negotiates on its own when the plain one leaves a few connections
@@ -506,6 +510,7 @@ fn main() -> Result<()> {
             pair_zdiff,
             pair_all,
             breakouts,
+            via_pairs,
             generations,
             geometry_generations,
             seed,
@@ -726,6 +731,7 @@ fn main() -> Result<()> {
                         room: tune_room.then(|| tune_cfg.clone()),
                         angles45: angles == Angles::Deg45,
                         breakouts,
+                        via_pairs,
                     };
                     gummiband_core::pairs::route_pairs(board, &sub_cfg, &router_cfg, search, &pair_cfg)
                 } else {

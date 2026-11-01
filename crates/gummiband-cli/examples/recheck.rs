@@ -63,6 +63,7 @@ fn main() {
                     layer: None,
                     origin: None,
                     resting: false,
+                    half: Default::default(),
                 });
             }
             Some(kind @ ("segment" | "arc")) => {

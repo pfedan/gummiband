@@ -2672,6 +2672,7 @@ mod tests {
             layer: None,
             origin: None,
             resting: false,
+            half: Default::default(),
         }];
         place_new_vias(&mut tracks, &mut vias, &[], true);
         assert!(vias[0].at.y > 1.0 && vias[0].at.y < 5.0, "{:?}", vias[0].at);

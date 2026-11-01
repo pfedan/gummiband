@@ -86,6 +86,69 @@ pub struct Via {
     pub origin: Option<u32>,
     /// Soft copper still exactly as the file has it.
     pub resting: bool,
+    /// Two vias side by side as one (the wide track of a pair): they sit at `at - half` and
+    /// `at + half`, each `diameter - 2 |half|` wide, so that the copper is a capsule and
+    /// `diameter` the circle around it. Zero for a round via.
+    pub half: Point,
+}
+
+impl Via {
+    /// Is this a pair of vias with a capsule as its copper?
+    pub fn is_pair(&self) -> bool {
+        self.half != Point::default()
+    }
+}
+
+/// The half line of a via pair (length h) for the two tracks that leave it in directions `out`:
+/// across the bisector of the band, as the split of a pair puts vias side by side. A band that
+/// does not turn keeps `old`; the side stays that of `old`.
+pub fn pair_half(out: [Point; 2], h: f64, old: Point) -> Point {
+    let [e1, e2] = out;
+    let t = if e1.dot(e2) < 0.0 { e2 - e1 } else { e1 + e2 };
+    if t.len2() < 1e-18 {
+        return old;
+    }
+    let t = t.norm();
+    let n = pt(-t.y, t.x) * h;
+    if n.dot(old) < 0.0 { n * -1.0 } else { n }
+}
+
+/// The direction in which a track leaves its end at the start (or at the end) point.
+pub fn leaving(pts: &[Point], at_start: bool) -> Option<Point> {
+    let mut it: Box<dyn Iterator<Item = &Point>> = if at_start {
+        Box::new(pts.iter())
+    } else {
+        Box::new(pts.iter().rev())
+    };
+    let first = *it.next()?;
+    it.find(|q| q.dist(first) > 1e-6).map(|&q| (q - first).norm())
+}
+
+/// Turn every via pair to the tracks that end on it (two of them; else it keeps its line).
+pub fn turn_pairs(geo: &mut Geometry) {
+    for vi in 0..geo.vias.len() {
+        let v = &geo.vias[vi];
+        if !v.is_pair() {
+            continue;
+        }
+        let out: Vec<Point> = geo
+            .tracks
+            .iter()
+            .filter(|t| t.net == v.net && t.pts.len() > 1)
+            .flat_map(|t| {
+                let (a, b) = (t.pts[0], *t.pts.last().unwrap());
+                [(a, true), (b, false)]
+                    .into_iter()
+                    .filter(|(p, _)| p.dist(v.at) < 1e-6)
+                    .filter_map(|(_, s)| leaving(&t.pts, s))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if let [e1, e2] = out[..] {
+            let h = v.half.len();
+            geo.vias[vi].half = pair_half([e1, e2], h, v.half);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

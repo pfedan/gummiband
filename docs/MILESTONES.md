@@ -85,10 +85,15 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   whose single track takes a long way round now counts as failed (on DDR5 one 31 mm detour set
   the aim of the whole command address group): with `--breakouts` DDR5 has 10 to 16 instead of
   13 to 22 of 29 out of range over 6 seeds, about as many as without; more pair gap errors
-  remain near the breakouts.
+  remain near the breakouts. Via pairs (2026-11-01, opt-in `--via-pairs`): two vias side by
+  side are one capsule that turns with the wide track, in check and relaxation, instead of the
+  circle that leaves room for vias in line too. Over seeds 1 to 3 (DDR5 1 to 4) KiCad errors
+  `diff_pairs` 11 instead of 16, DDR5 185 instead of 206 (clearance and shorts 26 instead of 31
+  on seed 1), `matching` 56 instead of 53 (2 length errors more on one seed), lengths out of
+  range on DDR5 53 instead of 52. Few joints qualify (1 to 5 on DDR5); most pair errors sit at
+  vias in line, where a pair turns back or changes sides.
   Open: room in the router itself, phase matching near the source, carrying the pair to its
-  end, via pairs (the remaining pair errors sit at vias near the ends), the open end with
-  pairs.
+  end, vias in line (the remaining pair errors sit there), the open end with pairs.
 - Rule engine: more custom rule conditions (positions, footprints, layers).
 - More than two signal layers (pulled forward with the synthetic 4 layer benchmarks).
 - Alternative placements as portfolio variants (smaller, square, round outlines with the
