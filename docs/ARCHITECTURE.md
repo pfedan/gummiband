@@ -359,7 +359,7 @@ ran the whole way next to the first one. The end stays on that segment: in the r
 along it to where its way is shortest, and whatever rips up a segment rips up what ends on it. Two
 fan-outs that end on each other reach no plane, `Router::net_pieces` counts that. Runs without
 `--until-stop` have no taps. A via weighs 20 mm of track in the open end, half of its weight in the
-search before, or the taps pay for fewer vias with long ways.
+search before, or the taps pay for fewer vias with long ways; `--open-via-cost` sets that price.
 
 The search has converged when even bold changes do not help: `TOP_LEVEL` side branches in a row
 have failed, each bolder than the last. One more connection or fewer spots start that over, a gain

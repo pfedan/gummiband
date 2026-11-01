@@ -64,6 +64,8 @@ class RouteOptions:
     pair_zdiff: float = 0.0  # 0 = keep the track widths of the net class
     # keep improving after the normal search until the user accepts the result
     until_stop: bool = True
+    # what a via is worth in mm of track while improving, the router's --open-via-cost
+    open_via_cost: float = 20.0
     prefer_width: float = 0.0  # tracks of the default class grow up to this where there is room
     gpu: bool = False  # sets GB_GPU for the router, needs a binary built with the gpu feature
     # turn the result into conventional 45 degree routing as a last step
@@ -94,7 +96,7 @@ class PlaceOptions:
 # layer names, net files) starts empty every time.
 ROUTE_SAVED = ("keep_locked", "runs", "via_cost", "geometry_generations", "animate", "move_parts", "placements",
                "teardrops", "generations", "via_pitch", "layer_dirs", "via_pass", "negotiate", "threads", "pairs", "pair_pull",
-               "pair_skew", "pair_zdiff", "until_stop", "prefer_width", "gpu",
+               "pair_skew", "pair_zdiff", "until_stop", "open_via_cost", "prefer_width", "gpu",
                "angles_45")
 PLACE_SAVED = ("starts", "gap", "halo", "seed", "iters", "margin", "threads")
 
@@ -253,7 +255,7 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
     if opts.angles_45:
         cmd += ["--angles", "45"]
     if open_ended(opts):
-        cmd.append("--until-stop")
+        cmd += ["--until-stop", "--open-via-cost", repr(float(opts.open_via_cost))]
     if opts.frames_dir:
         cmd += ["--frames", str(opts.frames_dir)]
     if opts.report:

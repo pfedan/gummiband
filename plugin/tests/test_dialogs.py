@@ -33,6 +33,14 @@ class DialogTest(unittest.TestCase):
         form.update_enabled()
         self.assertTrue(form.controls["pair_skew"].IsEnabled())
 
+    def test_open_via_cost_follows_the_open_end(self):
+        form = self.build(fields.ROUTE_TABS, runner.RouteOptions())
+        self.assertEqual(form.controls["open_via_cost"].GetValue(), 20.0)
+        self.assertTrue(form.controls["open_via_cost"].IsEnabled())
+        form.controls["until_stop"].SetValue(False)
+        form.update_enabled()
+        self.assertFalse(form.controls["open_via_cost"].IsEnabled())
+
     def test_defaults_button_values(self):
         form = self.build(fields.ROUTE_TABS, runner.RouteOptions(runs=8, plane_layers=["In1.Cu"]))
         form.set_values(runner.RouteOptions())

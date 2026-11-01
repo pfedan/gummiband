@@ -48,8 +48,10 @@ ROUTE_TABS: Tuple = (
                   "result does not depend on the machine. More runs explore more orders.",
                   1, 1024),
         float_field("via_cost", "Via cost (mm of track):",
-                    "How much track a via is worth. Lower gives more vias and shorter tracks, "
-                    "higher fewer vias. The search also tries values around it.", 0, 1000, 0.1),
+                    "How much track a via is worth while routing. Lower gives more vias and "
+                    "shorter tracks, higher fewer vias. The search also tries values around it. "
+                    "The improvement after the search judges with its own via price.",
+                    0, 1000, 0.1),
         int_field("generations", "Generations:",
                   "Rounds of the order search after the first runs, judged by routed connections, "
                   "vias and length.", 0, 50),
@@ -61,6 +63,10 @@ ROUTE_TABS: Tuple = (
               "violations, sometimes the last connections. A window shows how it goes and "
               "recommends when to accept. Not together with routing pairs as one wide track.",
               "check"),
+        float_field("open_via_cost", "Via price while improving (mm of track):",
+                    "How much track a via is worth when the improvement judges its results. Lower "
+                    "gives more vias and shorter tracks, higher fewer vias and longer tracks. "
+                    "The default is 20.", 0, 1000, 1, digits=1, requires="until_stop"),
         float_field("prefer_width", "Preferred track width (mm):",
                     "Tracks of the default net class push aside what can give way and grow up to "
                     "this width where there is room, with a taper at every change. Routing still "

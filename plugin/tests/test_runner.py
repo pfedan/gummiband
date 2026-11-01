@@ -237,6 +237,15 @@ open({str(self.out)!r}, "w").write("done")
         pairs = runner.RouteOptions(until_stop=True, pairs=True)
         self.assertNotIn("--until-stop", runner.build_command("gb", Path("b"), Path("o"), pairs))
 
+    def test_open_via_cost_goes_with_the_open_end(self):
+        cmd = runner.build_command("gb", Path("b"), Path("o"), runner.RouteOptions())
+        self.assertEqual(cmd[cmd.index("--open-via-cost") + 1], "20.0")
+        cheap = runner.RouteOptions(open_via_cost=12.5)
+        cmd = runner.build_command("gb", Path("b"), Path("o"), cheap)
+        self.assertEqual(cmd[cmd.index("--open-via-cost") + 1], "12.5")
+        off = runner.RouteOptions(until_stop=False)
+        self.assertNotIn("--open-via-cost", runner.build_command("gb", Path("b"), Path("o"), off))
+
     def test_angles_flag(self):
         cmd = runner.build_command("gb", Path("b"), Path("o"), runner.RouteOptions(angles_45=True))
         self.assertEqual(cmd[cmd.index("--angles") + 1], "45")

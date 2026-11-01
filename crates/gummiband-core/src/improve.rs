@@ -509,10 +509,19 @@ fn judge(board: &Board, c: &mut Candidate) {
     c.flaw = spots.iter().map(|s| 300.0 + 700.0 * (s.missing / 0.03).min(1.0)).sum();
 }
 
-/// The cost of the open end. A via weighs half of what it does in the search before: with
-/// connections that can end on a track of their net, it would be paid for with long ways.
+/// The via price of the open end in mm of track, `SearchConfig::open_via_cost` of the running
+/// open end, kept as the bits of an f64. One process runs one open end at a time.
+static OPEN_VIA_COST: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(crate::DEFAULT_OPEN_VIA_COST.to_bits());
+
+/// The cost of the open end. A via weighs [`OPEN_VIA_COST`] mm of track there, by default half
+/// of what it does in the search before: with connections that can end on a track of their net,
+/// it would be paid for with long ways.
 fn open_cost(c: &Candidate) -> f64 {
-    c.stats.cost() + c.flaw + c.stats.shorts.unwrap_or(0) as f64 * 5000.0 - c.stats.vias as f64
+    let price = f64::from_bits(OPEN_VIA_COST.load(std::sync::atomic::Ordering::Relaxed));
+    // `cost()` already holds the via price of the search, take the difference off or on
+    let via = price * crate::LENGTH_WEIGHT - crate::VIA_WEIGHT;
+    c.stats.cost() + c.flaw + c.stats.shorts.unwrap_or(0) as f64 * 5000.0 + c.stats.vias as f64 * via
 }
 
 /// What has to go for `aim`: what its connection runs into, and at random what lies around its way.
@@ -1331,6 +1340,10 @@ pub(crate) fn run(
     rng: &mut Rng,
     on_better: &mut dyn FnMut(&Candidate, usize),
 ) -> (Candidate, Vec<Candidate>) {
+    OPEN_VIA_COST.store(
+        search.open_via_cost.max(0.0).to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let Some(mut best) = rebuild(board, sub, &start) else {
         eprintln!("open end: the run does not repeat, nothing to improve on");
         return (start, Vec::new());
@@ -2230,6 +2243,7 @@ mod tests {
             open_end: Some(flag),
             air: 0.0,
             prefer_width: 0.0,
+            open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
         };
         route_board(b, &SubstrateConfig::default(), &RouterConfig::default(), &search).1
     }
@@ -2571,6 +2585,7 @@ mod tests {
             open_end: None,
             air: 0.0,
             prefer_width: 0.4,
+            open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
         };
         let cfg = RouterConfig::default();
         let res = route_board(&b, &SubstrateConfig::default(), &cfg, &search).1;
@@ -2612,6 +2627,7 @@ mod tests {
             open_end: None,
             air: 0.0,
             prefer_width: 0.0,
+            open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
         };
         let res = route_board(&b, &SubstrateConfig::default(), &RouterConfig::default(), &search).1;
         assert!(check::check(&b, &res.geometry).is_empty());
@@ -2788,6 +2804,7 @@ mod tests {
                 open_end: None,
                 air: 0.0,
                 prefer_width: 0.0,
+                open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
             },
         );
         let c = Candidate {

@@ -1137,6 +1137,7 @@ mod tests {
             open_end: None,
             air: 0.0,
             prefer_width: 0.0,
+            open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
         };
         let (_, res) = route_board(&b, &SubstrateConfig::default(), &RouterConfig::default(), &search);
         assert_eq!(res.stats.routed, 1, "{:?}", res.stats.unrouted);
@@ -1158,6 +1159,7 @@ mod tests {
             open_end: None,
             air: 0.0,
             prefer_width: 0.0,
+            open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
         }
     }
 

@@ -1630,6 +1630,7 @@ pub fn route_pairs(
         open_end: None,
         air: 0.0,
         prefer_width: 0.0,
+        open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
     };
     // a repaired end that finds no way keeps the two tracks it had: completion comes first
     let split_geo = geo;
@@ -1801,6 +1802,7 @@ mod tests {
             open_end: None,
             air: 0.0,
             prefer_width: 0.0,
+            open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
         };
         let (_, res, rep) = route_pairs(
             &b,
@@ -1843,6 +1845,7 @@ mod tests {
             open_end: None,
             air: 0.0,
             prefer_width: 0.0,
+            open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
         };
         let (_, res, _) = route_pairs(
             &b,
