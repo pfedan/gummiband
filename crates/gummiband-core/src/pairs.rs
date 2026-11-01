@@ -912,6 +912,30 @@ fn pair_vias(real: &Board, m: &Merged, geo: &mut Geometry) -> usize {
     made
 }
 
+/// Where the tracks of a pair change sides, per via joint (turns back, via pair, length of the
+/// shorter leg): vias side by side change them where the band turns back, vias in line where it
+/// goes on. In line the far via's track passes the near via, which takes room, so all joints
+/// are side by side where that gives the polarity the ends ask for (`twisted`: they ask for a
+/// change), else one joint is in line: where the legs are longest, best where the band goes on,
+/// not at a via pair unless all are.
+fn side_changes(joints: &[(bool, bool, f64)], twisted: bool) -> Vec<bool> {
+    let backs = joints.iter().filter(|j| j.0).count();
+    let pairs_only = joints.iter().all(|j| j.1);
+    let room = |j: &(bool, bool, f64)| j.2 + if j.0 { 0.0 } else { 1.0 };
+    let in_line = ((backs % 2 == 1) != twisted)
+        .then(|| {
+            (0..joints.len())
+                .filter(|&k| pairs_only || !joints[k].1)
+                .max_by(|&a, &b| room(&joints[a]).total_cmp(&room(&joints[b])))
+        })
+        .flatten();
+    joints
+        .iter()
+        .enumerate()
+        .map(|(k, j)| if in_line == Some(k) { !j.0 } else { j.0 })
+        .collect()
+}
+
 /// Replace the wide tracks in the geometry with the two tracks of each pair.
 fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
     let mut out = Geometry {
@@ -1003,46 +1027,32 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
             }
             let twisted = left_p != left_p_end;
             let via_joints: Vec<usize> = (0..joints.len()).filter(|&j| joints[j].x.is_finite()).collect();
-            // a via pair (`pair_vias`) holds two vias side by side, which is a change of sides
-            // where the band turns back and none elsewhere: those that turn back take the change
-            // first, the others only when there is no other joint
-            let turns_back = |j: usize| {
-                let (a, b) = (&legs[j].elems, &legs[j + 1].elems);
-                tangent(a.last().unwrap(), true).dot(tangent(&b[0], false)) < 0.0
-            };
-            let capsule = |j: usize| vias.iter().any(|v| v.is_pair() && v.at.dist(joints[j]) < 1e-6);
-            let swap_joints: Vec<usize> = if via_joints.iter().all(|&j| capsule(j) && !turns_back(j)) {
-                via_joints.clone()
-            } else {
-                via_joints
-                    .iter()
-                    .copied()
-                    .filter(|&j| !capsule(j) || turns_back(j))
-                    .collect()
-            };
             if twisted && via_joints.is_empty() {
                 rep.note = "polarity is crossed and the wide track has no via".to_string();
                 unfinished.push(rep.p.clone());
                 unfinished.push(rep.n.clone());
                 continue;
             }
-            // where both legs have room for the tracks to change sides; best where the band
-            // turns back, there is no detour around the vias there
-            let swap_room = |&j: &usize| {
+            // which joints change the sides of the tracks (`side_changes`)
+            let turns_back = |j: usize| {
                 let (a, b) = (&legs[j].elems, &legs[j + 1].elems);
-                let back = turns_back(j);
-                elems_len(a).min(elems_len(b))
-                    + if back { 1.0 } else { 0.0 }
-                    + if back && capsule(j) { 1000.0 } else { 0.0 }
+                tangent(a.last().unwrap(), true).dot(tangent(&b[0], false)) < 0.0
             };
-            let swap_at = twisted
-                .then(|| {
-                    swap_joints
-                        .iter()
-                        .copied()
-                        .max_by(|a, b| swap_room(a).total_cmp(&swap_room(b)))
+            let backs: Vec<bool> = (0..joints.len())
+                .map(|j| joints[j].x.is_finite() && turns_back(j))
+                .collect();
+            let capsule = |j: usize| vias.iter().any(|v| v.is_pair() && v.at.dist(joints[j]) < 1e-6);
+            let plan: Vec<(bool, bool, f64)> = via_joints
+                .iter()
+                .map(|&j| {
+                    let len = elems_len(&legs[j].elems).min(elems_len(&legs[j + 1].elems));
+                    (backs[j], capsule(j), len)
                 })
-                .flatten();
+                .collect();
+            let mut swaps = vec![false; joints.len()];
+            for (&j, s) in via_joints.iter().zip(side_changes(&plan, twisted)) {
+                swaps[j] = s;
+            }
             let first_track = out.tracks.len();
             let mut joint_vias: Vec<Option<[usize; 2]>> = Vec::new();
             // walk the legs: which net runs on the left, and where each track starts and ends
@@ -1087,7 +1097,7 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                         tangent(leg.elems.last().unwrap(), true),
                         tangent(&legs[k + 1].elems[0], false),
                     );
-                    (ua.dot(ub) < 0.0) == (swap_at == Some(k))
+                    (ua.dot(ub) < 0.0) == swaps[k]
                 };
                 let joint_trim = if tight { via_d / 2.0 + 0.02 } else { disc + 0.02 };
                 let mut end_trim = joint_trim;
@@ -1170,14 +1180,14 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                         c.y,
                         capsule(k),
                         back,
-                        swap_at == Some(k),
+                        swaps[k],
                         ua.dot(ub)
                     );
                 }
                 let t = if back { (ua - ub).norm() } else { (ua + ub).norm() };
                 let n = left_of(t);
                 let h = (via_d + via_gap) / 2.0;
-                let swap = swap_at == Some(k);
+                let swap = swaps[k];
                 let (near, far);
                 if swap != back {
                     // vias in line on the left track: it ends on the near via, the right track
@@ -2701,6 +2711,28 @@ mod tests {
             "{:?}",
             crate::check::check(&b, &res.geometry)
         );
+    }
+
+    #[test]
+    fn the_tracks_change_sides_where_the_band_turns_back() {
+        // (turns back, via pair, shorter leg)
+        let u = (true, false, 5.0);
+        let on = (false, false, 5.0);
+        // two turns back: both side by side, twice a change, none in line
+        assert_eq!(side_changes(&[u, on, u], false), vec![true, false, true]);
+        // a crossed pair with one turn back changes there
+        assert_eq!(side_changes(&[on, u], true), vec![false, true]);
+        // three turns back and no change wanted: one in line, at the longer legs, or where
+        // the band goes on if it can
+        assert_eq!(
+            side_changes(&[u, u, (true, false, 9.0)], false),
+            vec![true, true, false]
+        );
+        assert_eq!(side_changes(&[u, on, u], true), vec![true, true, true]);
+        // the longer legs take the vias in line, a via pair does not
+        let long = (false, false, 9.0);
+        assert_eq!(side_changes(&[on, long], true), vec![false, true]);
+        assert_eq!(side_changes(&[on, (false, true, 9.0)], true), vec![true, false]);
     }
 
     #[test]

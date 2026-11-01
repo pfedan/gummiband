@@ -290,9 +290,13 @@ track and split afterwards.
    the pads towards it, and which of them takes which side of the band is what keeps the links
    (to a point 1 mm along the band) from crossing; where both sides would do, the one that spares
    the pair a change of sides, else the shorter.
-4. Polarity: if the P pad lies on different sides at the two ends, the pair changes sides through
-   one of its vias (vias in line instead of side by side). Without a via the pair is routed as two
-   single nets.
+4. Polarity: vias side by side change the sides of the two tracks where the band turns back and
+   keep them where it goes on; vias in line the other way round, but there the far via's track
+   passes the near via, which takes room. So all vias of a pair stand side by side where that
+   gives the polarity the pads ask for (the P pad on the same or on different sides at the two
+   ends), else one joint gets its vias in line, where the legs are longest and best where the
+   band goes on (`pairs::side_changes`). A crossed pair without a via is routed as two single
+   nets.
    Via pairs (experimental, `--via-pairs`): after the search a trial split tells which joints get
    their vias side by side (`pairs::pair_vias`; not where the band turns nearly square). Each
    such via of the wide track becomes a via pair (`Via::half`): a capsule along the line of the
