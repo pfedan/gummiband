@@ -93,7 +93,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `current_check` | `path`, `paths? [{net, amps, short_amps?, from?, to?, name?}]`, `temp_rise?`, `refill?`, `max_segments?` | per current path the narrow segments, the narrowest single band and the total cross-section between the terminals (pours and vias included) with their position, vias against the current, verdict `ok` or `FLAG` |
 | `ground_pour` | `path`, `net?`, `layers?`, `pitch?`, `edge_pitch?`, `edge_inset?`, `avoid_courtyards?`, `via_diameter?`, `via_drill?`, `priority?`, `output?` | id and path of `<input>.gnd.kicad_pcb` with ground zones on the outer layers and locked stitching vias, `warnings` |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
-| `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?` | PNG (image content) and its path, region, pixels per mm |
+| `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?`, `refill?` | PNG (image content) and its path, region, pixels per mm |
 
 ### load_board
 
@@ -228,7 +228,9 @@ Stored in the session by net name and applied on every following `route` of the 
 out of routing (its pads stay obstacles; its old tracks are not kept, since the output replaces
 all unlocked copper). `width` (mm) gives the net its own track width, which is also its minimum
 width: it does not neck below it, except inside the courtyards of the parts whose pads are
-narrower than the width (fine pitch pins); `width: 0` clears it. `power_plan` with `apply` sets
+narrower than the width (fine pitch pins); `width: 0` clears it. Known gap: the router still
+lets such a net neck in places outside those courtyards (VBUS_F on the Lichtschnitzel benchmark
+kept 0.25 to 0.6 mm pieces); `current_check` finds them. `power_plan` with `apply` sets
 the widths of the power nets this way. `reset: true` drops the net's options before applying the
 others.
 
@@ -357,7 +359,10 @@ has copper) is put on a 0.05 mm raster, and two numbers are measured between the
   terminal to the sinks (the copper eroded by half the width; terminal and via pads are not
   eroded, and a band may end up to 0.3 mm from them). Inner layers count with their width
   divided by the factor IPC-2221 asks for there. This is the measure of the Lichtschnitzel
-  `layout/necks.py`, and gives the same numbers on that board.
+  `layout/necks.py` and gives its numbers for the VBUS paths of that board (0.70, 0.70,
+  0.28 mm). necks.py lets a band end up to half its width from a pad, so where two terminals are
+  closer than the width it bridges the gap without copper and reports its search limit (3.99 mm
+  for the switch nodes and the outputs); the 0.3 mm limit here measures the copper that is there.
 - `cross_section_mm`: the total cross-section, a minimum cut on the raster where parallel copper
   adds up and every via counts with what its barrel carries. Copper that is a band of the full
   width anyway cannot be cut, so the cut runs through narrower copper and vias only; a cut at an
@@ -400,8 +405,9 @@ nets on every layer, the hole to hole distance, the edge clearance, out of rule 
 forbid vias, of other nets' zones on routing layers and of courtyards (`avoid_courtyards`). A
 layer that already has a zone of the net is left as it is; `warnings` name zones of other nets
 whose priority does not beat the pour. The output `<input>.gnd.kicad_pcb` is loaded as a new
-board. KiCad fills the zones (`drc` refills them); a via the fill does not reach shows up there
-as dangling.
+board. The zones are filled with kicad-cli before the file is handed back (a warning says so if
+that fails), so `render` and KiCad show the pours right away. A via the fill does not reach shows
+up in `drc` as dangling, unless an inner plane of the net holds it.
 
 ```json
 {"name": "ground_pour", "arguments": {"path": "/abs/lichtschnitzel.routed.kicad_pcb"}}
@@ -441,7 +447,9 @@ Plots the layers with `kicad-cli pcb export svg` (page coordinates equal board c
 crops the SVG to `region` and rasterizes it with `rsvg-convert`. Default layers: the routing
 copper layers (no inner planes, which are solid pours) and `Edge.Cuts`; default region: the
 board outline plus 1 mm; `width_px` defaults to 1000 (at most 4000), the height follows the
-region. The PNG goes to the server's temp folder unless `output` is given.
+region. The PNG goes to the server's temp folder unless `output` is given. Zones without fill
+(after `add_zone` or a pour that was never filled) plot as nothing, so by default they are filled
+in a temp copy first (`refill`, kicad-cli 9 or newer); the file itself is not changed.
 
 ```json
 {"name": "render", "arguments": {"path": "/abs/path/lichtschnitzel.routed.kicad_pcb",

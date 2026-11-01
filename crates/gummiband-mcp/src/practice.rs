@@ -1080,6 +1080,13 @@ pub fn ground_pour(p: &GroundPourIn) -> Result<(PathBuf, GroundPourOut)> {
     };
     std::fs::write(&out_path, text).with_context(|| format!("writing {}", out_path.display()))?;
     external::copy_project_files(&path, &out_path);
+    // hand back a filled board, so a render or KiCad shows the pours right away
+    match external::refilled(&out_path).and_then(|f| std::fs::copy(&f, &out_path).map_err(anyhow::Error::from)) {
+        Ok(_) => {}
+        Err(e) => warnings.push(format!(
+            "zones not filled ({e:#}): KiCad fills them (B), drc refills them"
+        )),
+    }
     Ok((
         out_path.clone(),
         GroundPourOut {

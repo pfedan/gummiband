@@ -494,6 +494,9 @@ pub struct RenderIn {
     pub background: Option<String>,
     /// Where to write the PNG (default: a file in the server's temp folder).
     pub output: Option<String>,
+    /// Fill the zones with kicad-cli before plotting (default true when the file has a zone
+    /// without fill, e.g. after add_zone or ground_pour); the file itself stays as it is.
+    pub refill: Option<bool>,
 }
 
 // ------------------------------------------------------------------------------ results
@@ -1827,6 +1830,20 @@ fn render_blocking(p: RenderIn) -> Result<(String, RenderOut, Vec<u8>)> {
         }
     };
     let width_px = p.width_px.unwrap_or(1000).clamp(16, 4000);
+    // unfilled zones plot as nothing: fill them in a temp copy first
+    let unfilled = gummiband_kicad::power::zones(&kb).iter().any(|z| !z.filled);
+    let mut note = String::new();
+    let plotted = if p.refill.unwrap_or(unfilled) {
+        match external::refilled(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                note = format!(" Zones not filled ({e:#}).");
+                path.clone()
+            }
+        }
+    } else {
+        path.clone()
+    };
     let png = match &p.output {
         Some(o) => abs_path(o),
         None => {
@@ -1835,7 +1852,7 @@ fn render_blocking(p: RenderIn) -> Result<(String, RenderOut, Vec<u8>)> {
         }
     };
     let r = external::render(
-        &path,
+        &plotted,
         &layers,
         region,
         width_px,
@@ -1852,7 +1869,7 @@ fn render_blocking(p: RenderIn) -> Result<(String, RenderOut, Vec<u8>)> {
         scale: r.width_px as f64 / (region.2 - region.0),
     };
     let summary = format!(
-        "Rendered {} ({}) region x {:.2}..{:.2}, y {:.2}..{:.2} mm at {}x{} px ({:.1} px/mm) to {}.",
+        "Rendered {} ({}) region x {:.2}..{:.2}, y {:.2}..{:.2} mm at {}x{} px ({:.1} px/mm) to {}.{note}",
         path.file_name().and_then(|s| s.to_str()).unwrap_or(""),
         out.layers.join(","),
         region.0,
