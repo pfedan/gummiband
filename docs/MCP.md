@@ -82,7 +82,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `load_board` | `path`, `keep_locked?` | board id, layers (plane flag), outline box and size, pins, nets, routable nets, connections, planes, net classes (priority, width, clearance, via), custom rule count, custom clearance net pairs, kept net options, recognised differential pairs |
 | `list_nets` | `board`, `filter?`, `include_single?` | nets with class, pin count, plane flag, effective priority, skip flag |
 | `part_info` | `board`, `reference` | value, position, rotation, locked, sheet, pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
-| `move_part` | `board`, `reference`, `x`, `y`, `rotation?` | id and path of the working copy with the footprint at its new position, `items_added`, `warnings` |
+| `move_part` | `board`, `reference`, `x`, `y`, `rotation?`, `follow?` | id and path of the working copy with the footprint at its new position, `items_added`, `warnings` |
 | `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?` | id and path of the working copy, the new poses, decoupling assignment, crossings, smallest courtyard distance, pins off their plane, with `semantic` inductors and groups, `warnings` |
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
@@ -136,6 +136,13 @@ the moved part now overlaps, and an outline it leaves; boxes only, so run `drc` 
 the exact answer. Pads, their nets and the footprint's own copper move along. Without
 `rotation` only the position changes; with it the pads, the footprint's texts and its own zones
 turn with the footprint, so the part arrives as KiCad would place it.
+
+Without `rotation` the tracks around the part follow like rubber bands (`follow`, default
+true), as in `gummiband move-part`: the part moves in small steps, its own tracks stretch, tracks
+and vias of other nets give way within their clearances, and copper nothing touches stays as it
+is. The part stops short where nothing can give way any more, or where its courtyard meets
+another part or the edge; a warning then names where it stopped and why, and the message counts
+the tracks and vias that followed. `follow: false` only moves the footprint, as before.
 
 ```json
 {"name": "move_part", "arguments": {"board": "b1", "reference": "C12", "x": 152.4, "y": 118.0, "rotation": 90}}
