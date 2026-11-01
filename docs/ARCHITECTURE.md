@@ -288,7 +288,10 @@ neighbours as they really are (`Router::threaded`: on every edge between the rea
 neighbours, a taut polyline through those portals), with the vias at their real places. And the
 site of a new via can lie behind a track that has moved over it since: its track then crosses that
 track an odd number of times, which no push undoes, so the via goes along its track past the
-crossing if that leaves fewer such crossings on all its tracks (`place_new_vias`).
+crossing if that leaves fewer such crossings on all its tracks (`place_new_vias`). A via in the
+plane of its net does not go where it would leave that plane: a connection can count as made
+through the plane at that via, and outside it KiCad sees the connection open and the via dangling
+(`GB_PLANE_HOLD=0` lets it go, as before 2026-11-01).
 
 The open end does not count violations but spots: all violations of one pair of nets within 2 mm
 are one spot (`check::spots`), because the check reports every short piece of track, so that one

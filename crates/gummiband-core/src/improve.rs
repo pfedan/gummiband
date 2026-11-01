@@ -1480,7 +1480,7 @@ pub(crate) fn run(
 // ------------------------------------------------------------------------------- experiments
 //
 // Ideas under test, each switched on by its own environment variable and off by default: a run
-// without them is the same byte for byte.
+// without them is the same byte for byte. The plane hold is a fix and on by default.
 
 /// The experiments switched on for this run.
 #[derive(Clone, Copy, Debug)]
@@ -1509,8 +1509,8 @@ struct Ideas {
     /// `GB_BOLD_AIM=share`: that share of the bold moves that start a side branch aims at an open
     /// connection while there is one; the rest take a whole area (default 0.8).
     bold_aim: f64,
-    /// `GB_PLANE_HOLD`: a new via that reaches the plane of its net stays in it when it is moved
-    /// past a sleeping track (see `place_new_vias`).
+    /// A new via that reaches the plane of its net stays in it when it is moved past a sleeping
+    /// track (see `place_new_vias`). On by default; `GB_PLANE_HOLD=0` switches it off.
     plane_hold: bool,
     /// `GB_PLANE_LOG`: say on stderr when such a via would leave its plane.
     plane_log: bool,
@@ -1527,7 +1527,7 @@ fn ideas() -> &'static Ideas {
         window: env("GB_WINDOW", 0.0),
         spot_fade: std::env::var("GB_SPOT_FADE").is_ok(),
         bold_aim: env("GB_BOLD_AIM", 0.8),
-        plane_hold: std::env::var("GB_PLANE_HOLD").is_ok(),
+        plane_hold: std::env::var("GB_PLANE_HOLD").map_or(true, |v| v != "0"),
         plane_log: std::env::var("GB_PLANE_LOG").is_ok(),
     })
 }
