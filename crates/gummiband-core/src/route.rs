@@ -3442,7 +3442,8 @@ impl<'a> Router<'a> {
                         join(site(v), pin(p as usize));
                     }
                 }
-                if c.goal == Goal::Plane {
+                // two fan-outs that end on each other reach no plane
+                if c.goal == Goal::Plane && !matches!(s.end, End::Tap(..)) {
                     join(nodes[0].unwrap_or(pin(c.from)), PLANE);
                 }
             }
