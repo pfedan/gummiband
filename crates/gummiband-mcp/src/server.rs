@@ -418,8 +418,8 @@ pub struct RouteIn {
     /// With pairs: couple every pair recognised by name (default false: only pairs with a
     /// `diff_pair_gap` rule or a net class of their own).
     pub pair_all: Option<bool>,
-    /// With pairs: the wide track ends just outside the pads, two single tracks connect them
-    /// (default true; false: the wide track ends at the pads).
+    /// With pairs, experimental: the wide track ends just outside the pads, two single tracks
+    /// connect them (default false).
     pub pair_breakouts: Option<bool>,
     /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
     pub layer_dirs: Option<f64>,
@@ -1672,7 +1672,7 @@ fn route_blocking(
                 all: p.pair_all.unwrap_or(false),
                 room: tune.then(|| tune_cfg.clone()),
                 angles45: angles_45,
-                breakouts: p.pair_breakouts.unwrap_or(true),
+                breakouts: p.pair_breakouts.unwrap_or(false),
             };
             gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, &search_cfg, &cfg)
         } else {
