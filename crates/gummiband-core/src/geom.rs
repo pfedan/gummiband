@@ -214,6 +214,30 @@ pub fn seg_seg_dist(a: Point, b: Point, c: Point, d: Point) -> f64 {
         .fold(f64::NAN, |m, (o, _)| m.min(o.len()))
 }
 
+/// The nearest points of segments ab and cd, the first on ab: one point twice where they cross.
+pub fn seg_seg_nearest(a: Point, b: Point, c: Point, d: Point) -> (Point, Point) {
+    let (ab, cd) = (b - a, d - c);
+    let den = ab.cross(cd);
+    if den.abs() > 1e-12 {
+        let t = (c - a).cross(cd) / den;
+        let u = (c - a).cross(ab) / den;
+        if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
+            let x = a + ab * t;
+            return (x, x);
+        }
+    }
+    let cands = [
+        (a, a - point_seg_offset(a, c, d)),
+        (b, b - point_seg_offset(b, c, d)),
+        (c - point_seg_offset(c, a, b), c),
+        (d - point_seg_offset(d, a, b), d),
+    ];
+    cands
+        .into_iter()
+        .min_by(|x, y| (x.0 - x.1).len2().total_cmp(&(y.0 - y.1).len2()))
+        .unwrap()
+}
+
 /// Closed polygon, vertices in either orientation, no repeated last vertex.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Polygon {
@@ -543,6 +567,19 @@ pub fn arc_polyline(a: Point, m: Point, b: Point, max_error: f64) -> Vec<Point> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nearest_points_of_two_segments() {
+        // apart: the end of one and its foot on the other
+        let (p, q) = seg_seg_nearest(pt(0., 0.), pt(2., 0.), pt(1., 1.), pt(3., 2.));
+        assert!(p.dist(pt(1., 0.)) < 1e-12 && q.dist(pt(1., 1.)) < 1e-12, "{p:?} {q:?}");
+        // crossing: the crossing twice
+        let (p, q) = seg_seg_nearest(pt(0., 0.), pt(2., 2.), pt(0., 2.), pt(2., 0.));
+        assert!(p.dist(pt(1., 1.)) < 1e-12 && q.dist(pt(1., 1.)) < 1e-12, "{p:?} {q:?}");
+        // parallel
+        let (p, q) = seg_seg_nearest(pt(0., 0.), pt(1., 0.), pt(2., 1.), pt(3., 1.));
+        assert!(p.dist(pt(1., 0.)) < 1e-12 && q.dist(pt(2., 1.)) < 1e-12, "{p:?} {q:?}");
+    }
 
     #[test]
     fn polygons_grow_outwards_in_both_directions() {

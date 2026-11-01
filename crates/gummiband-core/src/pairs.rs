@@ -93,6 +93,10 @@ pub struct PairConfig {
     /// Breakout zones: the wide track starts outside the pads of a pair end, two single
     /// tracks connect the pads (see [`breakout`]).
     pub breakouts: bool,
+    /// Vias side by side as one via pair: a capsule that turns with the wide track in the
+    /// relaxation, instead of the circle that holds the vias in any arrangement (see
+    /// [`pair_vias`]).
+    pub via_pairs: bool,
 }
 
 impl Default for PairConfig {
@@ -104,6 +108,7 @@ impl Default for PairConfig {
             room: None,
             angles45: false,
             breakouts: false,
+            via_pairs: false,
         }
     }
 }
@@ -883,6 +888,30 @@ fn paths_of(tracks: &[&Track], vias: &[&Via], pins: &[Point]) -> Vec<(usize, Vec
     out
 }
 
+/// Make the vias of the wide tracks that the split puts side by side a via pair each: the
+/// capsule around the two vias, which the relaxation turns with the band, in place of the
+/// circle around them that leaves room for vias in line as well. The joint where a twisted
+/// pair changes sides keeps the circle. Returns how many.
+fn pair_vias(real: &Board, m: &Merged, geo: &mut Geometry) -> usize {
+    let probe = split(real, m, geo);
+    let mut made = 0;
+    for (net, c, half) in probe.side {
+        let Some(mp) = m.pairs.iter().find(|p| p.p == net) else {
+            continue;
+        };
+        let (cp, cn) = (real.class_of(mp.p), real.class_of(mp.n));
+        let (d, drill) = (cp.via_diameter.max(cn.via_diameter), cp.via_drill.max(cn.via_drill));
+        if let Some(v) = geo.vias.iter_mut().find(|v| v.net == net && v.at.dist(c) < 1e-6) {
+            let h = half.len();
+            v.half = half;
+            v.diameter = 2.0 * h + d;
+            v.drill = 2.0 * h + drill;
+            made += 1;
+        }
+    }
+    made
+}
+
 /// Replace the wide tracks in the geometry with the two tracks of each pair.
 fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
     let mut out = Geometry {
@@ -914,6 +943,7 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
     let mut reports = Vec::new();
     let mut unfinished = Vec::new();
     let mut tuned = Vec::new();
+    let mut side = Vec::new();
     for (pi, pair) in m.pairs.iter().enumerate() {
         let mut rep = PairReport {
             p: real.nets[pair.p as usize].name.clone(),
@@ -973,6 +1003,23 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
             }
             let twisted = left_p != left_p_end;
             let via_joints: Vec<usize> = (0..joints.len()).filter(|&j| joints[j].x.is_finite()).collect();
+            // a via pair (`pair_vias`) holds two vias side by side, which is a change of sides
+            // where the band turns back and none elsewhere: those that turn back take the change
+            // first, the others only when there is no other joint
+            let turns_back = |j: usize| {
+                let (a, b) = (&legs[j].elems, &legs[j + 1].elems);
+                tangent(a.last().unwrap(), true).dot(tangent(&b[0], false)) < 0.0
+            };
+            let capsule = |j: usize| vias.iter().any(|v| v.is_pair() && v.at.dist(joints[j]) < 1e-6);
+            let swap_joints: Vec<usize> = if via_joints.iter().all(|&j| capsule(j) && !turns_back(j)) {
+                via_joints.clone()
+            } else {
+                via_joints
+                    .iter()
+                    .copied()
+                    .filter(|&j| !capsule(j) || turns_back(j))
+                    .collect()
+            };
             if twisted && via_joints.is_empty() {
                 rep.note = "polarity is crossed and the wide track has no via".to_string();
                 unfinished.push(rep.p.clone());
@@ -983,12 +1030,14 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
             // turns back, there is no detour around the vias there
             let swap_room = |&j: &usize| {
                 let (a, b) = (&legs[j].elems, &legs[j + 1].elems);
-                let back = tangent(a.last().unwrap(), true).dot(tangent(&b[0], false)) < 0.0;
-                elems_len(a).min(elems_len(b)) + if back { 1.0 } else { 0.0 }
+                let back = turns_back(j);
+                elems_len(a).min(elems_len(b))
+                    + if back { 1.0 } else { 0.0 }
+                    + if back && capsule(j) { 1000.0 } else { 0.0 }
             };
             let swap_at = twisted
                 .then(|| {
-                    via_joints
+                    swap_joints
                         .iter()
                         .copied()
                         .max_by(|a, b| swap_room(a).total_cmp(&swap_room(b)))
@@ -1032,7 +1081,16 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                     lead_r = vec![rn_start + out];
                     start_trim = t;
                 }
-                let mut end_trim = disc + 0.02;
+                // a via pair side by side: the tracks go to their vias within its capsule
+                let tight = k + 1 < legs.len() && joints[k].x.is_finite() && capsule(k) && {
+                    let (ua, ub) = (
+                        tangent(leg.elems.last().unwrap(), true),
+                        tangent(&legs[k + 1].elems[0], false),
+                    );
+                    (ua.dot(ub) < 0.0) == (swap_at == Some(k))
+                };
+                let joint_trim = if tight { via_d / 2.0 + 0.02 } else { disc + 0.02 };
+                let mut end_trim = joint_trim;
                 let mut exits = None;
                 if k + 1 == legs.len() {
                     let base = if eb.out.is_some() {
@@ -1104,6 +1162,18 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                 // a band that turns back at the via comes out on the other side of itself: there
                 // vias side by side swap the tracks and vias in line keep them
                 let back = ua.dot(ub) < 0.0;
+                if std::env::var("GB_PAIR_LOG").is_ok() {
+                    eprintln!(
+                        "joint {} at {:.2},{:.2}: capsule {} back {} swap {} turn {:.2}",
+                        rep.p,
+                        c.x,
+                        c.y,
+                        capsule(k),
+                        back,
+                        swap_at == Some(k),
+                        ua.dot(ub)
+                    );
+                }
                 let t = if back { (ua - ub).norm() } else { (ua + ub).norm() };
                 let n = left_of(t);
                 let h = (via_d + via_gap) / 2.0;
@@ -1132,6 +1202,10 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                     }
                 } else {
                     (near, far) = (c + n * h, c - n * h);
+                    // (a band that turns nearly square could turn the other way in the end)
+                    if ua.dot(ub).abs() >= 0.2 {
+                        side.push((pair.p, c, n * h));
+                    }
                     el.push(Elem::Line(point_at_end(&cl), near));
                     er.push(Elem::Line(point_at_end(&cr), far));
                     lead_l.clear();
@@ -1149,6 +1223,7 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                         layer: None,
                         origin: None,
                         resting: false,
+                        half: Default::default(),
                     });
                 }
                 if swap {
@@ -1161,7 +1236,7 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                     std::mem::swap(&mut lead_l, &mut lead_r);
                 }
                 rep.vias += 1;
-                reach_start = Some(disc + 0.02);
+                reach_start = Some(joint_trim);
             }
             tuned.push(PairPath {
                 report: pi,
@@ -1195,6 +1270,7 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
         reports,
         unfinished,
         paths: tuned,
+        side,
     }
 }
 
@@ -1230,6 +1306,9 @@ struct Split {
     reports: Vec<PairReport>,
     unfinished: Vec<String>,
     paths: Vec<PairPath>,
+    /// The joints with vias side by side: wide track, centre and the half line to the via of
+    /// the left track.
+    side: Vec<(NetId, Point, Point)>,
 }
 
 fn track_len(t: &Track) -> f64 {
@@ -1864,6 +1943,36 @@ pub fn route_pairs(
     } else {
         board.with_offsets(&res.offsets)
     };
+    if cfg.via_pairs {
+        let t0 = std::time::Instant::now();
+        let made = pair_vias(&real, &merged, &mut res.geometry);
+        if made > 0 {
+            let moved;
+            let mb = if res.offsets.is_empty() {
+                &merged.board
+            } else {
+                moved = merged.board.with_offsets(&res.offsets);
+                &moved
+            };
+            // the wide tracks with via pairs take the room the circles leave; the rest sleeps
+            // until they come too close
+            let with: Vec<NetId> = res
+                .geometry
+                .vias
+                .iter()
+                .filter(|v| v.is_pair())
+                .map(|v| v.net)
+                .collect();
+            for t in res.geometry.tracks.iter_mut() {
+                t.resting = !with.contains(&t.net);
+            }
+            for v in res.geometry.vias.iter_mut() {
+                v.resting = !with.contains(&v.net);
+            }
+            crate::relax::relax(mb, &sub, &mut res.geometry, &crate::relax::RelaxConfig::default());
+        }
+        eprintln!("via pairs: {made} side by side, {:.1} s", t0.elapsed().as_secs_f64());
+    }
     if let Some(tc) = cfg.room.as_ref().filter(|_| !board.match_rules.is_empty()) {
         let t0 = std::time::Instant::now();
         // the lengths of the real tracks decide who needs room, the band makes it
@@ -1960,6 +2069,7 @@ pub fn route_pairs(
         mut reports,
         unfinished,
         paths,
+        ..
     } = split(&real, &merged, &res.geometry);
     for (p, why) in &merged.skipped {
         reports.push(PairReport {
@@ -2536,6 +2646,61 @@ mod tests {
             assert_eq!(res.geometry.tracks.iter().filter(|t| t.net == 1).count(), 1);
             assert!(crate::check::check(&b, &res.geometry).is_empty());
         }
+    }
+
+    /// With the pads of one end on the bottom the band changes layers: the vias stand side by
+    /// side, and as a via pair they take the capsule around them instead of the circle.
+    #[test]
+    fn vias_side_by_side_become_a_via_pair() {
+        let mut b = pair_board();
+        for pin in [1, 3] {
+            b.pins[pin].layers = LayerSet::single(1);
+            let o = b.pins[pin].obstacles[0];
+            b.obstacles[o].layers = LayerSet::single(1);
+        }
+        let search = SearchConfig {
+            population: 2,
+            generations: 0,
+            geometry_generations: 0,
+            frames: false,
+            progress: None,
+            seed: None,
+            open_end: None,
+            air: 0.0,
+            prefer_width: 0.0,
+            open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
+        };
+        let m = merge(&b, true, false);
+        let (_, mut res) = route_board(&m.board, &SubstrateConfig::default(), &RouterConfig::default(), &search);
+        let circle = res
+            .geometry
+            .vias
+            .iter()
+            .find(|v| v.net == m.pairs[0].p)
+            .unwrap()
+            .diameter;
+        assert_eq!(pair_vias(&b, &m, &mut res.geometry), 1);
+        let v = res.geometry.vias.iter().find(|v| v.net == m.pairs[0].p).unwrap();
+        // two vias of 0.6 mm with their gap: 0.6 + 0.15 + 0.6 long, 0.6 wide
+        assert!(v.is_pair() && v.diameter < circle, "{v:?} {circle}");
+        let (_, res, rep) = route_pairs(
+            &b,
+            &SubstrateConfig::default(),
+            &RouterConfig::default(),
+            &search,
+            &PairConfig {
+                all: true,
+                via_pairs: true,
+                ..PairConfig::default()
+            },
+        );
+        assert!(res.stats.unrouted.is_empty(), "{:?}", res.stats.unrouted);
+        assert!(rep[0].wide && rep[0].vias == 1 && rep[0].swaps == 0, "{:?}", rep[0]);
+        assert!(
+            crate::check::check(&b, &res.geometry).is_empty(),
+            "{:?}",
+            crate::check::check(&b, &res.geometry)
+        );
     }
 
     #[test]

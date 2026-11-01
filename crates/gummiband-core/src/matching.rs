@@ -670,6 +670,7 @@ pub fn kept_geometry(board: &Board) -> Geometry {
                     layer: None,
                     origin: None,
                     resting: true,
+                    half: Default::default(),
                 });
                 continue;
             }

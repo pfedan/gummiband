@@ -89,7 +89,29 @@ enum Piece {
         /// Drill diameter (0 for a branch point without hole).
         drill: f64,
         net: NetId,
+        /// A pair of vias at c - half and c + half (zero: one via at c); r and drill are those
+        /// of each.
+        half: Point,
     },
+}
+
+/// The distance between the centres (lines) of two vias or via pairs.
+fn vias_dist(c1: Point, h1: Point, c2: Point, h2: Point) -> f64 {
+    match (h1 == Point::default(), h2 == Point::default()) {
+        (true, true) => c1.dist(c2),
+        (false, true) => via_dist(c2, c1, h1),
+        (true, false) => via_dist(c1, c2, h2),
+        (false, false) => seg_seg_dist(c1 - h1, c1 + h1, c2 - h2, c2 + h2),
+    }
+}
+
+/// The distance of point p to the centre (line) of a via or via pair.
+fn via_dist(p: Point, c: Point, half: Point) -> f64 {
+    if half == Point::default() {
+        p.dist(c)
+    } else {
+        point_seg_dist(p, c - half, c + half)
+    }
 }
 
 impl Piece {
@@ -101,8 +123,9 @@ impl Piece {
                 r.add(b);
                 r.grow(rr)
             }
-            Piece::Via { c, r: rr, .. } => {
-                r.add(c);
+            Piece::Via { c, r: rr, half, .. } => {
+                r.add(c - half);
+                r.add(c + half);
                 r.grow(rr)
             }
         }
@@ -133,11 +156,13 @@ impl<'a> Copper<'a> {
         }
         // (a branch point of soft tracks has no copper of its own)
         for v in geo.vias.iter().filter(|v| v.drill > 0.0) {
+            let h = if v.is_pair() { v.half.len() } else { 0.0 };
             pieces.push(Piece::Via {
                 c: v.at,
-                r: v.diameter / 2.0,
-                drill: v.drill,
+                r: v.diameter / 2.0 - h,
+                drill: v.drill - 2.0 * h,
                 net: v.net,
+                half: v.half,
             });
         }
         let mut idx = GridIndex::new(board.bbox().grow(5.0), 1.0);
@@ -172,6 +197,7 @@ impl<'a> Copper<'a> {
             r: d / 2.0,
             drill,
             net,
+            half: Point::default(),
         });
         segs.chain(vias).all(|p| self.violations(&p, None).is_empty())
     }
@@ -189,6 +215,11 @@ impl<'a> Copper<'a> {
         };
         let shape = match *p {
             Piece::Seg { a, b, r, .. } => Shape::Capsule { a, b, r },
+            Piece::Via { c, r, half, .. } if half != Point::default() => Shape::Capsule {
+                a: c - half,
+                b: c + half,
+                r,
+            },
             Piece::Via { c, r, .. } => Shape::Circle { c, r },
         };
         let at = match *p {
@@ -197,28 +228,30 @@ impl<'a> Copper<'a> {
         };
         let bb = p.bbox().grow(1.0);
         // board edge
-        let edge = match *p {
-            Piece::Seg { a, b, r, .. } => {
-                board
-                    .outline
-                    .iter()
-                    .map(|o| {
-                        o.edges()
-                            .map(|(c, d)| seg_seg_dist(a, b, c, d))
-                            .fold(f64::INFINITY, f64::min)
-                    })
-                    .fold(f64::INFINITY, f64::min)
-                    - r
-            }
-            Piece::Via { c, r, .. } => {
-                board
-                    .outline
-                    .iter()
-                    .map(|o| o.boundary_dist(c))
-                    .fold(f64::INFINITY, f64::min)
-                    - r
-            }
+        let line = match *p {
+            Piece::Seg { a, b, .. } => Some((a, b)),
+            Piece::Via { c, half, .. } if half != Point::default() => Some((c - half, c + half)),
+            Piece::Via { .. } => None,
         };
+        let r = match *p {
+            Piece::Seg { r, .. } | Piece::Via { r, .. } => r,
+        };
+        let edge = match line {
+            Some((a, b)) => board
+                .outline
+                .iter()
+                .map(|o| {
+                    o.edges()
+                        .map(|(c, d)| seg_seg_dist(a, b, c, d))
+                        .fold(f64::INFINITY, f64::min)
+                })
+                .fold(f64::INFINITY, f64::min),
+            None => board
+                .outline
+                .iter()
+                .map(|o| o.boundary_dist(at))
+                .fold(f64::INFINITY, f64::min),
+        } - r;
         if edge < board.rules.edge_clearance - 1e-4 {
             out.push(Violation {
                 what: "edge".into(),
@@ -232,11 +265,11 @@ impl<'a> Copper<'a> {
         for j in self.oidx.query(&bb) {
             let o = &board.obstacles[j as usize];
             // hole to hole holds for every net, the own one too (KiCad's hole_to_hole)
-            if let (Piece::Via { c, drill, .. }, Some(h)) = (p, o.hole)
+            if let (Piece::Via { c, drill, half, .. }, Some(h)) = (p, o.hole)
                 && *drill > 0.0
             {
                 let oc = o.shape.bbox().center();
-                let d = c.dist(oc) - h - drill / 2.0;
+                let d = via_dist(oc, *c, *half) - h - drill / 2.0;
                 // the same via, kept and in the geometry as well
                 let itself = o.net == Some(net) && c.dist(oc) < 1e-3;
                 if !itself && d < h2h - 1e-4 {
@@ -311,11 +344,18 @@ impl<'a> Copper<'a> {
             }
             let q = &self.pieces[j as usize];
             if let (
-                Piece::Via { c, drill, net: n1, .. },
+                Piece::Via {
+                    c,
+                    drill,
+                    net: n1,
+                    half: h1,
+                    ..
+                },
                 Piece::Via {
                     c: c2,
                     drill: d2,
                     net: n2,
+                    half: h2,
                     ..
                 },
             ) = (p, q)
@@ -323,7 +363,7 @@ impl<'a> Copper<'a> {
                 && *d2 > 0.0
                 && c.dist(*c2) > 1e-3
             {
-                let d = c.dist(*c2) - drill / 2.0 - d2 / 2.0;
+                let d = vias_dist(*c, *h1, *c2, *h2) - drill / 2.0 - d2 / 2.0;
                 if d < h2h - 1e-4 {
                     out.push(Violation {
                         what: format!(
@@ -348,8 +388,26 @@ impl<'a> Copper<'a> {
                         net: n2,
                     },
                 ) => (*n2, seg_seg_dist(*a, *b, *c, *d) - r - r2, layer == l2),
-                (Piece::Seg { a, b, r, .. }, Piece::Via { c, r: r2, net: n2, .. })
-                | (Piece::Via { c, r: r2, net: n2, .. }, Piece::Seg { a, b, r, .. }) => {
+                (
+                    Piece::Seg { a, b, r, .. },
+                    Piece::Via {
+                        c,
+                        r: r2,
+                        net: n2,
+                        half,
+                        ..
+                    },
+                )
+                | (
+                    Piece::Via {
+                        c,
+                        r: r2,
+                        net: n2,
+                        half,
+                        ..
+                    },
+                    Piece::Seg { a, b, r, .. },
+                ) => {
                     let n = if matches!(p, Piece::Via { .. }) {
                         match q {
                             Piece::Seg { net, .. } => *net,
@@ -358,14 +416,23 @@ impl<'a> Copper<'a> {
                     } else {
                         *n2
                     };
-                    (n, point_seg_dist(*c, *a, *b) - r - r2, true)
+                    let d = if *half == Point::default() {
+                        point_seg_dist(*c, *a, *b)
+                    } else {
+                        seg_seg_dist(*a, *b, *c - *half, *c + *half)
+                    };
+                    (n, d - r - r2, true)
                 }
                 (
-                    Piece::Via { c, r, .. },
+                    Piece::Via { c, r, half: h1, .. },
                     Piece::Via {
-                        c: c2, r: r2, net: n2, ..
+                        c: c2,
+                        r: r2,
+                        net: n2,
+                        half: h2,
+                        ..
                     },
-                ) => (*n2, c.dist(*c2) - r - r2, true),
+                ) => (*n2, vias_dist(*c, *h1, *c2, *h2) - r - r2, true),
             };
             if qnet == net || !both_layers {
                 continue;
@@ -821,7 +888,53 @@ pub(crate) mod tests {
             layer: None,
             origin: None,
             resting: false,
+            half: Default::default(),
         }
+    }
+
+    /// A via pair is a capsule: a track passes its long side closer than the circle around it,
+    /// its ends count like round vias.
+    #[test]
+    fn a_via_pair_is_a_capsule() {
+        let mut b = crate::topo::tests::two_pad_board();
+        b.classes[0].clearance = 0.1;
+        b.nets.push(crate::board::Net {
+            name: "B".into(),
+            class: 0,
+            pins: Vec::new(),
+            planes: crate::board::LayerSet::default(),
+            priority: 0,
+        });
+        let track = |a: (f64, f64), c: (f64, f64)| Track {
+            width: 0.2,
+            neck_w: 0.2,
+            net: 1,
+            ..line(a, c, 0)
+        };
+        let pair = |half: Point| crate::realize::Via {
+            at: pt(5., 7.5),
+            diameter: 1.5,
+            drill: 1.2,
+            half,
+            ..via(5.)
+        };
+        // 0.65 mm from the line of the vias: 0.3 mm copper, 0.1 mm clearance, 0.1 mm track
+        let side = Geometry {
+            tracks: vec![track((5.65, 6.5), (5.65, 8.5))],
+            vias: vec![pair(pt(0., 0.45))],
+        };
+        assert!(check(&b, &side).is_empty(), "{:?}", check(&b, &side));
+        let round = Geometry {
+            vias: vec![pair(pt(0., 0.))],
+            ..side.clone()
+        };
+        assert!(!check(&b, &round).is_empty());
+        // past the end of the line it is as wide as a via
+        let end = Geometry {
+            tracks: vec![track((4., 8.45), (6., 8.45))],
+            vias: vec![pair(pt(0., 0.45))],
+        };
+        assert!(!check(&b, &end).is_empty());
     }
 
     /// Hole to hole holds for the own net too: a routed via next to a locked via of its net, and

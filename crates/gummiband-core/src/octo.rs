@@ -692,6 +692,7 @@ pub fn octilinear_copper(board: &mut Board, nets: &[String]) -> (Geometry, crate
             layer: n.layer,
             origin: Some(i as u32),
             resting: true,
+            half: Default::default(),
         });
     }
     let stats = octilinear(board, &mut geo);

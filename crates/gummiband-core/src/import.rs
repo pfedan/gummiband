@@ -891,6 +891,7 @@ impl Router<'_> {
                     layer: node.and_then(|n| soft.nodes[n as usize].layer),
                     origin: node,
                     resting: node.is_some(),
+                    half: Default::default(),
                 }
             })
             .collect();

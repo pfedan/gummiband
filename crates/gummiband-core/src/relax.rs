@@ -7,7 +7,7 @@
 use rayon::prelude::*;
 
 use crate::board::{Board, LayerId, LayerSet, ObstacleKind};
-use crate::geom::{Point, Rect, Shape, point_seg_dist, point_seg_offset, pt};
+use crate::geom::{Point, Rect, Shape, point_seg_dist, point_seg_offset, pt, seg_seg_dist, seg_seg_nearest};
 use crate::index::{GridIndex, PointGrid, axis_cell};
 use crate::prof::{self, Slot};
 use crate::realize::{Elem, Geometry, Track, Via};
@@ -661,10 +661,36 @@ pub fn relax_while(
         .map(|v| (v.at, v.diameter / 2.0, v.net, clr(v.net)))
         .collect();
     let max_vr = vias.iter().map(|v| v.1).fold(0.0, f64::max);
+    // a via pair is a capsule: its line turns with the tracks that end on it, its vias are as
+    // wide as the circle around it less the line (round vias: no line, the circle)
+    let mut halves: Vec<Point> = geo.vias.iter().map(|v| v.half).collect();
+    let any_pair = geo.vias.iter().any(|v| v.is_pair());
+    let pair_r: Vec<f64> = geo
+        .vias
+        .iter()
+        .map(|v| {
+            if v.is_pair() {
+                v.diameter / 2.0 - v.half.len()
+            } else {
+                v.diameter / 2.0
+            }
+        })
+        .collect();
     let max_drill = drills_max(geo);
     let edge_clr = board.rules.edge_clearance;
     let routing = board.routing_layers();
     let drills: Vec<f64> = geo.vias.iter().map(|v| v.drill).collect();
+    let pair_drills: Vec<f64> = geo
+        .vias
+        .iter()
+        .map(|v| {
+            if v.is_pair() {
+                v.drill - 2.0 * v.half.len()
+            } else {
+                v.drill
+            }
+        })
+        .collect();
     // the planes each via reaches, and how near to their border it may come
     let via_planes: Vec<Vec<(&crate::board::Plane, f64)>> = geo
         .vias
@@ -693,6 +719,19 @@ pub fn relax_while(
     let mut via_awake: Vec<bool> = geo.vias.iter().map(|v| !v.resting).collect();
     let lazy = awake.iter().chain(&via_awake).any(|a| !a);
     let via_layer: Vec<Option<LayerId>> = geo.vias.iter().map(|v| v.layer).collect();
+    // per via pair the tracks that end on it (and whether with their start)
+    let mut via_legs: Vec<Vec<(usize, bool)>> = vec![Vec::new(); vias.len()];
+    if any_pair {
+        for (ti, (a, b)) in ends.iter().enumerate() {
+            for (v, start) in [(a, true), (b, false)] {
+                if let Some(v) = *v
+                    && geo.vias[v].is_pair()
+                {
+                    via_legs[v].push((ti, start));
+                }
+            }
+        }
+    }
     // per via the layers and widths of the tracks that end on it
     let mut via_tracks: Vec<Vec<(_, f64)>> = vec![Vec::new(); vias.len()];
     for (t, (a, b)) in geo.tracks.iter().zip(&ends) {
@@ -717,30 +756,33 @@ pub fn relax_while(
     let annealing = |it: usize| it * 4 >= cfg.iterations * 3;
     // sleeping copper, vias of one layer and fitted widths stay on the CPU
     #[cfg(feature = "gpu")]
-    let mut on_gpu =
-        (cfg.gpu && !lazy && via_layer.iter().all(Option::is_none) && geo.tracks.iter().all(|t| t.fitted.is_empty()))
-            .then(|| {
-                let half: Vec<f64> = geo.tracks.iter().map(half_w).collect();
-                let clrs: Vec<f64> = (0..board.nets.len() as u32).map(clr).collect();
-                gpu::GpuRelax::new(gpu::Setup {
-                    board,
-                    geo,
-                    cfg,
-                    origin: (bounds.min + bounds.max) * 0.5,
-                    cells: &cells,
-                    layer_cells: &layer_cells,
-                    near_obs: &near_obs,
-                    obs_polys: &sub.shared.obs_polys,
-                    near_edge: &near_edge,
-                    net_clr: &net_clr,
-                    half_w: &half,
-                    clr: &clrs,
-                    max_clr,
-                    max_vr,
-                    via_grid: &via_grid,
-                })
-            })
-            .flatten();
+    let mut on_gpu = (cfg.gpu
+        && !lazy
+        && !any_pair
+        && via_layer.iter().all(Option::is_none)
+        && geo.tracks.iter().all(|t| t.fitted.is_empty()))
+    .then(|| {
+        let half: Vec<f64> = geo.tracks.iter().map(half_w).collect();
+        let clrs: Vec<f64> = (0..board.nets.len() as u32).map(clr).collect();
+        gpu::GpuRelax::new(gpu::Setup {
+            board,
+            geo,
+            cfg,
+            origin: (bounds.min + bounds.max) * 0.5,
+            cells: &cells,
+            layer_cells: &layer_cells,
+            near_obs: &near_obs,
+            obs_polys: &sub.shared.obs_polys,
+            near_edge: &near_edge,
+            net_clr: &net_clr,
+            half_w: &half,
+            clr: &clrs,
+            max_clr,
+            max_vr,
+            via_grid: &via_grid,
+        })
+    })
+    .flatten();
     // the last quarter resolves clearances on the CPU: there tracks and vias have to answer each
     // other round by round, and f64 and the dirty cells count
     #[cfg(feature = "gpu")]
@@ -882,6 +924,10 @@ pub fn relax_while(
                 if !via_awake[vi] || (on_gpu_now && !starts_batch(it)) {
                     return vc;
                 }
+                let half = halves[vi];
+                let pair = half != Point::default();
+                // the radius of the copper around the centre (a pair: around its line)
+                let cr = if pair { pair_r[vi] } else { vr };
                 let mut push = pt(0.0, 0.0);
                 for oi in sub.shared.obs_index.query_point(vc, vr + 1.0) {
                     let o = &board.obstacles[oi as usize];
@@ -906,31 +952,41 @@ pub fn relax_while(
                                 .filter(|(l, _)| tracks && o.layers.has(*l))
                                 .map(|(_, w)| w / 2.0)
                                 .fold(f64::NEG_INFINITY, f64::max);
-                            let r = if no_vias { vr.max(ends) } else { ends };
+                            let r = if no_vias { cr.max(ends) } else { ends };
                             if r == f64::NEG_INFINITY {
                                 continue;
                             }
                             crate::board::KEEPOUT_GAP + r
                         }
-                        ObstacleKind::Hole => board.hole_gap(vn) + vr,
-                        _ => o.clearance.max(vclr).max(board.item_gap(vn, o.net)) + vr,
+                        ObstacleKind::Hole => board.hole_gap(vn) + cr,
+                        _ => o.clearance.max(vclr).max(board.item_gap(vn, o.net)) + cr,
                     } + cfg.margin;
                     let poly = &sub.shared.obs_polys[oi as usize];
-                    let inside = poly.contains(vc);
-                    let (d, q) = nearest_on_poly(poly, vc);
+                    let (p, d, q, inside) = if pair {
+                        pair_near_poly(poly, vc, half, false)
+                    } else {
+                        let inside = poly.contains(vc);
+                        let (d, q) = nearest_on_poly(poly, vc);
+                        (vc, d, q, inside)
+                    };
                     let d = if inside { -d } else { d };
                     if d < need {
-                        let dir = if inside { (q - vc).norm() } else { (vc - q).norm() };
+                        let dir = if inside { (q - p).norm() } else { (p - q).norm() };
                         push = push + dir * (need - d);
                     }
                 }
                 if cfg.via_edge {
                     let inside_board = board.inside(vc);
                     for o in &board.outline {
-                        let (d, q) = nearest_on_poly(o, vc);
-                        let need = edge_clr + vr + cfg.margin;
+                        let (p, d, q, inside_board) = if pair {
+                            pair_near_poly(o, vc, half, true)
+                        } else {
+                            let (d, q) = nearest_on_poly(o, vc);
+                            (vc, d, q, inside_board)
+                        };
+                        let need = edge_clr + cr + cfg.margin;
                         if d < need || !inside_board {
-                            let dir = if inside_board { (vc - q).norm() } else { (q - vc).norm() };
+                            let dir = if inside_board { (p - q).norm() } else { (q - p).norm() };
                             let d = if inside_board { d } else { -d };
                             push = push + dir * (need - d);
                         }
@@ -955,17 +1011,29 @@ pub fn relax_while(
                     if matches!((via_layer[vi], via_layer[vj]), (Some(a), Some(b)) if a != b) {
                         continue;
                     }
+                    let (half2, pair2) = (halves[vj], halves[vj] != Point::default());
+                    let (dri, drj) = if pair || pair2 {
+                        (pair_drills[vi], pair_drills[vj])
+                    } else {
+                        (drills[vi], drills[vj])
+                    };
                     let holes = if drills[vi] == 0.0 || drills[vj] == 0.0 {
                         0.0
                     } else {
-                        drills[vi] / 2.0 + drills[vj] / 2.0 + board.rules.hole_to_hole + cfg.margin
+                        dri / 2.0 + drj / 2.0 + board.rules.hole_to_hole + cfg.margin
                     };
+                    let r2 = if pair2 { pair_r[vj] } else { r2 };
                     let need = if n2 == vn {
                         holes
                     } else {
-                        (vr + r2 + vclr.max(clr2).max(board.item_gap(vn, Some(n2))) + cfg.margin).max(holes)
+                        (cr + r2 + vclr.max(clr2).max(board.item_gap(vn, Some(n2))) + cfg.margin).max(holes)
                     };
-                    let dv = vc - c2;
+                    let dv = if pair || pair2 {
+                        let (p, q) = seg_seg_nearest(vc - half, vc + half, c2 - half2, c2 + half2);
+                        p - q
+                    } else {
+                        vc - c2
+                    };
                     if surely_outside(dv.x, dv.y, need) {
                         continue;
                     }
@@ -1000,19 +1068,24 @@ pub fn relax_while(
                 for &key in near.iter() {
                     let pc = &pieces[key as u32 as usize];
                     let o = &geo.tracks[pc.track as usize];
-                    let need = vr
+                    let need = cr
                         + o.piece_width(pc.a, pc.b) / 2.0
                         + vclr.max(clr(o.net)).max(board.item_gap(vn, Some(o.net)))
                         + cfg.margin;
                     let ab = pc.b - pc.a;
-                    let l2 = ab.len2();
-                    let tt = if l2 > 0.0 {
-                        ((vc - pc.a).dot(ab) / l2).clamp(0.0, 1.0)
+                    let v = if pair {
+                        let (p, q) = seg_seg_nearest(vc - half, vc + half, pc.a, pc.b);
+                        p - q
                     } else {
-                        0.0
+                        let l2 = ab.len2();
+                        let tt = if l2 > 0.0 {
+                            ((vc - pc.a).dot(ab) / l2).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        let q = pc.a + ab * tt;
+                        vc - q
                     };
-                    let q = pc.a + ab * tt;
-                    let v = vc - q;
                     if surely_outside(v.x, v.y, need) {
                         continue;
                     }
@@ -1159,9 +1232,14 @@ pub fn relax_while(
                         hits.sort_unstable();
                         for &vi in hits.iter() {
                             let (vc, vr, vn, vclr) = vias[vi as usize];
+                            let half = halves[vi as usize];
+                            let (vr, v) = if half != Point::default() {
+                                (pair_r[vi as usize], point_seg_offset(p, vc - half, vc + half))
+                            } else {
+                                (vr, p - vc)
+                            };
                             let need =
                                 vr + max_of(max_of(vclr, c), board.item_gap(net, Some(vn))) + w / 2.0 + cfg.margin;
-                            let v = p - vc;
                             if surely_outside(v.x, v.y, need) {
                                 continue;
                             }
@@ -1290,6 +1368,23 @@ pub fn relax_while(
                 pts[n - 1] = vias[*b].0;
             }
         }
+        // via pairs turn with their tracks
+        let mut turned: Vec<usize> = Vec::new();
+        for (vi, legs) in via_legs.iter().enumerate() {
+            if let [(t1, s1), (t2, s2)] = legs[..]
+                && let (Some(e1), Some(e2)) = (
+                    crate::realize::leaving(&tracks[t1], s1),
+                    crate::realize::leaving(&tracks[t2], s2),
+                )
+            {
+                let h = halves[vi].len();
+                let new = crate::realize::pair_half([e1, e2], h, halves[vi]);
+                if (new - halves[vi]).len2() > 1e-18 {
+                    halves[vi] = new;
+                    turned.push(vi);
+                }
+            }
+        }
         dirty = before.map(|()| {
             let mut d = vec![false; cells.len()];
             // the points that moved come in runs along their tracks: one mark per cell will do
@@ -1326,6 +1421,10 @@ pub fn relax_while(
                     mark(v.0);
                 }
             }
+            for &vi in &turned {
+                mark(vias[vi].0 - halves[vi]);
+                mark(vias[vi].0 + halves[vi]);
+            }
             d
         });
         prof::add(Slot::RelaxDirty, t_dirty.elapsed().as_nanos() as u64);
@@ -1333,6 +1432,7 @@ pub fn relax_while(
     for (i, (v, (p, ..))) in geo.vias.iter_mut().zip(&vias).enumerate() {
         v.at = *p;
         v.resting = !via_awake[i];
+        v.half = halves[i];
     }
     let t_taut = std::time::Instant::now();
     let tracks: Vec<(Vec<Point>, Vec<Elem>)> = if cfg.taut {
@@ -1384,7 +1484,41 @@ pub fn relax_while(
             tap: t.tap,
         };
     }
+    if any_pair {
+        crate::realize::turn_pairs(geo);
+    }
     true
+}
+
+/// The point of a via pair's line (c - half to c + half) nearest to a polygon, its distance, the
+/// nearest point of the polygon and whether the point lies inside: a few rounds of nearest
+/// points both ways from the middle and the ends of the line. The free side is outside the
+/// polygon, or inside with `free_inside` (the board outline): the line point the least far
+/// into the other side or the nearest to it wins.
+fn pair_near_poly(poly: &crate::geom::Polygon, c: Point, half: Point, free_inside: bool) -> (Point, f64, Point, bool) {
+    let (a, b) = (c - half, c + half);
+    let mut best: Option<(f64, (Point, f64, Point, bool))> = None;
+    for start in [c, a, b] {
+        let mut p = start;
+        for _ in 0..3 {
+            let inside = poly.contains(p);
+            let (d, q) = nearest_on_poly(poly, p);
+            let free = inside == free_inside;
+            let signed = if free { d } else { -d };
+            if best.is_none_or(|(s, _)| signed < s) {
+                best = Some((signed, (p, d, q, inside)));
+            }
+            if !free {
+                break;
+            }
+            let np = q - point_seg_offset(q, a, b);
+            if np.dist(p) < 1e-9 {
+                break;
+            }
+            p = np;
+        }
+    }
+    best.unwrap().1
 }
 
 /// Wake the sleeping copper that the waking copper violates. A sleeping track that only has
@@ -1542,7 +1676,19 @@ fn taut(
     for (ti, p) in tracks.iter().enumerate() {
         add(&mut idx, &mut pieces, &mut owned, ti, p);
     }
-    let routing_vias: Vec<(Point, f64, u32)> = geo.vias.iter().map(|v| (v.at, v.diameter / 2.0, v.net)).collect();
+    // (centre, radius, net, half line of a pair)
+    let routing_vias: Vec<(Point, f64, u32, Point)> = geo
+        .vias
+        .iter()
+        .map(|v| {
+            let r = if v.is_pair() {
+                v.diameter / 2.0 - v.half.len()
+            } else {
+                v.diameter / 2.0
+            };
+            (v.at, r, v.net, v.half)
+        })
+        .collect();
     let m = cfg.margin * 0.5;
     for ti in 0..tracks.len() {
         let t = &geo.tracks[ti];
@@ -1597,17 +1743,22 @@ fn taut(
                     return false;
                 }
             }
-            for &(vc, vr, vn) in &routing_vias {
+            for &(vc, vr, vn, half) in &routing_vias {
                 if vn == net {
                     continue;
                 }
                 let need = vr + c.max(clr(vn)).max(board.item_gap(net, Some(vn))) + w / 2.0 + m;
-                let reach = need + 1e-9;
+                let pair = half != Point::default();
+                let reach = need + 1e-9 + if pair { half.len() } else { 0.0 };
                 if vc.x >= r.min.x - reach
                     && vc.x <= r.max.x + reach
                     && vc.y >= r.min.y - reach
                     && vc.y <= r.max.y + reach
-                    && point_seg_dist(vc, a, b) < need
+                    && if pair {
+                        seg_seg_dist(vc - half, vc + half, a, b) < need
+                    } else {
+                        point_seg_dist(vc, a, b) < need
+                    }
                 {
                     return false;
                 }
@@ -2566,5 +2717,102 @@ mod tests {
         for &(a, c, wd) in &w {
             assert!(zone.touches_seg(a, c) || wd == 0.75, "{w:?}");
         }
+    }
+
+    /// A via pair is a capsule across its band: a track of another net passes its long side
+    /// where the circle around both vias would push it away; and it turns with its tracks.
+    #[test]
+    fn a_via_pair_takes_less_room_than_its_circle_and_turns_with_its_tracks() {
+        use crate::board::{Layer, LayerSet, Net, NetClass};
+        use crate::geom::Polygon;
+        let mut b = Board::default();
+        b.rules.min_clearance = 0.1;
+        b.layers = ["F.Cu", "B.Cu"]
+            .iter()
+            .map(|n| Layer {
+                name: n.to_string(),
+                is_plane: false,
+            })
+            .collect();
+        b.outline = vec![Polygon::new(vec![pt(0., 0.), pt(20., 0.), pt(20., 10.), pt(0., 10.)])];
+        b.classes = vec![NetClass {
+            name: "Default".into(),
+            track_width: 0.2,
+            clearance: 0.1,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            ..Default::default()
+        }];
+        for name in ["A", "B"] {
+            b.nets.push(Net {
+                name: name.into(),
+                class: 0,
+                pins: Vec::new(),
+                planes: LayerSet::default(),
+                priority: 0,
+            });
+        }
+        let track = |a: Point, c: Point, layer: u8, net: u32| {
+            let elems = vec![Elem::Line(a, c)];
+            Track {
+                pts: crate::realize::flatten(&elems),
+                elems,
+                width: 0.2,
+                layer,
+                net,
+                necks: Vec::new(),
+                neck_w: 0.2,
+                origin: None,
+                resting: false,
+                fitted: Vec::new(),
+                pattern: None,
+                seg: u32::MAX,
+                tap: None,
+            }
+        };
+        // the band comes in on the top and goes back on the bottom: the vias stand across it
+        let c = pt(10., 5.);
+        let geo = |half: Point, neighbour: bool| {
+            let mut tracks = vec![track(pt(2., 5.), c, 0, 0), track(c, pt(2., 5.5), 1, 0)];
+            if neighbour {
+                tracks.push(track(pt(10.75, 1.), pt(10.75, 9.), 0, 1));
+            }
+            Geometry {
+                tracks,
+                vias: vec![Via {
+                    at: c,
+                    diameter: 1.5,
+                    drill: 1.2,
+                    net: 0,
+                    layer: None,
+                    origin: None,
+                    resting: false,
+                    half,
+                }],
+            }
+        };
+        let sub = Substrate::build(&b, &crate::topo::SubstrateConfig::default());
+        let gap = |half: Point| {
+            let mut g = geo(half, true);
+            relax(&b, &sub, &mut g, &RelaxConfig::default());
+            let x = g.tracks[2].pts.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+            (x - g.vias[0].at.x, g)
+        };
+        // two vias of 0.6 mm 0.9 mm apart: 0.3 mm copper and 0.1 mm clearance to a track of 0.2 mm
+        let (pair, g) = gap(pt(0., 0.45));
+        assert!(pair < 0.8, "{pair}");
+        assert!(
+            crate::check::check(&b, &g).is_empty(),
+            "{:?}",
+            crate::check::check(&b, &g)
+        );
+        // the circle around them: 0.75 mm, the track goes away
+        let (round, _) = gap(pt(0., 0.));
+        assert!(round > 0.85, "{round}");
+        // a pair that stands along the band turns across it
+        let mut g = geo(pt(0.45, 0.), false);
+        relax(&b, &sub, &mut g, &RelaxConfig::default());
+        let h = g.vias[0].half;
+        assert!(h.x.abs() < 0.1 && (h.len() - 0.45).abs() < 1e-9, "{h:?}");
     }
 }

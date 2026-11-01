@@ -285,6 +285,15 @@ track and split afterwards.
 4. Polarity: if the P pad lies on different sides at the two ends, the pair changes sides through
    one of its vias (vias in line instead of side by side). Without a via the pair is routed as two
    single nets.
+   Via pairs (experimental, `--via-pairs`): after the search a trial split tells which joints get
+   their vias side by side (`pairs::pair_vias`; not where the band turns nearly square). Each
+   such via of the wide track becomes a via pair (`Via::half`): a capsule along the line of the
+   two vias, `diameter` the circle around it. The check (`check.rs`) and the relaxation
+   (`relax.rs`: forces from the nearest points of the line, the line turned each round across
+   the bisector of the two tracks that end on it, `realize::pair_half`) see the capsule, and the
+   relaxation then runs once more for these wide tracks, the rest waking where they come too
+   close. The split takes the change of sides at a via pair that turns back (there side by side
+   is the change) and avoids the others, and leads the tracks to their vias within the capsule.
 5. Repair: clearance problems within 6 mm of an end take the tracks and vias away up to the last
    problem; the normal router connects pad and track end. If that finds no way, or only one more
    than three times as long as the straight line plus 3 mm (it would set the aim of its length

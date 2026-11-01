@@ -291,6 +291,7 @@ pub fn soft_geometry(board: &Board) -> Geometry {
             layer: n.layer,
             origin: Some(i as u32),
             resting: true,
+            half: Default::default(),
         });
     }
     geo
