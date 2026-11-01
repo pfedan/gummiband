@@ -51,6 +51,9 @@ pub struct RouterConfig {
     /// Hot spots (centre, extra clearance in mm) where an earlier geometry had violations: the
     /// capacity model asks for more room there, so the topology spreads out.
     pub hotspots: std::sync::Arc<Vec<(Point, f64)>>,
+    /// Nets that may leave or enter a pad through a via in it at any time, not only as the last
+    /// resort (empty by default; the experiment `GB_VIP_RETRY` fills it).
+    pub vip_nets: std::sync::Arc<Vec<NetId>>,
 }
 
 impl Default for RouterConfig {
@@ -71,6 +74,7 @@ impl Default for RouterConfig {
             via_in_pad: false,
             escape_cost: env("GB_ESCAPE", 0.0),
             hotspots: Default::default(),
+            vip_nets: Default::default(),
         }
     }
 }
@@ -1885,9 +1889,13 @@ impl<'a> Router<'a> {
             .and_then(|p| self.guides.get(p))
             .map(|g| g.as_slice());
         let net = conn.net;
-        // a via in a pad is a last resort, except for the nets of `GB_VIP_NETS` and, with
-        // `GB_VIP_LEARN`, the nets that needed one before (experiments)
-        let via_in_pad = self.cfg.via_in_pad || vip_net(&self.board.nets[net as usize].name) || vip_learned(net);
+        // a via in a pad is a last resort, except for the nets of `GB_VIP_NETS`, with
+        // `GB_VIP_LEARN` the nets that needed one before, and the nets of `cfg.vip_nets`
+        // (experiments)
+        let via_in_pad = self.cfg.via_in_pad
+            || vip_net(&self.board.nets[net as usize].name)
+            || vip_learned(net)
+            || self.cfg.vip_nets.contains(&net);
         let cls = self.board.class_of(net);
         let item = Item {
             net,

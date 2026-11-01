@@ -838,6 +838,33 @@ pub fn route_fixed(
             ));
         }
     }
+    // experiment `GB_VIP_RETRY`: the winner again, with a via in a pad at any time for the nets
+    // it left open, as if `GB_VIP_NETS` named them; it stays only if it routes more, or as many
+    // for less. The nets stay in its configuration, so the open end keeps them and repeats it.
+    if std::env::var("GB_VIP_RETRY").is_ok_and(|v| v == "1") && !best.failed.is_empty() {
+        let mut nets: Vec<NetId> = best.failed.iter().map(|&(n, _)| n).collect();
+        nets.sort_unstable();
+        nets.dedup();
+        let identity: Genome = best.order.iter().enumerate().map(|(i, &k)| (k, i as f64)).collect();
+        let cfg = RouterConfig {
+            vip_nets: std::sync::Arc::new(nets),
+            ..best.cfg.clone()
+        };
+        let c = geo_eval(evaluate(board, &sub, cfg, Some(&identity), best.stats.generation));
+        let better = c.stats.routed > best.stats.routed
+            || (c.stats.routed == best.stats.routed && full_cost(&c) < full_cost(&best));
+        eprintln!(
+            "via in pad retry: {} nets, {} instead of {} connections{}",
+            c.cfg.vip_nets.len(),
+            c.stats.routed,
+            best.stats.routed,
+            if better { ", taken" } else { "" }
+        );
+        if better {
+            best = c;
+            search.report("via in pad retry", &best.stats);
+        }
+    }
     // polish: a few clearance spots are often left that more rounds without tension resolve
     if best.stats.violations.unwrap_or(0) > 0 && std::env::var("GB_NO_POLISH").is_err() {
         let polish = relax::RelaxConfig {
