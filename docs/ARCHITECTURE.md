@@ -281,6 +281,18 @@ pad-to-die lengths; skew against the longest net of a group; coupling of exactly
 (within KiCad's int32 tolerance) and of arcs about nearly the same centre, if nothing lies between
 and the gap fits the rule. Tracks of tuning patterns stay out of the coupling, as in KiCad.
 
+Before that, still inside the geometry step, `tune::make_room` makes room: `room_wanted` gives
+every net (with `--pairs` every pair band, keyed by its P net) that is too short an extra width
+of twice the bump height its missing length needs, from the gain of one bump per `4r` of line
+(`2h + (2 pi - 8) r`), clamped to `[2r, amplitude]`. `push_aside` widens these tracks in steps of
+0.15 mm with `relax` (no tension, vias fixed, only the widened tracks and what they touch awake),
+keeps the old width as necks at the ends, near pads and zones and at spots that already had a
+violation, then pulls the moved tracks taut and restores the widths. `make_room_judged` keeps the
+result only if the judge (the router's clearance check, with `--pairs` on the split geometry)
+finds no spot that was not there before; otherwise it bisects the set and pushes the halves on
+top of what was accepted, at most 12 pushes. In `pairs.rs` this runs on the merged board, before
+the split.
+
 `tune.rs` runs after the routing (and after the 45 degree step) when the board has such rules.
 It computes an aim per net (length window first, then the skew groups against their longest
 net), then places meanders: per straight line of the track, slots of `4r` along the line
@@ -289,9 +301,11 @@ clearance to all foreign copper and the edge (bisection on the height), then one
 the heights, found by bisection, so that the gain matches the need; below the gain of one low
 bump, a single bump with a smaller radius. A pair whose two nets both need length is tuned on
 the lines where its two tracks run side by side: the bumps are planned for the centre line with
-the width of the whole band, and both tracks are its offsets, so both gain the same. The meander
-becomes a track of its own (the original track is split around it) and a `tune::Pattern`, which
-the writer turns into a KiCad `tuning_pattern` group (base line, target, settings, members).
+the width of the whole band, and both tracks are its offsets, so both gain about the same (the
+plan is lowered until neither net gets past its `ceiling`: window max, longest net of its
+group). The meander becomes a track of its own (the original track is split around it) and a
+`tune::Pattern`, which the writer turns into a KiCad `tuning_pattern` group (base line, target,
+settings, members).
 
 ## Search
 

@@ -143,8 +143,318 @@ pub fn aims(board: &Board, geo: &Geometry) -> HashMap<NetId, f64> {
     aim
 }
 
+/// Longest a net with an aim may become: below the `max` of its length windows and not past the
+/// longest net of its skew groups (within-pair skew rules aside, a band does not change those).
+/// A pair tuned as a band may lengthen its two nets by different amounts; this is how far.
+pub fn ceiling(board: &Board, geo: &Geometry, aims: &HashMap<NetId, f64>, net: NetId) -> f64 {
+    let mut cap = f64::INFINITY;
+    for r in board.match_rules.iter().filter(|r| r.nets.contains(&net)) {
+        match r.kind {
+            MatchKind::Length => {
+                if let Some(max) = r.value.max {
+                    cap = cap.min(max - matching_eps());
+                }
+            }
+            MatchKind::Skew if !r.within_pairs => {
+                let target = r
+                    .nets
+                    .iter()
+                    .map(|&n| {
+                        let l = matching::net_length(board, geo, n).total();
+                        l.max(aims.get(&n).copied().unwrap_or(0.0))
+                    })
+                    .fold(0.0, f64::max);
+                cap = cap.min(target);
+            }
+            _ => {}
+        }
+    }
+    cap.max(aims.get(&net).copied().unwrap_or(0.0))
+}
+
 fn matching_eps() -> f64 {
     0.0005
+}
+
+/// Turn radius of a meander of a track of width `w`: legs `2r` apart.
+fn turn_radius(board: &Board, net: NetId, w: f64, cfg: &TuneConfig) -> f64 {
+    (w + (cfg.spacing * w).max(board.class_of(net).clearance)) / 2.0
+}
+
+/// How much wider the tracks of each net that wants length should push, so that a meander finds
+/// room next to them: twice the bump height that gives the missing length on the straight lines
+/// the net has (a bump goes to one side, the push makes room on both). A pair in `bands` (both
+/// nets want length, the band is one track while the room is made) gets it under its P net;
+/// other pair nets are left out, their two tracks would push each other apart.
+pub fn room_wanted(board: &Board, geo: &Geometry, cfg: &TuneConfig, bands: &[(NetId, NetId)]) -> HashMap<NetId, f64> {
+    let aims = aims(board, geo);
+    let in_pair: Vec<NetId> = board.diff_pairs().into_iter().flat_map(|(p, n)| [p, n]).collect();
+    let need_of = |n: NetId| aims.get(&n).map(|&a| a - matching::net_length(board, geo, n).total());
+    // height of the bumps that gain `need` on `room` mm of slots with turn radius r
+    let height = |need: f64, room: f64, r: f64| {
+        let h = (4.0 * r * need / room - (2.0 * std::f64::consts::PI - 8.0) * r) / 2.0;
+        h.clamp(2.0 * r, cfg.amplitude.max(2.0 * r))
+    };
+    let slots = |len: f64, r: f64| {
+        let margin = (2.0 * r).max(0.3);
+        let k = ((len - 2.0 * margin) / (4.0 * r)).floor();
+        if k >= 1.0 { k * 4.0 * r } else { 0.0 }
+    };
+    let mut out = HashMap::new();
+    let mut nets: Vec<NetId> = aims.keys().copied().collect();
+    nets.sort();
+    for net in nets {
+        if in_pair.contains(&net) {
+            continue;
+        }
+        let Some(need) = need_of(net).filter(|&x| x > TOL) else {
+            continue;
+        };
+        let Some(w) = geo.tracks.iter().find(|t| t.net == net).map(|t| t.width) else {
+            continue;
+        };
+        let r = turn_radius(board, net, w, cfg);
+        let room: f64 = geo
+            .tracks
+            .iter()
+            .filter(|t| t.net == net)
+            .flat_map(|t| &t.elems)
+            .map(|e| match *e {
+                Elem::Line(a, b) => slots(a.dist(b), r),
+                Elem::Arc(..) => 0.0,
+            })
+            .sum();
+        if room > 0.0 {
+            out.insert(net, 2.0 * height(need, room, r));
+        }
+    }
+    for &(p, n) in bands {
+        let (Some(np), Some(nn)) = (need_of(p), need_of(n)) else {
+            continue;
+        };
+        let need = (np + nn) / 2.0;
+        if need <= TOL {
+            continue;
+        }
+        let sides = sides(geo, p, n);
+        let Some(first) = sides.first() else { continue };
+        let w = geo.tracks[first.tp].width.max(geo.tracks[first.tn].width);
+        let d = first.off.abs();
+        let r = (d + w + (cfg.spacing * w).max(board.class_of(p).clearance)) / 2.0;
+        let room: f64 = sides.iter().map(|s| slots(s.s1 - s.s0, r)).sum();
+        if room > 0.0 {
+            out.insert(p, 2.0 * height(need, room, r));
+        }
+    }
+    out
+}
+
+/// Push the copper around the tracks of the nets in `extra` aside, as if those tracks were wider
+/// by `extra`: room for their meanders. Pushes without tension, in chains as far as that goes; a
+/// spot without room keeps the old width (a neck). Nothing may get worse at the real widths:
+/// None if the clearance check finds more spots or shorts than before.
+pub fn make_room(
+    board: &Board,
+    sub: &crate::topo::Substrate,
+    geo: &Geometry,
+    extra: &HashMap<NetId, f64>,
+) -> Option<Geometry> {
+    make_room_judged(board, sub, geo, extra, &|g| {
+        crate::check::spots(&crate::check::check(board, g))
+    })
+}
+
+/// [`make_room`] with the clearance spots of a geometry as `judge` finds them (for a board
+/// whose pairs are one wide track: the spots of the two tracks they become).
+pub fn make_room_judged(
+    board: &Board,
+    sub: &crate::topo::Substrate,
+    geo: &Geometry,
+    extra: &HashMap<NetId, f64>,
+    judge: &dyn Fn(&Geometry) -> Vec<crate::check::Spot>,
+) -> Option<Geometry> {
+    if extra.is_empty() {
+        return None;
+    }
+    let spots = judge;
+    let count = |s: &[crate::check::Spot]| (s.len(), s.iter().filter(|s| s.short).count());
+    let before = count(&spots(geo));
+    // all nets at once; where that leaves a new spot, each half on its own on top of what
+    // the other half got, down to single nets, within a budget of pushes
+    let mut nets: Vec<NetId> = extra.keys().copied().collect();
+    nets.sort();
+    let mut todo: Vec<Vec<NetId>> = vec![nets];
+    let mut cur = geo.clone();
+    let mut made = false;
+    let mut budget = 12;
+    while let Some(set) = todo.pop() {
+        if budget == 0 {
+            break;
+        }
+        budget -= 1;
+        let part: HashMap<NetId, f64> = set.iter().map(|n| (*n, extra[n])).collect();
+        let g = push_aside(board, sub, &cur, &part);
+        let after = count(&spots(&g));
+        if std::env::var("GB_TUNE_LOG").is_ok() {
+            eprintln!("room: {} nets, spots {before:?} before, {after:?} after", set.len());
+        }
+        if after.0 <= before.0 && after.1 <= before.1 {
+            cur = g;
+            made = true;
+        } else if set.len() > 1 {
+            let (x, y) = set.split_at(set.len() / 2);
+            todo.push(y.to_vec());
+            todo.push(x.to_vec());
+        }
+    }
+    made.then_some(cur)
+}
+
+fn push_aside(board: &Board, sub: &crate::topo::Substrate, geo: &Geometry, extra: &HashMap<NetId, f64>) -> Geometry {
+    let count = |g: &Geometry| crate::check::spots(&crate::check::check(board, g)).len();
+    let before = count(geo);
+    let mut g = geo.clone();
+    let plain: Vec<(f64, Vec<Rect>, f64)> = g.tracks.iter().map(|t| (t.width, t.necks.clone(), t.neck_w)).collect();
+    for t in &mut g.tracks {
+        if let Some(&e) = extra.get(&t.net) {
+            t.neck_w = t.neck_w.min(t.width);
+            // the ends stay narrow: they hang on pads and vias between other pins
+            let reach = e + 0.5;
+            for p in [t.pts[0], t.pts[t.pts.len() - 1]] {
+                let mut zone = Rect::empty();
+                zone.add(p);
+                t.necks.push(zone.grow(reach));
+            }
+            // and so do the stretches next to pads: those do not step aside, and the
+            // neighbours that pass them have nowhere to go
+            let near = e / 2.0 + t.width / 2.0 + board.class_of(t.net).clearance + 0.2;
+            let mut zones = Vec::new();
+            for w in t.pts.windows(2) {
+                let mut bb = Rect::empty();
+                bb.add(w[0]);
+                bb.add(w[1]);
+                let hit = board.obstacles.iter().any(|o| {
+                    o.layers.has(t.layer)
+                        && o.net != Some(t.net)
+                        && o.shape.bbox().overlaps(&bb.grow(near))
+                        && o.shape.dist_to_seg(w[0], w[1]) < near
+                });
+                if hit {
+                    zones.push(bb.grow(0.3));
+                }
+            }
+            t.necks.extend(zones);
+        }
+    }
+    let base = crate::relax::RelaxConfig::default();
+    let cfg = crate::relax::RelaxConfig {
+        iterations: 120,
+        tension: 0.0,
+        via_edge: false,
+        taut: false,
+        ..base.clone()
+    };
+    let wake = |g: &mut Geometry| {
+        // the rest sleeps until a push reaches it
+        g.tracks
+            .iter_mut()
+            .for_each(|t| t.resting = !extra.contains_key(&t.net));
+        g.vias.iter_mut().for_each(|v| v.resting = !extra.contains_key(&v.net));
+    };
+    // the tracks grow in small steps: a neighbour that a wide track overlaps by more than
+    // the clearance could be pushed through to the other side
+    let most = extra.values().copied().fold(0.0, f64::max);
+    let steps = (most / 0.15).ceil().max(1.0) as usize;
+    for k in 1..=steps {
+        for (t, p) in g.tracks.iter_mut().zip(&plain) {
+            if let Some(&e) = extra.get(&t.net) {
+                t.width = p.0 + e * k as f64 / steps as f64;
+            }
+        }
+        wake(&mut g);
+        let cfg = crate::relax::RelaxConfig {
+            iterations: 20,
+            ..cfg.clone()
+        };
+        crate::relax::relax(board, sub, &mut g, &cfg);
+    }
+    for _ in 0..4 {
+        wake(&mut g);
+        let t0 = std::time::Instant::now();
+        crate::relax::relax(board, sub, &mut g, &cfg);
+        let left = crate::check::spots(&crate::check::check(board, &g));
+        if std::env::var("GB_TUNE_LOG").is_ok() {
+            eprintln!("room round: {} spots, {:.1} s", left.len(), t0.elapsed().as_secs_f64());
+        }
+        if left.is_empty() {
+            break;
+        }
+        for v in &left {
+            let mut zone = Rect::empty();
+            zone.add(v.at);
+            let zone = zone.grow(0.6);
+            let nets = [Some(v.nets.0), v.nets.1];
+            for t in g
+                .tracks
+                .iter_mut()
+                .filter(|t| nets.contains(&Some(t.net)) && extra.contains_key(&t.net))
+            {
+                t.necks.push(zone);
+            }
+        }
+    }
+    // the pushed copper as rubber bands again around the wide tracks: a push in a chain
+    // leaves bulges that only make other nets longer, and the longest net of a group sets
+    // the length for all of it
+    // (only what moved: the rest stays exactly as the router left it)
+    for (t, o) in g.tracks.iter_mut().zip(&geo.tracks) {
+        t.resting = t.pts == o.pts && !extra.contains_key(&t.net);
+    }
+    for (v, o) in g.vias.iter_mut().zip(&geo.vias) {
+        v.resting = v.at == o.at;
+    }
+    let tight = crate::relax::RelaxConfig {
+        tension: base.tension,
+        ..cfg.clone()
+    };
+    crate::relax::relax(board, sub, &mut g, &tight);
+    // the shortcuts at the widths reached
+    let cfg = crate::relax::RelaxConfig {
+        iterations: 0,
+        margin: 2.0 * base.margin,
+        taut: true,
+        ..cfg
+    };
+    crate::relax::relax(board, sub, &mut g, &cfg);
+    g.tracks.iter_mut().for_each(|t| t.resting = false);
+    g.vias.iter_mut().for_each(|v| v.resting = false);
+    for (t, (w, necks, neck_w)) in g.tracks.iter_mut().zip(plain) {
+        t.width = w;
+        t.necks = necks;
+        t.neck_w = neck_w;
+    }
+    // what overlaps now settles at the real widths: first without tension, then the nets
+    // still in trouble as rubber bands again
+    for k in 0..3 {
+        let left = crate::check::spots(&crate::check::check(board, &g));
+        if left.len() <= before {
+            break;
+        }
+        let bad: Vec<NetId> = left.iter().flat_map(|v| [Some(v.nets.0), v.nets.1]).flatten().collect();
+        g.tracks.iter_mut().for_each(|t| t.resting = !bad.contains(&t.net));
+        g.vias.iter_mut().for_each(|v| v.resting = !bad.contains(&v.net));
+        let cfg = crate::relax::RelaxConfig {
+            iterations: 120,
+            tension: if k == 0 { 0.0 } else { base.tension },
+            via_edge: false,
+            taut: true,
+            ..base.clone()
+        };
+        crate::relax::relax(board, sub, &mut g, &cfg);
+    }
+    g.tracks.iter_mut().for_each(|t| t.resting = false);
+    g.vias.iter_mut().for_each(|v| v.resting = false);
+    g
 }
 
 /// Meander the nets that the rules want longer. Returns what was done per net.
@@ -183,8 +493,9 @@ pub fn tune(board: &Board, geo: &mut Geometry, cfg: &TuneConfig) -> TuneReport {
         let mut left = *need;
         if nets.len() == 2 {
             let aim = aims[&nets[0]].max(aims[&nets[1]]);
+            let caps = (ceiling(board, geo, &aims, nets[0]), ceiling(board, geo, &aims, nets[1]));
             let coupled = !sides(geo, nets[0], nets[1]).is_empty();
-            left -= tune_pair(board, geo, nets[0], nets[1], left, aim, cfg, &mut patterns);
+            left -= tune_pair(board, geo, nets[0], nets[1], left, aim, caps, cfg, &mut patterns);
             coupled_nets.extend(nets.iter().copied());
             // a pair that does not run side by side anywhere: each net on its own (a coupled
             // pair stays as it is, meanders of one track would break its coupling and skew)
@@ -730,6 +1041,7 @@ pub fn tune_pair(
     n: NetId,
     need: f64,
     aim: f64,
+    caps: (f64, f64),
     cfg: &TuneConfig,
     patterns: &mut Vec<Pattern>,
 ) -> f64 {
@@ -765,18 +1077,39 @@ pub fn tune_pair(
             let c0 = pa + u * s.s0 + left_n * (s.off / 2.0);
             let c1 = pa + u * s.s1 + left_n * (s.off / 2.0);
             let hw = d / 2.0 + w / 2.0;
-            let Some(plan) = plan(&room, geo, c0, c1, tp.layer, hw, r, left, cfg) else {
+            // the outer track of a turn gains more than the inner one: neither may get past
+            // its ceiling (the window's max, the longest net of its group)
+            let lp = caps.0 - matching::net_length(board, geo, p).total();
+            let ln = caps.1 - matching::net_length(board, geo, n).total();
+            let mut want = left;
+            let mut found = None;
+            for _ in 0..4 {
+                let Some(plan) = plan(&room, geo, c0, c1, tp.layer, hw, r, want, cfg) else {
+                    break;
+                };
+                if plan.gain <= 1e-6 {
+                    break;
+                }
+                let centre = realize_plan(c0, c1, &plan, cfg.style);
+                // P lies to the right of the centre line if N is on the left of P
+                let on_p = offset(&centre, -s.off / 2.0);
+                let on_n = offset(&centre, s.off / 2.0);
+                let gain_p = on_p.iter().map(elem_len).sum::<f64>() - (s.s1 - s.s0);
+                let gain_n = on_n.iter().map(elem_len).sum::<f64>() - (s.s1 - s.s0);
+                let over = (gain_p - lp).max(gain_n - ln);
+                found = Some((on_p, on_n, gain_p, gain_n));
+                if over <= TOL {
+                    break;
+                }
+                want -= over;
+                found = None;
+                if want <= TOL {
+                    break;
+                }
+            }
+            let Some((on_p, on_n, gain_p, gain_n)) = found else {
                 continue;
             };
-            if plan.gain <= 1e-6 {
-                continue;
-            }
-            let centre = realize_plan(c0, c1, &plan, cfg.style);
-            // P lies to the right of the centre line if N is on the left of P
-            let on_p = offset(&centre, -s.off / 2.0);
-            let on_n = offset(&centre, s.off / 2.0);
-            let gain_p = on_p.iter().map(elem_len).sum::<f64>() - (s.s1 - s.s0);
-            let gain_n = on_n.iter().map(elem_len).sum::<f64>() - (s.s1 - s.s0);
             // P: start of its line, the meander, the rest of its line
             let p0 = pa + u * s.s0;
             let p1 = pa + u * s.s1;

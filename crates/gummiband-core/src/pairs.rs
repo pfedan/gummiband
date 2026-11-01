@@ -79,6 +79,9 @@ pub struct PairConfig {
     /// Couple every pair recognised by name, also those without a pair rule or class of their
     /// own (see [`Board::coupled_pairs`]).
     pub all: bool,
+    /// Make room for the meanders of the length tuning while the pairs are still one wide
+    /// track (see [`crate::tune::make_room`]), with the settings the tuning will use.
+    pub room: Option<crate::tune::TuneConfig>,
 }
 
 impl Default for PairConfig {
@@ -87,6 +90,7 @@ impl Default for PairConfig {
             skew: 0.1,
             zdiff: None,
             all: false,
+            room: None,
         }
     }
 }
@@ -1588,6 +1592,39 @@ pub fn route_pairs(
     } else {
         board.with_offsets(&res.offsets)
     };
+    if let Some(tc) = cfg.room.as_ref().filter(|_| !board.match_rules.is_empty()) {
+        let t0 = std::time::Instant::now();
+        // the lengths of the real tracks decide who needs room, the band makes it
+        let probe = split(&real, &merged, &res.geometry);
+        let bands: Vec<(NetId, NetId)> = merged.pairs.iter().map(|p| (p.p, p.n)).collect();
+        let want = crate::tune::room_wanted(&real, &probe.geo, tc, &bands);
+        if !want.is_empty() {
+            let moved;
+            let mb = if res.offsets.is_empty() {
+                &merged.board
+            } else {
+                moved = merged.board.with_offsets(&res.offsets);
+                &moved
+            };
+            // the two tracks of a moved band may not fit next to vias and pads where the band
+            // did: judged on the split tracks
+            let judge = |g: &Geometry| crate::check::spots(&crate::check::check(&real, &split(&real, &merged, g).geo));
+            let made = crate::tune::make_room_judged(mb, &sub, &res.geometry, &want, &judge);
+            eprintln!(
+                "room for meanders: {} nets and pairs, {}, {:.1} s",
+                want.len(),
+                if made.is_some() {
+                    "made"
+                } else {
+                    "none without new violations"
+                },
+                t0.elapsed().as_secs_f64()
+            );
+            if let Some(g) = made {
+                res.geometry = g;
+            }
+        }
+    }
     let Split {
         geo,
         mut reports,

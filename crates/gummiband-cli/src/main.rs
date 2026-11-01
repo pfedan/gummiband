@@ -683,6 +683,16 @@ fn main() -> Result<()> {
             if move_parts {
                 println!("movable parts: {}", b.movable.len());
             }
+            let tune_cfg = gummiband_core::tune::TuneConfig {
+                style: if angles == Angles::Deg45 {
+                    gummiband_core::tune::Style::Chamfer
+                } else {
+                    gummiband_core::tune::Style::Round
+                },
+                amplitude: tune_amplitude,
+                spacing: tune_spacing,
+            };
+            let tune_room = !no_tune && std::env::var("GB_NO_TUNE_ROOM").is_err();
             // the nets asked for, and the nets that give way when a connection finds no way
             let finished = gummiband_core::finish_nets(b, &nets, shove, give, |board| {
                 let out = if pairs {
@@ -690,6 +700,7 @@ fn main() -> Result<()> {
                         skew: pair_skew,
                         zdiff: pair_zdiff,
                         all: pair_all,
+                        room: tune_room.then(|| tune_cfg.clone()),
                     };
                     gummiband_core::pairs::route_pairs(board, &sub_cfg, &router_cfg, &search_cfg, &pair_cfg)
                 } else {
@@ -720,15 +731,6 @@ fn main() -> Result<()> {
                 given,
                 ..
             } = finished;
-            let tune_cfg = gummiband_core::tune::TuneConfig {
-                style: if angles == Angles::Deg45 {
-                    gummiband_core::tune::Style::Chamfer
-                } else {
-                    gummiband_core::tune::Style::Round
-                },
-                amplitude: tune_amplitude,
-                spacing: tune_spacing,
-            };
             let b = &routed_board;
             let mut res = res;
             let dt = t0.elapsed();
@@ -745,6 +747,28 @@ fn main() -> Result<()> {
                 shifted = b.with_offsets(&res.offsets);
                 &shifted
             };
+            // room for the meanders: the copper next to the nets that want length steps aside
+            // (the pairs make it while they are one wide track)
+            if !pairs && tune_room && !b.match_rules.is_empty() {
+                let t1 = std::time::Instant::now();
+                let want = gummiband_core::tune::room_wanted(b, &res.geometry, &tune_cfg, &[]);
+                if !want.is_empty() {
+                    let made = gummiband_core::tune::make_room(b, &sub, &res.geometry, &want);
+                    println!(
+                        "room for meanders: {} nets, {}, {:.1} s",
+                        want.len(),
+                        if made.is_some() {
+                            "made"
+                        } else {
+                            "none without new violations"
+                        },
+                        t1.elapsed().as_secs_f64()
+                    );
+                    if let Some(g) = made {
+                        res.geometry = g;
+                    }
+                }
+            }
             let octo = (angles == Angles::Deg45).then(|| {
                 let before = gummiband_core::check::check(b, &res.geometry).len();
                 let t1 = std::time::Instant::now();

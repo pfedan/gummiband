@@ -206,7 +206,17 @@ Lengths are measured as the KiCad DRC measures them: tracks (joined into runs, w
 via or a pad straightened), each via over the layers it really connects (the stackup distance),
 and the pad-to-die length of the pads. `gummiband lengths` prints this for any routed board.
 
-When such rules exist, the routed result gets meanders as a last step (after `--angles 45`):
+When such rules exist, the routing first makes room for the meanders, then gets them as a last
+step (after `--angles 45`):
+
+- Room: every net that is too short (a pair that both nets of want length as one band) gets a
+  wider track for the moment, as wide as the meander it needs (twice the bump height, from the
+  length it lacks and the room one bump gains), and the geometry step pushes the neighbours aside
+  in small steps. Only the widened nets and what they push move; near pads, vias and their ends
+  the tracks keep their width, so the breakout stays as it was. The pushed nets are pulled taut
+  again and get their widths back. If that leaves a clearance error that was not there before,
+  the set is halved and tried again, so the nets that find room keep it. With `--pairs` this
+  happens on the wide track of each pair, before it is split into its two nets.
 
 - Aims: a net below the `min` of its `length` rule goes into the window (to `opt`, else the
   middle); in a `skew` group every net more than `max` below the longest one goes to a quarter of
@@ -218,14 +228,15 @@ When such rules exist, the routed result gets meanders as a last step (after `--
   `--tune-spacing` track widths of air. The longest lines come first.
 - A differential pair whose two nets both need length is meandered as one band: the bumps are
   laid out for the centre line and both tracks follow at their distance, so the pair stays
-  coupled and its skew does not change.
+  coupled. The outer track of a turn gains a little more than the inner one; neither net may get
+  past the `max` of its length window or the longest net of its skew group.
 - Every meander is written as a KiCad tuning pattern (a `generated` group of type
   `tuning_pattern` with its base line, target and settings). In KiCad it can be selected, edited
   and tuned again like one drawn by hand; the DRC leaves its tracks out of the coupling of a pair,
   as for KiCad's own patterns.
 
-The meanders only use room the routing left. In a tight bundle there is often none, and a net
-stays short; the output names every net that did not reach its length (see
+In a tight bundle the room step cannot always push the neighbours aside without a new error, and
+a net stays short; the output names every net that did not reach its length (see
 [benchmarks](benchmarks.md#length-matching)).
 
 ## Vias
@@ -298,9 +309,10 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
   net is pulled towards the first, spacing only roughly kept. A pair is coupled only if a pair
   rule or a net class of its own marks it as one (`--pair-all` for all). Polarity awareness is
   not there yet.
-- **Length matching only uses room the routing left.** The router does not yet keep room free
-  for meanders, does not tune where a mismatch arises (at the bends or the breakout) and does not
-  shorten a net that is too long. In tight bundles nets stay short; see
+- **Length matching makes room only after routing.** The router itself does not keep room free
+  for meanders; the room comes from pushing neighbours aside afterwards, which a tight bundle
+  does not always allow. It does not tune where a mismatch arises (at the bends or the breakout)
+  and does not shorten a net that is too long. In tight bundles nets stay short; see
   [Length matching](#length-matching).
 - **Solder mask.** A through-hole pad keeps its mask margin on all layers, also where the mask
   does not open. Vias count as tented: a board that leaves them open gets no room around them for
