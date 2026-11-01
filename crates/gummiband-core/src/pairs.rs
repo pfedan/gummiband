@@ -1220,7 +1220,7 @@ fn tune(real: &Board, geo: &mut Geometry, paths: &[PairPath], limit: f64) -> Vec
         let (short, other) = if lp < ln { (path.p, path.n) } else { (path.n, path.p) };
         let mut need = (lp - ln).abs();
         let cls = real.class_of(path.p);
-        let limit = cls.diff_skew.map_or(limit, |s| s.min(limit));
+        let limit = real.pair_skew_limit(path.p, path.n).map_or(limit, |s| s.min(limit));
         if need > limit {
             let clr = cls.clearance.max(real.class_of(path.n).clearance);
             // the longest straight pieces first

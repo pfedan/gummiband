@@ -80,6 +80,7 @@ pub fn read_board(path: &Path, opts: &ReadOptions) -> Result<KicadBoard> {
         kb.board.net_hole_clearance = crate::dru::hole_clearances(&kb.board, &dru).into_iter().collect();
         crate::dru::apply_width_rules(&mut kb.board, &dru);
         crate::dru::apply_pair_rules(&mut kb.board, &dru);
+        kb.board.match_rules = crate::dru::match_rules(&kb.board, &dru);
     }
     Ok(kb)
 }
@@ -107,6 +108,7 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
 
     r.read_layers(&root, opts);
     r.read_stackup(&root);
+    r.b.thickness = root.child("general").and_then(|g| g.child_f64("thickness")).unwrap_or(1.6);
     r.mask_margin = root
         .child("setup")
         .and_then(|s| s.child_f64("pad_to_mask_clearance"))
@@ -860,6 +862,9 @@ impl Reader {
                 size: (bb.width(), bb.height()),
             });
             self.b.nets[net as usize].pins.push(pin);
+            if let Some(d) = pad.child_f64("die_length").filter(|d| *d > 0.0) {
+                self.b.die_length.insert(pin, d);
+            }
         }
     }
 

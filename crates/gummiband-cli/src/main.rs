@@ -280,6 +280,18 @@ enum Cmd {
         #[arg(long)]
         svg: Option<PathBuf>,
     },
+    /// Measure a routed board as KiCad's DRC does: net lengths with vias and pad-to-die, the
+    /// coupled length of differential pairs, and the length, skew and uncoupled rules of the
+    /// `.kicad_dru`.
+    Lengths {
+        board: PathBuf,
+        /// Nets to list with their lengths (glob patterns), in addition to the rules.
+        #[arg(long, value_delimiter = ',')]
+        nets: Vec<String>,
+        /// Print JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove tracks, vias and outer copper zones (benchmark preparation).
     Strip {
         board: PathBuf,
@@ -292,6 +304,51 @@ enum Cmd {
         #[arg(long)]
         keep_zones: bool,
     },
+}
+
+/// Wildcard match as in KiCad rules (`*` and `?`).
+fn glob_match(pat: &str, s: &str) -> bool {
+    fn rec(p: &[u8], s: &[u8]) -> bool {
+        match (p.first(), s.first()) {
+            (None, None) => true,
+            (Some(b'*'), _) => rec(&p[1..], s) || (!s.is_empty() && rec(p, &s[1..])),
+            (Some(b'?'), Some(_)) => rec(&p[1..], &s[1..]),
+            (Some(a), Some(b)) if a == b => rec(&p[1..], &s[1..]),
+            _ => false,
+        }
+    }
+    rec(pat.as_bytes(), s.as_bytes())
+}
+
+/// The lines of the length, skew and uncoupled rules: one per rule, and one per net out of range.
+fn print_matching(rules: &[gummiband_core::matching::RuleMatch]) {
+    use gummiband_core::board::MatchKind;
+    if rules.is_empty() {
+        return;
+    }
+    println!("length rules: {}", gummiband_core::matching::summary(rules));
+    for r in rules {
+        let kind = match (r.kind, r.within_pairs) {
+            (MatchKind::Length, _) => "length",
+            (MatchKind::Skew, false) => "skew",
+            (MatchKind::Skew, true) => "skew within pairs",
+            (MatchKind::Uncoupled, _) => "uncoupled",
+            (MatchKind::Gap, _) => "gap",
+        };
+        let v = r.value;
+        let range = [("min", v.min), ("opt", v.opt), ("max", v.max)]
+            .iter()
+            .filter_map(|(k, x)| x.map(|x| format!("{k} {x}")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("  rule {} ({kind} {range}): {} of {} ok", r.rule, r.nets.len() - r.failed(), r.nets.len());
+        for n in r.nets.iter().filter(|n| !n.ok) {
+            match n.skew {
+                Some(s) => println!("    {}: {:.4} mm, skew {:+.4}", n.net, n.length, s),
+                None => println!("    {}: {:.4} mm", n.net, n.length),
+            }
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -1178,6 +1235,74 @@ fn main() -> Result<()> {
                     "move_part": r,
                 });
                 std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
+            }
+        }
+        Cmd::Lengths { board, nets, json } => {
+            let kb = read_board(
+                &board,
+                &ReadOptions {
+                    keep: KeepCopper::All,
+                    plane_layers: cli.plane_layers.clone(),
+                    ..Default::default()
+                },
+            )?;
+            let b = &kb.board;
+            let geo = gummiband_core::matching::kept_geometry(b);
+            let rules = gummiband_core::matching::check(b, &geo);
+            let glob = |pat: &str, s: &str| glob_match(pat, s);
+            let listed: Vec<(String, gummiband_core::matching::NetLength)> = b
+                .nets
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| nets.iter().any(|p| glob(p, &n.name)))
+                .map(|(i, n)| (n.name.clone(), gummiband_core::matching::net_length(b, &geo, i as u32)))
+                .collect();
+            let pairs: Vec<serde_json::Value> = b
+                .diff_pairs()
+                .into_iter()
+                .map(|(p, n)| {
+                    let gap = gummiband_core::matching::gap_rule(b, p);
+                    let (c, t) = gummiband_core::matching::coupling(b, &geo, p, n, gap);
+                    let lp = gummiband_core::matching::net_length(b, &geo, p).total();
+                    let ln = gummiband_core::matching::net_length(b, &geo, n).total();
+                    serde_json::json!({
+                        "p": b.nets[p as usize].name, "n": b.nets[n as usize].name,
+                        "length_p": lp, "length_n": ln, "skew": lp - ln,
+                        "coupled": c, "uncoupled": (t - c).max(0.0),
+                    })
+                })
+                .collect();
+            if json {
+                let nets_json: Vec<serde_json::Value> = listed
+                    .iter()
+                    .map(|(n, l)| serde_json::json!({"net": n, "length": l.total(), "tracks": l.tracks, "vias": l.vias, "die": l.die}))
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({"rules": rules, "pairs": pairs, "nets": nets_json}))?
+                );
+            } else {
+                for (n, l) in &listed {
+                    println!(
+                        "net {n}: {:.4} mm (tracks {:.4}, vias {:.4}, pad-to-die {:.4})",
+                        l.total(),
+                        l.tracks,
+                        l.vias,
+                        l.die
+                    );
+                }
+                for p in &pairs {
+                    println!(
+                        "pair {} / {}: {:.4} / {:.4} mm, skew {:.4}, uncoupled {:.4} mm",
+                        p["p"].as_str().unwrap_or(""),
+                        p["n"].as_str().unwrap_or(""),
+                        p["length_p"].as_f64().unwrap_or(0.0),
+                        p["length_n"].as_f64().unwrap_or(0.0),
+                        p["skew"].as_f64().unwrap_or(0.0),
+                        p["uncoupled"].as_f64().unwrap_or(0.0)
+                    );
+                }
+                print_matching(&rules);
             }
         }
         Cmd::Strip {
