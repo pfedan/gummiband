@@ -144,11 +144,12 @@ any machine and with any `--threads`; the thread count only changes the run time
 
 ```bash
 gummiband route board.kicad_pcb -o out.kicad_pcb --keep-locked \
-    --geometry-generations 3 --move-parts --fixed U1,Y1
+    --geometry-generations 3 --fixed U1,Y1
 ```
 
-With `--move-parts` the geometry generations may shift unlocked parts that sit next to clearance
-problems by a small amount to open a channel. The routed copper goes along like rubber bands:
+The geometry generations may shift unlocked parts that sit next to clearance problems or open
+connections by a small amount to open a channel (`--move-parts`, on by default when the whole
+board is routed; `--no-move-parts` keeps every part where it is). The routed copper goes along like rubber bands:
 the parts move in small steps, the tracks give way within their clearances, and a shift stops
 where nothing can give way any more. Only if that does not solve the problems is the search run
 again on the shifted board.

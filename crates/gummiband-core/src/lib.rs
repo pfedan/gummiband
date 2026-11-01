@@ -561,7 +561,11 @@ pub fn route_board(
         let v = check::check(b, &r.geometry);
         let shorts = v.iter().filter(|x| x.actual <= 0.0).count();
         let cost = r.stats.cost() + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0;
-        (r.stats.routed, cost, v.iter().map(|x| x.at).collect())
+        // places that ask for room: clearance problems, and the pins of open connections,
+        // where the parts around may step aside to let a track out
+        let mut hot: Vec<geom::Point> = v.iter().map(|x| x.at).collect();
+        hot.extend(open_pins(b, &r.stats.unrouted));
+        (r.stats.routed, cost, hot)
     };
     let (sub, res) = route_search(board, sub_cfg, base, search);
     if board.movable.is_empty() || search.geometry_generations == 0 {
@@ -1289,6 +1293,15 @@ pub(crate) fn follow_parts(from: &Board, to: &Board, geo: &Geometry) -> Geometry
     g
 }
 
+/// The pins open connections start from (`unrouted` as [`RunStats`] names them), on `b`.
+fn open_pins(b: &Board, unrouted: &[String]) -> Vec<geom::Point> {
+    unrouted
+        .iter()
+        .filter_map(|u| u.rsplit_once(" from ").map(|x| x.1))
+        .filter_map(|pin| b.pins.iter().find(|p| p.name == pin).map(|p| p.pos))
+        .collect()
+}
+
 /// New footprint offsets: movable parts with pads next to clearance problems step away from
 /// them (boldly, 0.15 to 0.5 mm per step), as long as the courtyards stay inside the board and
 /// apart from each other. `cur` is the board with the current `offsets` applied.
@@ -1309,10 +1322,13 @@ fn shift_parts(
         }
     }
     for h in spots {
+        // the part whose pin is the spot itself (an open connection) stays: its neighbours make
+        // the room
         let near: Vec<&String> = board
             .movable
             .iter()
             .filter(|f| cur.pins.iter().any(|p| &p.footprint == *f && p.pos.dist(h) < 1.5))
+            .filter(|f| !cur.pins.iter().any(|p| &p.footprint == *f && p.pos.dist(h) < 1e-6))
             .collect();
         if near.is_empty() {
             continue;

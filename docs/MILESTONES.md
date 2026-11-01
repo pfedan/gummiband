@@ -48,7 +48,9 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   give way any more. `gummiband move-part`, MCP `move_part` (default), and the shifts of
   `--move-parts`, which before jumped up to 0.5 mm at once and relaxed only once, and whose next
   round after a rejected new search started from a placement that did not match the copper.
-  Open: rotation with following copper, the plugin, parts that shove other parts along.
+  Since 2026-11-01 on by default (`--no-move-parts` switches it off), also in the plugin and in
+  MCP `route`, and open connections ask for room as well: the neighbours of their pins step
+  aside. Open: rotation with following copper, parts that shove other parts along.
 - Differential pairs: experimental option (`route --pairs`, see `docs/ARCHITECTURE.md`). Width and gap
   from net classes and custom rules per layer, skew tuning inside a pair, impedance estimate and
   `--pair-zdiff`. Measured on 2026-10-30: `diff_pairs` 99% coupled and clean in the KiCad DRC, Jetson

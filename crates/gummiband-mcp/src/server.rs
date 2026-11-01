@@ -364,6 +364,15 @@ pub struct RouteIn {
     pub geometry_generations: Option<usize>,
     /// Keep locked tracks and vias as fixed copper (default: as given to load_board).
     pub keep_locked: Option<bool>,
+    /// Let parts next to clearance problems and open connections shift a little while the
+    /// routed copper follows like rubber bands (default true without keep_all, false with it).
+    /// Locked footprints, connectors, modules, mounting holes, buttons and test points stay, as
+    /// do the references in `fixed`. The output has the footprints at their new positions, and
+    /// `moved` lists them.
+    pub move_parts: Option<bool>,
+    /// References that never move under move_parts.
+    #[serde(default)]
+    pub fixed: Vec<String>,
     /// Output .kicad_pcb (default: `<input>.routed.kicad_pcb` next to the input). The
     /// .kicad_pro and .kicad_dru are copied next to it if missing.
     pub output: Option<String>,
@@ -630,6 +639,8 @@ pub struct NetStatOut {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RouteOut {
     pub board: String,
+    /// Footprints that move_parts shifted, and by how much.
+    pub moved: Vec<MovedOut>,
     pub input: String,
     pub output: String,
     pub seconds: f64,
@@ -667,6 +678,13 @@ pub struct RouteOut {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+pub struct MovedOut {
+    pub reference: String,
+    pub dx_mm: f64,
+    pub dy_mm: f64,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct AnglesOut {
     /// Track length before and after the step.
     pub length_before_mm: f64,
@@ -1404,6 +1422,23 @@ fn route_blocking(
     // the nets left out of this call, for the result
     let (_, skipped) = apply_options(&kb.board, &options, &only);
     let (mut board, _) = apply_options(&kb.board, &options, &[]);
+    // parts move by default when the whole board is routed
+    let move_parts = p.move_parts.unwrap_or(p.keep_all != Some(true));
+    if move_parts {
+        if finishing && shove {
+            bail!("move_parts does not work with shove: set shove false, or leave move_parts out");
+        }
+        let movable = read_board(
+            &path,
+            &ReadOptions {
+                keep: if keep_locked { KeepCopper::Locked } else { KeepCopper::None },
+                move_parts: true,
+                fixed: p.fixed.clone(),
+                ..Default::default()
+            },
+        )?;
+        board.movable = movable.board.movable;
+    }
     let runs = p.runs.filter(|&r| r > 0).unwrap_or(gummiband_core::DEFAULT_RUNS);
     let t0 = std::time::Instant::now();
     if let (Some(z), Some(true)) = (p.pair_zdiff, p.pairs) {
@@ -1455,7 +1490,14 @@ fn route_blocking(
         given,
         ..
     } = finished;
-    let b = &routed;
+    // the copper was routed on the board with the parts where they ended up
+    let shifted;
+    let b = if res.offsets.is_empty() {
+        &routed
+    } else {
+        shifted = routed.with_offsets(&res.offsets);
+        &shifted
+    };
     let mut res = res;
     let angles_45 = angles_45.then(|| {
         let st = gummiband_core::octo::octilinear(b, &mut res.geometry);
@@ -1520,8 +1562,23 @@ fn route_blocking(
         items: changes.strip.clone(),
     };
     let ranges = write::strip_ranges(&kb, &opts);
-    std::fs::write(&output, write::patch(&kb, &ranges, &items))
-        .with_context(|| format!("writing {}", output.display()))?;
+    let text = write::patch(&kb, &ranges, &items);
+    let text = if res.offsets.is_empty() {
+        text
+    } else {
+        write::move_footprints(&text, &res.offsets, &kb.board.blocks)?
+    };
+    std::fs::write(&output, text).with_context(|| format!("writing {}", output.display()))?;
+    let mut moved: Vec<MovedOut> = res
+        .offsets
+        .iter()
+        .map(|(r, d)| MovedOut {
+            reference: r.clone(),
+            dx_mm: r3(d.x),
+            dy_mm: r3(d.y),
+        })
+        .collect();
+    moved.sort_by(|a, b| a.reference.cmp(&b.reference));
     let copied = external::copy_project_files(&path, &output);
 
     let net = |n: u32| b.nets[n as usize].name.clone();
@@ -1585,6 +1642,7 @@ fn route_blocking(
     }
     let st = &res.stats;
     let out = RouteOut {
+        moved,
         angles_45,
         coupling,
         notes,

@@ -135,10 +135,15 @@ enum Cmd {
         /// portfolio) for scripts and AI agents.
         #[arg(long)]
         report: Option<PathBuf>,
-        /// Let the geometry generations shift parts next to clearance problems (locked
-        /// footprints, connectors, modules and mounting holes stay).
-        #[arg(long)]
+        /// Let the geometry generations shift parts next to clearance problems and open
+        /// connections; the routed copper follows like rubber bands (locked footprints,
+        /// connectors, modules and mounting holes stay). On by default when the whole board is
+        /// routed (not with --keep-all); this flag insists on it.
+        #[arg(long, conflicts_with = "no_move_parts")]
         move_parts: bool,
+        /// Parts stay where they are.
+        #[arg(long)]
+        no_move_parts: bool,
         /// References that never move under --move-parts and --placements, comma separated.
         #[arg(long, value_delimiter = ',')]
         fixed: Vec<String>,
@@ -406,6 +411,7 @@ fn main() -> Result<()> {
             report,
             frames,
             move_parts,
+            no_move_parts,
             fixed,
             placements,
             placement_seed,
@@ -418,6 +424,9 @@ fn main() -> Result<()> {
             net_priorities,
             angles,
         } => {
+            // parts move by default when the whole board is routed; on a board whose copper is
+            // kept they stay unless asked
+            let move_parts = move_parts || (!no_move_parts && !keep_all);
             if until_stop && (shove || give.is_some_and(|g| g > 0.0) || pairs) {
                 anyhow::bail!("--until-stop does not work with --shove, --give or --pairs");
             }

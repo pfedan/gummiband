@@ -68,9 +68,11 @@ ROUTE_TABS: Tuple = (
                     "classes grow to the opt of a track_width custom rule.",
                     0, 5, 0.05),
         Field("move_parts", "Let parts shift to open channels",
-              "The geometry generations may shift parts next to clearance problems, so it needs "
-              "at least one of them. Locked footprints, connectors, modules, mounting holes, "
-              "switches, jumpers and test points stay. The moves arrive in the same undo step.",
+              "The geometry generations may shift parts next to clearance problems and open "
+              "connections, so it needs at least one of them; the routed tracks follow like "
+              "rubber bands. On by default. Locked footprints, connectors, modules, mounting "
+              "holes, switches, jumpers and test points stay. The moves arrive in the same undo "
+              "step.",
               "check"),
         int_field("placements", "Placements to try:",
                   "Places the parts that are not locked or mechanical from the netlist this many "
