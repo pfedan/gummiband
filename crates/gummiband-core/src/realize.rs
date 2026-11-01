@@ -35,6 +35,8 @@ pub struct Track {
     /// Widths fitted to the surroundings after the geometry step: (zone, width). A piece takes
     /// the smallest of those it touches, instead of the neck width.
     pub fitted: Vec<(crate::geom::Rect, f64)>,
+    /// Part of a length tuning pattern (a KiCad `tuning_pattern` group): its index.
+    pub pattern: Option<u32>,
 }
 
 impl Track {
@@ -469,6 +471,7 @@ impl Router<'_> {
                     origin: None,
                     resting: false,
                     fitted: Vec::new(),
+                    pattern: None,
                 };
                 let kept: Vec<bool> = if self.has_kept {
                     pts.iter().map(|&p| on_kept(p)).collect()

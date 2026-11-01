@@ -120,12 +120,25 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
     r.read_classes(pro);
     r.read_net_table(&root);
 
+    // members of length tuning patterns
+    let mut tuned: std::collections::HashSet<String> = Default::default();
+    for n in root.children("generated") {
+        if n.child_str("type") == Some("tuning_pattern")
+            && let Some(m) = n.child("members")
+        {
+            tuned.extend(m.args().iter().filter_map(|x| x.as_str()).map(str::to_string));
+        }
+    }
     for (i, n) in root.args().iter().enumerate() {
         match n.head() {
             Some("footprint") | Some("module") => r.read_footprint(n),
             Some("segment") | Some("arc") | Some("via") => {
                 let first = r.b.obstacles.len();
+                let before = r.b.copper.len();
                 r.read_copper(n, opts.keep, &opts.ignore_nets, i as u32);
+                if let (Some(c), Some(id)) = (r.b.copper.get_mut(before), item_id(n)) {
+                    c.pattern = tuned.contains(id);
+                }
                 if let Some(id) = item_id(n) {
                     r.copper_uuids
                         .insert(id.to_string(), (first..r.b.obstacles.len()).collect());
@@ -894,6 +907,7 @@ impl Reader {
                 source,
                 first,
                 last,
+                pattern: false,
             });
         };
         match n.head() {

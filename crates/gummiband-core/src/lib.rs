@@ -15,6 +15,7 @@ pub mod realize;
 pub mod relax;
 pub mod route;
 pub mod topo;
+pub mod tune;
 
 use std::collections::HashMap;
 

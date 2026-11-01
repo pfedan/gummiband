@@ -198,6 +198,16 @@ enum Cmd {
         /// where a 45 degree path does not fit, a piece keeps its angle.
         #[arg(long, value_enum, default_value_t = Angles::Any)]
         angles: Angles,
+        /// Leave the lengths as routed: no meanders for the length and skew rules of the
+        /// .kicad_dru (without such rules nothing is tuned anyway)
+        #[arg(long)]
+        no_tune: bool,
+        /// Highest meander bump in mm (centre line above the original line)
+        #[arg(long, default_value_t = 1.0)]
+        tune_amplitude: f64,
+        /// Air between neighbouring meander legs in track widths (at least the clearance)
+        #[arg(long, default_value_t = 2.0)]
+        tune_spacing: f64,
     },
     /// Place parts from the netlist: locked footprints, connectors, modules, mounting holes,
     /// buttons and test points stay, everything else gets a new position. Its current position
@@ -490,6 +500,9 @@ fn main() -> Result<()> {
             teardrops,
             net_priorities,
             angles,
+            no_tune,
+            tune_amplitude,
+            tune_spacing,
         } => {
             // parts move by default when the whole board is routed; on a board whose copper is
             // kept they stay unless asked
@@ -701,6 +714,15 @@ fn main() -> Result<()> {
                 given,
                 ..
             } = finished;
+            let tune_cfg = gummiband_core::tune::TuneConfig {
+                style: if angles == Angles::Deg45 {
+                    gummiband_core::tune::Style::Chamfer
+                } else {
+                    gummiband_core::tune::Style::Round
+                },
+                amplitude: tune_amplitude,
+                spacing: tune_spacing,
+            };
             let b = &routed_board;
             let mut res = res;
             let dt = t0.elapsed();
@@ -728,6 +750,28 @@ fn main() -> Result<()> {
                     st.tracks, st.length_before, st.length_after, st.any_angle, st.any_angle_length, st.sharp_corners
                 );
                 st
+            });
+            let tuned = (!no_tune && !b.match_rules.is_empty()).then(|| {
+                let t1 = std::time::Instant::now();
+                let rep = gummiband_core::tune::tune(b, &mut res.geometry, &tune_cfg);
+                let short: Vec<_> = rep.nets.iter().filter(|n| n.aim - n.after > 0.005).collect();
+                println!(
+                    "length tuning: {} nets, {} reached their length, {:.1} s",
+                    rep.nets.len(),
+                    rep.nets.len() - short.len(),
+                    t1.elapsed().as_secs_f64()
+                );
+                for n in &short {
+                    println!(
+                        "  {}: {:.3} -> {:.3} mm, aim {:.3} mm{}",
+                        n.net,
+                        n.before,
+                        n.after,
+                        n.aim,
+                        if n.coupled { " (as a pair)" } else { "" }
+                    );
+                }
+                rep
             });
             println!(
                 "substrate: {} vertices, {} triangles, {} via sites",
@@ -914,8 +958,12 @@ fn main() -> Result<()> {
             let write_result =
                 |geometry: &gummiband_core::realize::Geometry, path: &std::path::Path| -> Result<usize> {
                     let mut items = Vec::new();
+                    // the items of each track, for the tuning patterns
+                    let mut of_track: Vec<std::ops::Range<usize>> = Vec::with_capacity(geometry.tracks.len());
                     for t in &geometry.tracks {
+                        let start = items.len();
                         if rests(t.origin, &changes.chains) {
+                            of_track.push(start..start);
                             continue;
                         }
                         for e in &t.elems {
@@ -937,6 +985,32 @@ fn main() -> Result<()> {
                                 },
                             });
                         }
+                        of_track.push(start..items.len());
+                    }
+                    for p in tuned.iter().flat_map(|r| &r.patterns) {
+                        let members: Vec<usize> = p
+                            .tracks
+                            .iter()
+                            .filter_map(|&i| of_track.get(i))
+                            .flat_map(|r| r.clone())
+                            .collect();
+                        if members.is_empty() {
+                            continue;
+                        }
+                        items.push(write::Item::Pattern(Box::new(write::PatternItem {
+                            layer: p.layer,
+                            net: p.nets[0],
+                            base: p.base[0],
+                            base_coupled: p.base.get(1).copied(),
+                            rounded: p.rounded,
+                            width: p.width,
+                            gap: p.gap,
+                            amplitude: p.amplitude,
+                            spacing: p.spacing,
+                            target: p.aim,
+                            length: gummiband_core::matching::net_length(b, geometry, p.nets[0]).total(),
+                            members,
+                        })));
                     }
                     for v in &geometry.vias {
                         if v.drill == 0.0 || rests(v.origin, &changes.nodes) {
@@ -1006,6 +1080,7 @@ fn main() -> Result<()> {
                     "length_mm": st.length,
                     "length_lower_bound_mm": gummiband_core::length_lower_bound(b),
                     "angles_45": octo,
+                    "length_tuning": tuned,
                     "items_written": items,
                     "violations": viol.iter().map(|v| serde_json::json!({
                         "what": v.what,

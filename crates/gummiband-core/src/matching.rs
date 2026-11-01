@@ -1,10 +1,11 @@
 //! Lengths of nets and the coupling of differential pairs, measured as KiCad's DRC measures them,
 //! and the check of the length, skew and uncoupled length rules of the board.
 //!
-//! - Length (`LENGTH_DELAY_CALCULATION`): the tracks (KiCad clips only lines that end exactly in
-//!   a pad's centre and keeps their length when they enter straight), plus every via over the
-//!   layers its tracks really use (the stackup distance between them, a via with tracks on one
-//!   layer counts nothing), plus the pad-to-die lengths.
+//! - Length (`LENGTH_DELAY_CALCULATION`): the tracks, joined into chains where exactly two ends
+//!   meet; what lies inside a via, and inside a pad for chains ending in its centre, becomes a
+//!   straight line from the centre to where the chain leaves the copper. Plus every via over the
+//!   layers its tracks (and the pad it sits in) really use, the stackup distance between them (a
+//!   via with tracks on one layer counts nothing), plus the pad-to-die lengths.
 //! - Coupling (`DRC_TEST_PROVIDER_DIFF_PAIR_COUPLING`): every line of the P net against every
 //!   line of the N net on the same layer that is exactly parallel to it on the nanometre grid of
 //!   the file and overlaps it in projection, and arcs against arcs about nearly the same centre
@@ -15,9 +16,9 @@
 
 use std::collections::HashMap;
 
-use crate::board::{Board, LayerId, MatchKind, MinOptMax, NetId, ObstacleKind};
+use crate::board::{Board, LayerId, MatchKind, MinOptMax, NetId, Obstacle, ObstacleKind};
 use crate::geom::{self, Point};
-use crate::realize::{Elem, Geometry, Track};
+use crate::realize::{Elem, Geometry, Track, Via};
 
 /// Tolerance of KiCad's DRC (its epsilon) for lengths and gaps, in mm.
 const EPS: f64 = 0.0005;
@@ -86,21 +87,68 @@ pub fn sweep(a: Point, m: Point, b: Point, c: Point) -> f64 {
 /// Length of a net as KiCad's DRC counts it for `length` and `skew` rules.
 pub fn net_length(board: &Board, geo: &Geometry, net: NetId) -> NetLength {
     let tracks: Vec<&Track> = geo.tracks.iter().filter(|t| t.net == net && t.pts.len() >= 2).collect();
+    let mut chains = chains(&tracks);
+    let vias: Vec<&Via> = geo.vias.iter().filter(|v| v.net == net && v.drill > 0.0).collect();
+    let pads: Vec<(Point, &Obstacle)> = board.nets[net as usize]
+        .pins
+        .iter()
+        .flat_map(|&p| {
+            let pin = &board.pins[p];
+            pin.obstacles
+                .iter()
+                .map(move |&o| (pin.pos, &board.obstacles[o]))
+                .filter(|(_, o)| o.kind == ObstacleKind::Pad)
+        })
+        .collect();
     let mut len = NetLength::default();
-    for t in &tracks {
-        len.tracks += track_len(t);
-    }
-    for v in geo.vias.iter().filter(|v| v.net == net && v.drill > 0.0) {
-        let r = v.diameter / 2.0 + 1e-6;
-        let layers: Vec<LayerId> = tracks
+    for v in &vias {
+        let r = v.diameter / 2.0;
+        // the layers the via really connects: its tracks, and the pad it sits in
+        let mut layers: Vec<LayerId> = chains
             .iter()
-            .filter(|t| t.pts[0].dist(v.at) < r || t.pts.last().unwrap().dist(v.at) < r)
-            .map(|t| t.layer)
+            .filter(|(_, c)| start_of(c).dist(v.at) <= r + 1e-6 || end_of(c).dist(v.at) <= r + 1e-6)
+            .map(|(l, _)| *l)
             .collect();
+        if let Some((_, o)) = pads
+            .iter()
+            .find(|(_, o)| o.hole.is_none() && o.shape.dist_to_point(v.at) <= 0.0)
+        {
+            layers.extend(o.layers.iter().next());
+        }
         if let (Some(lo), Some(hi)) = (layers.iter().min(), layers.iter().max()) {
             len.vias += board.layer_distance(*lo, *hi);
         }
     }
+    // KiCad straightens what lies inside a via, and inside a pad for a line ending in its centre
+    for v in &vias {
+        let r = v.diameter / 2.0;
+        let inside = |p: Point| p.dist(v.at) <= r;
+        for (_, c) in chains.iter_mut() {
+            if inside(start_of(c)) {
+                clip_start(c, v.at, &inside);
+            } else if inside(end_of(c)) {
+                clip_end(c, v.at, &inside);
+            }
+        }
+    }
+    for &(at, o) in &pads {
+        let inside = |p: Point| o.shape.dist_to_point(p) <= 0.0;
+        for (layer, c) in chains.iter_mut() {
+            if !o.layers.has(*layer) {
+                continue;
+            }
+            let (s, e) = (start_of(c), end_of(c));
+            if nm(s) != nm(at) && nm(e) != nm(at) {
+                continue;
+            }
+            if inside(s) {
+                clip_start(c, at, &inside);
+            } else if inside(e) {
+                clip_end(c, at, &inside);
+            }
+        }
+    }
+    len.tracks = chains.iter().map(|(_, c)| c.iter().map(elem_len).sum::<f64>()).sum();
     len.die = board.nets[net as usize]
         .pins
         .iter()
@@ -109,10 +157,155 @@ pub fn net_length(board: &Board, geo: &Geometry, net: NetId) -> NetLength {
     len
 }
 
+/// A point on KiCad's nanometre grid.
+fn nm(p: Point) -> (i64, i64) {
+    ((p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64)
+}
+
+fn start_of(c: &[Elem]) -> Point {
+    match c[0] {
+        Elem::Line(a, _) | Elem::Arc(a, _, _) => a,
+    }
+}
+
+fn end_of(c: &[Elem]) -> Point {
+    match c[c.len() - 1] {
+        Elem::Line(_, b) | Elem::Arc(_, _, b) => b,
+    }
+}
+
+fn rev(e: &Elem) -> Elem {
+    match *e {
+        Elem::Line(a, b) => Elem::Line(b, a),
+        Elem::Arc(a, m, b) => Elem::Arc(b, m, a),
+    }
+}
+
+/// The tracks of a net joined into chains as KiCad's `mergeLines` joins them: two track ends on
+/// the same layer at exactly the same point make a joint, more make a branch.
+fn chains(tracks: &[&Track]) -> Vec<(LayerId, Vec<Elem>)> {
+    let mut ends: HashMap<(LayerId, (i64, i64)), Vec<usize>> = HashMap::new();
+    for (i, t) in tracks.iter().enumerate() {
+        if t.elems.is_empty() {
+            continue;
+        }
+        ends.entry((t.layer, nm(start_of(&t.elems)))).or_default().push(i);
+        ends.entry((t.layer, nm(end_of(&t.elems)))).or_default().push(i);
+    }
+    let mut used = vec![false; tracks.len()];
+    let mut out = Vec::new();
+    for i in 0..tracks.len() {
+        if used[i] || tracks[i].elems.is_empty() {
+            continue;
+        }
+        used[i] = true;
+        let layer = tracks[i].layer;
+        let mut c: Vec<Elem> = tracks[i].elems.clone();
+        loop {
+            let mut grew = false;
+            for at_end in [false, true] {
+                let p = if at_end { end_of(&c) } else { start_of(&c) };
+                let Some(here) = ends.get(&(layer, nm(p))) else {
+                    continue;
+                };
+                if here.len() != 2 {
+                    continue;
+                }
+                let Some(&j) = here.iter().find(|&&j| !used[j]) else {
+                    continue;
+                };
+                used[j] = true;
+                grew = true;
+                let e = &tracks[j].elems;
+                let forward = nm(start_of(e)) == nm(p);
+                let piece: Vec<Elem> = if forward == at_end {
+                    e.clone()
+                } else {
+                    e.iter().rev().map(rev).collect()
+                };
+                if at_end {
+                    c.extend(piece);
+                } else {
+                    let mut n = piece;
+                    n.extend(c);
+                    c = n;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        out.push((layer, c));
+    }
+    out
+}
+
+/// The point at parameter t (0..1) of an element.
+fn point_at(e: &Elem, t: f64) -> Point {
+    match *e {
+        Elem::Line(a, b) => a.lerp(b, t),
+        Elem::Arc(a, m, b) => match circle(a, m, b) {
+            Some((c, r)) => {
+                let s = sweep(a, m, b, c) * t;
+                let a0 = ang(a, c) + s;
+                Point {
+                    x: c.x + r * a0.cos(),
+                    y: c.y + r * a0.sin(),
+                }
+            }
+            None => a.lerp(b, t),
+        },
+    }
+}
+
+/// KiCad's `clipLineToPad` / `clipLineToVia` from the start of a chain: everything up to the
+/// first point outside the shape becomes a straight line from the shape's centre to where the
+/// chain leaves it. A chain that never leaves it stays as it is.
+fn clip_start(c: &mut Vec<Elem>, centre: Point, inside: &dyn Fn(Point) -> bool) {
+    let Some(k) = (0..c.len()).find(|&k| !inside(end_of(&c[k..=k]))) else {
+        return;
+    };
+    let e = c[k];
+    let (mut lo, mut hi) = (0.0, 1.0);
+    if inside(point_at(&e, 0.0)) {
+        for _ in 0..40 {
+            let mid = (lo + hi) / 2.0;
+            if inside(point_at(&e, mid)) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+    }
+    let x = point_at(&e, hi);
+    let rest = match e {
+        Elem::Line(_, b) => Elem::Line(x, b),
+        Elem::Arc(_, _, b) => Elem::Arc(x, point_at(&e, (hi + 1.0) / 2.0), b),
+    };
+    let mut n = vec![Elem::Line(centre, x), rest];
+    n.extend_from_slice(&c[k + 1..]);
+    *c = n;
+}
+
+fn clip_end(c: &mut Vec<Elem>, centre: Point, inside: &dyn Fn(Point) -> bool) {
+    let mut r: Vec<Elem> = c.iter().rev().map(rev).collect();
+    clip_start(&mut r, centre, inside);
+    *c = r.iter().rev().map(rev).collect();
+}
+
 /// Coupled and total length of a differential pair: (coupled, longer net's track length).
 pub fn coupling(board: &Board, geo: &Geometry, p: NetId, n: NetId, gap: MinOptMax) -> (f64, f64) {
-    let tp: Vec<&Track> = geo.tracks.iter().filter(|t| t.net == p).collect();
-    let tn: Vec<&Track> = geo.tracks.iter().filter(|t| t.net == n).collect();
+    // KiCad leaves the members of tuning patterns out, of the coupling and of the total
+    let tp: Vec<&Track> = geo
+        .tracks
+        .iter()
+        .filter(|t| t.net == p && t.pattern.is_none())
+        .collect();
+    let tn: Vec<&Track> = geo
+        .tracks
+        .iter()
+        .filter(|t| t.net == n && t.pattern.is_none())
+        .collect();
     let total = tp
         .iter()
         .map(|t| track_len(t))
@@ -492,6 +685,7 @@ pub fn kept_geometry(board: &Board) -> Geometry {
             origin: None,
             resting: true,
             fitted: Vec::new(),
+            pattern: c.pattern.then_some(0),
         });
     }
     geo
@@ -507,4 +701,50 @@ pub fn summary(results: &[RuleMatch]) -> String {
         failed,
         total
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pt(x: f64, y: f64) -> Point {
+        Point { x, y }
+    }
+
+    #[test]
+    fn chains_join_simple_joints_and_clip_inside_a_via() {
+        let track = |elems: Vec<Elem>| Track {
+            pts: crate::realize::flatten(&elems),
+            elems,
+            width: 0.1,
+            layer: 0,
+            net: 0,
+            necks: Vec::new(),
+            neck_w: 0.1,
+            origin: None,
+            resting: false,
+            fitted: Vec::new(),
+            pattern: None,
+        };
+        // a via at the origin (radius 0.2); the chain kinks inside it before it leaves along x
+        let a = track(vec![
+            Elem::Line(pt(0.0, 0.0), pt(0.0, 0.1)),
+            Elem::Line(pt(0.0, 0.1), pt(0.1, 0.1)),
+        ]);
+        let b = track(vec![Elem::Line(pt(1.0, 0.1), pt(0.1, 0.1))]);
+        let mut c = chains(&[&a, &b]);
+        assert_eq!(c.len(), 1);
+        let raw: f64 = c[0].1.iter().map(elem_len).sum();
+        assert!((raw - 1.1).abs() < 1e-9);
+        let inside = |p: Point| p.dist(pt(0.0, 0.0)) <= 0.2;
+        if inside(start_of(&c[0].1)) {
+            clip_start(&mut c[0].1, pt(0.0, 0.0), &inside);
+        } else {
+            clip_end(&mut c[0].1, pt(0.0, 0.0), &inside);
+        }
+        // centre to the circle (0.2) plus the rest from where y = 0.1 crosses it
+        let x = (0.2f64 * 0.2 - 0.1 * 0.1).sqrt();
+        let clipped: f64 = c[0].1.iter().map(elem_len).sum();
+        assert!((clipped - (0.2 + 1.0 - x)).abs() < 1e-6, "{clipped}");
+    }
 }

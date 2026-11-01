@@ -1307,6 +1307,7 @@ pub fn relax_while(
             origin: t.origin,
             resting: !awake[ti],
             fitted: std::mem::take(&mut t.fitted),
+            pattern: t.pattern,
         };
     }
     true

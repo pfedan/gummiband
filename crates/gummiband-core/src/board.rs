@@ -285,6 +285,9 @@ pub struct CopperItem {
     /// Its obstacles.
     pub first: u32,
     pub last: u32,
+    /// Member of a length tuning pattern (KiCad leaves those out of the diff pair coupling).
+    #[serde(default)]
+    pub pattern: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

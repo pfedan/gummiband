@@ -1,0 +1,19 @@
+(version 1)
+# Matching rules for the Antmicro DDR5 testbed (bench/prepare-ddr5.sh). The board ships without a
+# .kicad_dru; these follow what its reference routing achieves: one byte lane (DQ0-7, DQS, TDQS),
+# one command/address group (CA0-11) with the clock, coupled strobe and clock pairs. KiCad applies only
+# one skew rule per net, so the pairs take part in their group and keep no within-pair rule.
+(rule "ddr width"
+  (condition "A.NetName == 'DQ?' || A.NetName == 'CA*' || A.NetName == 'CS_N' || A.inDiffPair('*')")
+  (constraint track_width (min 0.1mm) (opt 0.1016mm)))
+(rule "pairs"
+  (condition "A.inDiffPair('*')")
+  (constraint track_width (min 0.1mm) (opt 0.1016mm))
+  (constraint diff_pair_gap (min 0.1mm) (opt 0.25mm) (max 0.3mm))
+  (constraint diff_pair_uncoupled (max 6mm)))
+(rule "byte lane"
+  (condition "A.NetName == 'DQ?' || A.inDiffPair('DQS*') || A.inDiffPair('TDQS*')")
+  (constraint skew (max 0.75mm)))
+(rule "command address"
+  (condition "(A.NetName == 'CA?' && A.NetName != 'CAI') || A.NetName == 'CA10' || A.NetName == 'CA11' || A.inDiffPair('CLK*')")
+  (constraint skew (max 0.6mm)))

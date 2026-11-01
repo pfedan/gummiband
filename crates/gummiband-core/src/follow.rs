@@ -277,6 +277,7 @@ pub fn soft_geometry(board: &Board) -> Geometry {
             origin: Some(i as u32),
             resting: true,
             fitted: Vec::new(),
+            pattern: None,
         });
     }
     for (i, n) in board.soft.nodes.iter().enumerate() {
@@ -423,6 +424,7 @@ mod tests {
             source: 7,
             first,
             last: first + 1,
+            pattern: false,
         });
         b
     }

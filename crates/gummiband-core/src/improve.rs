@@ -2487,6 +2487,7 @@ mod tests {
             origin: None,
             resting,
             fitted: Vec::new(),
+            pattern: None,
         };
         // the site lies under a sleeping track, the way of the new track leads over it
         let site = pt(5.0, 0.5);
