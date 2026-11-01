@@ -54,6 +54,23 @@ class ToKipyTest(unittest.TestCase):
             kicad_apply.to_kipy(bf.Segment((0, 0), (1, 1), 0.2, "Nope.Cu", ""), None)
 
 
+@unittest.skipIf(kicad_apply is None, "kicad-python (kipy) not installed")
+class ZoneOutlineTest(unittest.TestCase):
+    def points(self, zone):
+        return [(n.point.x, n.point.y) for n in zone.outline.outline]
+
+    def test_a_new_outline_replaces_the_old_one(self):
+        from kipy.board_types import Zone
+
+        zone = Zone()
+        kicad_apply.set_outline(zone, [(0, 0), (1, 0), (1, 1)])
+        kicad_apply.set_outline(zone, [(2, 2), (3, 2), (3, 3), (2, 3)])
+        self.assertEqual(self.points(zone), [(2_000_000, 2_000_000), (3_000_000, 2_000_000),
+                                             (3_000_000, 3_000_000), (2_000_000, 3_000_000)])
+        self.assertTrue(zone.outline.outline.closed)
+        self.assertEqual(len(zone.proto.outline.polygons), 1)
+
+
 class FakeBoard:
     """Records the API calls of apply_plan."""
 
