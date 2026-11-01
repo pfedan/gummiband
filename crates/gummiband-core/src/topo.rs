@@ -83,7 +83,12 @@ pub struct Shared {
     /// The sites from here on are the nodes of the board's soft copper.
     pub soft_base: usize,
     pub bounds: Rect,
+    /// What the relaxation needs of the board alone, by widest track, margin, reach and layer
+    /// count (see `relax::BoardStatic`); filled on first use.
+    pub(crate) relax_cache: RelaxCache,
 }
+
+pub(crate) type RelaxCache = std::sync::Mutex<Vec<((u64, u64, u64, usize), Arc<crate::relax::BoardStatic>)>>;
 
 /// Triangulation of one routing layer.
 #[derive(Clone)]
@@ -161,6 +166,7 @@ impl Substrate {
             pad_sites: FastMap::default(),
             soft_base: 0,
             bounds,
+            relax_cache: Default::default(),
         };
         shared.sites = build_sites(board, &shared, cfg.via_pitch);
         shared.sites.extend(build_pad_sites(board, &shared));

@@ -391,6 +391,112 @@ pub fn simplify(pts: &[Point], tol: f64) -> Vec<Point> {
     pts.iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| *p).collect()
 }
 
+/// What a relaxation needs of the board alone, for one margin, widest track and layer count.
+/// The open end relaxes thousands of mutants of one board, and on a board with many cutouts
+/// the edge mask alone took seconds per call, so it is built once and kept with the substrate.
+pub struct BoardStatic {
+    bounds: Rect,
+    cells: CellLists,
+    layer_cells: Vec<CellLists>,
+    near_obs: Vec<NearObstacle>,
+    near_edge: Vec<bool>,
+}
+
+/// The board-static part of a relaxation, from the cache of `sub` or built (and kept) now. It
+/// is built without holding the lock, because building runs on rayon and a thread that waits
+/// for its parallel work may pick up another relaxation that asks for the same entry.
+fn board_static(
+    board: &Board,
+    sub: &Substrate,
+    max_w: f64,
+    reach_max: f64,
+    margin: f64,
+    n_layers: usize,
+) -> std::sync::Arc<BoardStatic> {
+    let key = (max_w.to_bits(), margin.to_bits(), reach_max.to_bits(), n_layers);
+    if let Some(s) = sub.shared.relax_cache.lock().unwrap().iter().find(|e| e.0 == key) {
+        return s.1.clone();
+    }
+    let built = std::sync::Arc::new(build_board_static(board, sub, max_w, reach_max, margin, n_layers));
+    let mut cache = sub.shared.relax_cache.lock().unwrap();
+    if let Some(s) = cache.iter().find(|e| e.0 == key) {
+        return s.1.clone();
+    }
+    if cache.len() >= 4 {
+        cache.remove(0);
+    }
+    cache.push((key, built.clone()));
+    built
+}
+
+fn build_board_static(
+    board: &Board,
+    sub: &Substrate,
+    max_w: f64,
+    reach_max: f64,
+    margin: f64,
+    n_layers: usize,
+) -> BoardStatic {
+    let obs_boxes: Vec<Rect> = sub.shared.obs_polys.iter().map(|p| p.bbox()).collect();
+    let bounds = board.bbox().grow(5.0);
+    let cells = CellLists::new(bounds, 0.5, &obs_boxes, reach_max, |_| true);
+    // the same per layer, without the obstacles tracks there never see
+    let track_obstacle = |o: &crate::board::Obstacle, l: LayerId| {
+        o.layers.has(l) && !matches!(o.kind, ObstacleKind::Keepout { tracks: false, .. })
+    };
+    let layer_cells: Vec<CellLists> = (0..n_layers)
+        .map(|l| {
+            let l = l as LayerId;
+            CellLists::new(bounds, 0.5, &obs_boxes, reach_max, |i| {
+                track_obstacle(&board.obstacles[i], l)
+            })
+        })
+        .collect();
+    let near_obs: Vec<NearObstacle> = board
+        .obstacles
+        .iter()
+        .zip(&obs_boxes)
+        .map(|(o, b)| {
+            let (clr, floor) = match o.kind {
+                ObstacleKind::Keepout { .. } => (crate::board::KEEPOUT_GAP, false),
+                ObstacleKind::Hole => (board.rules.hole_clearance, false),
+                _ => (o.clearance, true),
+            };
+            NearObstacle {
+                bbox: *b,
+                own_net: if o.kind == ObstacleKind::Hole {
+                    u32::MAX
+                } else {
+                    o.net.unwrap_or(u32::MAX)
+                },
+                clr,
+                floor,
+                hole: o.kind == ObstacleKind::Hole,
+            }
+        })
+        .collect();
+    let near_edge: Vec<bool> = (0..cells.len())
+        .into_par_iter()
+        .map(|c| {
+            let (r, half) = cells.cell_rect(c);
+            let mid = (r.min + r.max) * 0.5;
+            let d = board
+                .outline
+                .iter()
+                .map(|o| nearest_on_poly(o, mid).0)
+                .fold(f64::INFINITY, f64::min);
+            d < board.rules.edge_clearance + max_w / 2.0 + margin + half + 0.01 || !board.inside(mid)
+        })
+        .collect();
+    BoardStatic {
+        bounds,
+        cells,
+        layer_cells,
+        near_obs,
+        near_edge,
+    }
+}
+
 pub fn relax(board: &Board, sub: &Substrate, geo: &mut Geometry, cfg: &RelaxConfig) {
     relax_while(board, sub, geo, cfg, &|| true);
 }
@@ -492,60 +598,18 @@ pub fn relax_while(
             .map(|ti| reach(ti) > limit[geo.tracks[ti].layer as usize])
             .collect()
     };
-    let obs_boxes: Vec<Rect> = sub.shared.obs_polys.iter().map(|p| p.bbox()).collect();
-    let bounds = board.bbox().grow(5.0);
     // every point query below looks at one cell only: the cell lists hold all obstacles within
     // the largest reach of any point in it, and the edge mask marks cells near the board edge
     let reach_max = max_w + max_clr + cfg.margin + 0.01;
-    let cells = CellLists::new(bounds, 0.5, &obs_boxes, reach_max, |_| true);
-    // the same per layer, without the obstacles tracks there never see
-    let track_obstacle = |o: &crate::board::Obstacle, l: LayerId| {
-        o.layers.has(l) && !matches!(o.kind, ObstacleKind::Keepout { tracks: false, .. })
-    };
-    let layer_cells: Vec<CellLists> = (0..n_layers)
-        .map(|l| {
-            let l = l as LayerId;
-            CellLists::new(bounds, 0.5, &obs_boxes, reach_max, |i| {
-                track_obstacle(&board.obstacles[i], l)
-            })
-        })
-        .collect();
-    let near_obs: Vec<NearObstacle> = board
-        .obstacles
-        .iter()
-        .zip(&obs_boxes)
-        .map(|(o, b)| {
-            let (clr, floor) = match o.kind {
-                ObstacleKind::Keepout { .. } => (crate::board::KEEPOUT_GAP, false),
-                ObstacleKind::Hole => (board.rules.hole_clearance, false),
-                _ => (o.clearance, true),
-            };
-            NearObstacle {
-                bbox: *b,
-                own_net: if o.kind == ObstacleKind::Hole {
-                    u32::MAX
-                } else {
-                    o.net.unwrap_or(u32::MAX)
-                },
-                clr,
-                floor,
-                hole: o.kind == ObstacleKind::Hole,
-            }
-        })
-        .collect();
-    let near_edge: Vec<bool> = (0..cells.len())
-        .into_par_iter()
-        .map(|c| {
-            let (r, half) = cells.cell_rect(c);
-            let mid = (r.min + r.max) * 0.5;
-            let d = board
-                .outline
-                .iter()
-                .map(|o| nearest_on_poly(o, mid).0)
-                .fold(f64::INFINITY, f64::min);
-            d < board.rules.edge_clearance + max_w / 2.0 + cfg.margin + half + 0.01 || !board.inside(mid)
-        })
-        .collect();
+    let st = board_static(board, sub, max_w, reach_max, cfg.margin, n_layers);
+    let BoardStatic {
+        bounds,
+        cells,
+        layer_cells,
+        near_obs,
+        near_edge,
+    } = &*st;
+    let bounds = *bounds;
     // vias as static obstacles: (centre, radius, net, clearance)
     let mut vias: Vec<(Point, f64, u32, f64)> = geo
         .vias
