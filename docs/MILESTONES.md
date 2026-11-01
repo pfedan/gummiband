@@ -288,8 +288,9 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   run; that would keep the moves that leave the net connected another way, which the hold forbids as
   well.
 - Night series of open end ideas, 2026-11-01: Mac, 20 minutes per run, three runs of 4 threads side
-  by side, cost 2 per via, 0.05 per mm and 10000 per open connection, KiCad DRC at the end. All
-  switches stay off in the code (`improve::Ideas`).
+  by side, cost 2 per via, 0.05 per mm and 10000 per open connection, KiCad DRC at the end.
+  Combination A is on by default since then (`GB_BANDIT=0`, `GB_AIM_COST=0`, `GB_PRUNE=0` switch
+  it off); the other switches stay off (`improve::Ideas`).
   - Combination A (`GB_BANDIT=1 GB_AIM_COST=0.25 GB_PRUNE=1`) against main, median over the seeds:
     Lichtschnitzel -12 % (4 and 4 seeds), Arty -15 % (3 and 3); fewer vias, a little more length;
     KiCad DRC clean in 5 of 7 runs against 3 of 7. Seed by seed: Lichtschnitzel -13.3 %, -11.5 %,

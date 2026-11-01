@@ -1480,7 +1480,10 @@ pub(crate) fn run(
 // ------------------------------------------------------------------------------- experiments
 //
 // Ideas under test, each switched on by its own environment variable and off by default: a run
-// without them is the same byte for byte. The plane hold is a fix and on by default.
+// without them is the same byte for byte. Combination A of the night series of 2026-11-01 (the
+// bandit over the via price, aimed moves at a quarter, pruning; see docs/MILESTONES.md) and the
+// plane hold, a fix, are on by default; `GB_BANDIT=0`, `GB_AIM_COST=0`, `GB_PRUNE=0` and
+// `GB_PLANE_HOLD=0` switch them off.
 
 /// The experiments switched on for this run.
 #[derive(Clone, Copy, Debug)]
@@ -1489,13 +1492,14 @@ struct Ideas {
     /// the result (40 mm of track), not only four times the normal price of the router.
     via_price: bool,
     /// `GB_BANDIT`: the via price of a move is drawn by what has won on this board so far
-    /// (Thompson sampling over the prices of `via_price`).
+    /// (Thompson sampling over the prices of `via_price`). On by default; `GB_BANDIT=0` switches
+    /// it off.
     bandit: bool,
     /// `GB_AIM_COST=share`: that share of the moves aims at an expensive routed connection, see
-    /// [`aim_at_cost`].
+    /// [`aim_at_cost`]. A quarter by default; `GB_AIM_COST=0` switches it off.
     aim_cost: f64,
     /// `GB_PRUNE`: a mutant that cannot beat its parent is dropped before its relaxation, see
-    /// [`hopeless`].
+    /// [`hopeless`]. On by default; `GB_PRUNE=0` switches it off.
     prune: bool,
     /// `GB_MERGE`: the mutants of a generation that beat their parent in places apart from each
     /// other all count, not only the best of them, see [`merge_wins`].
@@ -1520,9 +1524,9 @@ fn ideas() -> &'static Ideas {
     static IDEAS: std::sync::OnceLock<Ideas> = std::sync::OnceLock::new();
     IDEAS.get_or_init(|| Ideas {
         via_price: std::env::var("GB_VIA_PRICE").is_ok(),
-        bandit: std::env::var("GB_BANDIT").is_ok(),
-        aim_cost: env("GB_AIM_COST", 0.0),
-        prune: std::env::var("GB_PRUNE").is_ok(),
+        bandit: std::env::var("GB_BANDIT").map_or(true, |v| v != "0"),
+        aim_cost: env("GB_AIM_COST", 0.25),
+        prune: std::env::var("GB_PRUNE").map_or(true, |v| v != "0"),
         merge: std::env::var("GB_MERGE").is_ok(),
         window: env("GB_WINDOW", 0.0),
         spot_fade: std::env::var("GB_SPOT_FADE").is_ok(),
