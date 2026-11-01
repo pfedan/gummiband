@@ -68,8 +68,10 @@ Standing decisions of the project owner, kept here so that they survive any sess
   the current check of PR #43 found single 0.4 mm vias on the 4.1 A paths of the finished board).
   Parts move by default since PR #40. Third step: when the whole plain search leaves a few
   connections open (at most 15 %), a second search negotiates and the better result counts; a
-  search that completes the board stays as it is. Next in line: shove in the open end, the via in
-  a pad as a gene of the search.
+  search that completes the board stays as it is. Fourth step: finishing nets open ended, with
+  shove and give; the tries of give run without the open end, and the one kept goes on open
+  ended. The via in a pad as a gene of the search waits for a board that needs it: once the
+  search negotiates, none of the bench boards does (2026-11-01).
 - Convergence means that bold changes no longer help, not that some number of rounds went by. When
   it is reached, the user gets the results that differ in vias and length, not one of them.
 - Copper does not have to lie at the limit: `--air` gives it a reserve where there is room. On by

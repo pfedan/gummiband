@@ -496,7 +496,8 @@ pub fn soft_changes(board: &Board, geo: &Geometry) -> SoftChanges {
         ..Default::default()
     };
     for t in &geo.tracks {
-        if let (Some(o), false) = (t.origin, t.resting) {
+        // a resting track that got narrower at a spot (taper) is written again as well
+        if let Some(o) = t.origin.filter(|_| !t.resting || !t.fitted.is_empty()) {
             c.chains[o as usize] = true;
         }
     }
@@ -554,6 +555,36 @@ pub fn soft_changes(board: &Board, geo: &Geometry) -> SoftChanges {
         }
     }
     c
+}
+
+/// Soft copper that lies where the file has it rests, the rest of it is written again. For a
+/// result whose passes put soft copper to sleep and woke it as they needed (the open end), so
+/// that `resting` says again what [`soft_changes`] reads: a track rests when every point of it
+/// lies on its chain and every point of the chain on it (crossings add points on the way), at
+/// the width of the chain throughout; a via or branch point when it stands on its node.
+pub fn rest_in_place(board: &Board, geo: &mut Geometry) {
+    let soft = &board.soft;
+    let on = |p: Point, pts: &[Point]| match pts {
+        [q] => q.dist(p) < 1e-6,
+        _ => pts.windows(2).any(|w| point_seg_dist(p, w[0], w[1]) < 1e-6),
+    };
+    for t in &mut geo.tracks {
+        let Some(ch) = t.origin.and_then(|o| soft.chains.get(o as usize)) else {
+            continue;
+        };
+        t.resting = t.layer == ch.layer
+            && (t.width - ch.width).abs() < 1e-9
+            && t.fitted.is_empty()
+            && (t.necks.is_empty() || (t.neck_w - t.width).abs() < 1e-9)
+            && t.pts.iter().all(|&p| on(p, &ch.pts))
+            && ch.pts.iter().all(|&p| on(p, &t.pts));
+    }
+    for v in &mut geo.vias {
+        let Some(n) = v.origin.and_then(|o| soft.nodes.get(o as usize)) else {
+            continue;
+        };
+        v.resting = v.at.dist(n.at) < 1e-6;
+    }
 }
 
 const EPS: f64 = 1e-13;
@@ -791,13 +822,22 @@ impl Router<'_> {
     /// Geometry with soft copper: the routed tracks through their portals, the imported ones as
     /// they are, except where a routed track or a via needs them straight.
     pub(crate) fn soft_geometry(&self) -> Geometry {
+        self.soft_tagged().0
+    }
+
+    /// [`Self::soft_geometry`] with the segment of each track (`u32::MAX` for copper that could
+    /// not be traced) and the site of each via, for the open end.
+    pub(crate) fn soft_tagged(&self) -> (Geometry, Vec<u32>, Vec<u32>) {
         use rayon::prelude::*;
         let board = self.board;
         let soft = &board.soft;
         let routed: Vec<u32> = (0..self.segs.len() as u32)
             .filter(|&i| self.segs[i as usize].as_ref().is_some_and(|s| s.imported.is_none()))
             .collect();
-        let mut tracks: Vec<Track> = routed.par_iter().flat_map_iter(|&sid| self.seg_tracks(sid)).collect();
+        let (mut tracks, mut tags): (Vec<Track>, Vec<u32>) = routed
+            .par_iter()
+            .flat_map_iter(|&sid| self.seg_tracks(sid).into_iter().map(move |t| (t, sid)))
+            .unzip();
         // a stretch can bend far inside a triangle, or even out of it and back over the edge it
         // came over, where the chords do not show it: what a routed track really runs into gets
         // straight, and straight chords do not cross
@@ -856,6 +896,7 @@ impl Router<'_> {
                 seg: u32::MAX,
                 tap: None,
             });
+            tags.push(sid as u32);
         }
         // what could not be traced is still there
         for &c in &self.soft_lost {
@@ -875,27 +916,39 @@ impl Router<'_> {
                 seg: u32::MAX,
                 tap: None,
             });
+            tags.push(u32::MAX);
         }
-        let base = self.sub.shared.soft_base as u32;
-        let mut vias: Vec<Via> = self
+        let mut vias: Vec<(Via, u32)> = self
             .vias
             .iter()
-            .filter(|(v, _)| v.checked_sub(base).is_none_or(|n| !soft.nodes[n as usize].fixed))
-            .map(|(&v, info)| {
-                let node = v.checked_sub(base);
-                Via {
-                    at: self.site_point(v),
-                    diameter: info.r * 2.0,
-                    drill: info.drill,
-                    net: info.net,
-                    layer: node.and_then(|n| soft.nodes[n as usize].layer),
-                    origin: node,
-                    resting: node.is_some(),
-                }
-            })
+            .filter_map(|(&v, info)| Some((self.placed_via(v, info)?, v)))
             .collect();
-        vias.sort_by(|a, b| a.at.x.total_cmp(&b.at.x).then(a.at.y.total_cmp(&b.at.y)));
-        Geometry { tracks, vias }
+        vias.sort_by(|a, b| a.0.at.x.total_cmp(&b.0.at.x).then(a.0.at.y.total_cmp(&b.0.at.y)));
+        let (vias, sites) = vias.into_iter().unzip();
+        (Geometry { tracks, vias }, tags, sites)
+    }
+
+    /// The via at site `v` as the geometry has it. With soft copper a via or branch point of it
+    /// keeps its layer and origin and rests, and a node that only changes the width is none.
+    pub(crate) fn placed_via(&self, v: u32, info: &crate::route::ViaInfo) -> Option<Via> {
+        let soft = &self.board.soft;
+        let node = if self.soft_on {
+            v.checked_sub(self.sub.shared.soft_base as u32)
+        } else {
+            None
+        };
+        if node.is_some_and(|n| soft.nodes[n as usize].fixed) {
+            return None;
+        }
+        Some(Via {
+            at: self.site_point(v),
+            diameter: info.r * 2.0,
+            drill: info.drill,
+            net: info.net,
+            layer: node.and_then(|n| soft.nodes[n as usize].layer),
+            origin: node,
+            resting: node.is_some(),
+        })
     }
 }
 
@@ -1151,6 +1204,31 @@ mod tests {
         assert!(c.shift >= 0.09 && c.shift < 0.6, "shift {}", c.shift);
     }
 
+    #[test]
+    fn copper_that_moved_is_written_again_after_it_slept() {
+        let mut b = channel_board();
+        b.nets[0].pins.clear();
+        b.soften(&["B".to_string()]);
+        let (_, mut res) = route_board(&b, &SubstrateConfig::default(), &RouterConfig::default(), &quick());
+        assert_eq!(soft_changes(&b, &res.geometry).chains, vec![true]);
+        // a pass of the open end puts the soft copper to sleep: the flag alone would keep the file
+        res.geometry
+            .tracks
+            .iter_mut()
+            .filter(|t| t.origin.is_some())
+            .for_each(|t| t.resting = true);
+        assert_eq!(soft_changes(&b, &res.geometry).chains, vec![false]);
+        rest_in_place(&b, &mut res.geometry);
+        let c = soft_changes(&b, &res.geometry);
+        assert_eq!((c.strip, c.chains), (vec![7], vec![true]));
+        // copper in its place rests, awake or not
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut g = Router::new(&b, &sub, RouterConfig::default()).geometry();
+        g.tracks[0].resting = false;
+        rest_in_place(&b, &mut g);
+        assert!(g.tracks[0].resting);
+    }
+
     fn quick() -> SearchConfig {
         SearchConfig {
             population: 2,
@@ -1166,8 +1244,8 @@ mod tests {
         }
     }
 
-    fn route(b: &Board) -> (Substrate, crate::RouteResult, ()) {
-        let (sub, res) = route_board(b, &SubstrateConfig::default(), &RouterConfig::default(), &quick());
+    fn route(b: &Board, search: &SearchConfig) -> (Substrate, crate::RouteResult, ()) {
+        let (sub, res) = route_board(b, &SubstrateConfig::default(), &RouterConfig::default(), search);
         (sub, res, ())
     }
 
@@ -1175,10 +1253,10 @@ mod tests {
     fn finishing_a_net_shoves_where_plain_finds_no_way() {
         let b = channel_board();
         let nets = ["B".to_string()];
-        let plain = crate::finish_nets(&b, &nets, false, 0.0, route);
+        let plain = crate::finish_nets(&b, &nets, false, 0.0, &quick(), route);
         assert_eq!(plain.res.stats.unrouted.len(), 1);
         assert!(plain.res.stats.unrouted[0].starts_with("B from "));
-        let f = crate::finish_nets(&b, &nets, true, crate::DEFAULT_GIVE, route);
+        let f = crate::finish_nets(&b, &nets, true, crate::DEFAULT_GIVE, &quick(), route);
         assert!(f.res.stats.unrouted.is_empty(), "{:?}", f.res.stats.unrouted);
         assert_eq!((f.tries.len(), f.kept), (1, 0), "nothing has to give way");
         assert!(f.given.is_empty());
@@ -1187,7 +1265,7 @@ mod tests {
     #[test]
     fn a_net_near_the_pins_gives_way_and_is_routed_again() {
         let b = channel_board();
-        let f = crate::finish_nets(&b, &["B".to_string()], false, crate::DEFAULT_GIVE, route);
+        let f = crate::finish_nets(&b, &["B".to_string()], false, crate::DEFAULT_GIVE, &quick(), route);
         assert_eq!(f.tries.len(), 2);
         assert_eq!((f.tries[0].open, f.tries[1].radius), (1, 2.0));
         assert_eq!(f.kept, 1);
@@ -1200,7 +1278,7 @@ mod tests {
     fn a_try_that_leaves_more_open_loses_against_the_one_before() {
         let b = channel_board();
         // A gives way and finds no way back: that try has more open than the first
-        let worse = |b: &Board| {
+        let worse = |b: &Board, _: &SearchConfig| {
             let sub = Substrate::build(b, &SubstrateConfig::default());
             let mut unrouted = vec!["B from Q0".to_string()];
             if !b.nets[0].pins.is_empty() {
@@ -1220,12 +1298,100 @@ mod tests {
             };
             (sub, res, ())
         };
-        let f = crate::finish_nets(&b, &["B".to_string()], false, crate::DEFAULT_GIVE, worse);
+        let f = crate::finish_nets(&b, &["B".to_string()], false, crate::DEFAULT_GIVE, &quick(), worse);
         assert_eq!(
             f.tries.iter().map(|t| (t.given, t.open)).collect::<Vec<_>>(),
             [(0, 1), (1, 2)]
         );
         assert_eq!(f.kept, 0);
         assert!(f.given.is_empty(), "the copper of A stays");
+    }
+
+    #[test]
+    fn the_tries_run_without_the_open_end_and_the_one_kept_goes_on() {
+        let b = channel_board();
+        let nets = ["B".to_string()];
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let search = SearchConfig {
+            open_end: Some(flag.clone()),
+            ..quick()
+        };
+        // which tries were open ended; the route itself runs without, so the test ends
+        let calls = std::cell::RefCell::new(Vec::new());
+        let logged = |b: &Board, s: &SearchConfig| {
+            calls.borrow_mut().push(s.open_end.is_some());
+            route(b, &quick())
+        };
+        let f = crate::finish_nets(&b, &nets, false, crate::DEFAULT_GIVE, &search, logged);
+        assert_eq!(*calls.borrow(), [false, false, true], "B open, A gives way, then on");
+        assert_eq!(f.kept, 1);
+        assert!(f.res.stats.unrouted.is_empty(), "{:?}", f.res.stats.unrouted);
+        // nothing may give way: the only try is open ended right away
+        calls.borrow_mut().clear();
+        crate::finish_nets(&b, &nets, true, 0.0, &search, logged);
+        assert_eq!(*calls.borrow(), [true]);
+        // stopped during the tries: the try kept stays
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        calls.borrow_mut().clear();
+        let f = crate::finish_nets(&b, &nets, false, crate::DEFAULT_GIVE, &search, logged);
+        assert_eq!(*calls.borrow(), [false, false]);
+        assert!(f.res.stats.unrouted.is_empty());
+    }
+
+    #[test]
+    fn the_open_end_works_on_soft_copper() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        let b = channel_board();
+        let nets = ["B".to_string()];
+        let flag = Arc::new(AtomicBool::new(false));
+        let set = flag.clone();
+        let phases = Arc::new(Mutex::new(Vec::new()));
+        let seen = phases.clone();
+        let search = SearchConfig {
+            open_end: Some(flag),
+            progress: Some(crate::ProgressFn(Arc::new(move |p: &crate::Progress| {
+                seen.lock().unwrap().push(p.phase.clone());
+                if p.search.generation >= 6 {
+                    set.store(true, Ordering::Relaxed);
+                }
+            }))),
+            ..quick()
+        };
+        let plain = crate::finish_nets(&b, &nets, true, 0.0, &quick(), route);
+        let f = crate::finish_nets(&b, &nets, true, 0.0, &search, route);
+        // it repeats the run on the board with soft copper and goes on from there
+        assert!(
+            phases.lock().unwrap().iter().any(|p| p.starts_with("generation")),
+            "{:?}",
+            phases.lock().unwrap()
+        );
+        assert!(f.res.stats.unrouted.is_empty(), "{:?}", f.res.stats.unrouted);
+        let violations = |f: &crate::Finished<()>| crate::check::check(&f.board, &f.res.geometry).len();
+        assert!(violations(&f) <= violations(&plain));
+        // the copper of A is still there, and only once
+        let a = |f: &crate::Finished<()>| f.res.geometry.tracks.iter().filter(|t| t.net == 0).count();
+        assert_eq!(a(&f), a(&plain));
+    }
+
+    #[test]
+    fn an_open_end_that_ends_worse_keeps_the_try() {
+        let b = channel_board();
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let search = SearchConfig {
+            open_end: Some(flag),
+            ..quick()
+        };
+        // the open ended run comes back with B open again, as after a stop in its search part
+        let worse_on = |b: &Board, s: &SearchConfig| {
+            let (sub, mut res, ()) = route(b, &quick());
+            if s.open_end.is_some() {
+                res.stats.unrouted.push("B from Q0".to_string());
+            }
+            (sub, res, ())
+        };
+        let f = crate::finish_nets(&b, &["B".to_string()], false, crate::DEFAULT_GIVE, &search, worse_on);
+        assert_eq!(f.kept, 1);
+        assert!(f.res.stats.unrouted.is_empty(), "{:?}", f.res.stats.unrouted);
     }
 }

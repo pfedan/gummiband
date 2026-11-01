@@ -363,7 +363,9 @@ connected nets: the unlocked copper of `nets` goes first, then they are routed a
 the room (`shove`, default true), and if a connection still finds no way, those within 8 mm of
 its pins give way and are routed again (`give`, default 8, in steps of 2, 4, 8 mm; the try with
 the fewest open connections, then the fewest violations is written). `shove: false` and `give: 0`
-leave the other nets where they are; locked copper and plane nets never move. `output` defaults to
+leave the other nets where they are; locked copper and plane nets never move. With
+`open_end_seconds` the tries of `give` run without the open end, and the one kept goes on open
+ended for the rest of the time (the budget counts from the start of the call). `output` defaults to
 `<input>.routed.kicad_pcb` next to the input; the `.kicad_pro` and `.kicad_dru` are copied next
 to the output if missing, so `drc` and `load_board` work on it. `nets` routes only the listed
 nets for this call.
