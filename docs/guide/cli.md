@@ -100,7 +100,7 @@ when the progress reports `converged`.
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `--move-parts` | off | During the geometry generations, parts next to clearance problems may shift a little to open a channel. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay (by footprint library name and by reference prefix J, P, CN, USB, H, MH, SW, TP). The output file has the moved footprints at their new positions, with the footprint's own zones (a keepout drawn inside the footprint) moved along, and the console lists every move. Footprints in a KiCad group form a block that moves as a whole with its kept tracks and vias (zones in the group do not move yet); a block with one fixed member stays put. Blocks are new and untested on a real board. |
+| `--move-parts` | off | During the geometry generations, parts next to clearance problems may shift a little to open a channel. The routed copper goes along like rubber bands, as in [`move-part`](#gummiband-move-part): the parts move in small steps and the tracks give way; a shift stops where the copper cannot give way any more. Only if that keeps the problems does a new search on the shifted board follow (on boards up to 400 connections). Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay (by footprint library name and by reference prefix J, P, CN, USB, H, MH, SW, TP). The output file has the moved footprints at their new positions, with the footprint's own zones (a keepout drawn inside the footprint) moved along, and the console lists every move. Footprints in a KiCad group form a block that moves as a whole with its kept tracks and vias (zones in the group do not move yet); a block with one fixed member stays put. Blocks are new and untested on a real board. |
 | `--fixed R1,U3` | none | More references that never move under `--move-parts` and `--placements`. |
 | `--placements N` | 0 | Place the board N times from the netlist (see [`gummiband place`](#gummiband-place), default scope), route each result with the settings of this command and keep the best: fewest open connections, then clearance violations, vias and length. Takes N + 1 routes, the last one writes the winner; `--until-stop` applies to that last one only. Not with `--keep-all`, `--nets` or `--pairs`. The JSON report gets a `placement` block with every try. |
 | `--placement-seed S` | 1 | First seed of `--placements`. |
@@ -270,6 +270,30 @@ The console shows one line like `45 degrees: 626 tracks, 606 changed, 2348 -> 24
 pieces off the grid (60.4 mm), 1 sharp corners, violations 17 -> 17, 1.1 s`, where the
 violations are Gummiband's own check before and after. `--report` writes the same numbers as
 JSON under `angles_45`. The plugin button *45 degree tracks with Gummiband* runs this command.
+
+## `gummiband move-part`
+
+```bash
+gummiband move-part routed.kicad_pcb C12 152.4 118.0 -o moved.kicad_pcb [--report r.json] [--svg moved.svg]
+```
+
+Moves one part on a board that is already routed, and the copper around it follows like rubber
+bands; nothing is routed again. The part (with the rest of its KiCad group, if it is in one)
+moves to the new position in steps no longer than the smallest clearance, so a pad can never
+jump over a track. After every step the track ends and vias on its pads go along, the tracks of
+its own nets stretch, and tracks and vias of other nets that the pads now press against give way
+within their clearances and push their own neighbours in turn. Copper that nothing touches stays
+in the file byte for byte, locked copper stays anyway.
+
+The part stops short, at the last clean step, where the copper cannot give way any more (a
+track clamped between the pad and fixed copper or the board edge), where its courtyard runs into
+another part, or where it would leave the board. A step counts as clean if Gummiband's own check
+finds no more clearance spots than before the move. The console says how far it got and why it
+stopped, for example `moved Q1 from (105.000, 121.000) to (105.000, 119.500), 15 of 15 steps; 8
+tracks and 0 vias of 6 nets followed, at most 1.500 mm; clearance spots 91 -> 64`, followed by
+`stopped short: ...` if it did. Only translations; to turn a part, use the MCP tool `move_part`
+with `rotation` (the tracks do not follow then). `--report` writes the numbers as JSON under
+`move_part`, `--svg` draws the result.
 
 ## `gummiband strip`
 

@@ -43,6 +43,12 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   crossing in the capacity model; the geometry already supports per piece widths).
 - **Movable parts:** parts that are not locked may shift a little when that frees a channel
   (search over small placement offsets, evaluated by the router).
+- Moving a part with its copper (rubber band part shove): the part moves in steps no longer than
+  the smallest clearance, its own tracks stretch, other nets give way, it stops where nothing can
+  give way any more. `gummiband move-part`, MCP `move_part` (default), and the shifts of
+  `--move-parts`, which before jumped up to 0.5 mm at once and relaxed only once, and whose next
+  round after a rejected new search started from a placement that did not match the copper.
+  Open: rotation with following copper, the plugin, parts that shove other parts along.
 - Differential pairs: experimental option (`route --pairs`, see `docs/ARCHITECTURE.md`). Width and gap
   from net classes and custom rules per layer, skew tuning inside a pair, impedance estimate and
   `--pair-zdiff`. Measured on 2026-10-30: `diff_pairs` 99% coupled and clean in the KiCad DRC, Jetson

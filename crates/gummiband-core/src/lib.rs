@@ -2,6 +2,7 @@
 
 pub mod board;
 pub mod check;
+pub mod follow;
 pub mod geom;
 pub mod import;
 mod improve;
@@ -475,23 +476,35 @@ pub fn route_board(
         let Some(next) = shift_parts(board, &cur, &offsets, &hot, &mut rng) else {
             break;
         };
-        let moved = board.with_offsets(&next);
-        // fast path, the rubber band way: keep the topology of the best routing, let the pads
-        // take their track ends along and the relaxation push the tracks aside
+        // fast path, the rubber band way: keep the topology of the best routing and move the
+        // parts in small steps; after each the pads take their track ends along, and the tracks
+        // they press against give way within their clearances. The parts stop where the copper
+        // cannot give way any more, so the shift may end short of `next`.
         let quick = {
+            // the routed copper stays awake: the relaxation of each step may also settle the
+            // spots the shift is meant to free
+            let f = follow::follow_steps(board, &offsets, &next, &best.1.geometry, sub_cfg, &relax::RelaxConfig::default());
+            let geometry = f.geo;
+            eprintln!(
+                "placement round {round}: followed {} of {} steps{}",
+                f.stats.steps,
+                f.stats.steps_planned,
+                f.stats.stopped.as_ref().map_or(String::new(), |w| format!(", stopped: {w}"))
+            );
+            let moved = board.with_offsets(&f.offsets);
             let sub = Substrate::build(&moved, sub_cfg);
-            let mut res = RouteResult {
-                geometry: follow_parts(&cur, &moved, &best.1.geometry),
+            let res = RouteResult {
+                geometry,
                 stats: best.1.stats.clone(),
                 portfolio: Vec::new(),
                 frames: Vec::new(),
-                offsets: next.clone(),
+                offsets: f.offsets.clone(),
                 alternatives: Vec::new(),
             };
-            relax::relax(&moved, &sub, &mut res.geometry, &relax::RelaxConfig::default());
-            (sub, res)
+            (sub, res, moved, f.offsets)
         };
-        let qs = score(&moved, &quick.1);
+        let (quick, moved_quick, reached) = ((quick.0, quick.1), quick.2, quick.3);
+        let qs = score(&moved_quick, &quick.1);
         eprintln!(
             "placement round {round}: {} parts shifted, kept topology: cost {:.0} (best {:.0})",
             next.len(),
@@ -502,7 +515,7 @@ pub fn route_board(
             hot = qs.2.clone();
             best_score = qs;
             best = quick;
-            offsets = next;
+            offsets = reached;
             let mut st = best.1.stats.clone();
             st.violations = Some(best_score.2.len());
             search.report(&format!("placement round {round}"), &st);
@@ -514,6 +527,7 @@ pub fn route_board(
         if hot.len() > 20 || best.1.stats.conns > 400 || search.stopped() {
             continue;
         }
+        let moved = board.with_offsets(&next);
         let (sub, mut res) = route_search(&moved, sub_cfg, base, search);
         res.offsets = next.clone();
         let sc = score(&moved, &res);
@@ -525,9 +539,11 @@ pub fn route_board(
             sc.1,
             best_score.1
         );
-        hot = sc.2.clone();
-        offsets = next;
+        // the next round starts from the best result, with its placement: the fast path moves
+        // the copper of that result and needs the offsets it was routed with
         if sc.0 > best_score.0 || (sc.0 == best_score.0 && sc.1 < best_score.1) {
+            hot = sc.2.clone();
+            offsets = next;
             best_score = sc;
             best = (sub, res);
         }
@@ -1102,7 +1118,7 @@ pub fn route_fixed(
 
 /// The geometry of `geo` (routed on `from`) with every track end and via that sits on a pad
 /// moved along with that pad's footprint on `to` (same board, other offsets).
-fn follow_parts(from: &Board, to: &Board, geo: &Geometry) -> Geometry {
+pub(crate) fn follow_parts(from: &Board, to: &Board, geo: &Geometry) -> Geometry {
     let shift = |p: geom::Point, net: NetId| -> geom::Point {
         for (a, b) in from.pins.iter().zip(&to.pins) {
             if a.net != net || a.pos.dist(b.pos) < 1e-9 {
