@@ -73,9 +73,15 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   so both tracks stay parallel; a pair end whose repair finds no way gives up the pair (single
   tracks) before it keeps crossed tracks. `diff_pairs` 8 instead of 13 KiCad errors (pair gap 1
   instead of 11, 99 % instead of 95 % coupled), Lichtschnitzel 0 instead of 12 errors and 1
-  instead of 3 open, but its USB pair then runs as single tracks. Open: room in the
-  router itself, phase matching near the source, carrying the pair to its end and breakout
-  zones, via pairs, the open end with pairs.
+  instead of 3 open, but its USB pair then runs as single tracks. Breakout zones
+  (2026-11-01): with `--pairs` the wide track ends just outside the pads, the pads block it and
+  the room for the two short tracks to them stays free; which track takes which side is chosen
+  so that they do not cross. `diff_pairs` without clearance errors and shorts on all seeds
+  (before 3 of 6 runs with them), seed 0 2 instead of 6 KiCad errors (45 degrees 3 instead of
+  8), `matching` 7 instead of 13, Lichtschnitzel unchanged (its USB-C end stays at the pads).
+  Open: room in the router itself, phase matching near the source, carrying the pair to its
+  end, via pairs (the remaining pair errors sit at vias near the ends), the open end with
+  pairs.
 - Rule engine: more custom rule conditions (positions, footprints, layers).
 - More than two signal layers (pulled forward with the synthetic 4 layer benchmarks).
 - Alternative placements as portfolio variants (smaller, square, round outlines with the
