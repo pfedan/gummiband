@@ -95,21 +95,26 @@ bench/run-ddr5.sh --pairs --no-move-parts   # lengths of the reference, routing,
 ```
 
 Results of 2026-11-01 (`--pairs --runs 4 --generations 1 --no-move-parts`, so the placement
-stays as the reference has it):
+stays as the reference has it). "Meanders only" is the routing with meanders in the room it left,
+"room, then meanders" pushes the neighbours aside first:
 
-| Board | Without tuning | With tuning | KiCad DRC of the tuned board |
-| --- | --- | --- | --- |
-| `matching` | 13 of 16 nets or pairs out of range | 11 of 16: clock length 2 of 2, 5 of 11 tuned nets reached their length | 0 unconnected, 0 clearance, 10 skew (was 10), 0 length (was 2), 2 uncoupled |
-| DDR5 testbed | 24 of 29: byte lane 3 of 12, command/address 1 of 14, 22 skew errors in the KiCad DRC | 16 of 29: byte lane 7 of 12, command/address 5 of 14, uncoupled 1 of 3; 7 of 22 tuned nets reached their length | 261 of 263 routed, 0 clearance, 14 skew (was 22), 22 pair gap, 3 uncoupled, 1 sliver |
+| Board | Without tuning | Meanders only | Room, then meanders | KiCad DRC with room |
+| --- | --- | --- | --- | --- |
+| `matching` | 13 of 16 nets or pairs out of range | 11 of 16, 5 of 11 tuned nets reached their length | 6 of 16: clock length 2 of 2, byte lane 6 of 10; 6 of 11 tuned nets reached their length | 0 unconnected, 0 clearance, 5 skew (10 with meanders only), 1 uncoupled (2) |
+| DDR5 testbed | 24 of 29: byte lane 3 of 12, command/address 1 of 14, 22 skew errors in the KiCad DRC | 16 of 29: byte lane 7 of 12, command/address 5 of 14, uncoupled 1 of 3; 7 of 22 tuned nets reached their length | 10 of 29: byte lane 8 of 12, command/address 9 of 14, uncoupled 2 of 3; 14 of 23 tuned nets reached their length | 261 of 263 routed, 0 clearance, 9 skew (14), 6 pair gap (22), 1 uncoupled (3), 0 sliver (1) |
 
-In `bench/compare.py` against the version before (default arguments, so without `--pairs` and
-with moving parts), `matching` goes from 12 to 6 KiCad DRC errors and `diff_pairs` from 11 to 5;
-the other boards are unchanged.
+In `bench/compare.py` against main (default arguments, so without `--pairs` and with moving
+parts) every board has the same KiCad DRC result; the Lichtschnitzel file is byte-identical
+(the step only runs with length rules). On `matching` it makes room for 6 nets but the meanders
+reach the same lengths as before there.
 
-The meanders go where the routed nets have room. In tight bundles there is none, and the router
-does not leave room for them yet, so most of the misses on DDR5 are nets in the middle of a
-bundle. The longest net of a group sets the target, and one long detour (TDQS on DDR5) pulls the
-whole group after it.
+The room step widens each net that is too short to the width of the meander it needs and lets
+the geometry step push the neighbours aside; what would add a clearance error is undone, in
+halves, so the nets that find room keep it. It takes 45 s on `matching` and 80 s on DDR5 (on a
+busy machine). The misses that remain on DDR5 are nets in the middle of a bundle whose
+neighbours cannot move further (CA7, CA9, DQ1, DQ3), CA5 that is not routed, and the strobe pair,
+which the longest net of the byte lane (pulled long by its detour) leaves far behind. The clock
+pair's own skew (0.7 mm on `matching`) is a matter of phase matching, which is not there yet.
 
 ## Conventional 45 degree tracks
 

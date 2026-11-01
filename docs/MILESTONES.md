@@ -64,9 +64,13 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   groups them, lengths measured as the KiCad DRC does (equal to 0.0001 mm on the DDR5 testbed),
   `gummiband lengths`, meanders for nets and pairs that are too short, written as KiCad tuning
   patterns. Measured on `matching` and Antmicro's DDR5 testbed (see `docs/guide/benchmarks.md`):
-  the clock reaches its window, but on DDR5 only 7 of 22 nets reach their length. Open: room for
-  meanders in tight bundles (the router reserves none), phase matching near the source, carrying
-  the pair to its end and breakout zones, via pairs, the open end with pairs.
+  the clock reaches its window, but on DDR5 only 7 of 22 nets reach their length. Room for
+  meanders (2026-11-01): before the meanders the nets that are too short are widened to the
+  width of their meander and push their neighbours aside, undone in halves where that would add
+  a clearance error; DDR5 10 instead of 16 of 29 out of range, 14 of 23 nets reach their length,
+  KiCad skew errors 9 instead of 14, pair gap 6 instead of 22, 0 clearance. Open: room in the
+  router itself, phase matching near the source, carrying the pair to its end and breakout
+  zones, via pairs, the open end with pairs.
 - Rule engine: more custom rule conditions (positions, footprints, layers).
 - More than two signal layers (pulled forward with the synthetic 4 layer benchmarks).
 - Alternative placements as portfolio variants (smaller, square, round outlines with the
