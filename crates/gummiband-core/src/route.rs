@@ -3489,10 +3489,11 @@ impl<'a> Router<'a> {
     }
 
     /// The segments connection `ci` may end on: of its net, and not on its side of the gap it
-    /// closes. Pairs stay out, their tracks must run together to the end.
+    /// closes. That goes for plane fan-outs too: a track of the net leads to a via into the plane.
+    /// Pairs stay out, their tracks must run together to the end.
     fn tappable(&self, ci: usize) -> HashSet<u32> {
         let c = &self.conns[ci];
-        if !self.cfg.taps || c.goal == Goal::Plane || self.partner.contains_key(&c.net) {
+        if !self.cfg.taps || self.partner.contains_key(&c.net) {
             return HashSet::new();
         }
         let mine = self.net_side(c.net, c.from);
