@@ -347,7 +347,8 @@ fn warm_start(s: &State, r: &Router, fresh: Geometry, segs: &[u32], sites: &[u32
     let mut tracks = Vec::with_capacity(fresh.tracks.len());
     let mut tags = Vec::with_capacity(fresh.tracks.len());
     for (t, &sid) in s.cand.geo.tracks.iter().zip(&s.segs) {
-        if r.segs[sid as usize].is_some() {
+        // soft copper that could not be traced has no segment and stays
+        if r.segs.get(sid as usize).is_none_or(|x| x.is_some()) {
             let mut t = t.clone();
             t.resting = true;
             tracks.push(t);
@@ -1123,8 +1124,9 @@ fn measure_length(c: &mut Candidate) {
 
 /// The whole board once more, awake, with this tension and reserve.
 fn relax_all(board: &Board, sub: &Substrate, c: &mut Candidate, cfg: &relax::RelaxConfig) {
-    c.geo.tracks.iter_mut().for_each(|t| t.resting = false);
-    c.geo.vias.iter_mut().for_each(|v| v.resting = false);
+    // the soft copper of other nets (finishing nets) only moves where routed copper pushes it
+    c.geo.tracks.iter_mut().for_each(|t| t.resting = t.origin.is_some());
+    c.geo.vias.iter_mut().for_each(|v| v.resting = v.origin.is_some());
     relax::relax(board, sub, &mut c.geo, cfg);
     measure_length(c);
     judge(board, c);
@@ -1143,8 +1145,14 @@ fn settle(board: &Board, sub: &Substrate, c: &mut Candidate, best: &Candidate, c
             break;
         }
         let bad = c.bad_nets.clone();
-        c.geo.tracks.iter_mut().for_each(|t| t.resting = !bad.contains(&t.net));
-        c.geo.vias.iter_mut().for_each(|v| v.resting = !bad.contains(&v.net));
+        c.geo
+            .tracks
+            .iter_mut()
+            .for_each(|t| t.resting = t.origin.is_some() || !bad.contains(&t.net));
+        c.geo
+            .vias
+            .iter_mut()
+            .for_each(|v| v.resting = v.origin.is_some() || !bad.contains(&v.net));
         relax::relax(board, sub, &mut c.geo, &cfg);
         measure_length(c);
         judge(board, c);
@@ -1178,8 +1186,14 @@ fn clean_spots(board: &Board, sub: &Substrate, best: &Candidate, log: bool) -> O
             }
         }
         let bad = c.bad_nets.clone();
-        c.geo.tracks.iter_mut().for_each(|t| t.resting = !bad.contains(&t.net));
-        c.geo.vias.iter_mut().for_each(|v| v.resting = !bad.contains(&v.net));
+        c.geo
+            .tracks
+            .iter_mut()
+            .for_each(|t| t.resting = t.origin.is_some() || !bad.contains(&t.net));
+        c.geo
+            .vias
+            .iter_mut()
+            .for_each(|v| v.resting = v.origin.is_some() || !bad.contains(&v.net));
         relax::relax(board, sub, &mut c.geo, &cfg);
         measure_length(&mut c);
         judge(board, &mut c);
@@ -1312,7 +1326,11 @@ fn rebuild<'a>(board: &'a Board, sub: &Substrate, c: &Candidate) -> Option<State
     r.run();
     r.cfg.hotspots = Default::default();
     r.cfg.taps = true;
-    let (fresh, segs, sites) = r.tagged_geometry();
+    let (fresh, segs, sites) = if r.soft_on {
+        r.soft_tagged()
+    } else {
+        r.tagged_geometry()
+    };
     let same = fresh.tracks.len() == c.geo.tracks.len()
         && fresh.vias.len() == c.geo.vias.len()
         && fresh
@@ -1356,6 +1374,18 @@ fn loose_ends(board: &Board, geo: &Geometry, nets: &[u32]) -> Vec<String> {
                         .iter()
                         .any(|&o| board.obstacles[o].shape.dist_to_point(p) < 0.01)
             });
+            // kept copper of the net: a track that finishes a started one ends on it
+            let on_kept = || {
+                board.obstacles.iter().any(|o| {
+                    o.net == Some(t.net)
+                        && matches!(
+                            o.kind,
+                            crate::board::ObstacleKind::Track | crate::board::ObstacleKind::Via
+                        )
+                        && o.layers.has(t.layer)
+                        && o.shape.dist_to_point(p) < 0.01
+                })
+            };
             let on_track = geo.tracks.iter().enumerate().any(|(tj, o)| {
                 tj != ti
                     && o.net == t.net
@@ -1364,7 +1394,7 @@ fn loose_ends(board: &Board, geo: &Geometry, nets: &[u32]) -> Vec<String> {
                         .windows(2)
                         .any(|w| crate::geom::point_seg_dist(p, w[0], w[1]) < 1e-3)
             });
-            if !on_via && !on_pad && !on_track {
+            if !on_via && !on_pad && !on_track && !on_kept() {
                 out.push(format!(
                     "track {ti} net {} ends free at {:.3} {:.3}",
                     board.nets[t.net as usize].name, p.x, p.y
@@ -1623,7 +1653,15 @@ pub(crate) fn run(
             },
         );
     }
-    let others = front.others(&best.cand);
+    let mut others = front.others(&best.cand);
+    // soft copper slept and woke for the passes here (finishing nets): the file gets again what
+    // lies elsewhere than in it
+    if !board.soft.chains.is_empty() {
+        crate::import::rest_in_place(board, &mut best.cand.geo);
+        others
+            .iter_mut()
+            .for_each(|c| crate::import::rest_in_place(board, &mut c.geo));
+    }
     (best.cand, others)
 }
 

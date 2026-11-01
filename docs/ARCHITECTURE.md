@@ -196,7 +196,11 @@ For finishing nets on a routed board (`--keep-all --nets`, shove on by default) 
 tracks and vias of the other nets are no obstacles but part of the topology
 (`gummiband-core::import`). `finish_nets` drives it for the CLI and the MCP server: when a
 connection still finds no way, the nets near its pins give way in growing circles, and the try
-with the fewest open connections, then violations is kept.
+with the fewest open connections, then violations is kept. With an open end (`--until-stop`,
+MCP `open_end_seconds`, since 2026-11-01) the tries run without it, and the one kept runs again:
+the same search first, so the open end goes on from where that try ended; if it ends worse (a
+stop during its search part), the try stays. Its connections are those of the nets asked for and
+of the nets that gave way; the soft copper shifts aside in its relaxation as in the search.
 
 - Board side: `Board::soften` builds chains from the file's items: a chain is a run of one width
   between two nodes. Nodes are vias, branches, open ends and changes of width; ends in a pad stay
@@ -212,7 +216,9 @@ with the fewest open connections, then violations is kept.
 - Relaxation: imported copper sleeps. It wakes when copper that is awake violates its clearance
   and takes its neighbours along in the same way, so the wave ends where there is room. Sleeping
   copper is not written: the file keeps those items byte for byte, and changed ones are replaced
-  (`import::soft_changes`).
+  (`import::soft_changes`). The passes of the open end put soft copper to sleep for themselves,
+  also copper that has moved, so at its end the place decides what is written again, not the
+  flag (`import::rest_in_place`): a track that lies on its chain, and its chain on it, rests.
 
 ## Geometry
 

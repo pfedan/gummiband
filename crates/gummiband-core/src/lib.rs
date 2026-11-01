@@ -618,28 +618,43 @@ pub struct Finished<T> {
 /// 4, 8 ... mm up to `give` (0: nothing gives way). The try with the fewest open connections,
 /// then the fewest clearance violations is kept; on a tie the earlier one, it moves less. So
 /// giving way can only help: a try that breaks a net that gave way loses against the one before.
+///
+/// `route` runs a try with the search it is given. With an open end in `search` and something
+/// that may give way, the tries run without it and the one kept runs again open ended: the same
+/// search first, so the open end goes on from where that try ended. A stop before that keeps the
+/// try, and so does an open end that ends worse (a stop in its search part). With nothing to give
+/// way the only try runs open ended right away.
 pub fn finish_nets<T>(
     board: &Board,
     nets: &[String],
     shove: bool,
     give: f64,
-    route: impl Fn(&Board) -> (Substrate, RouteResult, T),
+    search: &SearchConfig,
+    route: impl Fn(&Board, &SearchConfig) -> (Substrate, RouteResult, T),
 ) -> Finished<T> {
     let mut given = std::collections::BTreeSet::new();
     let mut radius = 0.0;
     let mut tries: Vec<GiveTry> = Vec::new();
     let mut kept: Option<Finished<T>> = None;
+    let open_later = search.open_end.is_some() && give > 0.0;
+    let without = SearchConfig {
+        open_end: None,
+        ..search.clone()
+    };
+    let try_search = if open_later { &without } else { search };
+    let measure = |b: &Board, res: &RouteResult| (res.stats.unrouted.len(), check::check(b, &res.geometry).len());
     loop {
         let mut b = board.only_nets(nets, &given);
         if shove {
             b.soften(nets);
         }
-        let (sub, res, extra) = route(&b);
+        let (sub, res, extra) = route(&b, try_search);
+        let (open, violations) = measure(&b, &res);
         let t = GiveTry {
             radius,
             given: given.len(),
-            open: res.stats.unrouted.len(),
-            violations: check::check(&b, &res.geometry).len(),
+            open,
+            violations,
         };
         // around what was asked for; a net that gave way must not widen the circle
         let asked: Vec<String> = res
@@ -685,6 +700,13 @@ pub fn finish_nets<T>(
         }
     }
     let mut k = kept.expect("one try at least");
+    if open_later && !search.stopped() {
+        let (sub, res, extra) = route(&k.board, search);
+        let best = &tries[k.kept];
+        if measure(&k.board, &res) <= (best.open, best.violations) {
+            (k.sub, k.res, k.extra) = (sub, res, extra);
+        }
+    }
     k.tries = tries;
     k
 }
