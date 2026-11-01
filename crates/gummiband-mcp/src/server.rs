@@ -1568,12 +1568,23 @@ fn route_blocking(
         air: p.air.unwrap_or(0.0),
         prefer_width: p.prefer_width.unwrap_or(0.0),
     };
+    let tune_cfg = gummiband_core::tune::TuneConfig {
+        style: if p.angles.as_deref() == Some("45") {
+            gummiband_core::tune::Style::Chamfer
+        } else {
+            gummiband_core::tune::Style::Round
+        },
+        amplitude: p.tune_amplitude.unwrap_or(1.0),
+        ..Default::default()
+    };
+    let tune = p.tune != Some(false);
     let finished = gummiband_core::finish_nets(&board, &only, shove, give, |b| {
         if p.pairs == Some(true) {
             let cfg = gummiband_core::pairs::PairConfig {
                 skew: p.pair_skew.unwrap_or(0.1),
                 zdiff: p.pair_zdiff,
                 all: p.pair_all.unwrap_or(false),
+                room: tune.then(|| tune_cfg.clone()),
             };
             gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, &search_cfg, &cfg)
         } else {
@@ -1583,6 +1594,7 @@ fn route_blocking(
     });
     let gummiband_core::Finished {
         board: routed,
+        sub,
         res,
         extra: pair_reports,
         given,
@@ -1597,6 +1609,13 @@ fn route_blocking(
         &shifted
     };
     let mut res = res;
+    // room for the meanders (the pairs make it while they are one wide track)
+    if tune && p.pairs != Some(true) && !b.match_rules.is_empty() {
+        let want = gummiband_core::tune::room_wanted(b, &res.geometry, &tune_cfg, &[]);
+        if let Some(g) = gummiband_core::tune::make_room(b, &sub, &res.geometry, &want) {
+            res.geometry = g;
+        }
+    }
     let angles_45 = angles_45.then(|| {
         let st = gummiband_core::octo::octilinear(b, &mut res.geometry);
         AnglesOut {
@@ -1607,18 +1626,8 @@ fn route_blocking(
             sharp_corners: st.sharp_corners,
         }
     });
-    let tuned = (p.tune != Some(false) && !b.match_rules.is_empty()).then(|| {
-        let cfg = gummiband_core::tune::TuneConfig {
-            style: if p.angles.as_deref() == Some("45") {
-                gummiband_core::tune::Style::Chamfer
-            } else {
-                gummiband_core::tune::Style::Round
-            },
-            amplitude: p.tune_amplitude.unwrap_or(1.0),
-            ..Default::default()
-        };
-        gummiband_core::tune::tune(b, &mut res.geometry, &cfg)
-    });
+    let tuned =
+        (tune && !b.match_rules.is_empty()).then(|| gummiband_core::tune::tune(b, &mut res.geometry, &tune_cfg));
     let seconds = t0.elapsed().as_secs_f64();
     let viol = gummiband_core::check::check(b, &res.geometry);
 

@@ -91,7 +91,7 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | `--pair-all` | off | With `--pairs`: couple every pair recognised by name, also without a pair rule or net class. |
 | `--pair-skew MM` | 0.1 | With `--pairs`: length difference left within a pair; the shorter track gets bumps where they fit. A `skew` rule with `(within_diff_pairs)` may ask for less. |
 | `--pair-zdiff OHM` | none | With `--pairs`: target differential impedance, sets the track width per layer from the stackup (estimate after IPC-2141), the gap stays. |
-| `--no-tune` | off | Leave the lengths as routed. By default, when the `.kicad_dru` has `length` or `skew` rules, the finished routing gets meanders that bring the nets that are too short into range, see [Length matching](concepts.md#length-matching). |
+| `--no-tune` | off | Leave the lengths as routed. By default, when the `.kicad_dru` has `length` or `skew` rules, the routing first makes room next to the nets that are too short and then gets meanders that bring them into range, see [Length matching](concepts.md#length-matching). |
 | `--tune-amplitude MM` | 1 | Highest meander bump (centre line above the original line). |
 | `--tune-spacing W` | 2 | Air between neighbouring meander legs, in track widths (at least the clearance). |
 | `--layer-dirs W` | 0.5 | Weight of preferred directions per layer: the routing layers alternate horizontal and vertical, and running against the grain costs extra. A soft cost, used by every third run of the portfolio, so the search has candidates with and without it. 0 switches it off. |
@@ -148,6 +148,9 @@ wrote 83 items to routed.kicad_pcb
   as two separate nets, with the reason), width and gap, the estimated differential impedance
   from the stackup (0 if the stackup is unknown), both track lengths, the remaining skew, vias
   and polarity swaps through the pair's vias.
+- `room for meanders: N nets and pairs, made|none without new violations`: with `length` or
+  `skew` rules, before the meanders, how many nets (pairs as one) wanted room next to them and
+  whether pushing their neighbours aside was kept (`made`) or undone.
 - `length tuning: N nets, M reached their length`: with `length` or `skew` rules, how many nets
   the meanders were to lengthen and how many got there; one line for each net that did not
   (before, after, aim, `(as a pair)` for a pair meandered as a band).
