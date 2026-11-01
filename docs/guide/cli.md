@@ -288,7 +288,10 @@ in the file byte for byte, locked copper stays anyway.
 The part stops short, at the last clean step, where the copper cannot give way any more (a
 track clamped between the pad and fixed copper or the board edge), where its courtyard runs into
 another part, or where it would leave the board. A step counts as clean if Gummiband's own check
-finds no more clearance spots than before the move. The console says how far it got and why it
+finds no clearance spot that was not there before the move: a spot of two nets that had none
+nearby, or one where more is missing than before. A problem that only moves from one pair of
+nets to another stops the part as well. Keep the `.kicad_pro` (and `.kicad_dru`) next to the
+board, otherwise the copper gives way by default rules; the command warns then. The console says how far it got and why it
 stopped, for example `moved Q1 from (105.000, 121.000) to (105.000, 119.500), 15 of 15 steps; 8
 tracks and 0 vias of 6 nets followed, at most 1.500 mm; clearance spots 91 -> 64`, followed by
 `stopped short: ...` if it did. Only translations; to turn a part, use the MCP tool `move_part`

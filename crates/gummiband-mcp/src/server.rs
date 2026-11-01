@@ -1114,11 +1114,15 @@ impl Gummiband {
 
     fn do_move_part(&self, p: MovePartIn) -> Result<(String, AddLockedOut)> {
         let follow = p.follow.unwrap_or(true) && p.rotation.is_none();
+        let mut no_rules = None;
         // all copper, not only the locked: the tracks are what follows
         let all = if follow {
             let path = self.with_entry(&p.board, |e| Ok(e.path.clone()))?;
             let work = Self::working_copy(&path);
             let from = if work.is_file() { work } else { path };
+            if !from.with_extension("kicad_pro").is_file() {
+                no_rules = Some(from.with_extension("kicad_pro").display().to_string());
+            }
             Some(read_board(
                 &from,
                 &ReadOptions {
@@ -1163,6 +1167,11 @@ impl Gummiband {
             Ok(w)
         })?;
         let mut warnings = warnings;
+        if let Some(pro) = no_rules {
+            warnings.push(format!(
+                "no {pro} next to the board: the tracks gave way by default clearances and widths"
+            ));
+        }
         let msg = match &followed {
             None => format!("moved {} to {}, {}", p.reference, p.x, p.y),
             Some(r) => {

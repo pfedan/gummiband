@@ -125,8 +125,8 @@ pub struct Followed {
 /// copper of `geo` (on `board` with `from` applied) follows: track ends and vias on moved pads
 /// go along, what the pads now press against is woken, and the relaxation lets it give way.
 /// Copper that is asleep (`resting`) and not touched stays as it is. Stops before the first step
-/// that leaves more clearance spots than there were, or where a courtyard runs into another part
-/// or off the board.
+/// that leaves a clearance spot that was not there or got worse (see [`is_new`]), or where a
+/// courtyard runs into another part or off the board.
 pub fn follow_steps(
     board: &Board,
     from: &HashMap<String, Point>,
@@ -146,7 +146,8 @@ pub fn follow_steps(
     refs.dedup();
     let longest = refs.iter().map(|r| at(from, r).dist(at(to, r))).fold(0.0, f64::max);
     let start = board.with_offsets(from);
-    let base = check::spots(&check::check(&start, geo)).len();
+    let base_spots = check::spots(&check::check(&start, geo));
+    let base = base_spots.len();
     // never farther per step than the smallest clearance: a pad cannot pass a track in one step
     let step = board.rules.min_clearance.clamp(0.02, 0.1);
     let n = (longest / step).ceil() as usize;
@@ -215,8 +216,7 @@ pub fn follow_steps(
         let sub = Substrate::build(&next, sub_cfg);
         relax::relax(&next, &sub, &mut g, cfg);
         let spots = check::spots(&check::check(&next, &g));
-        if spots.len() > base {
-            let s = spots.iter().max_by(|a, b| a.missing.total_cmp(&b.missing)).unwrap();
+        if let Some(s) = spots.iter().find(|s| is_new(s, &base_spots, longest)) {
             let name = |n: Option<u32>| n.map_or("fixed copper".to_string(), |n| board.nets[n as usize].name.clone());
             st.stopped = Some(format!(
                 "no more room at ({:.2}, {:.2}): {} and {}, {:.3} mm missing",
@@ -239,6 +239,23 @@ pub fn follow_steps(
         offsets,
         stats: st,
     }
+}
+
+/// A clearance spot that was not there before the move, or got worse: no spot of the same two
+/// nets within reach (the moved distance plus the size of a spot), or one with less missing. A
+/// problem that only moves from one pair of nets to another counts as new, one that only splits
+/// into pieces does not.
+fn is_new(s: &check::Spot, before: &[check::Spot], moved: f64) -> bool {
+    let key = |n: (u32, Option<u32>)| {
+        let b = n.1.unwrap_or(u32::MAX);
+        (n.0.min(b), n.0.max(b))
+    };
+    !before.iter().any(|b| {
+        key(b.nets) == key(s.nets)
+            && b.at.dist(s.at) < 2.0 + moved
+            && s.missing <= b.missing + 0.001
+            && (b.short || !s.short)
+    })
 }
 
 /// All soft copper as geometry, asleep, each item with its origin.
@@ -477,4 +494,22 @@ mod tests {
         assert!(st.stopped.as_deref().is_some_and(|s| s.contains("P0")), "{st:?}");
         assert!(reached.x > -3.0 && reached.x < -1.5, "{reached:?}");
     }
+
+    #[test]
+    fn a_problem_that_moves_to_other_nets_is_new_one_that_splits_is_not() {
+        let spot = |x: f64, nets: (u32, Option<u32>), missing: f64| check::Spot {
+            at: pt(x, 0.0),
+            nets,
+            missing,
+            short: false,
+        };
+        let before = [spot(0.0, (1, Some(2)), 0.02)];
+        // the same pair close by, in two pieces, no worse
+        assert!(!is_new(&spot(0.5, (2, Some(1)), 0.02), &before, 0.1));
+        assert!(!is_new(&spot(1.5, (1, Some(2)), 0.01), &before, 0.1));
+        // worse, far away, or another pair
+        assert!(is_new(&spot(0.5, (1, Some(2)), 0.03), &before, 0.1));
+        assert!(is_new(&spot(5.0, (1, Some(2)), 0.01), &before, 0.1));
+        assert!(is_new(&spot(0.5, (1, Some(3)), 0.01), &before, 0.1));
+}
 }

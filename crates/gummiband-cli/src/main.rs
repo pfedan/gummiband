@@ -1122,6 +1122,12 @@ fn main() -> Result<()> {
                     ..Default::default()
                 },
             )?;
+            if !input.with_extension("kicad_pro").is_file() {
+                println!(
+                    "warning: no {} next to the board: default clearances and widths, the copper may give way to the wrong rules",
+                    input.with_extension("kicad_pro").display()
+                );
+            }
             let (text, r) = gummiband_kicad::follow_write::move_part_following(&kb, &reference, x, y)?;
             std::fs::write(&output, text)?;
             let secs = t0.elapsed().as_secs_f64();
