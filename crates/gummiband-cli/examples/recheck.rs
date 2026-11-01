@@ -81,6 +81,8 @@ fn main() {
                     origin: None,
                     resting: false,
                     fitted: Vec::new(),
+                    seg: u32::MAX,
+                    tap: None,
                 });
             }
             _ => {}

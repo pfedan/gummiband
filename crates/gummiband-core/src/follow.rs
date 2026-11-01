@@ -277,6 +277,8 @@ pub fn soft_geometry(board: &Board) -> Geometry {
             origin: Some(i as u32),
             resting: true,
             fitted: Vec::new(),
+            seg: u32::MAX,
+            tap: None,
         });
     }
     for (i, n) in board.soft.nodes.iter().enumerate() {

@@ -325,6 +325,15 @@ what is missing, full at 0.03 mm, so a spot that gets better counts before it is
 5000 on top. Before every tightening a pass works on the spots: the tracks there stay at their
 neck width for 1 mm around the spot, where the rules allow it, and only those nets move.
 
+In the open end a connection may end on a track of its net, also a plane fan-out (`End::Tap`):
+right after crossing an edge next to such a track the search is done, if that track is not on its
+own side of the gap. Before, it could only end on a pad or a via, so a connection to the same place
+ran the whole way next to the first one. The end stays on that segment: in the relaxation it slides
+along it to where its way is shortest, and whatever rips up a segment rips up what ends on it. Two
+fan-outs that end on each other reach no plane, `Router::net_pieces` counts that. Runs without
+`--until-stop` have no taps. A via weighs 20 mm of track in the open end, half of its weight in the
+search before, or the taps pay for fewer vias with long ways.
+
 The search has converged when even bold changes do not help: `TOP_LEVEL` side branches in a row
 have failed, each bolder than the last. One more connection or fewer spots start that over, a gain
 in vias or length only holds it, because those can go on falling for hours. There is no count of

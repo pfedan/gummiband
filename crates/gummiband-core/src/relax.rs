@@ -75,6 +75,48 @@ struct Rail {
     len: f64,
 }
 
+/// The tracks of `tracks` that end on a track of their net, each with the track it ends on.
+fn tap_targets(tracks: &[Track]) -> Vec<(usize, Vec<usize>)> {
+    let mut out = Vec::new();
+    for (ti, t) in tracks.iter().enumerate().filter(|(_, t)| t.tap.is_some()) {
+        let on = |(_, o): &(usize, &Track)| Some(o.seg) == t.tap;
+        let others: Vec<usize> = tracks.iter().enumerate().filter(on).map(|x| x.0).collect();
+        if !others.is_empty() {
+            out.push((ti, others));
+        }
+    }
+    out
+}
+
+/// Where the chains `others` come closest to `p`.
+fn nearest_on_tracks(chains: &[Vec<Point>], others: &[usize], p: Point) -> Option<Point> {
+    let mut best: Option<(f64, Point)> = None;
+    for &o in others {
+        for w in chains[o].windows(2) {
+            let ab = w[1] - w[0];
+            let x = ((p - w[0]).dot(ab) / ab.len2().max(1e-12)).clamp(0.0, 1.0);
+            let q = w[0] + ab * x;
+            let d = (q - p).len2();
+            if best.is_none_or(|b| d < b.0) {
+                best = Some((d, q));
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// Put the ends of the tapping tracks on the tracks they end on.
+pub(crate) fn snap_taps(tracks: &mut [Track]) {
+    for (ti, others) in tap_targets(tracks) {
+        let chains: Vec<Vec<Point>> = others.iter().map(|&o| tracks[o].pts.clone()).collect();
+        let index: Vec<usize> = (0..chains.len()).collect();
+        let n = tracks[ti].pts.len();
+        if let Some(q) = nearest_on_tracks(&chains, &index, tracks[ti].pts[n - 1]) {
+            tracks[ti].pts[n - 1] = q;
+        }
+    }
+}
+
 /// Pads count as fine pitch up to this distance to the next pad of their part.
 const RAIL_PITCH: f64 = 0.65;
 /// How far a rail goes on beyond the end of the pad. Longer rails take the room to fan out.
@@ -518,6 +560,7 @@ pub fn relax_while(
         .and_then(|v| v.parse().ok())
         .unwrap_or((cfg.spacing * 2.0).max(0.1));
     let mut tracks: Vec<Vec<Point>> = geo.tracks.iter().map(|t| resample(&t.pts, coarse)).collect();
+    let taps = tap_targets(&geo.tracks);
     let rails: Vec<[Option<Rail>; 2]> = if cfg.via_edge {
         let by_net = pin_rails(board);
         geo.tracks
@@ -820,6 +863,12 @@ pub fn relax_while(
                 (max_clr, max_vr),
                 (&net_clr, fitted_over),
             );
+            // a track that ends on a moving track goes with it
+            for (ti, others) in &taps {
+                if others.iter().any(|&o| awake[o]) {
+                    awake[*ti] = true;
+                }
+            }
         }
         let (awake, via_awake) = (&awake, &via_awake);
         prof::add(Slot::RelaxPieces, t_round.elapsed().as_nanos() as u64);
@@ -1208,6 +1257,15 @@ pub fn relax_while(
                 follow(r, &mut tracks[ti], true);
             }
         }
+        // the end of a tap slides along the track it ends on, to where it has the shortest way
+        for (ti, others) in taps.iter().filter(|(ti, _)| awake[*ti]) {
+            let n = tracks[*ti].len();
+            if n >= 2
+                && let Some(q) = nearest_on_tracks(&tracks, others, tracks[*ti][n - 2])
+            {
+                tracks[*ti][n - 1] = q;
+            }
+        }
         if let Some(moves) = gpu_moves {
             let mut at = 0;
             for p in &mut tracks {
@@ -1295,6 +1353,20 @@ pub fn relax_while(
             t_taut.elapsed().as_secs_f64()
         );
     }
+    // the tracks they end on have their last shape now
+    let mut tracks = tracks;
+    let chains: Vec<Vec<Point>> = tracks.iter().map(|t| t.0.clone()).collect();
+    for (ti, others) in &taps {
+        let (pts, elems) = &mut tracks[*ti];
+        let Some(&end) = pts.last() else { continue };
+        if let Some(q) = nearest_on_tracks(&chains, others, end).filter(|q| q.dist(end) > 1e-9) {
+            *pts.last_mut().unwrap() = q;
+            match elems.last_mut() {
+                Some(Elem::Line(_, b)) => *b = q,
+                _ => elems.push(Elem::Line(end, q)),
+            }
+        }
+    }
     for (ti, (t, (pts, elems))) in geo.tracks.iter_mut().zip(tracks).enumerate() {
         *t = Track {
             elems,
@@ -1307,6 +1379,8 @@ pub fn relax_while(
             origin: t.origin,
             resting: !awake[ti],
             fitted: std::mem::take(&mut t.fitted),
+            seg: t.seg,
+            tap: t.tap,
         };
     }
     true
