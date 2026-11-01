@@ -79,6 +79,9 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   so that they do not cross. `diff_pairs` without clearance errors and shorts on all seeds
   (before 3 of 6 runs with them), seed 0 2 instead of 6 KiCad errors (45 degrees 3 instead of
   8), `matching` 7 instead of 13, Lichtschnitzel unchanged (its USB-C end stays at the pads).
+  On DDR5 they were worse over 6 seeds (more pair gap and length errors, a pair whose repair
+  breaks it into single nets gets meandered as two nets), so they are opt-in (`--breakouts`)
+  until that is understood; ends between the pads of a part (BGA) stay at their pads.
   Open: room in the router itself, phase matching near the source, carrying the pair to its
   end, via pairs (the remaining pair errors sit at vias near the ends), the open end with
   pairs.

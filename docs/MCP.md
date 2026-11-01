@@ -327,8 +327,8 @@ stay). Defaults match the CLI: `runs` 14 (a constant, so results do not depend o
 directions per layer for every third run, 0 = off), `pair_pull` 0 (experimental pull between the
 nets of a differential pair), `pairs` false (experimental: a pair as one wide track that is split
 in two, see the CLI guide; only pairs with a pair rule or a net class of their own, `pair_all`
-true for every pair), `pair_breakouts` true (the wide track ends just outside the pads, false: at
-the pads), `pair_skew` 0.1 mm, `pair_zdiff` none, `tune` true (meanders for the
+true for every pair), `pair_breakouts` false (experimental: the wide track ends just outside the
+pads), `pair_skew` 0.1 mm, `pair_zdiff` none, `tune` true (meanders for the
 `length` and `skew` rules of the `.kicad_dru`, written as KiCad tuning patterns),
 `tune_amplitude` 1 mm, `tune_spacing` 2 track widths between meander legs, `negotiate` 0
 (negotiated routing from the start, 20 rounds work well and take about twice the time; with 0
