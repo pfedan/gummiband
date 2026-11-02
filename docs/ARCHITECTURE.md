@@ -364,7 +364,10 @@ the split.
 
 `tune.rs` runs after the routing (and after the 45 degree step) when the board has such rules.
 It computes an aim per net (length window first, then the skew groups against their longest
-net), then places meanders: per straight line of the track, slots of `4r` along the line
+net), then places meanders: per straight line of the track, and per run of lines and arcs
+that stays within 0.1 mm of its chord (the router leaves few long straight lines; the run becomes
+its chord, checked against all foreign copper, and the gain counts what the chord takes off; not
+with `--angles 45`, whose chords would leave the grid), slots of `4r` along the line
 (`2r` = track width plus the leg spacing), per slot the side and the highest bump that keeps the
 clearance to all foreign copper and the edge (bisection on the height), then one common cap on
 the heights, found by bisection, so that the gain matches the need; below the gain of one low

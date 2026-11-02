@@ -525,13 +525,15 @@ pub fn tune(board: &Board, geo: &mut Geometry, cfg: &TuneConfig) -> TuneReport {
     TuneReport { nets, patterns }
 }
 
-/// Put `mid` in place of element `ei` of track `ti` as a track of its own: the track keeps the
-/// elements before it (and `pre`), a new track takes `post` and the elements after it. Returns
-/// the index of the new middle track.
+/// Put `mid` in place of elements `ei` to `ej` of track `ti` as a track of its own: the track
+/// keeps the elements before them (and `pre`), a new track takes `post` and the elements after
+/// them. Returns the index of the new middle track.
+#[allow(clippy::too_many_arguments)]
 fn split_in(
     geo: &mut Geometry,
     ti: usize,
     ei: usize,
+    ej: usize,
     pre: Vec<Elem>,
     mid: Vec<Elem>,
     post: Vec<Elem>,
@@ -539,7 +541,7 @@ fn split_in(
 ) -> usize {
     let t = &mut geo.tracks[ti];
     let mut rest = post;
-    rest.extend_from_slice(&t.elems[ei + 1..]);
+    rest.extend_from_slice(&t.elems[ej + 1..]);
     t.elems.truncate(ei);
     t.elems.extend(pre);
     t.pts = flatten(&t.elems);
@@ -859,41 +861,46 @@ pub fn tune_net(
     let mut tried: Vec<(Point, Point)> = Vec::new();
     while left > TOL {
         let room = Room::new(board, geo, &[net]);
-        let mut lines: Vec<(f64, usize, usize)> = Vec::new();
+        let mut lines: Vec<(f64, usize, usize, usize, Point, Point)> = Vec::new();
         for (ti, t) in geo
             .tracks
             .iter()
             .enumerate()
             .filter(|(_, t)| t.net == net && t.pattern.is_none())
         {
-            for (ei, e) in t.elems.iter().enumerate() {
-                if let Elem::Line(a, b) = *e
-                    && a.dist(b) >= 1.0
-                    && !tried.iter().any(|&(p, q)| p.dist(a) < 1e-9 && q.dist(b) < 1e-9)
-                {
-                    lines.push((a.dist(b), ti, ei));
+            for (ei, ej, a, b) in runs(&t.elems, cfg.style == Style::Chamfer) {
+                if a.dist(b) >= 1.0 && !tried.iter().any(|&(p, q)| p.dist(a) < 1e-9 && q.dist(b) < 1e-9) {
+                    lines.push((a.dist(b), ti, ei, ej, a, b));
                 }
             }
         }
         lines.sort_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
         let mut placed = false;
-        for &(_, ti, ei) in &lines {
+        for &(_, ti, ei, ej, a, b) in &lines {
             let t = &geo.tracks[ti];
-            let Elem::Line(a, b) = t.elems[ei] else { continue };
             tried.push((a, b));
             let w = t.width;
             let clr = board.class_of(net).clearance;
             let r = (w + (cfg.spacing * w).max(clr)) / 2.0;
-            let Some(p) = plan(&room, geo, a, b, t.layer, w / 2.0, r, left, cfg) else {
+            // a run of lines and arcs becomes its chord: what that takes off is gained back too
+            let was: f64 = t.elems[ei..=ej].iter().map(elem_len).sum();
+            let lost = was - a.dist(b);
+            let Some(p) = plan(&room, geo, a, b, t.layer, w / 2.0, r, left + lost, cfg) else {
                 continue;
             };
-            if p.gain <= 1e-6 {
+            let new = realize_plan(a, b, &p, cfg.style);
+            let gain = new.iter().map(elem_len).sum::<f64>() - was;
+            if gain <= 1e-6 {
                 continue;
             }
-            let new = realize_plan(a, b, &p, cfg.style);
+            // the chord between the bumps strays from the run: it must keep its clearances
+            if (ej > ei || !matches!(t.elems[ei], Elem::Line(..))) && !room.free(geo, &flatten(&new), w / 2.0, t.layer)
+            {
+                continue;
+            }
             let layer = t.layer;
             let id = patterns.len() as u32;
-            let m = split_in(geo, ti, ei, Vec::new(), new, Vec::new(), id);
+            let m = split_in(geo, ti, ei, ej, Vec::new(), new, Vec::new(), id);
             patterns.push(Pattern {
                 nets: vec![net],
                 layer,
@@ -906,7 +913,7 @@ pub fn tune_net(
                 spacing: 2.0 * r - w,
                 aim,
             });
-            left -= p.gain;
+            left -= gain;
             placed = true;
             break;
         }
@@ -915,6 +922,50 @@ pub fn tune_net(
         }
     }
     need - left
+}
+
+/// Farthest a run of lines and arcs may stray from its chord to be meandered as one line, mm.
+const RUN_DEV: f64 = 0.1;
+
+/// Pieces of a track that a meander may take as one straight line: from element `ei` to `ej`,
+/// all within [`RUN_DEV`] of the chord from `a` to `b`. Every line on its own, and from every
+/// element on the longest such run of lines and arcs (shorter ones fit where the longer ones
+/// find no room). With `lines_only` (the 45 degree grid, whose chords would leave it) only the
+/// lines.
+fn runs(elems: &[Elem], lines_only: bool) -> Vec<(usize, usize, Point, Point)> {
+    let start = |e: &Elem| match *e {
+        Elem::Line(a, _) | Elem::Arc(a, _, _) => a,
+    };
+    let end = |e: &Elem| match *e {
+        Elem::Line(_, b) | Elem::Arc(_, _, b) => b,
+    };
+    let mut out = Vec::new();
+    for (i, e) in elems.iter().enumerate() {
+        if let Elem::Line(a, b) = *e {
+            out.push((i, i, a, b));
+        }
+        if lines_only {
+            continue;
+        }
+        let a = start(e);
+        let mut last = None;
+        for j in i..elems.len() {
+            let b = end(&elems[j]);
+            if flatten(&elems[i..=j])
+                .iter()
+                .any(|&q| crate::geom::point_seg_dist(q, a, b) > RUN_DEV)
+            {
+                break;
+            }
+            last = Some(j);
+        }
+        if let Some(j) = last
+            && (j > i || matches!(e, Elem::Arc(..)))
+        {
+            out.push((i, j, a, end(&elems[j])));
+        }
+    }
+    out
 }
 
 /// The two curves at distance d/2 to both sides of a centre line of lines and arcs whose
@@ -1168,8 +1219,8 @@ pub fn tune_pair(
             let layer = tp.layer;
             let id = patterns.len() as u32;
             let (tpi, tni, ep, en) = (s.tp, s.tn, s.ep, s.en);
-            let mp = split_in(geo, tpi, ep, pre_p, on_p, post_p, id);
-            let mn = split_in(geo, tni, en, pre_n, mid_n, post_n, id);
+            let mp = split_in(geo, tpi, ep, ep, pre_p, on_p, post_p, id);
+            let mn = split_in(geo, tni, en, en, pre_n, mid_n, post_n, id);
             patterns.push(Pattern {
                 nets: vec![p, n],
                 layer,
@@ -1319,6 +1370,48 @@ mod tests {
             assert_eq!(rep.patterns.len(), 1);
             assert!(crate::check::check(&b, &geo).is_empty(), "{style:?}");
             assert!(matching::check(&b, &geo).iter().all(|r| r.failed() == 0));
+        }
+    }
+
+    #[test]
+    fn a_track_of_short_lines_and_gentle_arcs_is_meandered_along_its_chord() {
+        // A wobbles from pad to pad in pieces of 0.8 mm, lines and arcs 0.03 mm off the line y = 5
+        let wobbly = || {
+            let (b, mut geo) = board(["A", "B"], 4.0);
+            let mut elems = Vec::new();
+            let mut x = 4.0;
+            while x < 25.9 {
+                let nx = (x + 0.8f64).min(26.0);
+                if elems.len() % 2 == 0 {
+                    elems.push(Elem::Line(pt(x, 5.0), pt(nx, 5.0)));
+                } else {
+                    elems.push(Elem::Arc(pt(x, 5.0), pt((x + nx) / 2.0, 5.03), pt(nx, 5.0)));
+                }
+                x = nx;
+            }
+            geo.tracks[0].pts = flatten(&elems);
+            geo.tracks[0].elems = elems;
+            (b, geo)
+        };
+        for style in [Style::Round, Style::Chamfer] {
+            let (mut b, mut geo) = wobbly();
+            let before = matching::net_length(&b, &geo, 0).total();
+            length_rule(&mut b, vec![0], before + 3.0, before + 3.2);
+            let cfg = TuneConfig {
+                style,
+                ..TuneConfig::default()
+            };
+            let rep = tune(&b, &mut geo, &cfg);
+            let l = matching::net_length(&b, &geo, 0).total();
+            if style == Style::Round {
+                assert!((before + 3.0..=before + 3.2).contains(&l), "{before} {l}");
+                assert_eq!(rep.patterns.len(), 1);
+                assert!(crate::check::check(&b, &geo).is_empty());
+            } else {
+                // on the 45 degree grid a chord would leave it: no piece is long enough
+                assert!(rep.patterns.is_empty());
+                assert!((l - before).abs() < 1e-9);
+            }
         }
     }
 
