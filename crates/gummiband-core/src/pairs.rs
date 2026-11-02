@@ -199,8 +199,19 @@ fn breakout_with(
             }
         }
     }
-    [first, first * -1.0]
-        .into_iter()
+    let mut dirs = vec![first, first * -1.0];
+    if apart {
+        // the pads of a part the pair runs through may face a neighbour: the start may lie
+        // off to the side as well, towards the other end first
+        let mut slant: Vec<Point> = [first, first * -1.0]
+            .into_iter()
+            .flat_map(|x| [(x + axis).norm(), (x - axis).norm()])
+            .collect();
+        let to = (toward - mid).norm();
+        slant.sort_by(|a, b| b.dot(to).total_cmp(&a.dot(to)));
+        dirs.extend(slant);
+    }
+    dirs.into_iter()
         .find_map(|x| breakout_towards(b, p, n, x, &part, wide, carrier_clr, apart))
 }
 
@@ -238,10 +249,38 @@ fn breakout_towards(
             })
             .collect();
         let zones: Option<Vec<Obstacle>> = if apart {
-            [p, n]
-                .into_iter()
-                .map(|pad| zone_of(b, p, n, &[pad], &disc, carrier_clr))
-                .collect()
+            // the way of each single track: straight out of its pad, then over to the start
+            // (the hull of the whole pad and the start would sweep over the pads between)
+            let rho = wide / 6.0;
+            // out of the pads at right angles to their row, on the side of the start
+            let normal = left_of((pp.pos - pn.pos).norm());
+            let out = if normal.dot(x) >= 0.0 { normal } else { normal * -1.0 };
+            let round = |q: Point| -> Vec<Point> {
+                (0..8)
+                    .map(|i| {
+                        let a = i as f64 * std::f64::consts::PI / 4.0;
+                        q + pt(a.cos(), a.sin()) * rho
+                    })
+                    .collect()
+            };
+            let mut zs = Vec::new();
+            for pad in [p, n] {
+                let at = b.pins[pad].pos;
+                let tip = b.pins[pad]
+                    .obstacles
+                    .iter()
+                    .flat_map(|&o| b.obstacles[o].shape.to_polygon(b.rules.max_error).pts)
+                    .map(|q| (q - at).dot(out))
+                    .fold(0.0, f64::max);
+                // past the tips of the pads beside it before it turns: two pieces, the hull
+                // of both would sweep over those pads
+                let turn = at + out * (tip + rho + carrier_clr);
+                let lead = [round(at), round(turn)].concat();
+                let over = [round(turn), disc.clone()].concat();
+                zs.push(zone_of(b, p, n, &[], &lead, carrier_clr));
+                zs.push(zone_of(b, p, n, &[], &over, carrier_clr));
+            }
+            zs.into_iter().collect()
         } else {
             zone(b, p, n, &disc, carrier_clr).map(|o| vec![o])
         };
@@ -457,8 +496,17 @@ fn segments(
             [i, j] => {
                 let (x, y) = (all[i].0, all[j].0);
                 // one hull around the four pads with nothing foreign in it: a second row of
-                // the same pins
-                if zone(b, x.p, x.n, &pads_of(&y), class.clearance).is_some() {
+                // the same pins (its neighbours may be as close as the pads of the row)
+                let row = Polygon::new(hull([pads_of(&x), pads_of(&y)].concat()));
+                let ours = [b.pins[x.p].net, b.pins[x.n].net];
+                let foreign = b.obstacles.iter().any(|o| {
+                    o.net.is_none_or(|n| !ours.contains(&n))
+                        && o.layers.intersects(b.pins[x.p].layers)
+                        && !matches!(o.kind, ObstacleKind::Keepout { .. })
+                        && o.shape.bbox().overlaps(&row.bbox())
+                        && o.shape.to_polygon(b.rules.max_error).dist_to_poly(&row) <= 0.0
+                });
+                if !foreign {
                     // the band may end on either pad of each net
                     let mut cand = vec![i, j];
                     for (p, n) in [(x.p, y.n), (y.p, x.n)] {
@@ -474,6 +522,27 @@ fn segments(
         }
     }
     let rows = terminals.iter().any(|t| t.len() > 1);
+    if std::env::var("GB_PAIR_LOG").is_ok() {
+        let names = |k: &usize| {
+            format!(
+                "{}/{}{}",
+                b.pins[all[*k].0.p].name,
+                b.pins[all[*k].0.n].name,
+                if all[*k].1.is_some() { "" } else { " (apart)" }
+            )
+        };
+        eprintln!(
+            "pair plan: ends {:?}, through {:?}",
+            terminals
+                .iter()
+                .map(|t| t.iter().map(names).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            through
+                .iter()
+                .map(|t| t.iter().map(names).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+    }
     if terminals.len() != 2 || (through.is_empty() && !rows) {
         return None;
     }
@@ -531,7 +600,13 @@ fn segments(
                 Some(o) => vec![o],
                 None => {
                     let other = mid(&all[s[1 - k]].0);
-                    let (c, zs) = breakout_with(b, e.p, e.n, other, class.track_width, class.clearance, true)?;
+                    let Some((c, zs)) = breakout_with(b, e.p, e.n, other, class.track_width, class.clearance, true)
+                    else {
+                        if std::env::var("GB_PAIR_LOG").is_ok() {
+                            eprintln!("pair plan: no breakout at {}/{}", b.pins[e.p].name, b.pins[e.n].name);
+                        }
+                        return None;
+                    };
                     e.out = Some(c);
                     zs
                 }
@@ -2452,6 +2527,13 @@ pub fn route_pairs(
     // last pass connects their pins along with the rest of their nets
     let mut joins_off: Vec<(usize, usize)> = Vec::new();
     let (geo_done, fin, cut_paths) = loop {
+        // the segments of a pair go together: a pair given up is routed as single tracks
+        let gone_p: Vec<NetId> = given_up.iter().map(|&pi| paths[pi].p).collect();
+        for (pi, path) in paths.iter().enumerate() {
+            if gone_p.contains(&path.p) && !given_up.contains(&pi) {
+                given_up.push(pi);
+            }
+        }
         let mut geo = split_geo.clone();
         let (repaired, cuts) = repair(&real, &mut geo, &paths, &given_up, &keep);
         let mut names = unfinished.clone();
