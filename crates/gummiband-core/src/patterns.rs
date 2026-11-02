@@ -439,7 +439,7 @@ fn buses(board: &Board, rows: &[PinRow]) -> Vec<Bus> {
 }
 
 /// The hints that `route --patterns` knows.
-pub const HINTS: [&str; 3] = ["shares", "decaps", "rows"];
+pub const HINTS: [&str; 5] = ["shares", "decaps", "rows", "pairs", "groups"];
 
 /// Parse a comma separated list of hints: names of [`HINTS`], `all` or `none`.
 pub fn hints(arg: &str) -> Result<Vec<&'static str>, String> {
@@ -450,7 +450,11 @@ pub fn hints(arg: &str) -> Result<Vec<&'static str>, String> {
             "all" => out.extend(HINTS),
             _ => match HINTS.iter().find(|&&a| a == w) {
                 Some(&a) => out.push(a),
-                None => return Err(format!("unknown hint {w:?} (shares, decaps, rows, all, none)")),
+                None => {
+                    return Err(format!(
+                        "unknown hint {w:?} (shares, decaps, rows, pairs, groups, all, none)"
+                    ));
+                }
             },
         }
     }

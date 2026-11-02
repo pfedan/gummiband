@@ -91,8 +91,10 @@ enum Cmd {
         /// Hints from local patterns of the board, comma separated: `shares` (pins of a plane net
         /// next to each other share one fan-out via), `decaps` (a decoupling capacitor is
         /// connected to its IC pin first, its via serves both), `rows` (the open end re-lays the
-        /// connections of a pin row in pin order), `all` or `none`. `gummiband info` lists the
-        /// patterns it finds.
+        /// connections of a pin row in pin order), `pairs` (differential pairs before the other
+        /// signal connections, the longest first), `groups` (the connections between two parts
+        /// as one block in pin order; `GB_GROUP_ORDER` = short, long or inline places it), `all`
+        /// or `none`. `gummiband info` lists the patterns it finds.
         #[arg(long, default_value = "none")]
         patterns: String,
         /// Factor on the via cost in the pass that routes connections with vias again and

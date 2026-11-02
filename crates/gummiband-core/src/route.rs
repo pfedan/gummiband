@@ -67,6 +67,26 @@ pub struct RouterConfig {
     /// Share of the moves of the open end that re-lay the connections of one pin row in pin
     /// order (0 = off).
     pub row_moves: f64,
+    /// Differential pairs go before the other signal connections of their priority, the longest
+    /// first: a pair has the fewest ways, the more so as one wide track (`--pairs`).
+    pub pairs_first: bool,
+    /// Connections between the same two parts (a bus, SPI, I2C, a connector) go as one block, in pin order
+    /// across the block, see [`GroupOrder`].
+    pub groups: GroupOrder,
+}
+
+/// Where the block of a part to part group goes in the routing order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupOrder {
+    /// No groups: every connection by its own length.
+    #[default]
+    Off,
+    /// Groups before the other signal connections of their priority, the shortest group first.
+    Short,
+    /// Groups before the other signal connections of their priority, the longest group first.
+    Long,
+    /// Each group at the place of its shortest connection among the others, as one block.
+    Inline,
 }
 
 impl Default for RouterConfig {
@@ -93,6 +113,8 @@ impl Default for RouterConfig {
             share_fanouts: false,
             decaps_first: false,
             row_moves: 0.0,
+            pairs_first: false,
+            groups: GroupOrder::Off,
         }
     }
 }
@@ -103,6 +125,17 @@ impl RouterConfig {
         self.share_fanouts = hints.contains(&"shares");
         self.decaps_first = hints.contains(&"decaps");
         self.row_moves = if hints.contains(&"rows") { 0.15 } else { 0.0 };
+        self.pairs_first = hints.contains(&"pairs");
+        // the place of the groups is an experiment: `GB_GROUP_ORDER` = short (default), long, inline
+        self.groups = if hints.contains(&"groups") {
+            match std::env::var("GB_GROUP_ORDER").as_deref() {
+                Ok("long") => GroupOrder::Long,
+                Ok("inline") => GroupOrder::Inline,
+                _ => GroupOrder::Short,
+            }
+        } else {
+            GroupOrder::Off
+        };
         self
     }
 }
@@ -113,6 +146,20 @@ pub enum Goal {
     Pins(Vec<usize>),
     /// A via into a plane of the net (or a through hole pin of the net).
     Plane,
+}
+
+/// Place of a planned connection in the routing order below its priority, see
+/// [`Router::order_keys`].
+#[derive(Debug, Clone, Copy)]
+struct OrderKey {
+    /// 0 differential pairs (`pairs_first`), 1 part to part groups before the rest, 2 the rest.
+    tier: u8,
+    /// Position of the block: the jittered length of a single connection, or of the group.
+    block: f64,
+    /// Group id (usize::MAX for none): keeps the connections of a block together.
+    group: usize,
+    /// Place across the block.
+    sweep: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -3114,15 +3161,157 @@ impl<'a> Router<'a> {
         }
         // stable order: priority, then short connections first; the seed perturbs lengths
         let seed = self.cfg.seed;
-        conns.sort_by(|a, b| {
-            let ja = jitter(seed, a.2.from as u64) * a.1;
-            let jb = jitter(seed, b.2.from as u64) * b.1;
-            a.0.cmp(&b.0).then(ja.total_cmp(&jb))
+        let order = self.order_keys(&conns);
+        let mut idx: Vec<usize> = (0..conns.len()).collect();
+        idx.sort_by(|&a, &b| {
+            let (ka, kb) = (&order[a], &order[b]);
+            conns[a]
+                .0
+                .cmp(&conns[b].0)
+                .then(ka.tier.cmp(&kb.tier))
+                .then(ka.block.total_cmp(&kb.block))
+                .then(ka.group.cmp(&kb.group))
+                .then(ka.sweep.total_cmp(&kb.sweep))
+                .then_with(|| {
+                    let ja = jitter(seed, conns[a].2.from as u64) * conns[a].1;
+                    let jb = jitter(seed, conns[b].2.from as u64) * conns[b].1;
+                    ja.total_cmp(&jb)
+                })
+                .then(a.cmp(&b))
         });
-        self.conns = conns.into_iter().map(|c| c.2).collect();
+        let mut slots: Vec<Option<Conn>> = conns.into_iter().map(|c| Some(c.2)).collect();
+        self.conns = idx.iter().map(|&i| slots[i].take().unwrap()).collect();
         self.pair_up();
         self.conn_segs = vec![Vec::new(); self.conns.len()];
         self.conn_vias = vec![Vec::new(); self.conns.len()];
+    }
+
+    /// Sort keys of the planned connections (priority key, length, connection) below the
+    /// priority: the tier (pairs, groups, the rest), then the block a connection belongs to with
+    /// its place in it. Without `pairs_first` and `groups` every connection is its own block at
+    /// its jittered length, which is the plain order.
+    fn order_keys(&self, conns: &[(i64, f64, Conn)]) -> Vec<OrderKey> {
+        let b = self.board;
+        let seed = self.cfg.seed;
+        let plain = |i: usize| {
+            let (_, d, c) = &conns[i];
+            OrderKey {
+                tier: 2,
+                block: jitter(seed, c.from as u64) * d,
+                group: usize::MAX,
+                sweep: 0.0,
+            }
+        };
+        let mut keys: Vec<OrderKey> = (0..conns.len()).map(plain).collect();
+        let signal = |c: &Conn| matches!(c.goal, Goal::Pins(_)) && !b.planes.iter().any(|p| p.net == c.net);
+        // differential pairs: as two nets or as the one wide net of `--pairs`
+        let mut pair_nets: HashSet<NetId> = HashSet::new();
+        if self.cfg.pairs_first {
+            for (p, n) in b.diff_pairs() {
+                pair_nets.insert(p);
+                pair_nets.insert(n);
+            }
+            for (i, n) in b.nets.iter().enumerate() {
+                if b.classes[n.class as usize].name.starts_with("pair:") {
+                    pair_nets.insert(i as NetId);
+                }
+            }
+            for (i, (_, d, c)) in conns.iter().enumerate() {
+                if signal(c) && pair_nets.contains(&c.net) {
+                    // the longest first
+                    keys[i].tier = 0;
+                    keys[i].block = -jitter(seed, c.from as u64) * d;
+                }
+            }
+        }
+        if self.cfg.groups == GroupOrder::Off {
+            return keys;
+        }
+        // group ends: parts with at least 4 pins on nets (ICs, connectors); passives and
+        // SOT-23 do not end a group, so a pull-up on the way does not split it
+        let mut count: HashMap<&str, usize> = HashMap::new();
+        for p in &b.pins {
+            *count.entry(p.footprint.as_str()).or_insert(0) += 1;
+        }
+        let end = |p: usize| count.get(b.pins[p].footprint.as_str()).copied().unwrap_or(0) >= 4;
+        let mut by_pair: HashMap<(&str, &str), Vec<(usize, usize)>> = HashMap::new();
+        for (i, (_, _, c)) in conns.iter().enumerate() {
+            if !signal(c) || keys[i].tier == 0 || !end(c.from) {
+                continue;
+            }
+            let Goal::Pins(tree) = &c.goal else { continue };
+            let from = b.pins[c.from].pos;
+            // the nearest pin of the tree on another part that ends groups
+            let Some(&to) = tree
+                .iter()
+                .filter(|&&t| end(t) && b.pins[t].footprint != b.pins[c.from].footprint)
+                .min_by(|&&x, &&y| b.pins[x].pos.dist(from).total_cmp(&b.pins[y].pos.dist(from)))
+            else {
+                continue;
+            };
+            let (fa, fb) = (b.pins[c.from].footprint.as_str(), b.pins[to].footprint.as_str());
+            let (k, a_pin) = if fa < fb { ((fa, fb), c.from) } else { ((fb, fa), to) };
+            by_pair.entry(k).or_default().push((i, a_pin));
+        }
+        let mut groups: Vec<((&str, &str), Vec<(usize, usize)>)> =
+            by_pair.into_iter().filter(|(_, m)| m.len() >= 2).collect();
+        groups.sort_by(|a, b| a.0.cmp(&b.0));
+        for (gi, (_, members)) in groups.iter().enumerate() {
+            // across the block: the pins of the first part along the normal of the line between
+            // the two parts, from one side to the other; the seed picks the side
+            let centre = |which: usize| {
+                let pts: Vec<Point> = members
+                    .iter()
+                    .map(|&(i, a)| {
+                        if which == 0 {
+                            b.pins[a].pos
+                        } else {
+                            let c = &conns[i].2;
+                            if a == c.from {
+                                // the end on the other part: the tree pin nearest to it
+                                match &c.goal {
+                                    Goal::Pins(t) => t
+                                        .iter()
+                                        .map(|&q| b.pins[q].pos)
+                                        .min_by(|x, y| x.dist(b.pins[a].pos).total_cmp(&y.dist(b.pins[a].pos)))
+                                        .unwrap_or(b.pins[a].pos),
+                                    _ => b.pins[a].pos,
+                                }
+                            } else {
+                                b.pins[c.from].pos
+                            }
+                        }
+                    })
+                    .collect();
+                let n = pts.len() as f64;
+                pts.iter().fold(Point::default(), |s, &p| s + p) * (1.0 / n)
+            };
+            let (ca, cb) = (centre(0), centre(1));
+            let axis = cb - ca;
+            let len = axis.dist(Point::default()).max(1e-9);
+            let normal = Point {
+                x: -axis.y / len,
+                y: axis.x / len,
+            };
+            let side = if (seed / 2) % 2 == 0 { 1.0 } else { -1.0 };
+            let lens: Vec<f64> = members
+                .iter()
+                .map(|&(i, _)| jitter(seed, conns[i].2.from as u64) * conns[i].1)
+                .collect();
+            let block = match self.cfg.groups {
+                GroupOrder::Long => -lens.iter().copied().fold(0.0, f64::max),
+                GroupOrder::Inline => lens.iter().copied().fold(f64::MAX, f64::min),
+                _ => lens.iter().copied().fold(f64::MAX, f64::min),
+            };
+            for &(i, a) in members {
+                let k = &mut keys[i];
+                k.tier = if self.cfg.groups == GroupOrder::Inline { 2 } else { 1 };
+                k.block = block;
+                k.group = gi;
+                k.sweep = side * (b.pins[a].pos - ca).dot(normal);
+            }
+        }
+        keys
     }
 
     /// Reorder the planned connections by a key (lower first; ties keep the plan order).
@@ -3941,6 +4130,8 @@ fn learn_vip(net: NetId, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::{LayerSet, Net, Obstacle, ObstacleKind, Pin};
+    use crate::geom::{Polygon, Shape};
     use crate::topo::SubstrateConfig;
 
     #[test]
@@ -3956,6 +4147,102 @@ mod tests {
         // on another layer right above, it counts farther
         assert!((guide_dist(&guides, 0, pt(2.0, 0.3), 10.0) - 0.3 - OFF_LAYER).abs() < 1e-9);
         assert_eq!(guide_dist(&guides, 1, pt(2.0, 50.0), 3.0), 3.0);
+    }
+
+    /// A board of small square pads: (footprint, net, x, y) per pin, on a 20 mm square.
+    fn pad_board(pins: &[(&str, &str, f64, f64)]) -> Board {
+        let mut b = crate::topo::tests::two_pad_board();
+        b.outline = vec![Polygon::new(vec![pt(0., 0.), pt(20., 0.), pt(20., 20.), pt(0., 20.)])];
+        b.nets.clear();
+        b.pins.clear();
+        b.obstacles.clear();
+        for (i, &(fp, net, x, y)) in pins.iter().enumerate() {
+            let n = match b.nets.iter().position(|n| n.name == net) {
+                Some(n) => n,
+                None => {
+                    b.nets.push(Net {
+                        name: net.into(),
+                        class: 0,
+                        pins: Vec::new(),
+                        planes: LayerSet::default(),
+                        priority: 0,
+                    });
+                    b.nets.len() - 1
+                }
+            };
+            b.nets[n].pins.push(i);
+            b.obstacles.push(Obstacle {
+                shape: Shape::Polygon(crate::geom::roundrect_polygon(pt(x, y), 0.4, 0.4, 0.0, 0.0, 0.005)),
+                layers: LayerSet::single(0),
+                net: Some(n as NetId),
+                kind: ObstacleKind::Pad,
+                hole: None,
+                clearance: 0.2,
+                pin: Some(i),
+                locked: true,
+            });
+            b.pins.push(Pin {
+                name: format!("{fp}.{i}"),
+                footprint: fp.into(),
+                net: n as NetId,
+                pos: pt(x, y),
+                layers: LayerSet::single(0),
+                obstacles: vec![i],
+                size: (0.4, 0.4),
+            });
+        }
+        b
+    }
+
+    fn planned_nets(b: &Board, cfg: RouterConfig) -> Vec<String> {
+        let sub = Substrate::build(b, &SubstrateConfig::default());
+        let mut r = Router::new(b, &sub, cfg);
+        r.plan();
+        r.conns.iter().map(|c| b.nets[c.net as usize].name.clone()).collect()
+    }
+
+    #[test]
+    fn pairs_and_part_groups_move_forward_in_the_plan() {
+        let mut pins = Vec::new();
+        // a bus of four nets between two parts, 12 mm, given in a mixed order
+        for net in ["C", "A", "D", "B"] {
+            let y = 4.0 + ["A", "B", "C", "D"].iter().position(|&n| n == net).unwrap() as f64;
+            pins.push(("U1", net, 3.0, y));
+            pins.push(("U2", net, 15.0, y));
+        }
+        // two short connections between passives
+        pins.extend([
+            ("R1", "E", 3.0, 12.0),
+            ("R2", "E", 5.0, 12.0),
+            ("R3", "F", 3.0, 14.0),
+            ("R4", "F", 6.0, 14.0),
+        ]);
+        // a pair, 14 mm
+        pins.extend([
+            ("J1", "L_P", 3.0, 17.0),
+            ("J2", "L_P", 17.0, 17.0),
+            ("J1", "L_N", 3.0, 18.0),
+            ("J2", "L_N", 17.0, 18.0),
+        ]);
+        let b = pad_board(&pins);
+        let plain = planned_nets(&b, RouterConfig::default());
+        assert_eq!(plain, ["E", "F", "C", "A", "D", "B", "L_P", "L_N"]);
+        let groups = RouterConfig {
+            groups: GroupOrder::Short,
+            ..Default::default()
+        };
+        // the bus as one block before the rest, in pin order across it
+        assert_eq!(planned_nets(&b, groups), ["A", "B", "C", "D", "E", "F", "L_P", "L_N"]);
+        let inline = RouterConfig {
+            groups: GroupOrder::Inline,
+            ..Default::default()
+        };
+        assert_eq!(planned_nets(&b, inline), ["E", "F", "A", "B", "C", "D", "L_P", "L_N"]);
+        let pairs = RouterConfig {
+            pairs_first: true,
+            ..Default::default()
+        };
+        assert_eq!(planned_nets(&b, pairs), ["L_P", "L_N", "E", "F", "C", "A", "D", "B"]);
     }
 
     #[test]

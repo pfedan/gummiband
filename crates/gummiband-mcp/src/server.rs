@@ -580,7 +580,8 @@ pub struct RouteIn {
     /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
     pub layer_dirs: Option<f64>,
     /// Hints from the local patterns of board_patterns, comma separated: shares, decaps, rows,
-    /// all or none (default none), as `gummiband route --patterns`.
+    /// pairs (differential pairs first), groups (part to part connections as one block), all or
+    /// none (default none), as `gummiband route --patterns`.
     pub patterns: Option<String>,
     /// Generations of the evolutionary order search after the portfolio (default 3).
     pub generations: Option<usize>,

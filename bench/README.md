@@ -23,6 +23,11 @@ only unconnected items.
 | `fine_pitch_mixed` | 2 | the same part with shuffled nets: vias and crossings right at the pins, the Corne problem in small |
 | `diff_pairs` | 2 | 8 differential pairs (`_P`, `_N`) with a ground between them, 0.5 mm connectors at an angle, parts in the way |
 | `matching` | 2 | a byte lane and a clock pair between two 0.5 mm connectors at an angle, with `length`, `skew` and `diff_pair_uncoupled` rules |
+| `pair_wall` | 2 | a USB pair through the one gap of a wall of THT pins (the gap takes the wide pair or three single tracks, between the pins only one single track fits), six short nets across the wall next to the gap |
+| `pair_traffic` | 2 | two long pairs from a connector to a QFN-32 across a field of 0603 parts with random local nets |
+| `parts_easy` | 2 | part to part, level 1: QFN-32 and SPI flash with a planar bus, series resistors to a header |
+| `parts_medium` | 2 | level 2: SPI flash in its real pinout (bus on both sides of the flash), I2C sensor with pull-ups and an interrupt, 6 bit bus with one swap, random local nets |
+| `parts_hard` | 2 | level 3: QFN-48 with shared SPI to two devices, shared I2C with pull-ups to two more, 8 bit bus with two swaps to an edge connector, USB pair, random local nets |
 
 `run_suite.sh [board ...]` builds the CLI, routes every board into `boards/out/`
 one board after another (`--runs 4 --generations 1 --geometry-generations 0` with `RAYON_NUM_THREADS=4`, override with

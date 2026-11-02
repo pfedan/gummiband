@@ -506,6 +506,17 @@ hints on, all off by default (and then byte for byte the same as without them):
 - `rows`: a move of the open end (`improve::row_move`, 15 % of the moves) takes the connections
   of one pin row out and lays them again in the order of their pins, from one end, the other,
   the middle out or the ends in.
+- `pairs`: the connections of differential pairs (as two nets, or as the one wide net of
+  `--pairs`) go before the other signal connections of their priority, the longest first: a pair
+  has the fewest ways, and a wide track that comes late finds its corridor taken
+  (`Router::order_keys`).
+- `groups`: the connections between the same two parts (ICs or connectors, at least 4 pins on
+  nets: a bus, SPI, I2C; a pull-up on the way does not count) form a block of at least two, laid in pin
+  order across the block, from one side or the other by seed. Where the block goes is the
+  experiment `GB_GROUP_ORDER`: `short` (default) all blocks before the other signal connections
+  of their priority, the shortest block first; `long` the same, the longest first; `inline` each
+  block at the place of its shortest connection. The evolutionary search may still move single
+  connections out of a block.
 
 Pockets (a pad that can only be left through a via in it) are not a pattern: the tracks of its
 neighbours close the pocket, not the fixed copper, so the empty board does not show them (see
