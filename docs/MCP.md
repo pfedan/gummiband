@@ -477,6 +477,16 @@ pins to the inductor, a big pad that reaches its plane through one via. For each
   two VBUS pin groups of a USB-C receptacle with the signal pins between them) get one pour
   each to the `to` pads, with a warning; join them on another layer if they must share the
   current.
+- A long narrow pad (at least twice as long as wide: the IN and OUT strips of a DFN/QFN eFuse,
+  the drain of a power FET) that one convex pour cannot reach, because its pin row stands
+  between the pad's middle and the other terminal or a neighbour beside the strip cuts the
+  pour down to the strip, is left through an exit: through a gap in a long side or off an end,
+  between its neighbours. The pour is then several zones: a narrow stub over the pad out to the
+  exit (as wide as the gap between the neighbours allows, reported in `exits` and flagged by
+  the `current_check` when it is a neck) and the pour from there. A via field at such a pad
+  gives each via the one pour misses its own pour through an exit.
+- The paths are laid out in order: the pours and vias of the earlier paths are in the way of
+  the later ones (of other nets).
 - A net with a plane gets, at every terminal, locked vias for the current (IPC-2221 per via; the
   `from` terminals share the current, every `to` terminal takes all of it) on rings just off the
   pad (the holes stay out of the pad; vias already touching it count), free by the same rules as
@@ -685,9 +695,9 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
   `--net-priorities`; both go through `set_net_options`).
 - `create_board` reads rectangular outlines only, places every part on the front side and
   without rotation, and does not read footprint libraries of other types than KiCad (`.pretty`).
-- `power_copper` shapes a pour as a convex hull cut by straight lines: obstacles between the
-  terminals cost more copper than needed, and a terminal behind another net's pad is lost (a
-  warning says so). It does not move parts; the via fields sit on rings around the pad.
+- `power_copper` shapes a pour as a convex hull cut by straight lines (plus a narrow stub out of
+  a long narrow pad, see above): obstacles between the terminals cost more copper than needed,
+  and a terminal behind another net's pad is lost (a warning says so). It does not move parts; the via fields sit on rings around the pad.
 - `current_check` measures on a raster (0.05 mm, coarser on very large nets); it does not weigh
   the length of a neck, and the cross-section is skipped for nets of more than three million
   copper cells. `ground_pour` does not yet check that the fill reaches every via (the DRC does).

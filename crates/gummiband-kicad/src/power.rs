@@ -1418,6 +1418,234 @@ pub fn pour_outline(
     })
 }
 
+/// A narrow, elongated pad (the long strips of a DFN eFuse, the drain fingers of a power FET):
+/// centre, long axis and half sizes of its tightest box.
+#[derive(Debug, Clone, Copy)]
+pub struct Strip {
+    pub c: Point,
+    pub u: Point,
+    pub half_len: f64,
+    pub half_w: f64,
+}
+
+impl Strip {
+    /// The strip of a pad polygon at least twice as long as wide.
+    pub fn of(pad: &Polygon) -> Option<Strip> {
+        let hull = convex_hull(&pad.pts);
+        let mut best: Option<(f64, Strip)> = None;
+        for i in 0..hull.len() {
+            let d = hull[(i + 1) % hull.len()] - hull[i];
+            if d.len() < 1e-6 {
+                continue;
+            }
+            let (u, v) = (d.norm(), d.norm().perp());
+            let (mut a0, mut a1, mut b0, mut b1) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+            for &q in &hull {
+                (a0, a1) = (a0.min(u.dot(q)), a1.max(u.dot(q)));
+                (b0, b1) = (b0.min(v.dot(q)), b1.max(v.dot(q)));
+            }
+            let c = u * ((a0 + a1) / 2.0) + v * ((b0 + b1) / 2.0);
+            let (hu, hv) = ((a1 - a0) / 2.0, (b1 - b0) / 2.0);
+            let s = if hu >= hv {
+                Strip {
+                    c,
+                    u,
+                    half_len: hu,
+                    half_w: hv,
+                }
+            } else {
+                Strip {
+                    c,
+                    u: v,
+                    half_len: hv,
+                    half_w: hu,
+                }
+            };
+            if best.as_ref().is_none_or(|(a, _)| hu * hv < *a - 1e-12) {
+                best = Some((hu * hv, s));
+            }
+        }
+        best.map(|x| x.1)
+            .filter(|s| s.half_w > 0.0 && s.half_len >= 2.0 * s.half_w)
+    }
+
+    /// Ways for a pour out of the strip, as (start on the strip's axis, exit point `depth` off
+    /// the pad): off both ends, and off both long sides at the middle and near each end.
+    pub fn exits(&self, depth: f64) -> Vec<(Point, Point)> {
+        let (u, v) = (self.u, self.u.perp());
+        let mut out = Vec::new();
+        for s in [1.0, -1.0] {
+            out.push((self.c, self.c + u * (s * (self.half_len + depth))));
+        }
+        let t = self.half_len - self.half_w;
+        for s in [1.0, -1.0] {
+            for k in [0.0, -t, t] {
+                let a = self.c + u * k;
+                out.push((a, a + v * (s * (self.half_w + depth))));
+            }
+        }
+        out
+    }
+}
+
+/// A pour in pieces: the main pour over the terminals, and per strip pad it leaves through an
+/// exit a narrow stub over the pad out to the exit (index of the terminal group, stub).
+#[derive(Debug, Clone)]
+pub struct Joined {
+    pub main: Pour,
+    pub stubs: Vec<(usize, Pour)>,
+    /// Groups the pieces do not reach.
+    pub lost: Vec<usize>,
+}
+
+impl Joined {
+    pub fn pieces(&self) -> impl Iterator<Item = &Pour> {
+        std::iter::once(&self.main).chain(self.stubs.iter().map(|x| &x.1))
+    }
+}
+
+/// [`pour_outline`] over terminal groups (pad polygons and a centre each) with the spine between
+/// the centres of `pairs`. One convex pour cannot reach a long narrow pad between neighbours
+/// (the strips of a DFN eFuse: its pin row stands between the pad's middle and the pour, and a
+/// cut by a neighbour beside the strip runs along its whole length). Where the plain pour misses
+/// a group, a group that is one strip pad ([`Strip::of`]) leaves through one of its exits
+/// instead (through a gap in a long side or off an end): a stub over the pad out to the exit, in
+/// the channel between the neighbours, and the main pour from a disk at the exit to the others.
+/// Returns the plain pour unless exits reach more groups.
+pub fn pour_joining(
+    b: &Board,
+    net: NetId,
+    layer: LayerId,
+    groups: &[(Vec<Polygon>, Point)],
+    pairs: &[(usize, usize)],
+    margin: f64,
+) -> Option<Joined> {
+    // (exit point, disk radius, stub, its length) of a group, None: the pad itself
+    type Exit = Option<(Point, f64, usize, f64)>;
+    let mut stubs: Vec<Pour> = Vec::new();
+    // the pieces and (length of the way from terminal to terminal, copper area)
+    let eval = |choice: &[Exit], stubs: &[Pour]| -> Option<(Joined, f64, f64)> {
+        let mut terms: Vec<Polygon> = Vec::new();
+        let mut owner: Vec<usize> = Vec::new();
+        let at: Vec<Point> = choice.iter().zip(groups).map(|(c, g)| c.map_or(g.1, |x| x.0)).collect();
+        for (i, (c, g)) in choice.iter().zip(groups).enumerate() {
+            match c {
+                Some((e, r, _, _)) => terms.push(gummiband_core::geom::circle_polygon(*e, *r, 0.01)),
+                None => terms.extend(g.0.iter().cloned()),
+            }
+            owner.resize(terms.len(), i);
+        }
+        let spine: Vec<(Point, Point)> = pairs.iter().map(|&(i, j)| (at[i], at[j])).collect();
+        let main = pour_outline(b, net, layer, &terms, &spine, margin)?;
+        let out = Polygon::new(main.outline.clone());
+        let mut lost: Vec<usize> = main.lost.iter().map(|&t| owner[t]).collect();
+        for (i, c) in choice.iter().enumerate() {
+            if c.is_some_and(|(e, _, _, _)| !out.contains(e)) {
+                lost.push(i);
+            }
+        }
+        lost.sort_unstable();
+        lost.dedup();
+        let st: Vec<(usize, Pour)> = choice
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| c.map(|x| (i, stubs[x.2].clone())))
+            .collect();
+        let area = std::iter::once(&main)
+            .chain(st.iter().map(|x| &x.1))
+            .map(|p| Polygon::new(p.outline.clone()).signed_area().abs())
+            .sum();
+        let way =
+            spine.iter().map(|(a, e)| a.dist(*e)).sum::<f64>() + choice.iter().flatten().map(|x| x.3).sum::<f64>();
+        Some((Joined { main, stubs: st, lost }, way, area))
+    };
+    // fewest groups missed, then fewest exits (a pad the pour covers carries more), then the
+    // shortest way (through the narrow stubs), then most copper
+    let key = |x: &Option<(Joined, f64, f64)>| {
+        x.as_ref()
+            .map(|(j, w, a)| (j.lost.len(), j.stubs.len(), (w * 100.0).round() as i64, -a))
+    };
+    let better = |a: &Option<(Joined, f64, f64)>, b: &Option<(Joined, f64, f64)>| match (key(a), key(b)) {
+        (Some(a), Some(b)) => {
+            (a.0, a.1, a.2) < (b.0, b.1, b.2) || ((a.0, a.1, a.2) == (b.0, b.1, b.2) && a.3 < b.3 - 1e-9)
+        }
+        (Some(_), None) => true,
+        _ => false,
+    };
+    let mut choice: Vec<Exit> = vec![None; groups.len()];
+    let mut best = eval(&choice, &stubs);
+    if best.as_ref().is_some_and(|x| x.0.lost.is_empty()) {
+        return best.map(|x| x.0);
+    }
+    // the exits of each strip pad, with a stub that reaches pad and exit
+    let gap = b.clearance(Some(net), None);
+    let options: Vec<Vec<Exit>> = groups
+        .iter()
+        .map(|g| {
+            let [pad] = g.0.as_slice() else { return Vec::new() };
+            let Some(s) = Strip::of(pad) else { return Vec::new() };
+            let r = s.half_w;
+            let step = gap + r + 0.05;
+            let mut v = Vec::new();
+            for depth in [step, 2.0 * step, 4.0 * step] {
+                for (from, e) in s.exits(depth) {
+                    let terms = [pad.clone(), gummiband_core::geom::circle_polygon(e, r, 0.01)];
+                    let Some(stub) = pour_outline(b, net, layer, &terms, &[(from, e)], r.min(margin)) else {
+                        continue;
+                    };
+                    if stub.lost.is_empty() && Polygon::new(stub.outline.clone()).contains(e) {
+                        stubs.push(stub);
+                        v.push(Some((e, r, stubs.len() - 1, from.dist(e))));
+                    }
+                }
+            }
+            v
+        })
+        .collect();
+    // every combination while there are few, else one group after the other
+    let combos: usize = options.iter().map(|o| o.len() + 1).product();
+    if combos <= 1000 {
+        let mut c: Vec<Exit> = vec![None; groups.len()];
+        let mut idx = vec![0usize; groups.len()];
+        loop {
+            let x = eval(&c, &stubs);
+            if better(&x, &best) {
+                best = x;
+            }
+            // next combination (index 0 of a group: its pad, k: its exit k-1)
+            let mut g = 0;
+            while g < groups.len() {
+                idx[g] += 1;
+                if idx[g] <= options[g].len() {
+                    c[g] = options[g][idx[g] - 1];
+                    break;
+                }
+                idx[g] = 0;
+                c[g] = None;
+                g += 1;
+            }
+            if g == groups.len() {
+                break;
+            }
+        }
+        return best.map(|x| x.0);
+    }
+    for _pass in 0..2 {
+        for (g, opts) in options.iter().enumerate() {
+            for &o in opts.iter().chain(std::iter::once(&None)) {
+                let mut c = choice.clone();
+                c[g] = o;
+                let x = eval(&c, &stubs);
+                if better(&x, &best) {
+                    best = x;
+                    choice = c;
+                }
+            }
+        }
+    }
+    best.map(|x| x.0)
+}
+
 /// Spots for `count` vias of `net` next to a pad (its copper polygons): on rings around the pad,
 /// the first one just off the pad (the hole stays out of the pad, a pour joins them), each spot
 /// free by `room`. Fewer when there is no room.
