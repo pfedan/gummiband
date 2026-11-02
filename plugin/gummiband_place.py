@@ -81,6 +81,9 @@ def summary(placed: dict, applied) -> str:
         f"Moved {applied.moved} parts, {len(placed['fixed'])} stayed.",
         f"{placed['crossings']} crossings between the nets, seed {placed['seed']}.",
     ]
+    if placed.get("back") or applied.flipped:
+        lines.append(f"{len(placed.get('back', []))} moved parts on the back, "
+                     f"{applied.flipped} changed sides.")
     if applied.zones:
         lines.append(f"{applied.zones} keepouts followed their parts.")
     if placed["off_plane"]:
@@ -120,7 +123,9 @@ def main() -> int:
         ui.run_with_progress(lambda keep_going: runner.run_route(cmd, out, work, keep_going),
                              busy="Placing...")
         placed = json.loads(report.read_text(encoding="utf-8"))
-        applied = kicad_apply.apply_placement(board, placed["poses"], placed["zones"])
+        applied = kicad_apply.apply_placement(board, placed["poses"], placed["zones"],
+                                              placed.get("flipped", []),
+                                              placed.get("flipped_zones", []))
     except runner.RouteCancelled:
         shutil.rmtree(work, ignore_errors=True)
         return 0

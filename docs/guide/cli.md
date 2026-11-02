@@ -247,7 +247,11 @@ gummiband route placed.kicad_pcb -o routed.kicad_pcb
 | `--corridors` | off | experimental: keep a band free for each group of tracks between two parts, see below |
 | `--escape-halo` | off | experimental: room for the escape per side of a part, from its pins on that side, see below |
 | `--leash MM` | 0 (free) | parts with 4 or more pads (ICs, connectors) stay within this distance of where they sit: a local change instead of a new placement, e.g. with `--only`. A leashed part keeps the room it has where its neighbours sit closer than `--gap`, and gets no halo |
-| `--report FILE` | | JSON report: poses, decoupling assignment, crossings, every start, with `--semantic` inductors and groups |
+| `--two-sided` | off | place on both sides: each side has its own room, small SMD parts may change sides, see below |
+| `--back-max-pads N` | 8 | with `--two-sided`: parts with more pads keep their side |
+| `--back-cost MM` | 6 | with `--two-sided`: what a part on the back costs, in mm of wire |
+| `--on-front U3,C1` / `--on-back U6` | | with `--two-sided`: these parts go on that side, whatever their pads |
+| `--report FILE` | | JSON report: poses, decoupling assignment, crossings, every start, with `--semantic` inductors and groups, with `--two-sided` `back`, `flipped`, `flipped_zones` and `back_free_area` |
 
 Without a scope option, all parts move except locked footprints, connectors, modules, mounting
 holes, buttons and test points. Locked footprints never move. A KiCad group moves as a whole; a
@@ -258,8 +262,14 @@ parts use, and a part with locked copper of its net on a pad stays where it is (
 report name it). Copper added after placing is not known to the placer, so lock your pre-routed
 copper first. Unlocked tracks and vias do not follow; the console says how many there are. Keepouts of a
 moved part follow it (a keepout counts as the part's if its courtyard covers at least half of it),
-other keepouts that forbid footprints or pads stay free of parts. All parts share one side as far
-as spacing goes, so a two sided board comes out less dense than it could be.
+other keepouts that forbid footprints or pads stay free of parts. Without `--two-sided` all parts
+share one room as far as spacing goes and keep their side, so a two sided board comes out less
+dense than it could be.
+
+Before the search the placer compares the courtyard area of the movable parts with the free room
+(of each side, with `--two-sided`). When they cannot fit, the error says so at once, with the area
+missing, instead of after a search that has no chance; for a one sided placement it also says
+when front and back together would have the room.
 
 What it looks at: wire length per net (wide and differential nets double, switch nodes eightfold,
 nets with a plane over most of the board not at all), the pins of a net with a partial plane
@@ -294,6 +304,25 @@ side, as deep as the tracks of the signal pins on that side with their clearance
 routing layers (at most 3 mm; pins of a plane net leave through a via and do not count). A full
 side of a QFN keeps room for its fan-out, an empty side none, and two chips with a bus between
 them stay apart by what their pins need.
+
+`--two-sided` gives each side its own room: a part on the front and one on the back may sit on
+the same spot. A through hole part keeps its body on its side and takes on the other side only its
+holes (a square of the larger pad size plus 0.25 mm around each, the solder joint and the cut
+lead), so small parts fit under an electrolytic capacitor or a terminal, between its pins.
+Keepouts count on the sides of their layers; kept copper counts on F.Cu for the front and on B.Cu
+for the back. SMD parts with at most `--back-max-pads` pads (8: passives, diodes, transistors,
+small regulators up to SOIC-8) may change sides; larger parts, through hole parts, blocks and
+fixed parts keep theirs. `--on-front` and `--on-back` put a movable SMD part on a side whatever its
+pads (a large IC on the back under a module, a part that has to stay on top). A part on the back
+pays `--back-cost` mm of wire, and a net with pins on both sides and no through hole pin pays
+1.5 mm per unit of net weight for the via it needs, so the back takes what does not fit on the
+front or saves more wire there (a decoupling capacitor right under its IC). With `--back-cost 0`
+both sides count alike. A part that changes sides is flipped as KiCad flips it: the footprint
+mirrored, pads, graphics and texts on the layers of the other side, the texts mirrored; keepouts
+that follow it change layers too. Groups of tracks (`--corridors`) count a part on the other side
+of both their ends at half weight, `--escape-halo` and `--leash` work per side. Not modelled: the
+vias of a BGA fan-out under parts on the back. The console prints the free room per side and how
+many parts went to the back.
 
 The console lists the inductors and groups. Connectors and power stages that matter still belong
 in `--fixed`. On the Lichtschnitzel controller (only connectors fixed, four seeds) the routed

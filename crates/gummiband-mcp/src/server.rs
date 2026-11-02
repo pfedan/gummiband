@@ -30,7 +30,7 @@ the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board 
 look at problems. To pre-route a critical part by hand (datasheet layout): part_info -> \
 add_locked_copper -> route the returned board id. move_part and add_zone edit the same working \
 copy. To change one net on a routed board: load the routed file -> route with keep_all, nets and \
-reroute (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short), add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Good practice around routing (the prompt good_practice walks through a whole board): \
+reroute (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short; two_sided: true when the parts do not fit on one side), add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Good practice around routing (the prompt good_practice walks through a whole board): \
 power_plan before routing (currents -> widths, planes, vias; apply stores the widths), \
 current_check after routing (narrowest cross-section of every current path), ground_pour (GND \
 pours and stitching vias), then drc. Opt-in options (route patterns, clear_corridors, \
@@ -456,6 +456,27 @@ pub struct PlacePartsIn {
     /// `corridors` it moves the parts that track_corridors lists out of a band while the ICs
     /// keep their place; route's clear_corridors uses 1.5.
     pub leash: Option<f64>,
+    /// Place on both sides (default false: one room for both sides, every part keeps its
+    /// side). Each side gets its own room; a through hole part takes its holes on the other
+    /// side (the room under its body stays free). SMD parts with at most `back_max_pads` pads
+    /// may change sides. They pay a little for the back and for a net that
+    /// then needs a via, so the back takes what does not fit on the front or sits better there
+    /// (a decoupling capacitor under its IC). For a dense board whose parts do not fit on one
+    /// side: the error of a one sided placement says when the back has the room.
+    pub two_sided: Option<bool>,
+    /// With `two_sided`: parts with more pads keep their side (default 8: passives, diodes,
+    /// transistors, small regulators up to SOIC-8).
+    pub back_max_pads: Option<usize>,
+    /// With `two_sided`: cost of a part on the back in mm of wire (default 6). A part goes to
+    /// the back if the front has no room for it or the back saves at least this much; 0 treats
+    /// both sides alike, a large value keeps the back for what does not fit.
+    pub back_cost: Option<f64>,
+    /// With `two_sided`: movable SMD parts that go on the front, or on the back, whatever their
+    /// pads (e.g. a large IC on the back under a module, or a part that has to stay on top).
+    #[serde(default)]
+    pub on_front: Vec<String>,
+    #[serde(default)]
+    pub on_back: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -497,6 +518,9 @@ pub struct PartPose {
     pub x: f64,
     pub y: f64,
     pub rotation: f64,
+    /// The part sits on the back (B.Cu).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub back: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -531,6 +555,18 @@ pub struct PlacePartsOut {
     /// Released parts, parts that stay piled up or with a courtyard off the board, pads without
     /// room for their via.
     pub warnings: Vec<String>,
+    /// With `two_sided`: placed parts that changed sides.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flipped: Vec<String>,
+    /// With `two_sided`: free room in mm2 on the front and on the back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub free_mm2: Option<SidesOut>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SidesOut {
+    pub front: f64,
+    pub back: f64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1922,8 +1958,14 @@ impl Gummiband {
             corridors: p.corridors.unwrap_or(false),
             escape_halo: p.escape_halo.unwrap_or(false),
             leash: p.leash.unwrap_or(defaults.leash),
+            two_sided: p.two_sided.unwrap_or(false),
+            back_max_pads: p.back_max_pads.unwrap_or(defaults.back_max_pads),
+            back_cost: p.back_cost.unwrap_or(defaults.back_cost),
+            on_front: p.on_front.clone(),
+            on_back: p.on_back.clone(),
             ..defaults
         };
+        let two_sided = opts.two_sided;
         let path = self.with_entry(&p.board, |e| Ok(e.path.clone()))?;
         let work = Self::working_copy(&path);
         let from = if work.is_file() { work } else { path };
@@ -1935,6 +1977,9 @@ impl Gummiband {
         })?;
         let r = report.context("placement did not run")?;
         let mut text = format!("placed {} parts, {} crossings", r.moved.len(), r.crossings);
+        if two_sided {
+            text += &format!("; {} on the back, {} changed sides", r.back.len(), r.flipped.len());
+        }
         if !r.warnings.is_empty() {
             text += &format!("; {} warnings: {}", r.warnings.len(), r.warnings.join("; "));
         }
@@ -1945,6 +1990,7 @@ impl Gummiband {
                 .poses
                 .into_iter()
                 .map(|(reference, x, y, rotation)| PartPose {
+                    back: r.back.contains(&reference),
                     reference,
                     x,
                     y,
@@ -1966,6 +2012,11 @@ impl Gummiband {
             released: r.released,
             no_via_room: r.no_via_room,
             warnings: r.warnings,
+            flipped: r.flipped,
+            free_mm2: two_sided.then_some(SidesOut {
+                front: r.free_area - r.back_free_area,
+                back: r.back_free_area,
+            }),
         };
         Ok((text, out))
     }

@@ -25,8 +25,8 @@ class Field:
     choices: Tuple[Tuple[str, str], ...] = ()
 
 
-def int_field(name, label, tip, low, high, step=1) -> Field:
-    return Field(name, label, tip, "int", low, high, step)
+def int_field(name, label, tip, low, high, step=1, requires=None) -> Field:
+    return Field(name, label, tip, "int", low, high, step, requires=requires)
 
 
 def float_field(name, label, tip, low, high, step, digits=2, requires=None) -> Field:
@@ -299,6 +299,22 @@ PLACE_TABS: Tuple = (
                     "Parts with 4 or more pads stay within this distance of where they sit: a "
                     "local change instead of a new placement, for example with \"Selected parts\". "
                     "0 = free.", 0, 50, 0.5, digits=1),
+        check("two_sided", "Place on both sides",
+              "Each side gets its own room; through hole parts take their holes on the other "
+              "side, the space under their body stays free. Small SMD parts (up "
+              "to the pads below) may go to the back: what does not fit on the front, and what "
+              "saves more wire there than the cost below (a decoupling capacitor right under its "
+              "IC). Off: one room for both sides, every part keeps its side.\n\n"
+              "For dense boards: when a one sided placement fails, its message says whether "
+              "front and back together have the room."),
+        float_field("back_cost", "Cost of a part on the back (mm):",
+                    "With both sides: a part goes to the back if the front has no room for it or "
+                    "the back saves at least this much wire. 0 = both sides alike; large = the "
+                    "back only for what does not fit.", 0, 100, 1, digits=1,
+                    requires="two_sided"),
+        int_field("back_max_pads", "Largest part for the back (pads):",
+                  "With both sides: parts with more pads keep their side (the big ICs).", 2, 1000,
+                  requires="two_sided"),
     ), "For a placement from scratch, the first three together gave the cleanest results. "
        "Try two or three seeds and route each: a good seed is worth more than any option."),)),
     ("Advanced", ((None, (

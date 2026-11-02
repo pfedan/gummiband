@@ -177,5 +177,63 @@ class ApplyPlanTest(unittest.TestCase):
         self.assertEqual(sum(res.unknown_nets.values()), 3)
 
 
+class OldPlaceBoard(FakeBoard):
+    """A board with footprints U1, C1 and a keepout that follows C1, without the API to flip
+    (KiCad before 10.0.6)."""
+
+    def __init__(self):
+        super().__init__([])
+
+        def fp(ref):
+            field = types.SimpleNamespace(text=types.SimpleNamespace(value=ref))
+            return types.SimpleNamespace(reference_field=field, position=None, orientation=None)
+
+        self.fps = [fp("U1"), fp("C1")]
+        from kipy.board_types import Zone
+        self.zone = Zone()
+        self.zone.proto.id.value = "z1"
+        self.zone.layers = [BoardLayer.BL_F_Cu]
+
+    def get_footprints(self):
+        return self.fps
+
+    def get_zones(self):
+        return [self.zone]
+
+
+class PlaceBoard(OldPlaceBoard):
+    """Records flips."""
+
+    def flip_items(self, items):
+        self.calls.append(("flip", [i.reference_field.text.value for i in items]))
+        return items
+
+
+@unittest.skipIf(kicad_apply is None, "kicad-python (kipy) not installed")
+class ApplyPlacementTest(unittest.TestCase):
+    def test_flips_then_moves_in_one_commit(self):
+        board = PlaceBoard()
+        zones = [{"id": "z1", "points": [[0, 0], [1, 0], [1, 1]]}]
+        res = kicad_apply.apply_placement(board, [["U1", 1.0, 2.0, 90.0], ["C1", 3.0, 4.0, 0.0]], zones,
+                                          ["C1", "C9"], ["z1"])
+        self.assertEqual([c[0] for c in board.calls], ["begin", "flip", "update", "push"])
+        self.assertEqual(board.calls[1], ("flip", ["C1"]))
+        self.assertEqual((res.moved, res.flipped, res.zones, res.missing), (2, 1, 1, ["C9"]))
+        self.assertEqual(list(board.zone.layers), [BoardLayer.BL_B_Cu])
+        self.assertEqual(board.fps[1].position.x, 3_000_000)
+
+    def test_one_sided_flips_nothing(self):
+        board = PlaceBoard()
+        res = kicad_apply.apply_placement(board, [["U1", 1.0, 2.0, 90.0]], [])
+        self.assertEqual([c[0] for c in board.calls], ["begin", "update", "push"])
+        self.assertEqual((res.moved, res.flipped), (1, 0))
+
+    def test_an_old_kicad_cannot_flip(self):
+        board = OldPlaceBoard()
+        with self.assertRaisesRegex(RuntimeError, "10.0.6"):
+            kicad_apply.apply_placement(board, [], [], ["C1"])
+        self.assertEqual(board.calls[-1], ("drop", "commit-1"))
+
+
 if __name__ == "__main__":
     unittest.main()

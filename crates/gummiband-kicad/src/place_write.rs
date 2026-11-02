@@ -11,7 +11,7 @@ use std::ops::Range;
 
 use gummiband_core::geom::{Point, pt};
 
-use crate::sexpr::{Node, quote};
+use crate::sexpr::{Atom, Node, quote};
 
 /// KiCad rotates counter-clockwise on screen with y pointing down.
 pub fn kicad_rot(p: Point, deg: f64) -> Point {
@@ -151,6 +151,188 @@ impl Patch {
         }
     }
 
+    /// Flip a footprint to the other side of the board and put it at `at` with rotation `rot`
+    /// (degrees), as KiCad's flip does: the layers of the footprint and its items change side
+    /// (`F.Cu` to `B.Cu`, `F.SilkS` to `B.SilkS`, ...), everything in the footprint frame is
+    /// mirrored at its x axis (pads, graphics, texts, which also toggle `mirror`), relative pad
+    /// and text angles change sign, and the footprint's own zones follow in board coordinates.
+    /// Whether KiCad mirrors left-right or top-bottom only changes the rotation; with the
+    /// rotation given here the result is the same.
+    pub fn flip_footprint(&mut self, fp: &Node, at: Point, rot: f64) {
+        let Some(at_node) = fp.child("at") else { return };
+        let a = at_node.args();
+        let old_at = pt(
+            a.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
+            a.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
+        );
+        let old_rot = a.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let rot = norm_angle(rot);
+        let mut s = format!("(at {} {}", fmt_mm(at.x), fmt_mm(at.y));
+        if rot != 0.0 {
+            let _ = write!(s, " {}", fmt_mm(rot));
+        }
+        s.push(')');
+        self.replace(at_node, s);
+        let board = move |p: Point| {
+            let l = kicad_rot(p - old_at, -old_rot);
+            at + kicad_rot(pt(l.x, -l.y), rot)
+        };
+        for c in fp.args() {
+            match c.head() {
+                Some("at") => {}
+                Some("layer") | Some("layers") => self.flip_layer_node(c),
+                Some("zone") => {
+                    self.flip_layers_in(c);
+                    self.transform_zone(c, &board);
+                }
+                Some("pad") | Some("property") | Some("fp_text") | Some("fp_text_box") => {
+                    if let Some(an) = c.child("at") {
+                        self.flip_at(an, old_rot, rot);
+                    }
+                    self.flip_local(c, true);
+                }
+                _ => self.flip_local(c, false),
+            }
+        }
+    }
+
+    /// `(at x y [angle])` of a pad or text in the footprint frame: y mirrored, the angle
+    /// relative to the footprint (`old_rot` before, `rot` after) changes sign.
+    fn flip_at(&mut self, at: &Node, old_rot: f64, rot: f64) {
+        let a = at.args();
+        let (Some(x), Some(y)) = (a.first().and_then(|v| v.as_f64()), a.get(1).and_then(|v| v.as_f64())) else {
+            return;
+        };
+        let old = a.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let extra: Vec<&str> = a.iter().skip(3).filter_map(|v| v.as_str()).collect();
+        let ang = norm_angle(rot - (old - old_rot));
+        let mut s = format!("(at {} {}", fmt_mm(x), fmt_mm(-y));
+        if ang != 0.0 || a.len() > 2 {
+            let _ = write!(s, " {}", fmt_mm(ang));
+        }
+        for e in extra {
+            let _ = write!(s, " {e}");
+        }
+        s.push(')');
+        self.replace(at, s);
+    }
+
+    /// Mirror an item in the footprint frame: points in y, layers to the other side, chamfered
+    /// corners top to bottom, texts mirrored. `own_at`: its `(at ...)` is done already.
+    fn flip_local(&mut self, n: &Node, own_at: bool) {
+        for c in n.args() {
+            match c.head() {
+                Some("at") if own_at => {}
+                Some("start") | Some("end") | Some("center") | Some("mid") | Some("xy") | Some("offset")
+                | Some("at") => {
+                    let a = c.args();
+                    if let (Some(h), Some(x), Some(y)) = (
+                        c.head(),
+                        a.first().and_then(|v| v.as_f64()),
+                        a.get(1).and_then(|v| v.as_f64()),
+                    ) {
+                        let mut s = format!("({h} {} {}", fmt_mm(x), fmt_mm(-y));
+                        for e in a.iter().skip(2) {
+                            s.push(' ');
+                            s.push_str(&atom_text(e));
+                        }
+                        s.push(')');
+                        self.replace(c, s);
+                    }
+                }
+                Some("layer") | Some("layers") => self.flip_layer_node(c),
+                Some("chamfer") => {
+                    let mut s = String::from("(chamfer");
+                    for e in c.args() {
+                        let t = match e.as_str() {
+                            Some("top_left") => "bottom_left".to_string(),
+                            Some("bottom_left") => "top_left".to_string(),
+                            Some("top_right") => "bottom_right".to_string(),
+                            Some("bottom_right") => "top_right".to_string(),
+                            _ => atom_text(e),
+                        };
+                        let _ = write!(s, " {t}");
+                    }
+                    s.push(')');
+                    self.replace(c, s);
+                }
+                Some("effects") => self.mirror_text(c),
+                Some("model") => {}
+                Some(_) => self.flip_local(c, false),
+                None => {}
+            }
+        }
+    }
+
+    /// Toggle `mirror` in the `justify` of a text's effects, left and right swap.
+    fn mirror_text(&mut self, effects: &Node) {
+        match effects.child("justify") {
+            Some(j) => {
+                // a mirrored text grows to the other side: left becomes right, as KiCad's
+                // left-right flip does
+                let mut items: Vec<String> = j
+                    .args()
+                    .iter()
+                    .map(|e| match e.as_str() {
+                        Some("left") => "right".to_string(),
+                        Some("right") => "left".to_string(),
+                        _ => atom_text(e),
+                    })
+                    .collect();
+                match items.iter().position(|t| t == "mirror") {
+                    Some(i) => {
+                        items.remove(i);
+                    }
+                    None => items.push("mirror".into()),
+                }
+                if items.is_empty() {
+                    self.remove(j);
+                } else {
+                    self.replace(j, format!("(justify {})", items.join(" ")));
+                }
+            }
+            None => {
+                let end = effects.span().end - 1;
+                self.edits.push((end..end, " (justify mirror)".into()));
+            }
+        }
+    }
+
+    /// The layers of a zone to the other side, for a keepout that follows a flipped part.
+    pub fn flip_zone_layers(&mut self, z: &Node) {
+        self.flip_layers_in(z);
+    }
+
+    /// The layers of a zone to the other side.
+    fn flip_layers_in(&mut self, n: &Node) {
+        for c in n.args() {
+            if matches!(c.head(), Some("layer") | Some("layers")) {
+                self.flip_layer_node(c);
+            }
+        }
+    }
+
+    fn flip_layer_node(&mut self, c: &Node) {
+        let Some(h) = c.head() else { return };
+        let mut changed = false;
+        let mut s = format!("({h}");
+        for e in c.args() {
+            let t = match e {
+                Node::Atom(Atom::Str(v), _) => {
+                    let w = other_side(v);
+                    changed |= w != *v;
+                    quote(&w)
+                }
+                _ => atom_text(e),
+            };
+            let _ = write!(s, " {t}");
+        }
+        s.push(')');
+        if changed {
+            self.replace(c, s);
+        }
+    }
+
     /// Transform every point of a zone outline; filled polygons are dropped (refill in KiCad).
     pub fn transform_zone(&mut self, z: &Node, f: &dyn Fn(Point) -> Point) {
         for c in z.args() {
@@ -250,6 +432,27 @@ impl Patch {
     }
 }
 
+/// A layer of the other side: `F.SilkS` to `B.SilkS` and back; inner layers, `*.Cu`, `F&B.Cu`
+/// and user layers stay.
+pub fn other_side(layer: &str) -> String {
+    if let Some(r) = layer.strip_prefix("F.") {
+        format!("B.{r}")
+    } else if let Some(r) = layer.strip_prefix("B.") {
+        format!("F.{r}")
+    } else {
+        layer.to_string()
+    }
+}
+
+/// An atom as it stands in the file; a list as `()` (not expected where this is used).
+fn atom_text(n: &Node) -> String {
+    match n {
+        Node::Atom(Atom::Str(v), _) => quote(v),
+        Node::Atom(Atom::Symbol(v), _) => v.clone(),
+        Node::List(..) => "()".into(),
+    }
+}
+
 /// `(polygon (pts (xy ..) ...))` with `indent` tabs before the inner lines.
 pub fn polygon_text(pts: &[Point], indent: usize) -> String {
     let tabs = "\t".repeat(indent + 1);
@@ -304,4 +507,43 @@ pub fn plane_zone(p: &mut Patch, net: &str, layer: &str, name: &str, outline: &[
         fmt_mm(clearance),
         polygon_text(outline, 1)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FP: &str = "(kicad_pcb\n\
+        \t(footprint \"Lib:SOT\" (layer \"F.Cu\") (at 10 20 90)\n\
+        \t\t(property \"Reference\" \"U1\" (at 0 -2.5 90) (layer \"F.SilkS\")\n\
+        \t\t\t(effects (font (size 1 1)) (justify left)))\n\
+        \t\t(fp_rect (start -1 -2) (end 1 2) (layer \"F.CrtYd\"))\n\
+        \t\t(pad \"1\" smd rect (at 1 0.5 90) (size 0.6 0.4) (layers \"F.Cu\" \"F.Paste\" \"F.Mask\"))\n\
+        \t\t(pad \"2\" thru_hole circle (at -1 -0.5 90) (size 1.6 1.6) (drill 0.8) (layers \"*.Cu\" \"*.Mask\"))\n\
+        \t)\n\
+        )\n";
+
+    #[test]
+    fn a_flip_mirrors_the_footprint_frame_and_swaps_the_layers() {
+        let root = crate::sexpr::parse(FP).unwrap();
+        let fp = root.children("footprint").next().unwrap();
+        let mut patch = Patch::new(0);
+        patch.flip_footprint(fp, pt(30.0, 40.0), 0.0);
+        let out = patch.apply(FP, &root);
+        let flat = out.split_whitespace().collect::<Vec<_>>().join(" ");
+        for want in [
+            "(layer \"B.Cu\") (at 30 40)",
+            // local y mirrored; the pads turned with the part (90 at 90) keep their place on it
+            "(pad \"1\" smd rect (at 1 -0.5 0)",
+            "(layers \"B.Cu\" \"B.Paste\" \"B.Mask\")",
+            "(pad \"2\" thru_hole circle (at -1 0.5 0)",
+            "(layers \"*.Cu\" \"*.Mask\")",
+            "(fp_rect (start -1 2) (end 1 -2) (layer \"B.CrtYd\"))",
+            "(layer \"B.SilkS\")",
+            "(justify right mirror)",
+        ] {
+            assert!(flat.contains(want), "{want} missing in\n{out}");
+        }
+        assert!(!flat.contains("F."), "{out}");
+    }
 }

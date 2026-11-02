@@ -304,6 +304,28 @@ enum Cmd {
         /// sit (mm, 0 = free): a local change instead of a new placement, e.g. with --only.
         #[arg(long, default_value_t = 0.0)]
         leash: f64,
+        /// Place on both sides: each side has its own room; a through hole part takes its holes
+        /// on the other side (the room under its body stays free). SMD parts with at most
+        /// --back-max-pads pads may change sides; they pay a little for the
+        /// back and for a net that then needs a via, so the back takes what does not fit on the
+        /// front or sits better there (a decoupling capacitor under its IC). Off: one room for
+        /// both sides and every part keeps its side.
+        #[arg(long)]
+        two_sided: bool,
+        /// With --two-sided: parts with more pads keep their side.
+        #[arg(long, default_value_t = gummiband_place::auto::BACK_MAX_PADS)]
+        back_max_pads: usize,
+        /// With --two-sided: cost of a part on the back in mm of wire. A part goes to the back
+        /// if the front has no room for it or the back saves at least this much (0: both sides
+        /// alike).
+        #[arg(long, default_value_t = gummiband_place::auto::BACK_COST)]
+        back_cost: f64,
+        /// With --two-sided: these parts go on the front, whatever their pads (comma separated).
+        #[arg(long, value_delimiter = ',')]
+        on_front: Vec<String>,
+        /// With --two-sided: these parts go on the back, whatever their pads (comma separated).
+        #[arg(long, value_delimiter = ',')]
+        on_back: Vec<String>,
         /// Write a machine readable JSON report.
         #[arg(long)]
         report: Option<PathBuf>,
@@ -1277,6 +1299,11 @@ fn main() -> Result<()> {
             corridors,
             escape_halo,
             leash,
+            two_sided,
+            back_max_pads,
+            back_cost,
+            on_front,
+            on_back,
             report,
         } => {
             use gummiband_place::auto::{PlaceOptions, Scope};
@@ -1304,6 +1331,11 @@ fn main() -> Result<()> {
                 corridors,
                 escape_halo,
                 leash,
+                two_sided,
+                back_max_pads,
+                back_cost,
+                on_front,
+                on_back,
             };
             let placed = gummiband_place::auto::place_board(&board, &opts)?;
             let r = &placed.report;
@@ -1314,6 +1346,18 @@ fn main() -> Result<()> {
                 r.movable_area,
                 r.free_area
             );
+            if two_sided {
+                println!(
+                    "two sided: {:.0} mm2 free on the front, {:.0} on the back; {} moved parts on the back, {} changed sides",
+                    r.free_area - r.back_free_area,
+                    r.back_free_area,
+                    r.back.len(),
+                    r.flipped.len()
+                );
+            }
+            for w in &r.warnings {
+                println!("warning: {w}");
+            }
             for (s, w, c) in &r.starts {
                 println!("  start {s}: wire {w:.0}, {c} crossings");
             }
@@ -1373,6 +1417,11 @@ fn main() -> Result<()> {
                     "free_area": r.free_area,
                     "movable_area": r.movable_area,
                     "min_separation": r.min_separation,
+                    "back_free_area": r.back_free_area,
+                    "flipped": r.flipped,
+                    "flipped_zones": r.flipped_zones,
+                    "back": r.back,
+                    "warnings": r.warnings,
                 });
                 std::fs::write(path, serde_json::to_string_pretty(&json)?)?;
             }

@@ -94,6 +94,8 @@ pub struct Pad {
     pub number: String,
     pub local: Point,
     pub net: Option<usize>,
+    /// Through hole: the pad is on both sides.
+    pub through: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +120,20 @@ pub struct Part {
     pub sheet: String,
     /// Name of that sheet for reports (the sheet path if the file gives no name).
     pub sheet_name: String,
+    /// On the back of the board (`(layer "B.Cu")`).
+    pub bottom: bool,
+    /// A pad goes through the board (through hole, a hole without copper): the part takes its
+    /// courtyard on its side and [`Part::under`] on the other.
+    pub through: bool,
+    /// What a through hole part takes on the other side, footprint frame: a square around each
+    /// hole pad, its larger size plus [`UNDER_MARGIN`]. The body stays on its side; the solder
+    /// joints and the leads that stick out are all there is below.
+    pub under: Vec<R>,
 }
+
+/// Room around a hole pad on the other side, beyond the pad, in mm: the solder fillet and the
+/// cut lead.
+pub const UNDER_MARGIN: f64 = 0.25;
 
 impl Part {
     pub fn pad_world(&self, pad: &Pad) -> Point {
@@ -126,6 +141,22 @@ impl Part {
     }
     pub fn court_area(&self) -> f64 {
         self.court.iter().map(|r| r.area()).sum()
+    }
+    /// The part as on the other side of the board after KiCad's flip: pads and courtyard
+    /// mirrored at the x axis of the footprint frame. The pose stays, the side changes.
+    pub fn mirror(&mut self) {
+        for pad in &mut self.pads {
+            pad.local.y = -pad.local.y;
+        }
+        for r in self.court.iter_mut().chain(self.under.iter_mut()) {
+            *r = R {
+                x0: r.x0,
+                y0: -r.y1,
+                x1: r.x1,
+                y1: -r.y0,
+            };
+        }
+        self.bottom = !self.bottom;
     }
 }
 
@@ -171,6 +202,7 @@ impl Design {
             let value = prop("Value");
             let footprint = fp.args().first().and_then(|x| x.as_str()).unwrap_or("").to_string();
             let mut pads = Vec::new();
+            let mut under = Vec::new();
             for pad in fp.children("pad") {
                 let number = pad.args().first().and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let local = child_xy(pad, "at").unwrap_or(pt(0.0, 0.0));
@@ -180,7 +212,30 @@ impl Design {
                         nets.len() - 1
                     })
                 });
-                pads.push(Pad { number, local, net });
+                let through = matches!(
+                    pad.args().get(1).and_then(|x| x.as_str()),
+                    Some("thru_hole") | Some("np_thru_hole")
+                );
+                if through {
+                    let size = pad.child_f64s("size").unwrap_or_default();
+                    let drill = pad
+                        .child("drill")
+                        .map(|d| d.args().iter().filter_map(|x| x.as_f64()).fold(0.0, f64::max))
+                        .unwrap_or(0.0);
+                    let h = size.iter().cloned().fold(drill, f64::max) * 0.5 + UNDER_MARGIN;
+                    under.push(R {
+                        x0: local.x - h,
+                        y0: local.y - h,
+                        x1: local.x + h,
+                        y1: local.y + h,
+                    });
+                }
+                pads.push(Pad {
+                    number,
+                    local,
+                    net,
+                    through,
+                });
             }
             let court = courtyard(fp);
             let mut keepouts = Vec::new();
@@ -218,7 +273,11 @@ impl Design {
                 n if !n.is_empty() && n != "/" => n.trim_matches('/').to_string(),
                 _ => sheet.clone(),
             };
+            let through = pads.iter().any(|p| p.through);
             parts.push(Part {
+                bottom: fp.child_str("layer") == Some("B.Cu"),
+                through,
+                under,
                 reference,
                 value,
                 footprint,
@@ -240,6 +299,37 @@ impl Design {
             .collect();
         Design { parts, nets, by_ref }
     }
+}
+
+/// Points of the arc from `a` through `m` to `b` where it is furthest left, right, up or down
+/// (those it passes; its ends are not included).
+fn arc_extremes(a: Point, m: Point, b: Point) -> Vec<Point> {
+    let d = 2.0 * (a.x * (m.y - b.y) + m.x * (b.y - a.y) + b.x * (a.y - m.y));
+    if d.abs() < 1e-12 {
+        return Vec::new();
+    }
+    let sq = |p: Point| p.x * p.x + p.y * p.y;
+    let c = pt(
+        (sq(a) * (m.y - b.y) + sq(m) * (b.y - a.y) + sq(b) * (a.y - m.y)) / d,
+        (sq(a) * (b.x - m.x) + sq(m) * (a.x - b.x) + sq(b) * (m.x - a.x)) / d,
+    );
+    let r = c.dist(a);
+    let ang = |p: Point| (p.y - c.y).atan2(p.x - c.x);
+    let tau = std::f64::consts::TAU;
+    // sweep from a in the direction that passes m
+    let ccw = |t: f64| (t - ang(a)).rem_euclid(tau);
+    let (to_m, to_b) = (ccw(ang(m)), ccw(ang(b)));
+    let forward = to_m <= to_b;
+    let passes = |t: f64| {
+        let x = ccw(t);
+        x > 1e-9 && if forward { x < to_b - 1e-9 } else { x > to_b + 1e-9 }
+    };
+    [0.0, 0.5, 1.0, 1.5]
+        .iter()
+        .map(|k| k * std::f64::consts::PI)
+        .filter(|&t| passes(t))
+        .map(|t| pt(c.x + r * t.cos(), c.y + r * t.sin()))
+        .collect()
 }
 
 /// Courtyard of a footprint as rectangles in its frame: rectilinear outlines are split into
@@ -295,8 +385,13 @@ fn courtyard(fp: &Node) -> Vec<R> {
                 }
             }
             "fp_arc" => {
-                for k in ["start", "mid", "end"] {
-                    if let Some(p) = child_xy(g, k) {
+                let ps: Vec<Point> = ["start", "mid", "end"].iter().filter_map(|k| child_xy(g, k)).collect();
+                for &p in &ps {
+                    add(p, &mut bbox);
+                }
+                // the extremes of the circle that the arc passes, beyond its three points
+                if let [a, m, b] = ps[..] {
+                    for p in arc_extremes(a, m, b) {
                         add(p, &mut bbox);
                     }
                 }
@@ -373,4 +468,24 @@ fn courtyard(fp: &Node) -> Vec<R> {
         }
     }
     if out.is_empty() { vec![bbox] } else { out }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_arc_reaches_past_its_points() {
+        // a half circle of radius 2 around the origin, from the left through the top to the right
+        let e = arc_extremes(pt(-2.0, 0.0), pt(0.0, -2.0), pt(2.0, 0.0));
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert!((e[0].y + 2.0).abs() < 1e-9);
+        // the other half, through the bottom: the low point
+        let e = arc_extremes(pt(-2.0, 0.0), pt(0.0, 2.0), pt(2.0, 0.0));
+        assert!(e.len() == 1 && (e[0].y - 2.0).abs() < 1e-9, "{e:?}");
+        // a three quarter arc from the top to the right through the left and the bottom
+        let s = std::f64::consts::FRAC_1_SQRT_2 * 2.0;
+        let e = arc_extremes(pt(0.0, -2.0), pt(-s, s), pt(2.0, 0.0));
+        assert_eq!(e.len(), 2, "{e:?}");
+    }
 }

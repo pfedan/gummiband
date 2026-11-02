@@ -42,6 +42,31 @@ types ignored). A crash or timeout on one board is reported in the table and the
 not stop the suite. The table is also written to `boards/out/results.txt`; the router output of
 each board is in `boards/out/<board>.route.log`.
 
+## Two sided placement
+
+`gen_two_sided.py` writes four synthetic boards into `boards/two_sided/` for `gummiband place
+--two-sided` (placement only, no routing): `ts_som` (4 layers, 42 x 30 mm, BGA SoC and memory,
+PMIC, about 120 0402 parts, a board to board connector locked on the back; the parts need about
+1.4 times the front), `ts_sensor` (34 x 23 mm, a coin cell holder locked on the back, an antenna
+keepout on the front: one sided nothing fits, two sided the front holds it all), `ts_roomy` (a
+control with room to spare) and `ts_tht` (through hole electrolytics and a terminal block between
+SMD converters). `check_sides.py PLACED [--input ORIGINAL]` checks a result from the file alone:
+courtyard overlaps per side, the holes of through hole parts against parts on the other side, SMD
+pads and courtyards on the layers of their side, mirrored texts on the back, and with `--input`
+that every part that changed sides keeps its pad distances and is mirrored. `draw_sides.py PLACED
+OUT.svg` draws front and back next to each other.
+
+With `--iters 1000000`, one start, seed 1:
+
+| Board | One sided | Two sided: parts on the back | Wall time |
+| --- | --- | --- | --- |
+| `ts_som` | fails before the search, 321 mm2 missing | 105 | 20 s |
+| `ts_sensor` | fails before the search, 275 mm2 missing | 0 (the front holds it all once the holder only takes the back) | 6 s |
+| `ts_roomy` | places | 9 (decoupling capacitors under their IC) | 3 s |
+| `ts_tht` | places | 10, some under the electrolytics | 3 s |
+
+`check_sides.py` finds no problem on any of them.
+
 ## Lichtschnitzel
 
 `prepare-lichtschnitzel.sh` strips the real Lichtschnitzel controller board,

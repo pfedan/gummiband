@@ -109,6 +109,9 @@ class PlaceOptions:
     corridors: bool = False  # free bands for the buses between two parts
     escape_halo: bool = False  # room per side from the pins instead of the halo
     leash: float = 0.0  # parts with 4 or more pads stay this close to where they sit, 0 = free
+    two_sided: bool = False  # each side its own room, small SMD parts may change sides
+    back_cost: float = 6.0  # with two_sided: what a part on the back costs, in mm of wire
+    back_max_pads: int = 8  # with two_sided: parts with more pads keep their side
     # the defaults of the advanced options are those of the command line
     seed: int = 1
     iters: int = 3_000_000
@@ -127,7 +130,7 @@ ROUTE_SAVED = ("keep_locked", "runs", "via_cost", "geometry_generations", "anima
                "hint_decaps", "hint_rows", "hint_shares", "clear_corridors", "pair_all",
                "via_pairs", "breakouts", "air")
 PLACE_SAVED = ("starts", "gap", "halo", "seed", "iters", "margin", "threads", "semantic",
-               "corridors", "escape_halo", "leash")
+               "corridors", "escape_halo", "leash", "two_sided", "back_cost", "back_max_pads")
 
 # Options of the command line that are left out at their default value.
 ROUTE_FLAGS = (("generations", "--generations"), ("via_pitch", "--via-pitch"),
@@ -138,9 +141,10 @@ PAIR_FLAGS = (("pair_skew", "--pair-skew"), ("pair_zdiff", "--pair-zdiff"))
 PAIR_SWITCHES = (("pair_all", "--pair-all"), ("via_pairs", "--via-pairs"),
                  ("breakouts", "--breakouts"))
 PLACE_FLAGS = (("seed", "--seed"), ("iters", "--iters"), ("margin", "--margin"),
-               ("leash", "--leash"))
+               ("leash", "--leash"), ("back_cost", "--back-cost"), ("back_max_pads", "--back-max-pads"))
+PLACE_SIDE_FLAGS = ("back_cost", "back_max_pads")  # only with two_sided
 PLACE_SWITCHES = (("semantic", "--semantic"), ("corridors", "--corridors"),
-                  ("escape_halo", "--escape-halo"))
+                  ("escape_halo", "--escape-halo"), ("two_sided", "--two-sided"))
 GROUP_ORDERS = ("long", "short", "inline")
 
 
@@ -357,7 +361,8 @@ def build_place_command(binary: str, board: Path, output: Path, report: Path,
         cmd += ["--fixed", ",".join(opts.fixed)]
     if opts.free:
         cmd += ["--free", ",".join(opts.free)]
-    return (cmd + _changed(opts, PLACE_FLAGS) + _switches(opts, PLACE_SWITCHES)
+    flags = tuple(f for f in PLACE_FLAGS if opts.two_sided or f[0] not in PLACE_SIDE_FLAGS)
+    return (cmd + _changed(opts, flags) + _switches(opts, PLACE_SWITCHES)
             + _global_flags(opts))
 
 

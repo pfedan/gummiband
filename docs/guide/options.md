@@ -29,6 +29,7 @@ about an option.
 | Fine pitch keyboard style board, no planes (Corne) | nothing; `rows` in the open end | `decaps`, `pairs,groups` |
 | Fixed placement that already routes cleanly (Lichtschnitzel controller) | nothing, or `decaps`; spend the time on seeds and the open end | `groups`, `pairs,groups`, `--clear-corridors` |
 | Placement from scratch | `place --semantic --corridors --escape-halo`, several placement seeds, then route without hints | `--starts` above 1 instead of seeds |
+| Parts that do not fit on one side | `place --two-sided`; `--back-max-pads` or `--on-back` when the ICs that keep the front are the problem | `--back-cost 0` unless the back is meant to be full |
 | Differential pairs that must couple, board not dense | `--pair-pull 1`; `--pairs` if the pairs have their own rule or class | `--pairs` on dense boards |
 
 ## Routing order hints: `--patterns`
@@ -59,6 +60,17 @@ they existed.
 | `place --escape-halo` | Each side of a part with 5 or more pads gets room for the tracks that leave it, instead of the same halo all round. | Placement from scratch: no more missed connections at tightly packed ICs, about 15 % more length. |
 | `place --semantic` | Uses the schematic: sheets and IC clusters stay together, inductors at their converter, decaps at an IC of their sheet. | Placement from scratch of a board with power stages: the cleanest results on Lichtschnitzel together with the two options above. |
 | `place --leash MM` | Parts with 4 or more pads stay within MM of where they sit. | A local change instead of a new placement, typically with `--only`. |
+
+## One side or two
+
+Off by default: without it every part keeps its side and both sides share one room.
+
+| Option | What it does | Use it when |
+| --- | --- | --- |
+| `place --two-sided` (MCP `two_sided`, plugin *Place on both sides*) | Each side gets its own room. Small SMD parts (up to `--back-max-pads`, 8) may change sides and are flipped as KiCad flips them; through hole parts take only their holes on the other side. | The parts do not fit on one side (a one sided placement says so before it searches, and whether both sides have the room), or a board meant for parts on the back. Leave it off for a board assembled on one side. |
+| `place --back-cost MM` | What a part on the back costs in mm of wire, 6 by default. | Lower (0 to 2) to let decoupling capacitors and small parts go under their IC freely; higher (15 and more) to keep the back for what does not fit. On a roomy synthetic board 10, 6 and 3 parts went to the back at 2, 6 and 15. |
+| `place --back-max-pads N` | Parts with more pads keep their side, 8 by default. | Raise it when the ICs that keep the front are what does not fit (the error of a failed run says so). |
+| `place --on-front`, `--on-back` | These parts go on that side, whatever their pads. | A large IC on the back under a module, a part that has to stay on top. |
 
 ## Differential pairs
 
