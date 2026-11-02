@@ -2125,6 +2125,7 @@ pub fn route_pairs(
     let mut given_up: Vec<usize> = Vec::new();
     let mut failed_ends: Vec<(usize, bool)> = Vec::new();
     let mut keep: Vec<(usize, bool)> = Vec::new();
+    let mut worse_tried: Vec<usize> = Vec::new();
     let (geo_done, fin) = loop {
         let mut geo = split_geo.clone();
         let (repaired, cuts) = repair(&real, &mut geo, &paths, &given_up, &keep);
@@ -2191,6 +2192,22 @@ pub fn route_pairs(
         for v in fin.geometry.vias.iter_mut() {
             v.net = cut_map.get(&v.net).copied().unwrap_or(v.net);
         }
+        // the search completes before it keeps its distance: where it joined the pins without
+        // partner (the second pads of a USB-C socket) along the pair, onto the partner or
+        // foreign copper, the pair gives up its wide track
+        // (once: a pair whose single tracks find no way either keeps it)
+        let worse = worse_paths(
+            &real,
+            &geo,
+            &fin.geometry,
+            &paths,
+            &[&given_up[..], &worse_tried].concat(),
+        );
+        if !worse.is_empty() {
+            worse_tried.extend(&worse);
+            given_up.extend(worse);
+            continue;
+        }
         break (geo, Some(fin));
     };
     let mut geo = geo_done;
@@ -2199,7 +2216,12 @@ pub fn route_pairs(
     for &pi in &given_up {
         let r = &mut reports[paths[pi].report];
         r.wide = false;
-        r.note = "routed as single tracks: an end of the wide track found no way to its pads".to_string();
+        r.note = if worse_tried.contains(&pi) {
+            "routed as single tracks: the pins without partner found no clean way to the pair"
+        } else {
+            "routed as single tracks: an end of the wide track found no way to its pads"
+        }
+        .to_string();
     }
     let mut paths: Vec<PairPath> = paths
         .into_iter()
@@ -2251,6 +2273,35 @@ pub fn route_pairs(
         .sum();
     res.geometry = geo;
     (sub, res, reports)
+}
+
+/// The paths (but those in `skip`) of pairs with pins without partner whose nets have more
+/// clearance spots with the tracks of the last pass `fin` than without them.
+fn worse_paths(real: &Board, geo: &Geometry, fin: &Geometry, paths: &[PairPath], skip: &[usize]) -> Vec<usize> {
+    // only pairs with pins without partner: a pass that only repairs the ends of a pair is
+    // better than the pair given up
+    let extra = |path: &PairPath| real.nets[path.p as usize].pins.len() + real.nets[path.n as usize].pins.len() > 4;
+    let open: Vec<usize> = (0..paths.len())
+        .filter(|&pi| !skip.contains(&pi) && extra(&paths[pi]))
+        .collect();
+    if open.is_empty() {
+        return open;
+    }
+    let mut all = geo.clone();
+    all.tracks.extend(fin.tracks.iter().cloned());
+    all.vias.extend(fin.vias.iter().cloned());
+    let (before, after) = (crate::check::check(real, geo), crate::check::check(real, &all));
+    let count = |vs: &[crate::check::Violation], path: &PairPath| {
+        let of: Vec<crate::check::Violation> = vs
+            .iter()
+            .filter(|v| [path.p, path.n].iter().any(|&x| v.nets.0 == x || v.nets.1 == Some(x)))
+            .cloned()
+            .collect();
+        crate::check::spots(&of).len()
+    };
+    open.into_iter()
+        .filter(|&pi| count(&after, &paths[pi]) > count(&before, &paths[pi]))
+        .collect()
 }
 
 /// Farthest the tracks of a pair may be apart for [`zip`] to close them up, in mm.
@@ -2557,6 +2608,39 @@ mod tests {
 
     fn polyline(pts: &[Point], net: NetId) -> Track {
         make_track(pts.windows(2).map(|w| Elem::Line(w[0], w[1])).collect(), 0.2, 0, net)
+    }
+
+    #[test]
+    fn a_pair_whose_extra_pins_are_joined_onto_its_partner_gives_up() {
+        let mut b = pair_board();
+        let path = PairPath {
+            report: 0,
+            p: 0,
+            n: 1,
+            tracks: Vec::new(),
+            vias: Vec::new(),
+            whole: false,
+            ends: [PairEnd { p: 0, n: 2, out: None }, PairEnd { p: 1, n: 3, out: None }],
+        };
+        // the pair's two tracks, and a last pass that runs a track of D_P on top of D_N
+        let geo = Geometry {
+            tracks: vec![
+                polyline(&[pt(4., 5.), pt(26., 5.)], 0),
+                polyline(&[pt(4., 5.8), pt(26., 5.8)], 1),
+            ],
+            vias: Vec::new(),
+        };
+        let fin = Geometry {
+            tracks: vec![polyline(&[pt(8., 5.9), pt(20., 5.9)], 0)],
+            vias: Vec::new(),
+        };
+        // two pins each: the pass only repaired the ends, the pair stays
+        assert!(worse_paths(&b, &geo, &fin, std::slice::from_ref(&path), &[]).is_empty());
+        // a third pin of D_P (the second pad of a USB-C socket)
+        b.nets[0].pins.push(b.pins.len());
+        b.pins.push(b.pins[0].clone());
+        assert_eq!(worse_paths(&b, &geo, &fin, std::slice::from_ref(&path), &[]), vec![0]);
+        assert!(worse_paths(&b, &geo, &fin, std::slice::from_ref(&path), &[0]).is_empty());
     }
 
     #[test]

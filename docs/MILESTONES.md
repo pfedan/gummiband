@@ -103,6 +103,12 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   bumps gain as much and only count as uncoupled length: DDR5 107 instead of 151 KiCad errors
   over seeds 1 to 4 (pair gap 21 instead of 65), `diff_pairs` 5 instead of 10, `matching`
   unchanged.
+  USB-C pins without partner (2026-11-02): with breakout zones Lichtschnitzel's USB pair is
+  routed as a pair, but the last pass joined the second pads of the socket (B6/B7) with a 70 mm
+  track along the pair and onto its partner (502 KiCad errors). Such a pair now gives up its
+  wide track: Lichtschnitzel `--pairs --breakouts` 3 instead of 502 KiCad errors; DDR5,
+  `diff_pairs` and `matching` unchanged (byte for byte). The pair itself still needs a way for
+  those pins next to the socket.
   Open: room in the router itself, phase matching near the source, carrying the pair to its
   end, the open end with pairs.
 - Rule engine: more custom rule conditions (positions, footprints, layers).

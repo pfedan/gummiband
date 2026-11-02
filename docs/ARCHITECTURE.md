@@ -312,7 +312,10 @@ track and split afterwards.
    group), the pair is given
    up and its nets are routed as single tracks (reported as such); only if they find no way
    either do the ends that found no way keep the two tracks they had.
-6. Last pass: what is still open is routed around everything as single tracks.
+6. Last pass: what is still open is routed around everything as single tracks. A pair with pins
+   without partner (the second pads of a USB-C socket) whose single tracks this pass joins with
+   new clearance problems (along the pair, onto its partner) gives up its wide track as well,
+   once; only if its single tracks then find no way does it keep the tracks of the pass.
 7. Tuning: the shorter track of a path gets 45 degree bumps on its outer side, where they fit,
    down to `--pair-skew` or a `skew` rule. A bump is a point without a flat top: KiCad's DRC
    takes a top parallel to the other track as coupled at a wider gap (`diff_pair_gap`), the two
