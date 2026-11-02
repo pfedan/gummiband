@@ -363,6 +363,83 @@ class AdvancedCommandTest(unittest.TestCase):
             self.assertEqual(cmd[cmd.index(flag) + 1], value)
 
 
+class OptInCommandTest(unittest.TestCase):
+    def cmd(self, **kw):
+        return runner.build_command("gb", Path("b"), Path("o"), runner.RouteOptions(**kw))
+
+    def test_hints_are_off_by_default(self):
+        c = self.cmd()
+        for flag in ("--patterns", "--clear-corridors", "--seed", "--placement-seed", "--air",
+                     "--pair-all", "--via-pairs", "--breakouts"):
+            self.assertNotIn(flag, c)
+
+    def test_patterns(self):
+        c = self.cmd(hint_groups=True, hint_pairs=True)
+        self.assertEqual(c[c.index("--patterns") + 1], "groups,pairs")
+        c = self.cmd(hint_groups=True, group_order="short", hint_decaps=True, hint_shares=True)
+        self.assertEqual(c[c.index("--patterns") + 1], "groups-short,decaps,shares")
+        # the order alone is no hint
+        self.assertNotIn("--patterns", self.cmd(group_order="inline"))
+        # rows acts only in the open end
+        c = self.cmd(hint_rows=True)
+        self.assertEqual(c[c.index("--patterns") + 1], "rows")
+        self.assertNotIn("--patterns", self.cmd(hint_rows=True, until_stop=False))
+
+    def test_clear_corridors(self):
+        self.assertIn("--clear-corridors", self.cmd(clear_corridors=True))
+        self.assertNotIn("--clear-corridors", self.cmd(clear_corridors=True, finish_nets=["A"]))
+
+    def test_seeds(self):
+        c = self.cmd(seed=42)
+        self.assertEqual(c[c.index("--seed") + 1], "42")
+        self.assertNotIn("--placement-seed", self.cmd(placement_seed=7))
+        c = self.cmd(placements=3, placement_seed=7)
+        self.assertEqual(c[c.index("--placement-seed") + 1], "7")
+
+    def test_next_placement_seed(self):
+        opts = runner.RouteOptions(placements=3, placement_seed=7)
+        self.assertEqual(runner.next_placement_seed(opts).placement_seed, 10)
+        self.assertEqual(opts.placement_seed, 7)
+        same = runner.RouteOptions(placement_seed=7)
+        self.assertIs(runner.next_placement_seed(same), same)
+        top = runner.RouteOptions(placements=2, placement_seed=runner.SEED_MAX)
+        self.assertEqual(runner.next_placement_seed(top).placement_seed, 1)
+        self.assertTrue(1 <= runner.random_seed() <= runner.SEED_MAX)
+
+    def test_pair_switches_need_pairs(self):
+        c = self.cmd(pair_all=True, via_pairs=True, breakouts=True, until_stop=False)
+        self.assertNotIn("--pair-all", c)
+        c = self.cmd(pairs=True, pair_all=True, via_pairs=True, breakouts=True)
+        for flag in ("--pairs", "--pair-all", "--via-pairs", "--breakouts"):
+            self.assertIn(flag, c)
+
+    def test_air_goes_with_the_open_end(self):
+        self.assertNotIn("--air", self.cmd(air=0.03))
+        c = self.cmd(air=0.05)
+        self.assertEqual(c[c.index("--air") + 1], "0.05")
+        self.assertNotIn("--air", self.cmd(air=0.05, until_stop=False))
+
+    def test_place_switches(self):
+        c = runner.build_place_command("gb", Path("a"), Path("b"), Path("r"),
+                                       runner.PlaceOptions(semantic=True, corridors=True,
+                                                           escape_halo=True, leash=1.5))
+        for flag in ("--semantic", "--corridors", "--escape-halo"):
+            self.assertIn(flag, c)
+        self.assertEqual(c[c.index("--leash") + 1], "1.5")
+        c = runner.build_place_command("gb", Path("a"), Path("b"), Path("r"), runner.PlaceOptions())
+        for flag in ("--semantic", "--corridors", "--escape-halo", "--leash"):
+            self.assertNotIn(flag, c)
+
+    def test_parse_seed_and_corridors(self):
+        r = runner.RouteResult([], 0, "corridors: 2 parts in the way get new positions: R1 C4\n"
+                                      "best placement: seed 9\n", "")
+        self.assertEqual(r.cleared_corridors(), ["R1", "C4"])
+        self.assertEqual(r.placement_seed(), 9)
+        empty = runner.RouteResult([], 0, "corridors: no part in the way\n", "")
+        self.assertEqual(empty.cleared_corridors(), [])
+        self.assertIsNone(empty.placement_seed())
+
+
 class SavedOptionsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -418,6 +495,8 @@ class FieldTableTest(unittest.TestCase):
                     self.assertIn(f.requires, names)
                 if f.kind in ("refs", "file"):
                     self.assertNotIn(f.name, saved)
+                if f.kind == "choice":
+                    self.assertIn(getattr(opts, f.name), [v for v, _label in f.choices])
 
 
 class PlacementsCommandTest(unittest.TestCase):

@@ -41,6 +41,41 @@ class DialogTest(unittest.TestCase):
         form.update_enabled()
         self.assertFalse(form.controls["open_via_cost"].IsEnabled())
 
+    def test_opt_in_values_come_back_unchanged(self):
+        route = runner.RouteOptions(hint_groups=True, group_order="inline", hint_rows=True,
+                                    clear_corridors=True, seed=77, placements=2,
+                                    placement_seed=5, pairs=True, via_pairs=True, air=0.05)
+        self.assertEqual(dataclasses.replace(route, **self.build(fields.ROUTE_TABS, route).values()),
+                         route)
+        place = runner.PlaceOptions(semantic=True, corridors=True, escape_halo=True, leash=1.5)
+        self.assertEqual(dataclasses.replace(place, **self.build(fields.PLACE_TABS, place).values()),
+                         place)
+
+    def test_group_order_follows_the_groups(self):
+        form = self.build(fields.ROUTE_TABS, runner.RouteOptions())
+        self.assertFalse(form.controls["group_order"].IsEnabled())
+        self.assertFalse(form.labels["group_order"].IsEnabled())
+        form.controls["hint_groups"].SetValue(True)
+        form.update_enabled()
+        self.assertTrue(form.controls["group_order"].IsEnabled())
+
+    def test_placement_seed_follows_the_placements(self):
+        form = self.build(fields.ROUTE_TABS, runner.RouteOptions())
+        self.assertFalse(form.controls["placement_seed"].IsEnabled())
+        self.assertFalse(form.buttons["placement_seed"].IsEnabled())
+        form.controls["placements"].SetValue(3)
+        form.update_enabled()
+        self.assertTrue(form.controls["placement_seed"].IsEnabled())
+        self.assertTrue(form.buttons["placement_seed"].IsEnabled())
+
+    def test_new_seed_button(self):
+        form = self.build(fields.ROUTE_TABS, runner.RouteOptions())
+        self.assertEqual(form.controls["seed"].GetValue(), 0)
+        button = form.buttons["seed"]
+        button.GetEventHandler().ProcessEvent(
+            action.wx.CommandEvent(action.wx.wxEVT_BUTTON, button.GetId()))
+        self.assertGreater(form.controls["seed"].GetValue(), 0)
+
     def test_defaults_button_values(self):
         form = self.build(fields.ROUTE_TABS, runner.RouteOptions(runs=8, plane_layers=["In1.Cu"]))
         form.set_values(runner.RouteOptions())
