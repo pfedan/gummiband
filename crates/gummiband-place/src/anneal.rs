@@ -633,13 +633,13 @@ impl<'a> Placer<'a> {
     /// Legalize biggest units first: each unit only has to avoid the fixed parts and the units
     /// legalized before it; if it overlaps them it moves to the nearest free spot (spiral search
     /// over position and rotation, wire length as tie breaker). Smaller units it lands on are
-    /// moved when their turn comes. Returns the number of units that found no spot.
-    pub fn legalize(&mut self, step: f64, max_r: f64) -> usize {
+    /// moved when their turn comes. Returns the units that found no spot, biggest first.
+    pub fn legalize(&mut self, step: f64, max_r: f64) -> Vec<usize> {
         let n = self.p.units.len();
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|&a, &b| self.p.units[b].area.partial_cmp(&self.p.units[a].area).unwrap());
         let mut placed = vec![false; n];
-        let mut failed = 0;
+        let mut failed = Vec::new();
         for &u in &order {
             if self.overlap_with(u, &placed) <= 1e-9 {
                 placed[u] = true;
@@ -697,7 +697,7 @@ impl<'a> Placer<'a> {
                 None => {
                     self.s.pos[u] = home;
                     self.s.k[u] = home_k;
-                    failed += 1;
+                    failed.push(u);
                 }
             }
             placed[u] = true;
