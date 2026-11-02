@@ -103,7 +103,8 @@ pub fn net_length(board: &Board, geo: &Geometry, net: NetId) -> NetLength {
     let mut len = NetLength::default();
     for v in &vias {
         let r = v.diameter / 2.0;
-        // the layers the via really connects: its tracks, and the pad it sits in
+        // the layers the via really connects: its tracks, and the pad it sits in or touches (a
+        // via beside a BGA ball whose centre lies just off the pad joins it as well)
         let mut layers: Vec<LayerId> = chains
             .iter()
             .filter(|(_, c)| start_of(c).dist(v.at) <= r + 1e-6 || end_of(c).dist(v.at) <= r + 1e-6)
@@ -111,7 +112,7 @@ pub fn net_length(board: &Board, geo: &Geometry, net: NetId) -> NetLength {
             .collect();
         if let Some((_, o)) = pads
             .iter()
-            .find(|(_, o)| o.hole.is_none() && o.shape.dist_to_point(v.at) <= 0.0)
+            .find(|(_, o)| o.hole.is_none() && o.shape.dist_to_point(v.at) <= r)
         {
             layers.extend(o.layers.iter().next());
         }
@@ -712,6 +713,81 @@ mod tests {
 
     fn pt(x: f64, y: f64) -> Point {
         Point { x, y }
+    }
+
+    #[test]
+    fn a_via_that_touches_a_pad_counts_down_from_the_pad() {
+        use crate::board::{Layer, LayerSet, Net, Pin};
+        use crate::geom::Shape;
+        let mut b = Board::default();
+        b.layers = ["F.Cu", "B.Cu"]
+            .iter()
+            .map(|n| Layer {
+                name: n.to_string(),
+                is_plane: false,
+            })
+            .collect();
+        b.thickness = 1.6;
+        // a BGA ball (radius 0.225) and a via of 0.4 mm whose centre lies 0.249 mm off it
+        b.obstacles.push(Obstacle {
+            shape: Shape::Circle {
+                c: pt(0.0, 0.0),
+                r: 0.225,
+            },
+            layers: LayerSet::single(0),
+            net: Some(0),
+            kind: ObstacleKind::Pad,
+            hole: None,
+            clearance: 0.1,
+            pin: Some(0),
+            locked: false,
+        });
+        b.pins.push(Pin {
+            name: "K3".into(),
+            footprint: "U1".into(),
+            net: 0,
+            pos: pt(0.0, 0.0),
+            layers: LayerSet::single(0),
+            obstacles: vec![0],
+            size: (0.45, 0.45),
+        });
+        b.nets.push(Net {
+            name: "CA6".into(),
+            class: 0,
+            pins: vec![0],
+            planes: LayerSet::default(),
+            priority: 0,
+        });
+        let at = pt(0.067, 0.24);
+        let geo = Geometry {
+            tracks: vec![Track {
+                pts: vec![at, pt(5.0, 0.24)],
+                elems: vec![Elem::Line(at, pt(5.0, 0.24))],
+                width: 0.1,
+                layer: 1,
+                net: 0,
+                necks: Vec::new(),
+                neck_w: 0.1,
+                origin: None,
+                resting: false,
+                fitted: Vec::new(),
+                pattern: None,
+                seg: u32::MAX,
+                tap: None,
+            }],
+            vias: vec![Via {
+                at,
+                diameter: 0.4,
+                drill: 0.2,
+                net: 0,
+                layer: None,
+                origin: None,
+                resting: false,
+                half: Point::default(),
+            }],
+        };
+        // KiCad joins the via to the ball: the via runs from F.Cu to B.Cu
+        assert!((net_length(&b, &geo, 0).vias - 1.6).abs() < 1e-9);
     }
 
     #[test]
