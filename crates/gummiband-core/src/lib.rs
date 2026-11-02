@@ -14,6 +14,7 @@ pub mod patterns;
 pub mod prof;
 pub mod realize;
 pub mod relax;
+pub mod returns;
 pub mod route;
 pub mod topo;
 pub mod tune;
@@ -55,6 +56,9 @@ pub struct RunStats {
     pub violations: Option<usize>,
     /// Of those, the ones where copper of two nets touches or crosses (shorts).
     pub shorts: Option<usize>,
+    /// mm the nets of the skew rules lack to their longest net, beyond what the rule allows
+    /// (see [`skew_need`]).
+    pub skew_need: f64,
 }
 
 /// Weight of a via in [`RunStats::cost`].
@@ -66,8 +70,46 @@ impl RunStats {
     /// Lower is better: completion first, then vias, then length. One unrouted connection
     /// weighs as much as ten clearance violations (see the geometry stage).
     pub fn cost(&self) -> f64 {
-        (self.conns - self.routed) as f64 * 1e4 + self.vias as f64 * VIA_WEIGHT + self.length * LENGTH_WEIGHT
+        (self.conns - self.routed) as f64 * 1e4
+            + self.vias as f64 * VIA_WEIGHT
+            + self.length * LENGTH_WEIGHT
+            + self.skew_need * skew_weight()
     }
+}
+
+/// Weight of a mm of [`RunStats::skew_need`] (experiment: `GB_SKEW_WEIGHT`, default 0).
+fn skew_weight() -> f64 {
+    static W: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *W.get_or_init(|| {
+        std::env::var("GB_SKEW_WEIGHT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0)
+    })
+}
+
+/// What length tuning would have to add: per skew rule (not within pairs), for each net with
+/// tracks, how much shorter than the longest net of the rule it is beyond the allowed skew. A
+/// single long way round raises this for the whole group. Track lengths only, no vias.
+pub fn skew_need(board: &Board, geo: &Geometry) -> f64 {
+    if board.match_rules.is_empty() {
+        return 0.0;
+    }
+    let mut len: HashMap<NetId, f64> = HashMap::new();
+    for t in &geo.tracks {
+        *len.entry(t.net).or_insert(0.0) += t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>();
+    }
+    let mut need = 0.0;
+    for r in &board.match_rules {
+        if r.kind != board::MatchKind::Skew || r.within_pairs {
+            continue;
+        }
+        let tol = r.value.max.unwrap_or(0.0);
+        let ls: Vec<f64> = r.nets.iter().filter_map(|n| len.get(n).copied()).collect();
+        let top = ls.iter().copied().fold(0.0, f64::max);
+        need += ls.iter().map(|&l| (top - l - tol).max(0.0)).sum::<f64>();
+    }
+    need
 }
 
 /// Share of the differential pair track length that runs next to its partner on the same
@@ -388,6 +430,7 @@ fn lost_run(board: &Board, sub: &Substrate, cfg: RouterConfig, generation: usize
         blocked: Vec::new(),
         violations: None,
         shorts: None,
+        skew_need: 0.0,
     };
     Candidate {
         stats,
@@ -474,6 +517,7 @@ fn candidate(
         unrouted,
         violations: None,
         shorts: None,
+        skew_need: skew_need(board, &geo),
     };
     Candidate {
         stats,
