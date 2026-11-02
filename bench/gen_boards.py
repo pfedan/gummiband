@@ -20,6 +20,7 @@ Boards, roughly by difficulty:
   parts_easy          2 layers, MCU and SPI flash with a planar bus, local nets
   parts_medium        2 layers, MCU with SPI flash (real pinout), I2C with pull-ups, 6 bit bus with a swap
   parts_hard          2 layers, QFN-48 with shared SPI and I2C, 8 bit bus with swaps, USB pair, local nets
+  parts_multi         4 layers (planes), MCU and PHY with a 12 net bus, peripherals, shared I2C, 3 pairs, debug header
 """
 import json
 import math
@@ -1029,10 +1030,107 @@ def board_parts_hard():
     return b
 
 
+def board_parts_multi():
+    """Part to part, level 4: two big chips (QFN-48 MCU, QFN-32 PHY) with a 12 net bus between
+    them, each with its own peripherals and connectors: SPI flash and a 6 bit bus at the MCU, an
+    I2C bus shared by both chips with pull-ups, a USB pair to one edge, two pairs from the PHY to a
+    connector at the other edge, a debug header wired to both chips, random local nets. Four
+    layers, GND and 3V3 planes inside."""
+    rng = random.Random(64)
+    b = Board("parts_multi", 74, 52, inner="power",
+              title="4 layers, MCU and PHY with a 12 net bus, peripherals, shared I2C, three pairs, debug header")
+    b.net_class("Power", 0.3, 0.15, 0.6, 0.3, ["GND", "+3V3"])
+    b.zones = [("GND", "In1.Cu"), ("+3V3", "In2.Cu")]
+    gnd, vcc = "GND", "+3V3"
+    u1 = b.add(qfn("U1", 12, 0.5, 3.4375, 0.875, 0.25, 5.15), 22, 26)
+    u2 = b.add(qfn("U2", 8, 0.5, 2.4375, 0.875, 0.25, 3.3), 52, 26)
+    u3 = b.add(soic("U3", 8, "Flash"), 10, 9)
+    u4 = b.add(soic("U4", 14, "Latch"), 22, 44, 90)
+    u5 = b.add(soic("U5", 8, "EEPROM"), 37, 44)
+    u6 = b.add(soic("U6", 8, "Sensor"), 52, 44)
+    u1.pad(49).net = u2.pad(33).net = gnd
+    for n in (6, 30):
+        u1.pad(n).net = vcc
+    for n in (7, 31):
+        u1.pad(n).net = gnd
+    u2.pad(1).net, u2.pad(32).net = vcc, gnd
+    for u in (u3, u5, u6):
+        u.pad(4).net, u.pad(8).net = gnd, vcc
+    u4.pad(7).net, u4.pad(14).net = gnd, vcc
+    # the bus between the chips: right side of U1 (25..36 bottom to top) to the left side of U2
+    # (1..8 top to bottom) and its bottom side (9..16 left to right), three nets crossed
+    a = sorted([u1.pad(n) for n in range(26, 36) if n != 30] + [u1.pad(36), u1.pad(25)], key=lambda p: u1.world(p)[1])
+    c = sorted([u2.pad(n) for n in range(2, 9)], key=lambda p: u2.world(p)[1]) + \
+        sorted([u2.pad(n) for n in range(9, 14)], key=lambda p: u2.world(p)[0])
+    names = ["A0", "A1", "A2", "A3", "A5", "A4", "A6", "A7", "WR", "RD", "CS", "IRQ"]
+    for pa, pc, n in zip(a, c, names):
+        pa.net = pc.net = n
+    # SPI flash at the top left, from the top pins of U1 (37..48 right to left)
+    wire(u1, 46, u3, 1, "F_CS")
+    wire(u1, 45, u3, 2, "F_MISO")
+    wire(u1, 44, u3, 5, "F_MOSI")
+    wire(u1, 43, u3, 6, "F_SCK")
+    # 6 bit bus to the latch below, from the bottom pins (13..24 left to right), one swap
+    a = sorted([u1.pad(n) for n in range(14, 20)], key=lambda p: u1.world(p)[0])
+    c = sorted([p for p in u4.pads if int(p.num) in (8, 9, 10, 11, 12, 13)], key=lambda p: u4.world(p)[0])
+    for pa, pc, n in zip(a, c, ["Q0", "Q2", "Q1", "Q3", "Q4", "Q5"]):
+        pa.net = pc.net = n
+    # I2C shared by both chips, with pull-ups, to the EEPROM and the sensor
+    wire(u1, 21, u5, 5, "SDA")
+    u6.pad(5).net = u2.pad(15).net = "SDA"
+    wire(u1, 22, u5, 6, "SCL")
+    u6.pad(6).net = u2.pad(16).net = "SCL"
+    wire(u2, 14, u6, 1, "S_INT")
+    for i, n in enumerate(("SDA", "SCL")):
+        r = b.add(two_terminal("R", f"R{i + 1}", "4k7"), 44, 36 + 2 * i)
+        r.pad(1).net, r.pad(2).net = vcc, n
+    # USB pair at the left edge
+    j1 = b.add(fpc("J1", 6, 0.5), 3.5, 26, 90)
+    jp = sorted([j1.pad(3), j1.pad(4)], key=lambda p: j1.world(p)[1])
+    up = sorted([u1.pad(5), u1.pad(4)], key=lambda p: u1.world(p)[1])
+    for pa, pc, n in zip(jp, up, ("USB_P", "USB_N")):
+        pa.net = pc.net = n
+    j1.pad(1).net = j1.pad(6).net = gnd
+    # two pairs and two LED lines from the PHY to a connector at the right edge
+    j2 = b.add(fpc("J2", 10, 0.5), 70, 26, 270)
+    jp = sorted([j2.pad(n) for n in (2, 3, 5, 6, 8, 9)], key=lambda p: j2.world(p)[1])
+    up = sorted([u2.pad(n) for n in (19, 20, 21, 22, 23, 24)], key=lambda p: u2.world(p)[1])
+    for pa, pc, n in zip(jp, up, ("TX_P", "TX_N", "LED0", "LED1", "RX_P", "RX_N")):
+        pa.net = pc.net = n
+    j2.pad(1).net = j2.pad(10).net = gnd
+    j2.pad(4).net = j2.pad(7).net = gnd
+    # debug header at the top, wired to both chips
+    j3 = b.add(header("J3", 5, 2), 34, 4)
+    wire(j3, 1, u1, 39, "SWDIO")
+    wire(j3, 3, u1, 40, "SWCLK")
+    wire(j3, 5, u1, 41, "NRST")
+    wire(j3, 7, u2, 28, "TMS")
+    wire(j3, 9, u2, 27, "TCK")
+    wire(j3, 2, u2, 26, "TDI")
+    wire(j3, 4, u2, 25, "TDO")
+    j3.pad(6).net, j3.pad(8).net, j3.pad(10).net = gnd, vcc, gnd
+    # decoupling next to the chips
+    for i, (x, y, r) in enumerate(((15.5, 19.5, 45), (28.5, 32.5, 45), (47, 21, 0), (57, 31, 0),
+                                   (10, 14, 0), (37, 39.5, 0), (52, 39.5, 0), (29, 44, 90))):
+        cap = b.add(two_terminal("C", f"C{i + 1}", "100n"), x, y, r)
+        cap.pad(1).net, cap.pad(2).net = vcc, gnd
+    # local parts with random nets around the MCU and the PHY
+    loc = []
+    for i, (x, y, r) in enumerate(((10, 18, 0), (10, 22, 0), (10, 31, 0), (10, 35, 0), (22, 14, 90), (26, 14, 90),
+                                   (60, 14, 90), (64, 14, 90), (60, 38, 90), (64, 38, 90), (44, 14, 90),
+                                   (40, 30, 0))):
+        loc.append(b.add(two_terminal("R", f"R{i + 3}"), x, y, r))
+    free = [(u, p) for u in (u1, u2) for p in u.pads if p.net is None]
+    free += [(u4, p) for p in u4.pads if p.net is None] + [(u3, u3.pad(3)), (u3, u3.pad(7))]
+    random_nets(rng, all_pads(loc) + free, "N", near=4, sizes=(2, 2, 3))
+    b.dru = PAIR_DRU
+    return b
+
+
 BOARDS = [board_easy, board_medium, board_bus, board_power_mix, board_crossing, board_qfn_fanout,
           board_four_signal_layers, board_bga_escape, board_bga_dense, board_fine_pitch, board_fine_pitch_mixed,
           board_diff_pairs, board_matching, board_pair_wall, board_pair_traffic, board_parts_easy,
-          board_parts_medium, board_parts_hard]
+          board_parts_medium, board_parts_hard, board_parts_multi]
 
 
 def main():
