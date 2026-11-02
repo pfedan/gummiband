@@ -88,13 +88,14 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `track_corridors` | `board`, `fixed?` | groups of tracks between two parts (`a`, `b`, `nets`, `width_mm`, `length_mm`) with the movable parts `in_the_way` of each band, and all of them once; nothing moves |
 | `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?`, `corridors?`, `escape_halo?`, `leash?`, `two_sided?`, `back_max_pads?`, `back_cost?`, `on_front?`, `on_back?` | id and path of the working copy, the new poses (with `back` for a part on the back), decoupling assignment, crossings, smallest courtyard distance, pins off their plane, pads without via room, released connectors, with `semantic` inductors, groups and ties, with `two_sided` `flipped` and `free_mm2` per side, `warnings` |
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?`, `pad_connection?`, `thermal_spoke_width?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
+| `set_layer_type` | `board`, `layers [{layer, type}]` | id and path of the working copy with the new KiCad layer types (`signal`, `power`, `mixed`, `jumper`), per change the old type and the nets with a zone on the layer, all copper layers with their plane flag, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `width?`, `reset?` | the net's options and effective priority |
 | `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `move_parts?`, `fixed?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `patterns?`, `clear_corridors?`, `pair_pull?`, `pairs?`, `pair_all?`, `pair_breakouts?`, `pair_via_pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `via_pass?`, `open_end_seconds?`, `open_via_cost?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `tune_spacing?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
 | `angles_45` | `path`, `output?`, `nets?` | path of the written `<input>.45.kicad_pcb`, runs of track looked at and changed, length before and after, pieces off the grid, sharp corners, Gummiband's violations before and after |
 | `power_plan` | `board`, `currents? [{net, amps, short_amps?}]`, `temp_rise?`, `apply?` | per power net the IPC-2221 width per layer, the track width to route with, vias per layer change, planes and zones, advice; board notes (GND plane, reference planes); the widths as `.kicad_dru` rules; with `apply` the widths stored as net options |
 | `current_check` | `path`, `paths? [{net, amps, short_amps?, from?, to?, name?}]`, `temp_rise?`, `refill?`, `max_segments?` | per current path the narrow segments, the narrowest single band and the total cross-section between the terminals (pours and vias included) with their position, vias against the current, verdict `ok` or `FLAG` |
-| `power_copper` | `board`, `paths [{net, amps, short_amps?, from, to?, layer?, name?}]`, `temp_rise?`, `margin?`, `max_span?`, `via_diameter?`, `via_drill?`, `priority?` | id and path of the working copy with "gb:" power pours over the pads of each path and, for plane nets, locked via fields with a pour into the plane; per pour its outline, area, what cut it, vias needed and placed; a `current_check` of the pours; `warnings` |
+| `power_copper` | `board`, `paths [{net, amps, short_amps?, from, to?, layer?, name?}]`, `temp_rise?`, `margin?`, `max_span?`, `via_diameter?`, `via_drill?`, `priority?`, `unlocked?` | id and path of the working copy with "gb:" power pours over the pads of each path and, for plane nets, locked via fields with a pour into the plane; per pour its outline, area, what cut it, vias needed and placed; a `current_check` of the pours; the unlocked copper on the board, with `unlocked: "clear"` what was removed (`cleared`) and the nets to route again (`reroute_nets`); `warnings` |
 | `ground_pour` | `path`, `net?`, `layers?`, `pitch?`, `edge_pitch?`, `edge_inset?`, `avoid_courtyards?`, `via_diameter?`, `via_drill?`, `priority?`, `pad_connection?`, `thermal_spoke_width?`, `output?` | id and path of `<input>.gnd.kicad_pcb` with ground zones on the outer layers and locked stitching vias, `warnings` |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?`, `refill?` | PNG (image content) and its path, region, pixels per mm |
@@ -338,6 +339,22 @@ the zones, and `drc` runs with a refill, so the result is judged correctly.
   "points": [[140, 110], [200, 110], [200, 150], [140, 150]]}}
 ```
 
+### set_layer_type
+
+Sets the KiCad type of inner copper layers in the working copy, so the planes can be planned
+through the MCP. `power` makes a layer a plane layer: its zones are planes that the router
+reaches with vias, and it routes no tracks there. `signal`, `mixed` and `jumper` make it a
+routing layer (Gummiband routes all three alike). Outer layers stay routing layers (they carry
+the parts; pour them with `add_zone` or `ground_pour`). Warnings name a new power layer without
+a zone (add one with `add_zone`, or several side by side for a split plane), locked tracks left
+on a new power layer, and zones that stop being planes when a power layer turns back into a
+routing layer. Use the returned board id from now on.
+
+```json
+{"name": "set_layer_type", "arguments": {"board": "b1", "layers": [
+  {"layer": "In1.Cu", "type": "power"}, {"layer": "In4.Cu", "type": "power"}, {"layer": "In6.Cu", "type": "power"}]}}
+```
+
 ### add_locked_copper
 
 Preliminary (new, lightly tested). Adds pre-routed copper as **locked** tracks and vias: the
@@ -548,6 +565,43 @@ them on the next `load_board`. `apply: true` stores the widths as net options (`
   {"net": "*/SW_?", "amps": 8}, {"net": "*OUT?_5V", "amps": 4, "short_amps": 7}]}}
 ```
 
+#### Planes and wide supply nets
+
+Plan the layers before `power_plan`, so that its advice already sees the planes:
+
+1. Decide which inner layers are planes and give them type `power` with `set_layer_type`; the
+   others stay `signal`. A GND plane next to every signal layer that carries fast signals or
+   differential pairs, the supplies on the rest. KiCad files often mark every layer `signal`
+   (the Jetson baseboard even has `jumper` on In4), so look at the `plane` flags `load_board`
+   reports.
+2. One `add_zone` per plane net. Several supplies can share one power layer as a split plane:
+   one zone per net, side by side with a gap of at least the clearance (0.5 mm is common); a via
+   counts only where it lands in the copper of its own net (see the overlap rule below). On the
+   Jetson baseboard: In1 and In4 GND, In2 +3V3, In6 VCC on the left and +5V on the right.
+3. Then `power_plan` with the currents: a net with a plane gets the vias per pin instead of a
+   width, a net without one its width and the advice below.
+
+A supply net that is too wide for a track on an inner layer (VBUS or VIN from a connector, a
+battery net, a motor supply) needs a plan of its own. `power_plan` sizes the track for the outer
+layers; an inner layer needs about twice the width for the same current (IPC-2221 k 0.024
+instead of 0.048), and the router takes a net with its width onto any routing layer it uses. A
+1.5 mm VBUS track across an inner signal layer takes the room of four or five signal tracks, and a
+long one cuts the layer in two halves that buses no longer cross (on the Jetson baseboard the wide
+VBUS nets ran over the inner layers, next to the buses that were already the bottleneck). The
+router has no per net layer choice, so leave it no long wide track to route:
+
+- A plane or a share of a split plane on a power layer under the path from the source to the
+  loads, best for a supply that spans the board. `power_copper` gives the large pads their via
+  fields into it.
+- A pour on an outer layer for a short path (connector to fuse to eFuse): `power_copper` with
+  `from` and `to` up to `max_span` (12 mm) apart, `add_zone` on F.Cu or B.Cu with a priority
+  above the GND pour for a longer one.
+- A track pre-routed on the outer layers with `add_locked_copper`, `power_plan`'s width and
+  `vias_per_transition` vias wherever it changes layer, then `route` with `keep_locked`.
+
+What is left for the router are short fan-outs from the pins into the plane or pour. After the
+route `render` the inner layers and look for wide tracks; `current_check` confirms the paths.
+
 #### power_copper
 
 Before routing, for current paths a track carries badly: a converter's switch node from its
@@ -581,6 +635,18 @@ pins to the inductor, a big pad that reaches its plane through one via. For each
   plane zone with room for the via and its clearance, and outside the zones of other nets on
   that layer with a higher priority (KiCad fills those first). When vias would fit beside the
   pad but the plane has no copper there, the warning says so (extend the plane zone).
+
+- On a routed board (or one with any unlocked tracks and vias) `unlocked` decides what
+  happens to the unlocked copper of other nets. `avoid` (the default) treats it as an obstacle
+  like locked copper: the pours give way and the vias go where it leaves room, which on a
+  finished board is often nowhere; a warning then points to `clear`. `clear` lays out the copper
+  as on an unrouted board (only locked copper and the earlier paths are in the way) and removes
+  the unlocked tracks and vias of other nets the new copper would touch, closer than their
+  clearance (`cleared`, per net). Route `reroute_nets` (the cleared nets and the nets of the
+  paths) next, with `keep_all`, `nets` and `reroute`: those nets are routed anew, everything
+  else stays. Locked copper is never removed. Before this option the tool saw only locked
+  copper and put vias on the routed tracks of other nets without a warning; a reroute from there
+  ended on the Lichtschnitzel with 175 shorts.
 
 Courtyards count by their outline where the courtyard lines close (an L or T shaped module
 courtyard leaves the room beside its stem free), by their box otherwise. The same holds for the
@@ -661,8 +727,17 @@ shows that `VBUS_F` and `VBUS_IN` each pass a single 0.4 mm via (about 1.6 A) on
 ```
 
 A flag is fixed by widening the net (`set_net_options` width, then `route` with `keep_all`,
-`nets` and `reroute`), a pour over the neck (`add_zone`, or `power_copper` before the next
-route), more vias or locked copper, then another check.
+`nets` and `reroute`), a pour over the neck (`add_zone`), more vias or locked copper, then another
+check. For a pour or via field from `power_copper` there are two ways:
+
+- On the routed board: `power_copper` with `unlocked: "clear"`, then `route` with `keep_all`,
+  `nets` set to the returned `reroute_nets` and `reroute`. Only the nets in the way are routed
+  again. Without `clear` the new copper gives way to the routed tracks and often finds no room.
+- On the unrouted board before the next full route: `power_copper`, then `route` with
+  `keep_locked`. Next to fine pitch pins a via field before routing can wall in the neighbours:
+  at the eFuse U6 of the Lichtschnitzel the VBUS_P vias in front of pins 7 to 10 left 6
+  connections open in every run. Compare such a run with one without the via field over the same
+  seeds before keeping it.
 
 #### ground_pour
 
@@ -784,6 +859,9 @@ Shortened session on the Lichtschnitzel benchmark (4 threads):
 - `power_copper` shapes a pour as a convex hull cut by straight lines (plus a narrow stub out of
   a long narrow pad, see above): obstacles between the terminals cost more copper than needed,
   and a terminal behind another net's pad is lost (a warning says so). It does not move parts; the via fields sit on rings around the pad.
+- `route` has no per net layer choice: a wide net can only be kept off inner signal layers by a
+  plane, a pour or locked copper (see Planes and wide supply nets). Zones can be added, not
+  changed or removed.
 - `current_check` measures on a raster (0.05 mm, coarser on very large nets); it does not weigh
   the length of a neck, and the cross-section is skipped for nets of more than three million
   copper cells. `ground_pour` does not yet check that the fill reaches every via (the DRC does).

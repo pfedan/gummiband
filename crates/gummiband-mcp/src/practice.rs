@@ -159,6 +159,12 @@ pub struct PowerCopperIn {
     pub via_drill: Option<f64>,
     /// Zone priority of the pours (default 20, above ground pours).
     pub priority: Option<u32>,
+    /// What to do with unlocked tracks and vias of other nets already on the board (a routed
+    /// board): "avoid" (default) lays the pours and vias out around them, "clear" lays them out
+    /// as on an unrouted board and removes the unlocked tracks and vias of other nets in the
+    /// way; reroute the nets in `reroute_nets` afterwards (route with keep_all, nets and
+    /// reroute).
+    pub unlocked: Option<String>,
 }
 
 // ------------------------------------------------------------------------------ outputs
@@ -469,7 +475,7 @@ pub fn power_plan(kb: &KicadBoard, id: &str, p: &PowerPlanIn) -> Result<(PowerPl
             // fan-out tracks into the plane or pour: their width matters only where they are long
         } else if pour {
             advice.push(format!(
-                "{need:.2} mm is too wide for a track{}: draw a pour (add_zone on an outer layer, priority above the GND pour) or a plane, pre-route the pins into it with add_locked_copper, then skip the net or route it with keep_locked",
+                "{need:.2} mm is too wide for a track{}: give it a pour before routing (power_copper with its from and to pads, up to max_span apart; add_zone on an outer layer for longer paths) or a plane (set_layer_type power, add_zone), then route with keep_locked",
                 if need > POUR_ABOVE_MM { String::new() } else { format!(" into pins of {narrow_pad:.2} mm") }
             ));
         } else if need > c.track_width + 1e-6 {
@@ -483,7 +489,8 @@ pub fn power_plan(kb: &KicadBoard, id: &str, p: &PowerPlanIn) -> Result<(PowerPl
             && !carried
         {
             advice.push(format!(
-                "custom rules let it neck to {m:.2} mm; apply sets the minimum width to {track:.2} mm (narrower only inside the courtyards of parts whose pads are narrower)"
+                "custom rules let it neck to {m:.2} mm; apply routes it {track:.2} mm wide and no narrower (narrower only inside the courtyards of parts whose pads are narrower); dru_rules let KiCad's DRC accept down to the {:.2} mm it needs",
+                (need * 100.0).ceil() / 100.0
             ));
         }
         let inner: Vec<String> = required
@@ -494,7 +501,7 @@ pub fn power_plan(kb: &KicadBoard, id: &str, p: &PowerPlanIn) -> Result<(PowerPl
             .collect();
         if !inner.is_empty() && !pour {
             advice.push(format!(
-                "keep it off the inner routing layers or widen it there: {}",
+                "inner routing layers need it wider ({}): the router may take it there and the wide track blocks the room of several signal tracks; give it a plane or pour so that only short fan-outs stay, or pre-route it on the outer layers with add_locked_copper and route with keep_locked (the router has no per net layer choice)",
                 inner.join(", ")
             ));
         }
@@ -709,6 +716,37 @@ pub struct PowerCopperOut {
     /// current_check of the pours before routing (pour paths only, zone outlines unless
     /// kicad-cli refilled them).
     pub check: Option<CurrentCheckOut>,
+    /// Unlocked tracks and vias of other nets on the board when the tool ran (0: unrouted).
+    pub unlocked_items: usize,
+    /// With unlocked "clear": per net the tracks and vias removed because they were in the way.
+    pub cleared: Vec<ClearedOut>,
+    /// The nets to route again after a clear (the cleared nets and the nets of the paths), for
+    /// route with keep_all, nets and reroute; empty without a clear.
+    pub reroute_nets: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ClearedOut {
+    pub net: String,
+    pub tracks: usize,
+    pub vias: usize,
+}
+
+/// How power_copper treats unlocked copper of other nets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unlocked {
+    Avoid,
+    Clear,
+}
+
+impl Unlocked {
+    pub fn parse(s: Option<&str>) -> Result<Unlocked> {
+        match s {
+            None | Some("avoid") => Ok(Unlocked::Avoid),
+            Some("clear") => Ok(Unlocked::Clear),
+            Some(x) => bail!("unlocked {x:?}: use avoid or clear"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------- current check
@@ -1085,8 +1123,15 @@ fn area(pts: &[Point]) -> f64 {
 /// Lay out power copper before routing: per current path a pour over its pads or via fields
 /// into its plane, as "gb:" zones (the router keeps other nets out and counts the pads under a
 /// pour as joined) and locked vias. Returns the new board text and the report (board and path
-/// filled in by the caller).
-pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, PowerCopperOut)> {
+/// filled in by the caller). `all` is the board read with all its copper and `locked` the same
+/// file with locked copper only: with unlocked "avoid" the layout gives way to all of it, with
+/// "clear" it sees the locked copper only and the unlocked copper of other nets in the way goes.
+pub fn power_copper(all: &KicadBoard, locked: &KicadBoard, p: &PowerCopperIn) -> Result<(String, PowerCopperOut)> {
+    let mode = Unlocked::parse(p.unlocked.as_deref())?;
+    let kb = match mode {
+        Unlocked::Avoid => all,
+        Unlocked::Clear => locked,
+    };
     let b = &kb.board;
     let dt = p.temp_rise.unwrap_or(DEFAULT_RISE);
     let margin = p.margin.unwrap_or(0.5);
@@ -1426,10 +1471,89 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
             }
         }
     }
-    let mut text = if vias.is_empty() {
-        kb.text.clone()
+    // unlocked copper of other nets the new copper would touch: gone with "clear"; with "avoid"
+    // the layout kept clear of it, so anything found here is a bug worth a warning
+    let unlocked_items = all
+        .board
+        .copper
+        .iter()
+        .filter(|c| !c.locked && c.net.is_none_or(|n| !path_nets(b, p).contains(&n)))
+        .count();
+    let hit = in_the_way(&all.board, &zones, &vias);
+    let mut cleared: Vec<ClearedOut> = Vec::new();
+    let mut remove = Vec::new();
+    if !hit.is_empty() {
+        match mode {
+            Unlocked::Avoid => warnings.push(format!(
+                "{} unlocked tracks or vias of other nets touch the new copper: check with drc before routing",
+                hit.len()
+            )),
+            Unlocked::Clear => {
+                for &i in &hit {
+                    let c = &all.board.copper[i];
+                    let name = c
+                        .net
+                        .map_or_else(|| "(no net)".to_string(), |n| all.board.nets[n as usize].name.clone());
+                    let row = match cleared.iter().position(|x| x.net == name) {
+                        Some(r) => r,
+                        None => {
+                            cleared.push(ClearedOut {
+                                net: name,
+                                tracks: 0,
+                                vias: 0,
+                            });
+                            cleared.len() - 1
+                        }
+                    };
+                    if matches!(c.kind, gummiband_core::board::CopperKind::Via { .. }) {
+                        cleared[row].vias += 1;
+                    } else {
+                        cleared[row].tracks += 1;
+                    }
+                }
+                let items: Vec<u32> = hit.iter().map(|&i| all.board.copper[i].source).collect();
+                remove = write::strip_ranges(
+                    all,
+                    &write::StripOptions {
+                        items,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+    if mode == Unlocked::Avoid && unlocked_items > 0 {
+        let gave_way = pours.iter().any(|x| {
+            x.vias_added < x.vias_needed || x.cut_by.iter().any(|c| c.starts_with("track") || c.starts_with("via"))
+        });
+        if gave_way {
+            warnings.push(format!(
+                "the board has {unlocked_items} unlocked tracks and vias of other nets and the new copper gave way to them; unlocked: \"clear\" removes those in the way instead, then route reroute_nets with keep_all, nets and reroute"
+            ));
+        }
+    }
+    let mut reroute_nets: Vec<String> = Vec::new();
+    if !cleared.is_empty() {
+        for n in cleared
+            .iter()
+            .map(|x| x.net.clone())
+            .chain(path_nets(b, p).iter().map(|&n| b.nets[n as usize].name.clone()))
+        {
+            if !reroute_nets.contains(&n) {
+                reroute_nets.push(n);
+            }
+        }
+        warnings.push(format!(
+            "removed {} unlocked tracks and vias of {} nets in the way: route {} with keep_all, nets and reroute before anything else",
+            hit.len(),
+            cleared.len(),
+            reroute_nets.join(", ")
+        ));
+    }
+    let mut text = if vias.is_empty() && remove.is_empty() {
+        all.text.clone()
     } else {
-        write::add_locked(kb, &vias)
+        write::add_locked_removing(all, &remove, &vias)
     };
     // overlapping zones on one layer must not share a priority (KiCad: zones_intersect), e.g.
     // the via field pours of two FETs side by side: the later one goes one priority up
@@ -1469,8 +1593,65 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
             pours,
             warnings,
             check: None,
+            unlocked_items,
+            cleared,
+            reroute_nets,
         },
     ))
+}
+
+/// The nets of the paths (names that do not resolve are left out; the layout reported them).
+fn path_nets(b: &Board, p: &PowerCopperIn) -> Vec<NetId> {
+    p.paths.iter().filter_map(|q| b.net_id(&q.net)).collect()
+}
+
+/// Unlocked copper items (indices into `b.copper`) of other nets closer to a new via or pour
+/// than their clearance: a via on every layer, a pour on its layer.
+fn in_the_way(b: &Board, zones: &[(NetId, LayerId, String, Vec<Point>)], vias: &[write::Item]) -> Vec<usize> {
+    let polys: Vec<(NetId, LayerId, Shape)> = zones
+        .iter()
+        .filter(|z| z.3.len() >= 3)
+        .map(|(n, l, _, o)| (*n, *l, Shape::Polygon(Polygon::new(o.clone()))))
+        .collect();
+    let circles: Vec<(NetId, Shape)> = vias
+        .iter()
+        .filter_map(|v| match v {
+            write::Item::Via { at, diameter, net, .. } => Some((
+                *net,
+                Shape::Circle {
+                    c: *at,
+                    r: diameter / 2.0,
+                },
+            )),
+            _ => None,
+        })
+        .collect();
+    let gap = |net: NetId, other: Option<NetId>, own: f64| {
+        let base = match other {
+            Some(o) => b.track_clearance(net, o),
+            None => b.clearance(Some(net), None),
+        };
+        base.max(own).max(b.item_gap(net, other)) - 1e-6
+    };
+    let mut out = Vec::new();
+    for (i, c) in b.copper.iter().enumerate() {
+        if c.locked {
+            continue;
+        }
+        let hits = (c.first..c.last).any(|k| {
+            let o = &b.obstacles[k as usize];
+            circles
+                .iter()
+                .any(|(n, s)| c.net != Some(*n) && o.shape.dist(s) < gap(*n, c.net, o.clearance))
+                || polys.iter().any(|(n, l, s)| {
+                    c.net != Some(*n) && o.layers.has(*l) && o.shape.dist(s) < gap(*n, c.net, o.clearance)
+                })
+        });
+        if hits {
+            out.push(i);
+        }
+    }
+    out
 }
 
 // ----------------------------------------------------------------------------- ground pour
@@ -1661,9 +1842,13 @@ current where a fuse or PTC limits a short. Without facts take the estimate powe
 the class widths, and say so in the report. Name the current paths: source pads -> sink pads.
 
 3. Plan before routing: power_plan with the currents and apply true. Follow its advice and board \
-notes: a solid GND plane on an inner layer next to the main signal layer (add_zone over the whole \
-board; on two layers keep B.Cu for a GND pour), planes or pours for nets too wide for a track \
-(add_zone on an outer layer, priority above the GND pour), the datasheet layout of converters, \
+notes. Layers first: the inner layers that carry planes get type power (set_layer_type), the others \
+stay signal; a solid GND plane on an inner layer next to the main signal layer (add_zone over the \
+whole board; on two layers keep B.Cu for a GND pour). Supply nets too wide for a track on an inner \
+layer get a plane or a share of one (several nets side by side on one power layer, add_zone each) or \
+a pour on an outer layer (power_copper, add_zone for longer paths), so that only short fan-outs are \
+left to route: a wide supply routed as a track runs across the inner signal layers and takes the room \
+of several signal tracks there. Then the datasheet layout of converters, \
 eFuses and their input and output loops as locked copper (part_info, add_locked_copper), enough \
 vias per pin into the planes (power_plan gives the count). Paths a track carries badly get \
 power_copper with their from and to pads: the switch node of a converter from its pins to the \
@@ -1685,8 +1870,9 @@ hints on a fixed placement that already routes cleanly. Keep what wins by the me
 
 5. Check the copper: current_check on the routed file with from and to for every current path \
 of step 2. A FLAG names the neck with its position: widen the net (set_net_options width, then \
-route keep_all + nets + reroute), add a pour over the neck (add_zone) or locked copper, and check \
-again until every path is ok. Too few vias where the current changes layer count as a neck too.
+route keep_all + nets + reroute), add a pour over the neck (add_zone), or on the routed board \
+power_copper with unlocked \"clear\" and route its reroute_nets with keep_all, nets and reroute, and \
+check again until every path is ok. Too few vias where the current changes layer count as a neck too.
 
 6. Ground: ground_pour on the routed file (GND pours on the outer layers, stitching vias on a grid \
 and along the edge). Use the returned file from now on.
@@ -1816,8 +2002,9 @@ mod tests {
             via_diameter: None,
             via_drill: None,
             priority: None,
+            unlocked: None,
         };
-        power_copper(kb, &p).unwrap().1
+        power_copper(kb, kb, &p).unwrap().1
     }
 
     #[test]
@@ -1915,6 +2102,106 @@ mod tests {
         assert!(x.vias_added >= 2, "{o:?}");
         assert!(!x.exits.is_empty(), "{o:?}");
         assert_clean(&kb, &o);
+    }
+
+    /// A switch node between R1.1 and L1.1 with a routed track of net X running across the gap,
+    /// read with all its copper and with the locked copper only.
+    fn routed_across(locked: bool) -> (KicadBoard, KicadBoard) {
+        let parts = [
+            part(
+                "R1",
+                105.0,
+                107.0,
+                &[smd("1", 0.0, 0.0, 1.2, 1.4, "SW"), smd("2", -2.0, 0.0, 1.2, 1.4, "A")],
+            ),
+            part(
+                "L1",
+                112.0,
+                107.0,
+                &[smd("1", 0.0, 0.0, 1.6, 2.0, "SW"), smd("2", 3.0, 0.0, 1.6, 2.0, "B")],
+            ),
+            part(
+                "R2",
+                108.5,
+                107.0,
+                &[smd("1", 0.0, -5.0, 0.6, 0.6, "X"), smd("2", 0.0, 5.0, 0.6, 0.6, "X")],
+            ),
+        ];
+        let track = format!(
+            "(segment (start 108.5 102) (end 108.5 112) (width 0.2) (layer \"F.Cu\") (net \"X\") {}(uuid \"0000-x\"))",
+            if locked { "(locked yes) " } else { "" }
+        );
+        let kb = board(&[parts.join("\n"), track]);
+        let pro = serde_json::json!({"net_settings": {"classes": [{"name": "Default", "clearance": 0.15,
+            "track_width": 0.2, "via_diameter": 0.6, "via_drill": 0.3}]}});
+        let read = |keep| {
+            gummiband_kicad::read::parse_board(
+                kb.text.clone(),
+                Some(&pro),
+                &ReadOptions {
+                    keep,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        (read(KeepCopper::All), read(KeepCopper::Locked))
+    }
+
+    fn copper_mode(all: &KicadBoard, locked: &KicadBoard, mode: &str) -> (String, PowerCopperOut) {
+        let p = PowerCopperIn {
+            board: "b1".into(),
+            paths: vec![path("SW", "R1.1", Some("L1.1"))],
+            temp_rise: None,
+            margin: None,
+            max_span: None,
+            via_diameter: None,
+            via_drill: None,
+            priority: None,
+            unlocked: Some(mode.into()),
+        };
+        power_copper(all, locked, &p).unwrap()
+    }
+
+    #[test]
+    fn power_copper_gives_way_to_routed_tracks() {
+        // the unlocked track of X splits the pour: the tool must not lay copper over it
+        let (all, locked) = routed_across(false);
+        let (text, o) = copper_mode(&all, &locked, "avoid");
+        assert_eq!(o.unlocked_items, 1, "{o:?}");
+        assert!(o.cleared.is_empty() && o.reroute_nets.is_empty(), "{o:?}");
+        assert!(text.contains("0000-x"), "the track stays");
+        assert!(
+            o.warnings
+                .iter()
+                .any(|w| w.contains("does not reach") || w.contains("no room")),
+            "{o:?}"
+        );
+        assert!(o.warnings.iter().any(|w| w.contains("unlocked: \"clear\"")), "{o:?}");
+        assert_clean(&all, &o);
+    }
+
+    #[test]
+    fn power_copper_clears_routed_tracks_in_the_way() {
+        let (all, locked) = routed_across(false);
+        let (text, o) = copper_mode(&all, &locked, "clear");
+        assert!(o.warnings.iter().all(|w| !w.contains("does not reach")), "{o:?}");
+        assert_eq!(o.cleared.len(), 1, "{o:?}");
+        assert_eq!((o.cleared[0].net.as_str(), o.cleared[0].tracks), ("X", 1));
+        assert_eq!(o.reroute_nets, vec!["X".to_string(), "SW".to_string()]);
+        assert!(!text.contains("0000-x"), "the track is gone");
+        assert!(text.contains("gb:power SW"));
+        gummiband_kicad::read::parse_board(text, None, &ReadOptions::default()).unwrap();
+    }
+
+    #[test]
+    fn power_copper_keeps_locked_tracks_in_the_way() {
+        // locked copper is the designer's: it stays an obstacle even with clear
+        let (all, locked) = routed_across(true);
+        let (text, o) = copper_mode(&all, &locked, "clear");
+        assert!(o.cleared.is_empty(), "{o:?}");
+        assert!(text.contains("0000-x"));
+        assert_clean(&all, &o);
     }
 
     #[test]

@@ -489,10 +489,18 @@ pub fn enable_teardrops(text: &str) -> anyhow::Result<String> {
 /// Add items to a board as locked copper (a pre-routed layout the router keeps): the board text
 /// with the items appended, each with `(locked yes)`.
 pub fn add_locked(kb: &KicadBoard, items: &[Item]) -> String {
-    let text = patch(kb, &[], items);
-    let close = kb.root.span().end - 1;
-    // patch keeps everything up to the root's closing paren, the new items follow it
-    let start = text[..close.min(text.len())].rfind('\n').unwrap_or(0);
+    add_locked_removing(kb, &[], items)
+}
+
+/// [`add_locked`] that also removes the root items at the byte ranges `remove` (see
+/// [`strip_ranges`]).
+pub fn add_locked_removing(kb: &KicadBoard, remove: &[Range<usize>], items: &[Item]) -> String {
+    // patch writes the kept text, a line break, the new items and the closing paren
+    let start = patch(kb, remove, &[]).len() - ")\n".len();
+    let text = patch(kb, remove, items);
+    if items.is_empty() {
+        return text;
+    }
     let (head, tail) = text.split_at(start);
     let tail = tail
         .replace("\t(segment\n", "\t(segment\n\t\t(locked yes)\n")
@@ -633,9 +641,74 @@ pub fn add_zone_named(kb: &KicadBoard, text: &str, z: &ZoneSpec, outline: &[Poin
     format!("{}{}{}", &text[..end], zone, &text[end..])
 }
 
+/// KiCad copper layer types.
+pub const LAYER_TYPES: [&str; 4] = ["signal", "power", "mixed", "jumper"];
+
+/// Set the KiCad type of copper layers (`(layers (4 "In1.Cu" signal) ...)`): `changes` holds
+/// layer names with one of [`LAYER_TYPES`]. Returns the new text and per change the old type.
+pub fn set_layer_types(text: &str, changes: &[(String, String)]) -> anyhow::Result<(String, Vec<String>)> {
+    let root = crate::sexpr::parse(text).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+    let layers = root
+        .child("layers")
+        .ok_or_else(|| anyhow::anyhow!("the board has no layer table"))?;
+    let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    let mut old = Vec::new();
+    for (name, kind) in changes {
+        if !LAYER_TYPES.contains(&kind.as_str()) {
+            anyhow::bail!("layer type {kind:?}: use one of {}", LAYER_TYPES.join(", "));
+        }
+        let Some(l) = layers
+            .args()
+            .iter()
+            .find(|l| l.items().get(1).and_then(|x| x.as_str()) == Some(name.as_str()))
+        else {
+            anyhow::bail!("no layer {name:?} in the layer table");
+        };
+        if !name.ends_with(".Cu") {
+            anyhow::bail!("{name} is not a copper layer");
+        }
+        match l.items().get(2) {
+            Some(t @ crate::sexpr::Node::Atom(..)) => {
+                old.push(t.as_str().unwrap_or("signal").to_string());
+                edits.push((t.span(), kind.clone()));
+            }
+            _ => {
+                // no type given: KiCad reads signal; the type follows the name
+                let at = l.items()[1].span().end;
+                old.push("signal".into());
+                edits.push((at..at, format!(" {kind}")));
+            }
+        }
+    }
+    edits.sort_by_key(|e| std::cmp::Reverse(e.0.start));
+    let mut out = text.to_string();
+    for (r, t) in edits {
+        out.replace_range(r, &t);
+    }
+    Ok((out, old))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layer_types_change_in_place() {
+        let text = "(kicad_pcb (layers (0 \"F.Cu\" signal) (4 \"In1.Cu\" signal) (6 \"In2.Cu\" jumper) (2 \"B.Cu\" signal) (25 \"Edge.Cuts\" user))\n)\n";
+        let (out, old) = set_layer_types(
+            text,
+            &[("In2.Cu".into(), "power".into()), ("In1.Cu".into(), "power".into())],
+        )
+        .unwrap();
+        assert_eq!(old, vec!["jumper".to_string(), "signal".to_string()]);
+        assert!(
+            out.contains("(4 \"In1.Cu\" power) (6 \"In2.Cu\" power) (2 \"B.Cu\" signal)"),
+            "{out}"
+        );
+        assert!(set_layer_types(text, &[("In3.Cu".into(), "power".into())]).is_err());
+        assert!(set_layer_types(text, &[("In1.Cu".into(), "plane".into())]).is_err());
+        assert!(set_layer_types(text, &[("Edge.Cuts".into(), "power".into())]).is_err());
+    }
 
     const BOARD: &str = r#"(kicad_pcb
 	(footprint "R"
