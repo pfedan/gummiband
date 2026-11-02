@@ -651,6 +651,11 @@ Lichtschnitzel (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
   gap. `--clear-corridors` leashes ICs and connectors at 1.5 mm (`GB_CC_LEASH`): U5 moves 0.1 mm,
   U22 1.5 mm. With move rounds, seeds 1 to 3, Gummiband's own clearance check: 272/276/300 vias,
   2461/2543/2552 mm, 0/2/1 violations. The KiCad DRC of this state is still open.
+- With move rounds (the router's own moves, KiCad DRC, before the leash): little change at about
+  twice the run time; D stays without a clearance error or short in all 18 runs. In B, U22 may
+  move 6.9 mm and gives the shortest result (down to 2292 mm); holding U5 alone is enough for 0 to
+  1 clearance errors. So the leash, not a fixed IC, is the right default; a switching regulator
+  with its power nets may need a shorter one.
 
 ## M4b: GPU experiment
 
