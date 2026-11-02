@@ -513,8 +513,8 @@ hints on, all off by default (and then byte for byte the same as without them):
 - `groups`: the connections between the same two parts (ICs or connectors, at least 4 pins on
   nets: a bus, SPI, I2C; a pull-up on the way does not count) form a block of at least two, laid in pin
   order across the block, from one side or the other by seed. Where the block goes is the
-  experiment `GB_GROUP_ORDER`: `short` (default) all blocks before the other signal connections
-  of their priority, the shortest block first; `long` the same, the longest first; `inline` each
+  experiment `GB_GROUP_ORDER`: `long` (default) all blocks before the other signal connections
+  of their priority, the longest block first; `short` the same, the shortest first; `inline` each
   block at the place of its shortest connection. The evolutionary search may still move single
   connections out of a block.
 

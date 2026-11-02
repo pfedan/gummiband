@@ -126,12 +126,12 @@ impl RouterConfig {
         self.decaps_first = hints.contains(&"decaps");
         self.row_moves = if hints.contains(&"rows") { 0.15 } else { 0.0 };
         self.pairs_first = hints.contains(&"pairs");
-        // the place of the groups is an experiment: `GB_GROUP_ORDER` = short (default), long, inline
+        // the place of the groups is an experiment: `GB_GROUP_ORDER` = long (default), short, inline
         self.groups = if hints.contains(&"groups") {
             match std::env::var("GB_GROUP_ORDER").as_deref() {
-                Ok("long") => GroupOrder::Long,
+                Ok("short") => GroupOrder::Short,
                 Ok("inline") => GroupOrder::Inline,
-                _ => GroupOrder::Short,
+                _ => GroupOrder::Long,
             }
         } else {
             GroupOrder::Off
