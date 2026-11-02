@@ -22,6 +22,7 @@ Boards, roughly by difficulty:
   parts_hard          2 layers, QFN-48 with shared SPI and I2C, 8 bit bus with swaps, USB pair, local nets
   parts_multi         4 layers (planes), MCU and PHY with a 12 net bus, peripherals, shared I2C, 3 pairs, debug header
   parts_multi_feed    the same with 40 scattered 0603 parts (chicken feed), half of them with a plane via
+  parts_xhard         parts_multi_feed on a board 25 % smaller in each direction
 """
 import json
 import math
@@ -242,19 +243,61 @@ class Board:
         self.rules = dict(min_clearance=0.15, min_track_width=0.1, min_hole_clearance=0.2,
                           min_hole_to_hole=0.25, min_via_diameter=0.45, min_via_annular_width=0.1)
         self._uid = 0
+        self.scale = 1.0  # positions given to add() are scaled by this (a tighter variant of a board)
 
     def uid(self):
         self._uid += 1
         return str(uuid.uuid5(NS, f"{self.name}/{self._uid}"))
 
     def add(self, fp, x, y, r=0.0):
-        """Place a footprint; x, y relative to the board origin (top left corner)."""
+        """Place a footprint; x, y relative to the board origin (top left corner). With a `scale`
+        other than 1 (on a board `scale` times the size `w / scale`), a position within 6 mm of an
+        edge keeps its distance to that edge, so edge connectors stay at the edge; the others
+        scale."""
+        if self.scale != 1.0:
+            def sc(v, size):
+                full = size / self.scale
+                if v <= 6.0:
+                    return v
+                if v >= full - 6.0:
+                    return size - (full - v)
+                return v * self.scale
+            x, y = sc(x, self.w), sc(y, self.h)
         self.fps.append(fp.place(ORIGIN[0] + x, ORIGIN[1] + y, r))
         return fp
 
     def net_class(self, name, width, clearance, via_dia, via_drill, patterns):
         self.classes.append((name, width, clearance, via_dia, via_drill))
         self.patterns += [(p, name) for p in patterns]
+
+    def spread(self, gap=0.3, step=0.2, max_steps=400):
+        """Move parts that overlap a part placed before them (or stick out of the board) away from
+        it in small steps: what a tighter `scale` packs on top of each other ends up side by side."""
+        x0b, y0b = ORIGIN[0] + 0.3, ORIGIN[1] + 0.3
+        x1b, y1b = ORIGIN[0] + self.w - 0.3, ORIGIN[1] + self.h - 0.3
+
+        def hit(a, b):
+            return a[0] - gap < b[2] and b[0] - gap < a[2] and a[1] - gap < b[3] and b[1] - gap < a[3]
+
+        for i, fp in enumerate(self.fps):
+            for _ in range(max_steps):
+                bb = fp.bbox()
+                others = [o for o in self.fps[:i] if hit(bb, o.bbox())]
+                dx = dy = 0.0
+                for o in others:
+                    ob = o.bbox()
+                    vx = (bb[0] + bb[2] - ob[0] - ob[2]) / 2
+                    vy = (bb[1] + bb[3] - ob[1] - ob[3]) / 2
+                    n = math.hypot(vx, vy) or 1.0
+                    dx, dy = dx + vx / n, dy + vy / n
+                dx += (bb[0] < x0b) - (bb[2] > x1b)
+                dy += (bb[1] < y0b) - (bb[3] > y1b)
+                if not others and dx == 0 and dy == 0:
+                    break
+                n = math.hypot(dx, dy) or 1.0
+                fp.x += step * dx / n
+                fp.y += step * dy / n
+            fp.x, fp.y = round(fp.x, 2), round(fp.y, 2)
 
     # -- checks
     def check(self):
@@ -1031,14 +1074,16 @@ def board_parts_hard():
     return b
 
 
-def board_parts_multi(feed=False):
+def board_parts_multi(feed=False, name=None, scale=1.0, title=None):
     """Part to part, level 4: two big chips (QFN-48 MCU, QFN-32 PHY) with a 12 net bus between
     them, each with its own peripherals and connectors: SPI flash and a 6 bit bus at the MCU, an
     I2C bus shared by both chips with pull-ups, a USB pair to one edge, two pairs from the PHY to a
     connector at the other edge, a debug header wired to both chips, random local nets. Four layers, GND and 3V3 planes inside."""
     rng = random.Random(64)
-    b = Board("parts_multi_feed" if feed else "parts_multi", 74, 52, inner="power",
-              title="4 layers, MCU and PHY with a 12 net bus, peripherals, shared I2C, three pairs, debug header")
+    b = Board(name or ("parts_multi_feed" if feed else "parts_multi"), round(74 * scale, 2), round(52 * scale, 2),
+              inner="power",
+              title=title or "4 layers, MCU and PHY with a 12 net bus, peripherals, shared I2C, three pairs, debug header")
+    b.scale = scale
     b.net_class("Power", 0.3, 0.15, 0.6, 0.3, ["GND", "+3V3"])
     b.zones = [("GND", "In1.Cu"), ("+3V3", "In2.Cu")]
     gnd, vcc = "GND", "+3V3"
@@ -1123,6 +1168,8 @@ def board_parts_multi(feed=False):
     free = [(u, p) for u in (u1, u2) for p in u.pads if p.net is None]
     free += [(u4, p) for p in u4.pads if p.net is None] + [(u3, u3.pad(3)), (u3, u3.pad(7))]
     random_nets(rng, all_pads(loc) + free, "N", near=4, sizes=(2, 2, 3))
+    if b.scale != 1.0:
+        b.spread()
     if feed:
         # chicken feed: 0603 parts wherever there is room, half of them on a plane net with one
         # pad (a via each), the other pads in small random nets with their neighbours
@@ -1132,7 +1179,8 @@ def board_parts_multi(feed=False):
 
 
 def add_feed(b, rng, gnd, vcc):
-    feed = scatter(b, rng, "F", 40, keep_out=[(14, 18, 30, 34), (47, 21, 57, 31)])
+    k = b.scale
+    feed = scatter(b, rng, "F", 40, keep_out=[(14 * k, 18 * k, 30 * k, 34 * k), (47 * k, 21 * k, 57 * k, 31 * k)])
     for f in feed:
         if rng.random() < 0.5:
             f.pad(1).net = rng.choice((gnd, vcc))
@@ -1142,6 +1190,13 @@ def add_feed(b, rng, gnd, vcc):
 def board_parts_multi_feed():
     """Part to part, level 5: parts_multi with 40 scattered 0603 parts (chicken feed) in the way."""
     return board_parts_multi(feed=True)
+
+
+def board_parts_xhard():
+    """Part to part, extra hard: parts_multi_feed on a board 25 % smaller in each direction, the
+    same parts and nets closer together (the chicken feed takes what room is left)."""
+    return board_parts_multi(feed=True, name="parts_xhard", scale=0.75,
+                             title="4 layers, parts_multi_feed on a board 25 % smaller in each direction")
 
 
 def scatter(b, rng, prefix, n, keep_out=(), tries=4000):
@@ -1174,7 +1229,7 @@ BOARDS = [board_easy, board_medium, board_bus, board_power_mix, board_crossing, 
           board_four_signal_layers, board_bga_escape, board_bga_dense, board_fine_pitch, board_fine_pitch_mixed,
           board_diff_pairs, board_matching, board_pair_wall, board_pair_traffic, board_parts_easy,
           board_parts_medium, board_parts_hard, board_parts_multi,
-          board_parts_multi_feed]
+          board_parts_multi_feed, board_parts_xhard]
 
 
 def main():
