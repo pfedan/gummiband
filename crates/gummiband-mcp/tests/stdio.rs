@@ -159,6 +159,7 @@ fn initialize_list_load_route() {
             "power_plan",
             "render",
             "route",
+            "set_layer_type",
             "set_net_options",
             "track_corridors"
         ]
@@ -327,6 +328,68 @@ fn initialize_list_load_route() {
     );
     assert_eq!(placed["placed"].as_array().unwrap().len(), 1, "{placed}");
     assert_eq!(placed["placed"][0]["reference"], "R2", "{placed}");
+
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn layer_types_plan_a_plane() {
+    let dir = std::env::temp_dir().join(format!("gummiband-mcp-layers-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let pcb = dir.join("four.kicad_pcb");
+    let text = tiny_board().replace(
+        "(2 \"B.Cu\" signal)",
+        "(4 \"In1.Cu\" signal) (6 \"In2.Cu\" jumper) (2 \"B.Cu\" signal)",
+    );
+    std::fs::write(&pcb, text).unwrap();
+
+    let mut s = Server::start();
+    s.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}),
+    );
+    s.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    s.call("load_board", json!({"path": pcb.display().to_string()}));
+    let r = s.call(
+        "set_layer_type",
+        json!({"board": "b1", "layers": [{"layer": "In1.Cu", "type": "power"}, {"layer": "In2.Cu", "type": "signal"}]}),
+    );
+    assert_eq!(r["changed"][0]["old_type"], "signal", "{r}");
+    assert_eq!(r["changed"][1]["old_type"], "jumper", "{r}");
+    let planes: Vec<bool> = r["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["plane"].as_bool().unwrap())
+        .collect();
+    assert_eq!(planes, [false, true, false, false], "{r}");
+    assert!(r["warnings"][0].as_str().unwrap().contains("no zone"), "{r}");
+    let work = dir.join("four.prerouted.kicad_pcb");
+    let text = std::fs::read_to_string(&work).unwrap();
+    assert!(text.contains("(4 \"In1.Cu\" power) (6 \"In2.Cu\" signal)"), "{text}");
+    // the zone on the power layer is the plane of its net
+    let z = s.call(
+        "add_zone",
+        json!({"board": r["board"], "net": "A", "layer": "In1.Cu", "points": [[101, 101], [119, 101], [119, 114], [101, 114]]}),
+    );
+    let nets = s.call("list_nets", json!({"board": z["board"], "filter": "A"}));
+    assert_eq!(nets["nets"][0]["plane"], true, "{nets}");
+    assert!(
+        s.call_err(
+            "set_layer_type",
+            json!({"board": "b1", "layers": [{"layer": "F.Cu", "type": "power"}]})
+        )
+        .contains("outer")
+    );
+    assert!(
+        s.call_err(
+            "set_layer_type",
+            json!({"board": "b1", "layers": [{"layer": "In1.Cu", "type": "plane"}]})
+        )
+        .contains("layer type")
+    );
 
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);

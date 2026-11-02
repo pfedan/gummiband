@@ -30,7 +30,7 @@ the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board 
 look at problems. To pre-route a critical part by hand (datasheet layout): part_info -> \
 add_locked_copper -> route the returned board id. move_part and add_zone edit the same working \
 copy. To change one net on a routed board: load the routed file -> route with keep_all, nets and \
-reroute (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short; two_sided: true when the parts do not fit on one side), add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Good practice around routing (the prompt good_practice walks through a whole board): \
+reroute (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short; two_sided: true when the parts do not fit on one side), set_layer_type (power) and add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Good practice around routing (the prompt good_practice walks through a whole board): \
 power_plan before routing (currents -> widths, planes, vias; apply stores the widths), \
 current_check after routing (narrowest cross-section of every current path), ground_pour (GND \
 pours and stitching vias), then drc. Opt-in options (route patterns, clear_corridors, \
@@ -591,6 +591,46 @@ pub struct AddZoneIn {
     pub pad_connection: Option<String>,
     /// Width of the thermal spokes in mm (default 0.3); wider for pins that carry amperes.
     pub thermal_spoke_width: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LayerTypeIn {
+    /// Copper layer name, e.g. In2.Cu.
+    pub layer: String,
+    /// KiCad layer type: "signal", "power" (a plane layer: its zones are planes the router
+    /// reaches with vias, no tracks on it), "mixed" or "jumper" (both routed like signal).
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetLayerTypeIn {
+    /// Board id from load_board.
+    pub board: String,
+    pub layers: Vec<LayerTypeIn>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LayerTypeOut {
+    pub layer: String,
+    pub old_type: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Nets with a zone on the layer (their planes when the type is power).
+    pub zone_nets: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SetLayerTypeOut {
+    /// Id of the working copy; use it from now on.
+    pub board: String,
+    pub path: String,
+    pub changed: Vec<LayerTypeOut>,
+    /// All copper layers after the change.
+    pub layers: Vec<LayerOut>,
+    /// A power layer without zone, tracks left on a new power layer, zones that stop being
+    /// planes.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2060,6 +2100,114 @@ impl Gummiband {
         Ok((format!("zone {} on {}", p.net, p.layer), out))
     }
 
+    fn do_set_layer_type(&self, p: SetLayerTypeIn) -> Result<(String, SetLayerTypeOut)> {
+        if p.layers.is_empty() {
+            bail!("give at least one layer");
+        }
+        let mut changed = Vec::new();
+        let mut warnings = Vec::new();
+        let (id, path) = self.edit_copy(&p.board, |kb, text| {
+            let b = &kb.board;
+            let zf = gummiband_kicad::power::zones(kb);
+            let mut changes = Vec::new();
+            for l in &p.layers {
+                let lid = b
+                    .layer_id(&l.layer)
+                    .with_context(|| format!("no copper layer {:?}", l.layer))?;
+                let outer = gummiband_kicad::power::is_outer(b, lid);
+                if l.kind == "power" && outer {
+                    bail!(
+                        "{} is an outer layer: it carries the parts and stays a routing layer; pour it with add_zone or ground_pour instead",
+                        l.layer
+                    );
+                }
+                let mut zone_nets: Vec<String> = Vec::new();
+                for z in zf.iter().filter(|z| z.layer == lid) {
+                    if let Some(n) = z.net {
+                        let name = b.nets[n as usize].name.clone();
+                        if !zone_nets.contains(&name) {
+                            zone_nets.push(name);
+                        }
+                    }
+                }
+                let was_plane = b.layers[lid as usize].is_plane;
+                if l.kind == "power" && !was_plane {
+                    if zone_nets.is_empty() {
+                        warnings.push(format!(
+                            "{} has no zone yet: add_zone gives it its plane (one net, or several nets side by side as a split plane)",
+                            l.layer
+                        ));
+                    }
+                    let tracks = b
+                        .copper
+                        .iter()
+                        .filter(|c| match c.kind {
+                            gummiband_core::board::CopperKind::Line { layer, .. }
+                            | gummiband_core::board::CopperKind::Arc { layer, .. } => layer == lid,
+                            _ => false,
+                        })
+                        .count();
+                    if tracks > 0 {
+                        warnings.push(format!(
+                            "{tracks} locked tracks on {}: they stay, but the router no longer routes on a power layer",
+                            l.layer
+                        ));
+                    }
+                } else if l.kind != "power" && was_plane && !zone_nets.is_empty() {
+                    warnings.push(format!(
+                        "the zones of {} on {} are no longer planes: the router routes on the layer and those nets need tracks or a plane elsewhere",
+                        zone_nets.join(", "),
+                        l.layer
+                    ));
+                }
+                changes.push((l.layer.clone(), l.kind.clone()));
+                changed.push(LayerTypeOut {
+                    layer: l.layer.clone(),
+                    old_type: String::new(),
+                    kind: l.kind.clone(),
+                    zone_nets,
+                });
+            }
+            let (t, old) = write::set_layer_types(text, &changes)?;
+            for (c, o) in changed.iter_mut().zip(old) {
+                c.old_type = o;
+            }
+            Ok(t)
+        })?;
+        let layers = self.with_entry(&id, |e| {
+            Ok(e.kb
+                .board
+                .layers
+                .iter()
+                .enumerate()
+                .map(|(i, l)| LayerOut {
+                    index: i,
+                    name: l.name.clone(),
+                    plane: l.is_plane,
+                })
+                .collect::<Vec<_>>())
+        })?;
+        let s = format!(
+            "Layer types in {path} (board {id}): {}. {}",
+            changed
+                .iter()
+                .map(|c| format!("{} {} -> {}", c.layer, c.old_type, c.kind))
+                .collect::<Vec<_>>()
+                .join(", "),
+            warnings.join(" ")
+        );
+        Ok((
+            s,
+            SetLayerTypeOut {
+                board: id,
+                path,
+                changed,
+                layers,
+                warnings,
+            },
+        ))
+    }
+
     fn set_options(&self, p: SetNetOptionsIn) -> Result<(String, SetNetOptionsOut)> {
         self.with_entry(&p.board, |e| {
             let b = &e.kb.board;
@@ -2914,6 +3062,19 @@ impl Gummiband {
     }
 
     #[tool(
+        description = "Set the KiCad type of inner copper layers in the working copy: power makes a layer a plane layer (its zones become planes the router reaches with vias, and it routes no tracks there), signal, mixed or jumper make it a routing layer. Use it to plan the planes before routing (a ground plane, a supply plane, a split plane for several supplies with add_zone). Use the returned board id from now on.",
+        output_schema = schema_for_output::<SetLayerTypeOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn set_layer_type(&self, Parameters(p): Parameters<SetLayerTypeIn>) -> Result<CallToolResult, ErrorData> {
+        let me = self.clone();
+        match blocking(move || me.do_set_layer_type(p)).await {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
         description = "Add pre-routed copper (tracks as polylines, vias) as locked items: the router keeps it and routes around it, and track ends join their net. The input file stays untouched: the copper goes into a working copy <input>.prerouted.kicad_pcb, which is loaded with keep_locked; use the returned board id from now on. Check the result with drc and render.",
         output_schema = schema_for_output::<AddLockedOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
@@ -3076,7 +3237,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Lay out power copper before routing, for current paths that a track carries badly (a converter's switch node, a pad into a plane through one via): for a net without plane one pour over its from and to pads on their layer (convex hull grown by margin, cut back from other nets' copper, holes and the edge; a long narrow pad between neighbours, like the strips of a DFN eFuse, is left through a narrow stub off an end or through a gap in its side), for a plane net at each terminal a field of locked vias for the current (IPC-2221 per via) and a small pour joining them to the pad. The pours are zones named \"gb: ...\": the router keeps other nets out and treats the pads under one pour as connected. Writes the working copy <input>.prerouted.kicad_pcb; route the returned board id. Reports the pours, what cut them and a current_check of the pours.",
+        description = "Lay out power copper before routing (or, with unlocked: \"clear\", on a routed board: the unlocked tracks and vias of other nets in the way are removed and reroute_nets lists what to route again with keep_all, nets and reroute; by default the new copper gives way to them), for current paths that a track carries badly (a converter's switch node, a pad into a plane through one via): for a net without plane one pour over its from and to pads on their layer (convex hull grown by margin, cut back from other nets' copper, holes and the edge; a long narrow pad between neighbours, like the strips of a DFN eFuse, is left through a narrow stub off an end or through a gap in its side), for a plane net at each terminal a field of locked vias for the current (IPC-2221 per via) and a small pour joining them to the pad. The pours are zones named \"gb: ...\": the router keeps other nets out and treats the pads under one pour as connected. Writes the working copy <input>.prerouted.kicad_pcb; route the returned board id. Reports the pours, what cut them and a current_check of the pours.",
         output_schema = schema_for_output::<practice::PowerCopperOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
@@ -3086,9 +3247,22 @@ impl Gummiband {
     ) -> Result<CallToolResult, ErrorData> {
         let me = self.clone();
         let res = blocking(move || {
+            practice::Unlocked::parse(p.unlocked.as_deref())?;
+            // the board with all its copper: unlocked tracks of a routed board are in the way too
+            let all = {
+                let path = me.with_entry(&p.board, |e| Ok(e.path.clone()))?;
+                let work = Self::working_copy(&path);
+                read_board(
+                    if work.is_file() { &work } else { &path },
+                    &ReadOptions {
+                        keep: KeepCopper::All,
+                        ..Default::default()
+                    },
+                )?
+            };
             let mut out = None;
             let (id, path) = me.edit_copy(&p.board, |kb, _| {
-                let (text, o) = practice::power_copper(kb, &p)?;
+                let (text, o) = practice::power_copper(&all, kb, &p)?;
                 out = Some(o);
                 Ok(text)
             })?;
