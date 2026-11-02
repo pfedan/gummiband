@@ -344,7 +344,8 @@ holds wins (`Board::match_rules`). `matching.rs` measures as KiCad's DRC does
 (`LENGTH_DELAY_CALCULATION`, `DRC_TEST_PROVIDER_MATCHED_LENGTH`,
 `DRC_TEST_PROVIDER_DIFF_PAIR_COUPLING`): tracks joined into runs where exactly two ends meet, the
 part inside a via (and inside a pad, for runs ending in its centre) straightened, vias over the
-layers they really connect with the stackup distance (outer copper in full, inner copper half),
+layers they really connect with the stackup distance (outer copper in full, inner copper half;
+an SMD pad the via touches counts as one of them, even with the via's centre off the pad),
 pad-to-die lengths; skew against the longest net of a group; coupling of exactly parallel lines
 (within KiCad's int32 tolerance) and of arcs about nearly the same centre, if nothing lies between
 and the gap fits the rule. Tracks of tuning patterns stay out of the coupling, as in KiCad.
