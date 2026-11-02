@@ -21,6 +21,7 @@ Boards, roughly by difficulty:
   parts_medium        2 layers, MCU with SPI flash (real pinout), I2C with pull-ups, 6 bit bus with a swap
   parts_hard          2 layers, QFN-48 with shared SPI and I2C, 8 bit bus with swaps, USB pair, local nets
   parts_multi         4 layers (planes), MCU and PHY with a 12 net bus, peripherals, shared I2C, 3 pairs, debug header
+  parts_multi_feed    the same with 40 scattered 0603 parts (chicken feed), half of them with a plane via
 """
 import json
 import math
@@ -1030,14 +1031,13 @@ def board_parts_hard():
     return b
 
 
-def board_parts_multi():
+def board_parts_multi(feed=False):
     """Part to part, level 4: two big chips (QFN-48 MCU, QFN-32 PHY) with a 12 net bus between
     them, each with its own peripherals and connectors: SPI flash and a 6 bit bus at the MCU, an
     I2C bus shared by both chips with pull-ups, a USB pair to one edge, two pairs from the PHY to a
-    connector at the other edge, a debug header wired to both chips, random local nets. Four
-    layers, GND and 3V3 planes inside."""
+    connector at the other edge, a debug header wired to both chips, random local nets. Four layers, GND and 3V3 planes inside."""
     rng = random.Random(64)
-    b = Board("parts_multi", 74, 52, inner="power",
+    b = Board("parts_multi_feed" if feed else "parts_multi", 74, 52, inner="power",
               title="4 layers, MCU and PHY with a 12 net bus, peripherals, shared I2C, three pairs, debug header")
     b.net_class("Power", 0.3, 0.15, 0.6, 0.3, ["GND", "+3V3"])
     b.zones = [("GND", "In1.Cu"), ("+3V3", "In2.Cu")]
@@ -1123,14 +1123,58 @@ def board_parts_multi():
     free = [(u, p) for u in (u1, u2) for p in u.pads if p.net is None]
     free += [(u4, p) for p in u4.pads if p.net is None] + [(u3, u3.pad(3)), (u3, u3.pad(7))]
     random_nets(rng, all_pads(loc) + free, "N", near=4, sizes=(2, 2, 3))
+    if feed:
+        # chicken feed: 0603 parts wherever there is room, half of them on a plane net with one
+        # pad (a via each), the other pads in small random nets with their neighbours
+        add_feed(b, rng, gnd, vcc)
     b.dru = PAIR_DRU
     return b
+
+
+def add_feed(b, rng, gnd, vcc):
+    feed = scatter(b, rng, "F", 40, keep_out=[(14, 18, 30, 34), (47, 21, 57, 31)])
+    for f in feed:
+        if rng.random() < 0.5:
+            f.pad(1).net = rng.choice((gnd, vcc))
+    random_nets(rng, all_pads(feed), "M", near=3, sizes=(2, 2, 3))
+
+
+def board_parts_multi_feed():
+    """Part to part, level 5: parts_multi with 40 scattered 0603 parts (chicken feed) in the way."""
+    return board_parts_multi(feed=True)
+
+
+def scatter(b, rng, prefix, n, keep_out=(), tries=4000):
+    """Up to n 0603 parts at random places and angles (0, 90) where their courtyard keeps 0.4 mm
+    from every part, the board edge and the keep-out boxes (x0, y0, x1, y1 relative to the board)."""
+    placed = []
+    boxes = [fp.bbox() for fp in b.fps]
+    ko = [(ORIGIN[0] + x0, ORIGIN[1] + y0, ORIGIN[0] + x1, ORIGIN[1] + y1) for x0, y0, x1, y1 in keep_out]
+    k = 0
+    for _ in range(tries):
+        if len(placed) == n:
+            break
+        x, y = round(rng.uniform(2.5, b.w - 2.5), 1), round(rng.uniform(2.5, b.h - 2.5), 1)
+        fp = two_terminal("C" if rng.random() < 0.5 else "R", f"{prefix}{k + 1}").place(ORIGIN[0] + x, ORIGIN[1] + y,
+                                                                                      rng.choice((0, 90)))
+        x0, y0, x1, y1 = fp.bbox()
+        if x0 < ORIGIN[0] + 0.7 or y0 < ORIGIN[1] + 0.7 or x1 > ORIGIN[0] + b.w - 0.7 or y1 > ORIGIN[1] + b.h - 0.7:
+            continue
+        m = 0.4
+        if any(x0 - m < c[2] and c[0] < x1 + m and y0 - m < c[3] and c[1] < y1 + m for c in boxes + ko):
+            continue
+        k += 1
+        b.fps.append(fp)
+        boxes.append(fp.bbox())
+        placed.append(fp)
+    return placed
 
 
 BOARDS = [board_easy, board_medium, board_bus, board_power_mix, board_crossing, board_qfn_fanout,
           board_four_signal_layers, board_bga_escape, board_bga_dense, board_fine_pitch, board_fine_pitch_mixed,
           board_diff_pairs, board_matching, board_pair_wall, board_pair_traffic, board_parts_easy,
-          board_parts_medium, board_parts_hard, board_parts_multi]
+          board_parts_medium, board_parts_hard, board_parts_multi,
+          board_parts_multi_feed]
 
 
 def main():
