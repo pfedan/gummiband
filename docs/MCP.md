@@ -297,10 +297,12 @@ gets its own board id. Use that id for `route`, `drc` and `render` from then on.
 to the working copy, whether you pass the input's id or the copy's, so earlier additions are never
 lost.
 
-The result has `items_added` and `warnings`: problems found at the given points of the new
-copper, such as a point off the board, a point touching copper of another net, or a track on a
-plane layer. Only the points are checked, not the track between them, so a `render` of the
-region and a `drc` after routing remain the real check.
+The result has `items_added` and `warnings`: a point off the board, a track on a plane layer,
+and every track piece or via closer to the pads, tracks or vias of another net than the
+clearance asks for, routed tracks of the file included. Copper that would touch another net is
+refused with an error naming both nets, and nothing is written: KiCad would join the two nets
+there. Zones are not counted, they fill around the new copper. A `drc` after routing remains the
+final check.
 
 ```json
 {"name": "add_locked_copper", "arguments": {"board": "b1",
