@@ -10,6 +10,7 @@ use gummiband_core::board::{Board, LayerId, NetId, ObstacleKind};
 use gummiband_core::geom::{Point, Polygon, Shape};
 use gummiband_kicad::power::{self, ZoneFill};
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
+use rayon::prelude::*;
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 
@@ -809,9 +810,8 @@ pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
     let b = &kb.board;
     let zf = power::zones(&kb);
     let ref_layer = outer_ref(b);
-    let mut out = Vec::new();
-    let mut flagged = 0;
-    for q in &paths {
+    // the paths are independent: in parallel (a ground net with planes takes seconds each)
+    let check_path = |q: &PathIn| -> Result<PathOut> {
         let net = b.net_id(&q.net).with_context(|| format!("no net named {:?}", q.net))?;
         let c = b.class_of(net);
         // a short until the fuse or PTC trips heats the copper like a continuous current
@@ -989,9 +989,6 @@ pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
             ),
             None => "ok".into(),
         };
-        if verdict.starts_with("FLAG") {
-            flagged += 1;
-        }
         if ((neck.is_some() && changes_layer) || (neck.is_none() && vias > 0)) && vias < per {
             pnotes.push(format!(
                 "{vias} vias on the net, {per} needed wherever the current changes layer{}",
@@ -1002,7 +999,7 @@ pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
                 }
             ));
         }
-        out.push(PathOut {
+        Ok(PathOut {
             name: q.name.clone().unwrap_or_else(|| q.net.clone()),
             net: q.net.clone(),
             amps: q.amps,
@@ -1023,8 +1020,15 @@ pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
             vias_per_transition: per,
             verdict,
             notes: pnotes,
-        });
-    }
+        })
+    };
+    let out: Vec<PathOut> = paths
+        .par_iter()
+        .map(check_path)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<Result<_>>()?;
+    let flagged = out.iter().filter(|o| o.verdict.starts_with("FLAG")).count();
     if flagged > 0 {
         notes.push("fix a neck: reroute the net wider (set_net_options width, route with keep_all, nets and reroute), add a pour over the neck (add_zone) or locked copper, then check again".into());
     }

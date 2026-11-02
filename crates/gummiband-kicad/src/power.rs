@@ -805,6 +805,7 @@ impl Flow {
     }
 
     /// One augmenting path in the level graph (iterative, current arcs in `it`).
+    #[cfg(test)]
     fn augment(&mut self, s: usize, t: usize, lim: i64, lv: &mut [i32], it: &mut [u32]) -> i64 {
         let mut stack: Vec<u32> = Vec::new();
         let mut u = s;
@@ -841,6 +842,212 @@ impl Flow {
         }
     }
 
+    /// Max flow from `s` to `t`, up to `limit` (Boykov and Kolmogorov: two search trees that
+    /// are kept between augmentations instead of a new search of the whole graph per phase,
+    /// much faster on the large rasters of planes). The flow is a valid flow, so the residual
+    /// graph gives the same cut as any other max flow.
+    fn max_flow_bk(&mut self, s: usize, t: usize, limit: i64) -> i64 {
+        const FREE: u8 = 0;
+        const SRC: u8 = 1;
+        const SNK: u8 = 2;
+        // parent edge: into the node from its parent (source tree), out of the node to its
+        // parent (sink tree); ROOT for s and t, NIL for none
+        const ROOT: u32 = NIL - 1;
+        let nv = self.head.len();
+        let mut tree = vec![FREE; nv];
+        let mut parent = vec![NIL; nv];
+        // distance to the root, valid at time stamp `ts`
+        let mut dist = vec![0u32; nv];
+        let mut ts = vec![0u32; nv];
+        let mut time = 1u32;
+        let mut active: VecDeque<u32> = VecDeque::new();
+        let mut orphans: Vec<u32> = Vec::new();
+        let mut path: Vec<u32> = Vec::new();
+        tree[s] = SRC;
+        tree[t] = SNK;
+        parent[s] = ROOT;
+        parent[t] = ROOT;
+        ts[s] = time;
+        ts[t] = time;
+        active.push_back(s as u32);
+        active.push_back(t as u32);
+        let mut flow = 0i64;
+        while flow < limit {
+            // grow: the middle edge of a path from s to t
+            let mut mid = NIL;
+            while let Some(&p) = active.front() {
+                let p = p as usize;
+                let tp = tree[p];
+                if tp == FREE {
+                    active.pop_front();
+                    continue;
+                }
+                let mut e = self.head[p];
+                while e != NIL {
+                    let eu = e as usize;
+                    let q = self.to[eu] as usize;
+                    // residual capacity in the direction of the tree: away from s, towards t
+                    let c = if tp == SRC { self.cap[eu] } else { self.cap[eu ^ 1] };
+                    if c > 0 {
+                        if tree[q] == FREE {
+                            tree[q] = tp;
+                            parent[q] = if tp == SRC { e } else { e ^ 1 };
+                            ts[q] = ts[p];
+                            dist[q] = dist[p] + 1;
+                            active.push_back(q as u32);
+                        } else if tree[q] != tp {
+                            mid = if tp == SRC { e } else { e ^ 1 };
+                            break;
+                        }
+                    }
+                    e = self.next[eu];
+                }
+                if mid != NIL {
+                    break;
+                }
+                active.pop_front();
+            }
+            if mid == NIL {
+                break;
+            }
+            // augment along s .. a -> b .. t
+            let (a, b) = (self.to[(mid ^ 1) as usize] as usize, self.to[mid as usize] as usize);
+            path.clear();
+            path.push(mid);
+            let mut v = a;
+            while parent[v] != ROOT {
+                path.push(parent[v]);
+                v = self.to[(parent[v] ^ 1) as usize] as usize;
+            }
+            let mut v = b;
+            while parent[v] != ROOT {
+                path.push(parent[v]);
+                v = self.to[parent[v] as usize] as usize;
+            }
+            let f = path
+                .iter()
+                .map(|&e| self.cap[e as usize])
+                .min()
+                .unwrap_or(0)
+                .min(limit - flow);
+            for &e in &path {
+                self.cap[e as usize] -= f;
+                self.cap[(e ^ 1) as usize] += f;
+            }
+            flow += f;
+            if flow >= limit {
+                break;
+            }
+            // saturated tree edges leave orphans
+            for &e in &path[1..] {
+                if self.cap[e as usize] == 0 {
+                    let (from, to) = (self.to[(e ^ 1) as usize] as usize, self.to[e as usize] as usize);
+                    let o = if tree[to] == SRC && parent[to] == e { to } else { from };
+                    if parent[o] == e {
+                        parent[o] = NIL;
+                        orphans.push(o as u32);
+                    }
+                }
+            }
+            time += 1;
+            // adopt
+            while let Some(o) = orphans.pop() {
+                let o = o as usize;
+                let to = tree[o];
+                let mut best = NIL;
+                let mut best_d = u32::MAX;
+                let mut e = self.head[o];
+                while e != NIL {
+                    let eu = e as usize;
+                    let q = self.to[eu] as usize;
+                    // residual edge from the parent candidate q to o (source tree) or o to q
+                    let c = if to == SRC { self.cap[eu ^ 1] } else { self.cap[eu] };
+                    if tree[q] == to && c > 0 {
+                        // does q still hang on a root, and how far
+                        let mut d = 0u32;
+                        let mut u = q;
+                        let ok = loop {
+                            if ts[u] == time {
+                                d += dist[u];
+                                break true;
+                            }
+                            let pe = parent[u];
+                            if pe == ROOT {
+                                ts[u] = time;
+                                dist[u] = 0;
+                                break true;
+                            }
+                            if pe == NIL {
+                                break false;
+                            }
+                            d += 1;
+                            u = if to == SRC {
+                                self.to[(pe ^ 1) as usize]
+                            } else {
+                                self.to[pe as usize]
+                            } as usize;
+                        };
+                        if ok {
+                            if d < best_d {
+                                best_d = d;
+                                best = if to == SRC { e ^ 1 } else { e };
+                            }
+                            // stamp the way up
+                            let mut u = q;
+                            let mut dd = d;
+                            while ts[u] != time {
+                                ts[u] = time;
+                                dist[u] = dd;
+                                dd = dd.saturating_sub(1);
+                                let pe = parent[u];
+                                u = if to == SRC {
+                                    self.to[(pe ^ 1) as usize]
+                                } else {
+                                    self.to[pe as usize]
+                                } as usize;
+                            }
+                        }
+                    }
+                    e = self.next[eu];
+                }
+                if best != NIL {
+                    parent[o] = best;
+                    ts[o] = time;
+                    dist[o] = best_d + 1;
+                    continue;
+                }
+                // no parent: o leaves the tree, its neighbours in the tree may grow back into it
+                let mut e = self.head[o];
+                while e != NIL {
+                    let eu = e as usize;
+                    let q = self.to[eu] as usize;
+                    if tree[q] == to {
+                        let c = if to == SRC { self.cap[eu ^ 1] } else { self.cap[eu] };
+                        if c > 0 {
+                            active.push_back(q as u32);
+                        }
+                        let pe = parent[q];
+                        if pe != NIL && pe != ROOT {
+                            let up = if to == SRC {
+                                self.to[(pe ^ 1) as usize]
+                            } else {
+                                self.to[pe as usize]
+                            } as usize;
+                            if up == o {
+                                parent[q] = NIL;
+                                orphans.push(q as u32);
+                            }
+                        }
+                    }
+                    e = self.next[eu];
+                }
+                tree[o] = FREE;
+            }
+        }
+        flow
+    }
+
+    #[cfg(test)]
     fn max_flow(&mut self, s: usize, t: usize, limit: i64) -> i64 {
         let mut flow = 0;
         while flow < limit {
@@ -884,44 +1091,111 @@ fn min_cut(
 ) -> (f64, Option<(Point, LayerId)>) {
     const S: f64 = 16.0;
     let n = g.n();
-    let mut id: HashMap<(usize, usize), usize> = HashMap::new();
+    let nl = cu.len();
+    // cell index of (layer, raster cell), NIL where there is no copper
+    let mut id: Vec<u32> = vec![NIL; nl * n];
     let mut cells: Vec<(usize, usize)> = Vec::new();
     for &l in layers {
         for i in 0..n {
             if cu[l][i] {
-                id.insert((l, i), cells.len());
+                id[l * n + i] = cells.len() as u32;
                 cells.push((l, i));
             }
         }
     }
+    let cell_id =
+        |l: usize, i: usize| -> Option<usize> { id.get(l * n + i).filter(|&&x| x != NIL).map(|&x| x as usize) };
     let k = cells.len();
-    let nj = joints.len();
-    let (s, t) = (2 * k + 2 * nj, 2 * k + 2 * nj + 1);
-    let mut f = Flow::new(2 * k + 2 * nj + 2);
-    let terminal: std::collections::HashSet<(usize, usize)> = src.iter().chain(sinks).copied().collect();
-    for (j, &(l, i)) in cells.iter().enumerate() {
-        // the barrel itself limits a via, not the raster cell at its centre
-        let c = if terminal.contains(&(l, i))
-            || joints.contains_key(&i)
-            || wide.get(l).is_some_and(|w| w.get(i) == Some(&true))
-        {
-            INF
-        } else {
-            ((S / factor[l].max(1e-6)).round() as i64).max(1)
-        };
-        f.edge(2 * j, 2 * j + 1, c);
-        let (r, col) = (i / g.nx, i % g.nx);
-        if col + 1 < g.nx
-            && let Some(&m) = id.get(&(l, i + 1))
-        {
-            f.edge(2 * j + 1, 2 * m, INF);
-            f.edge(2 * m + 1, 2 * j, INF);
+    let mut unlimited = vec![false; k];
+    for &(l, i) in src.iter().chain(sinks) {
+        if let Some(j) = cell_id(l, i) {
+            unlimited[j] = true;
         }
-        if r + 1 < g.ny
-            && let Some(&m) = id.get(&(l, i + g.nx))
-        {
-            f.edge(2 * j + 1, 2 * m, INF);
-            f.edge(2 * m + 1, 2 * j, INF);
+    }
+    let mut at_joint = vec![false; n];
+    for &i in joints.keys() {
+        at_joint[i] = true;
+    }
+    // what a cell lets through: the barrel itself limits a via, not the raster cell at its centre
+    let cap: Vec<i64> = cells
+        .iter()
+        .zip(&unlimited)
+        .map(|(&(l, i), &u)| {
+            if u || at_joint[i] || wide.get(l).is_some_and(|w| w.get(i) == Some(&true)) {
+                INF
+            } else {
+                ((S / factor[l].max(1e-6)).round() as i64).max(1)
+            }
+        })
+        .collect();
+    // the right and lower neighbour of each cell on its layer
+    let neighbours = |j: usize| -> [Option<usize>; 2] {
+        let (l, i) = cells[j];
+        let (r, col) = (i / g.nx, i % g.nx);
+        [
+            (col + 1 < g.nx).then(|| cell_id(l, i + 1)).flatten(),
+            (r + 1 < g.ny).then(|| cell_id(l, i + g.nx)).flatten(),
+        ]
+    };
+    // Cells without a limit that touch are joined by unlimited edges both ways: one node for
+    // each such region (the planes and wide copper) leaves the max flow and the cut as they
+    // are, and makes the graph a fraction of the raster.
+    let mut parent: Vec<u32> = (0..k as u32).collect();
+    fn root(parent: &mut [u32], mut x: u32) -> u32 {
+        while parent[x as usize] != x {
+            let p = parent[x as usize];
+            parent[x as usize] = parent[p as usize];
+            x = p;
+        }
+        x
+    }
+    for j in 0..k {
+        if cap[j] < INF {
+            continue;
+        }
+        for m in neighbours(j).into_iter().flatten() {
+            if cap[m] == INF {
+                let (a, b) = (root(&mut parent, j as u32), root(&mut parent, m as u32));
+                if a != b {
+                    parent[a.max(b) as usize] = a.min(b);
+                }
+            }
+        }
+    }
+    // entry and exit node of each cell: one node for an unlimited region, two for a cell
+    let mut node_in: Vec<u32> = vec![NIL; k];
+    let mut node_out: Vec<u32> = vec![NIL; k];
+    let mut nodes = 0u32;
+    for j in 0..k {
+        if cap[j] == INF {
+            let r = root(&mut parent, j as u32) as usize;
+            if node_in[r] == NIL {
+                node_in[r] = nodes;
+                node_out[r] = nodes;
+                nodes += 1;
+            }
+            node_in[j] = node_in[r];
+            node_out[j] = node_in[r];
+        } else {
+            node_in[j] = nodes;
+            node_out[j] = nodes + 1;
+            nodes += 2;
+        }
+    }
+    let nodes = nodes as usize;
+    let nj = joints.len();
+    let (s, t) = (nodes + 2 * nj, nodes + 2 * nj + 1);
+    let mut f = Flow::new(nodes + 2 * nj + 2);
+    let (vi, vo) = (|j: usize| node_in[j] as usize, |j: usize| node_out[j] as usize);
+    for j in 0..k {
+        if cap[j] < INF {
+            f.edge(vi(j), vo(j), cap[j]);
+        }
+        for m in neighbours(j).into_iter().flatten() {
+            if vi(j) != vi(m) {
+                f.edge(vo(j), vi(m), INF);
+                f.edge(vo(m), vi(j), INF);
+            }
         }
     }
     // a barrel is a node of its own: what it carries limits the current between any two of
@@ -932,27 +1206,27 @@ fn min_cut(
         let c = ((joint_mm.get(&i).copied().unwrap_or(0.0) / g.step) * S)
             .round()
             .max(1.0) as i64;
-        let (vin, vout) = (2 * k + 2 * q, 2 * k + 2 * q + 1);
+        let (vin, vout) = (nodes + 2 * q, nodes + 2 * q + 1);
         f.edge(vin, vout, c);
         for &l in ls {
-            if let Some(&a) = id.get(&(l, i)) {
-                f.edge(2 * a + 1, vin, INF);
-                f.edge(vout, 2 * a, INF);
+            if let Some(a) = cell_id(l, i) {
+                f.edge(vo(a), vin, INF);
+                f.edge(vout, vi(a), INF);
             }
         }
     }
-    for &c in src {
-        if let Some(&j) = id.get(&c) {
-            f.edge(s, 2 * j, INF);
+    for &(l, i) in src {
+        if let Some(j) = cell_id(l, i) {
+            f.edge(s, vi(j), INF);
         }
     }
-    for &c in sinks {
-        if let Some(&j) = id.get(&c) {
-            f.edge(2 * j + 1, t, INF);
+    for &(l, i) in sinks {
+        if let Some(j) = cell_id(l, i) {
+            f.edge(vo(j), t, INF);
         }
     }
     let lim = ((limit / g.step) * S).ceil() as i64;
-    let flow = f.max_flow(s, t, lim);
+    let flow = f.max_flow_bk(s, t, lim);
     let width = flow as f64 / S * g.step;
     if flow >= lim {
         return (limit, None);
@@ -962,12 +1236,12 @@ fn min_cut(
     let mut cut: Vec<(usize, usize)> = cells
         .iter()
         .enumerate()
-        .filter(|(j, _)| lv[2 * j] >= 0 && lv[2 * j + 1] < 0)
+        .filter(|(j, _)| lv[vi(*j)] >= 0 && lv[vo(*j)] < 0)
         .map(|(_, c)| *c)
         .collect();
     // saturated barrels: reported on the first layer of the via, at its centre
     for (q, &i) in joint_cells.iter().enumerate() {
-        if lv[2 * k + 2 * q] >= 0 && lv[2 * k + 2 * q + 1] < 0 {
+        if lv[nodes + 2 * q] >= 0 && lv[nodes + 2 * q + 1] < 0 {
             cut.push((joints[&i].iter().copied().min().unwrap_or(0), i));
         }
     }
@@ -1504,6 +1778,115 @@ mod tests {
 #[cfg(test)]
 mod cut_tests {
     use super::*;
+
+    #[test]
+    fn min_cut_through_wide_copper_is_the_neck() {
+        // a band of 14 cells on layer 0, wide (no limit) except a neck of 4 cells around
+        // column 50: the unlimited copper on both sides becomes one node each
+        let g = Grid {
+            x0: 0.0,
+            y0: 0.0,
+            step: 0.05,
+            nx: 100,
+            ny: 40,
+        };
+        let mut m = vec![false; g.n()];
+        let mut wide = vec![false; g.n()];
+        for r in 10..24 {
+            for c in 0..100 {
+                let neck = (45..55).contains(&c);
+                if !neck || (15..19).contains(&r) {
+                    m[r * 100 + c] = true;
+                }
+                if !(40..60).contains(&c) {
+                    wide[r * 100 + c] = true;
+                }
+            }
+        }
+        let src: Vec<(usize, usize)> = (10..24).map(|r| (0, r * 100)).collect();
+        let dst: Vec<(usize, usize)> = (10..24).map(|r| (0, r * 100 + 99)).collect();
+        let (w, at) = min_cut(
+            &g,
+            &[0],
+            &[m],
+            &[wide],
+            &[1.0],
+            &HashMap::new(),
+            &HashMap::new(),
+            &src,
+            &dst,
+            2.0,
+        );
+        assert!((w - 0.2).abs() < 1e-6, "{w}");
+        let (p, l) = at.unwrap();
+        assert_eq!(l, 0);
+        // at the mouth of the neck, on the side of the source
+        assert!((2.0..=2.3).contains(&p.x) && (0.75..=0.95).contains(&p.y), "{p:?}");
+    }
+
+    #[test]
+    fn both_max_flows_agree_on_random_graphs() {
+        // a small xorshift: graphs like the raster ones (grid, unlimited edges between cells,
+        // limited nodes) and random ones, flow capped or not
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = |m: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % m
+        };
+        for round in 0..2000 {
+            let n = 2 + rnd(60) as usize;
+            let mut edges = Vec::new();
+            if round % 2 == 0 {
+                let w = 1 + rnd(8) as usize;
+                for v in 0..n {
+                    for u in [v + 1, v + w] {
+                        if u < n && (u != v + 1 || (v + 1) % w != 0) && rnd(5) > 0 {
+                            edges.push((v, u, if rnd(3) == 0 { INF } else { 1 + rnd(20) as i64 }));
+                            edges.push((u, v, if rnd(3) == 0 { INF } else { 1 + rnd(20) as i64 }));
+                        }
+                    }
+                }
+            } else {
+                for _ in 0..rnd(4 * n as u64) {
+                    let (a, b) = (rnd(n as u64) as usize, rnd(n as u64) as usize);
+                    if a != b {
+                        edges.push((a, b, 1 + rnd(20) as i64));
+                    }
+                }
+            }
+            let (s, t) = (0, n - 1);
+            let limit = if rnd(2) == 0 { INF } else { 1 + rnd(60) as i64 };
+            let mut f1 = Flow::new(n);
+            let mut f2 = Flow::new(n);
+            for &(a, b, c) in &edges {
+                f1.edge(a, b, c);
+                f2.edge(a, b, c);
+            }
+            let (x, y) = (f1.max_flow(s, t, limit), f2.max_flow_bk(s, t, limit));
+            assert_eq!(x, y, "round {round}");
+            // a valid flow: conserved at every inner node, and the same source side of the cut
+            let mut net = vec![0i64; n];
+            for (e, &(a, b, c)) in edges.iter().enumerate() {
+                let used = c - f2.cap[2 * e];
+                assert!(used >= 0 && used <= c);
+                net[a] -= used;
+                net[b] += used;
+            }
+            for (v, &x) in net.iter().enumerate() {
+                if v != s && v != t {
+                    assert_eq!(x, 0, "round {round} node {v}");
+                }
+            }
+            assert_eq!(net[t], y);
+            if y < limit {
+                let r1: Vec<bool> = f1.levels(s).iter().map(|&l| l >= 0).collect();
+                let r2: Vec<bool> = f2.levels(s).iter().map(|&l| l >= 0).collect();
+                assert_eq!(r1, r2, "round {round}");
+            }
+        }
+    }
 
     #[test]
     fn min_cut_of_a_strip_is_its_width() {
