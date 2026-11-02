@@ -1025,14 +1025,15 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                     left_p_end = left_p;
                 }
             }
-            let twisted = left_p != left_p_end;
             let via_joints: Vec<usize> = (0..joints.len()).filter(|&j| joints[j].x.is_finite()).collect();
-            if twisted && via_joints.is_empty() {
-                rep.note = "polarity is crossed and the wide track has no via".to_string();
-                unfinished.push(rep.p.clone());
-                unfinished.push(rep.n.clone());
-                continue;
+            let crossed = left_p != left_p_end && via_joints.is_empty();
+            if crossed {
+                // polarity crossed and no via to change sides at: the tracks keep their sides
+                // to the far end, where they cross on the way to their pads. The repair takes
+                // them back by [`CROSS_CUT`] at least and the router joins them to their pads
+                left_p_end = left_p;
             }
+            let twisted = left_p != left_p_end;
             // which joints change the sides of the tracks (`side_changes`)
             let turns_back = |j: usize| {
                 let (a, b) = (&legs[j].elems, &legs[j + 1].elems);
@@ -1081,14 +1082,21 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                     } else {
                         exit_trim(&exit_a, u0, s, w, clr)
                     };
+                    let (step_l, step_r) = {
+                        let (pl, pr) = if left_is_p { (ea.p, ea.n) } else { (ea.n, ea.p) };
+                        (
+                            pad_step(real, pl, pr, &exit_a, w, g, clr),
+                            pad_step(real, pr, pl, &exit_a, w, g, clr),
+                        )
+                    };
                     let sides = [
-                        (ln_start, net_l, full_l.as_slice()),
-                        (rn_start, net_r, full_r.as_slice()),
+                        (ln_start + step_l, net_l, full_l.as_slice()),
+                        (rn_start + step_r, net_r, full_r.as_slice()),
                     ];
                     let (more, t) = best_exit(&around, &exit_a, sides, base, ea.out.is_some(), w, clr, leg.layer);
-                    let out = exit_a.x * (exit_a.ext + more);
-                    lead_l = vec![ln_start + out];
-                    lead_r = vec![rn_start + out];
+                    let len = exit_a.ext + more;
+                    lead_l = pad_lead(ln_start, step_l, exit_a.x, len);
+                    lead_r = pad_lead(rn_start, step_r, exit_a.x, len);
                     start_trim = t;
                 }
                 // a via pair side by side: the tracks go to their vias within its capsule
@@ -1110,11 +1118,18 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                     };
                     let (tl, tr) = (pad_target(real, eb, left_is_p), pad_target(real, eb, !left_is_p));
                     let (bl, br) = (reversed(&full_l), reversed(&full_r));
-                    let sides = [(tl, net_l, bl.as_slice()), (tr, net_r, br.as_slice())];
+                    let (step_l, step_r) = {
+                        let (pl, pr) = if left_is_p { (eb.p, eb.n) } else { (eb.n, eb.p) };
+                        (
+                            pad_step(real, pl, pr, &exit_b, w, g, clr),
+                            pad_step(real, pr, pl, &exit_b, w, g, clr),
+                        )
+                    };
+                    let sides = [(tl + step_l, net_l, bl.as_slice()), (tr + step_r, net_r, br.as_slice())];
                     let (more, t) = best_exit(&around, &exit_b, sides, base, eb.out.is_some(), w, clr, leg.layer);
-                    let out = exit_b.x * (exit_b.ext + more);
+                    let len = exit_b.ext + more;
                     end_trim = t;
-                    exits = Some((tl + out, tr + out));
+                    exits = Some((pad_lead(tl, step_l, exit_b.x, len), pad_lead(tr, step_r, exit_b.x, len)));
                 }
                 let cl = cut_both(&full_l, start_trim, end_trim);
                 let cr = cut_both(&full_r, start_trim, end_trim);
@@ -1144,10 +1159,13 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                 if k + 1 == legs.len() {
                     let (tl, tr) = (pad_target(real, eb, left_is_p), pad_target(real, eb, !left_is_p));
                     let (ql, qr) = exits.unwrap();
-                    el.push(Elem::Line(point_at_end(&cl), ql));
-                    el.push(Elem::Line(ql, tl));
-                    er.push(Elem::Line(point_at_end(&cr), qr));
-                    er.push(Elem::Line(qr, tr));
+                    for (e, c, q, t) in [(&mut el, &cl, ql, tl), (&mut er, &cr, qr, tr)] {
+                        let mut from = point_at_end(c);
+                        for &x in q.iter().rev().chain(std::iter::once(&t)) {
+                            e.push(Elem::Line(from, x));
+                            from = x;
+                        }
+                    }
                     out.tracks.push(make_track(el, w, leg.layer, net_l));
                     out.tracks.push(make_track(er, w, leg.layer, net_r));
                     break;
@@ -1257,6 +1275,7 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                 whole: pair.ends.len() == real.nets[pair.p as usize].pins.len()
                     && pair.ends.len() == real.nets[pair.n as usize].pins.len(),
                 ends: [ea, eb],
+                crossed,
             });
         }
         // ends that no wide track reached, and pins without partner
@@ -1297,6 +1316,8 @@ struct PairPath {
     whole: bool,
     /// The pair ends at the start and the end of the path.
     ends: [PairEnd; 2],
+    /// The polarity is crossed: the tracks cross before the pads at the end of the path.
+    crossed: bool,
 }
 
 /// A track of a pair that lost its way to the pad: pad, and where the track starts now.
@@ -1328,6 +1349,10 @@ fn track_len(t: &Track) -> f64 {
 /// How far from the ends of a path a clearance problem is worth giving up the wide track.
 const REPAIR_REACH: f64 = 6.0;
 
+/// How far in mm the repair takes the tracks of a crossed pair back from the end where they
+/// cross, at least: room for the router to cross them.
+const CROSS_CUT: f64 = 3.0;
+
 /// Next to the pads and vias the two tracks do not always fit, the wide track knew nothing of
 /// them. Where a path has clearance problems near one of its ends, take its tracks and vias
 /// away up to the last problem: single tracks connect the rest. The paths in `given_up` go
@@ -1351,7 +1376,7 @@ fn repair(
             .filter(|v| [path.p, path.n].iter().any(|&x| v.nets.0 == x || v.nets.1 == Some(x)))
             .map(|v| v.at)
             .collect();
-        if hits.is_empty() && !give_up {
+        if hits.is_empty() && !give_up && !path.crossed {
             continue;
         }
         let legs: Vec<[usize; 2]> = path.tracks.chunks(2).map(|c| [c[0], c[1]]).collect();
@@ -1383,6 +1408,9 @@ fn repair(
             } else if total - s <= REPAIR_REACH {
                 from_end = from_end.max(total - s + 0.5);
             }
+        }
+        if path.crossed {
+            from_end = from_end.max(CROSS_CUT.min(total / 2.0));
         }
         if give_up {
             (from_start, from_end) = (total + 1.0, 0.0);
@@ -1688,6 +1716,47 @@ fn bumps(
     }
     elems.push(Elem::Line(cur, b));
     (elems, gained)
+}
+
+/// Where the track of `pin` runs out of its pad along `ex`, as a step from the pad centre:
+/// where the pads lie farther apart than the pair (an edge connector, a BGA), the track steps
+/// over towards the partner's pad by up to that difference (within its own pad, clear of the
+/// partner's), so that the two tracks run at the pair's gap and not at the pitch of the pads,
+/// which KiCad takes as a gap out of range.
+#[allow(clippy::too_many_arguments)]
+fn pad_step(b: &Board, pin: usize, partner: usize, ex: &Exit, w: f64, g: f64, clr: f64) -> Point {
+    let c = b.pins[pin].pos;
+    let d = b.pins[partner].pos - c;
+    let across = d - ex.x * d.dot(ex.x);
+    let pitch = across.len();
+    if pitch < 1e-9 {
+        return Point::default();
+    }
+    let inward = across * (1.0 / pitch);
+    let reach = |pin: usize, dir: Point| {
+        b.pins[pin]
+            .obstacles
+            .iter()
+            .flat_map(|&o| b.obstacles[o].shape.to_polygon(b.rules.max_error).pts)
+            .map(|q| (q - b.pins[pin].pos).dot(dir))
+            .fold(0.0, f64::max)
+    };
+    let shift = ((pitch - (w + g)) / 2.0)
+        .min(reach(pin, inward) - w / 2.0 - 0.005)
+        .min(pitch - reach(partner, inward * -1.0) - w / 2.0 - clr - 0.005);
+    if shift < 0.01 { Point::default() } else { inward * shift }
+}
+
+/// The points after the pad centre `c` of a track that steps over by `step` and runs out along
+/// `x` to `len` mm from the centre.
+fn pad_lead(c: Point, step: Point, x: Point, len: f64) -> Vec<Point> {
+    let side = c + step;
+    let mut v = Vec::new();
+    if step.len() > 0.0 && step.len() < len {
+        v.push(side + x * step.len());
+    }
+    v.push(side + x * len);
+    v
 }
 
 fn pad_target(b: &Board, e: PairEnd, p: bool) -> Point {
@@ -2167,9 +2236,11 @@ pub fn route_pairs(
             }
             continue;
         }
+        // a crossed pair never keeps its crossed tracks: it stays open
         let lost: Vec<usize> = given_up
             .iter()
             .copied()
+            .filter(|&pi| !paths[pi].crossed)
             .filter(|&pi| {
                 let names = [
                     &real.nets[paths[pi].p as usize].name,
@@ -2217,7 +2288,7 @@ pub fn route_pairs(
         let r = &mut reports[paths[pi].report];
         r.wide = false;
         r.note = if worse_tried.contains(&pi) {
-            "routed as single tracks: the pins without partner found no clean way to the pair"
+            "routed as single tracks: the last pass found no clean way to join it"
         } else {
             "routed as single tracks: an end of the wide track found no way to its pads"
         }
@@ -2275,26 +2346,31 @@ pub fn route_pairs(
     (sub, res, reports)
 }
 
-/// The paths (but those in `skip`) of pairs with pins without partner whose nets have more
-/// clearance spots with the tracks of the last pass `fin` than without them.
+/// The paths (but those in `skip`) whose nets have more clearance spots with the tracks of the
+/// last pass `fin` than without them: of a pair with pins without partner any spot of its nets,
+/// else spots between its two nets (the repaired ends crossed on their way to the pads). A pass
+/// that only repairs the ends of a pair is better than the pair given up otherwise.
 fn worse_paths(real: &Board, geo: &Geometry, fin: &Geometry, paths: &[PairPath], skip: &[usize]) -> Vec<usize> {
-    // only pairs with pins without partner: a pass that only repairs the ends of a pair is
-    // better than the pair given up
-    let extra = |path: &PairPath| real.nets[path.p as usize].pins.len() + real.nets[path.n as usize].pins.len() > 4;
-    let open: Vec<usize> = (0..paths.len())
-        .filter(|&pi| !skip.contains(&pi) && extra(&paths[pi]))
-        .collect();
-    if open.is_empty() {
-        return open;
+    let open: Vec<usize> = (0..paths.len()).filter(|pi| !skip.contains(pi)).collect();
+    if open.is_empty() || fin.tracks.is_empty() {
+        return Vec::new();
     }
     let mut all = geo.clone();
     all.tracks.extend(fin.tracks.iter().cloned());
     all.vias.extend(fin.vias.iter().cloned());
     let (before, after) = (crate::check::check(real, geo), crate::check::check(real, &all));
     let count = |vs: &[crate::check::Violation], path: &PairPath| {
+        let extra = real.nets[path.p as usize].pins.len() + real.nets[path.n as usize].pins.len() > 4;
+        let ours = |x: NetId| x == path.p || x == path.n;
         let of: Vec<crate::check::Violation> = vs
             .iter()
-            .filter(|v| [path.p, path.n].iter().any(|&x| v.nets.0 == x || v.nets.1 == Some(x)))
+            .filter(|v| {
+                if extra {
+                    ours(v.nets.0) || v.nets.1.is_some_and(ours)
+                } else {
+                    ours(v.nets.0) && v.nets.1.is_some_and(ours)
+                }
+            })
             .cloned()
             .collect();
         crate::check::spots(&of).len()
@@ -2611,8 +2687,12 @@ mod tests {
     }
 
     #[test]
-    fn a_pair_whose_extra_pins_are_joined_onto_its_partner_gives_up() {
+    fn a_pair_whose_last_pass_adds_trouble_gives_up() {
         let mut b = pair_board();
+        let mut x = b.nets[0].clone();
+        x.name = "X".into();
+        x.pins = Vec::new();
+        b.nets.push(x);
         let path = PairPath {
             report: 0,
             p: 0,
@@ -2621,26 +2701,35 @@ mod tests {
             vias: Vec::new(),
             whole: false,
             ends: [PairEnd { p: 0, n: 2, out: None }, PairEnd { p: 1, n: 3, out: None }],
+            crossed: false,
         };
-        // the pair's two tracks, and a last pass that runs a track of D_P on top of D_N
+        let paths = std::slice::from_ref(&path);
+        // the pair's two tracks and a track of no pair
         let geo = Geometry {
             tracks: vec![
                 polyline(&[pt(4., 5.), pt(26., 5.)], 0),
                 polyline(&[pt(4., 5.8), pt(26., 5.8)], 1),
+                polyline(&[pt(4., 9.), pt(26., 9.)], 2),
             ],
             vias: Vec::new(),
         };
-        let fin = Geometry {
+        // a last pass that runs a track of D_P onto the foreign track, or onto D_N
+        let foreign = Geometry {
+            tracks: vec![polyline(&[pt(8., 9.1), pt(20., 9.1)], 0)],
+            vias: Vec::new(),
+        };
+        let partner = Geometry {
             tracks: vec![polyline(&[pt(8., 5.9), pt(20., 5.9)], 0)],
             vias: Vec::new(),
         };
-        // two pins each: the pass only repaired the ends, the pair stays
-        assert!(worse_paths(&b, &geo, &fin, std::slice::from_ref(&path), &[]).is_empty());
-        // a third pin of D_P (the second pad of a USB-C socket)
+        // two pins each: only the partner gives the pair up
+        assert!(worse_paths(&b, &geo, &foreign, paths, &[]).is_empty());
+        assert_eq!(worse_paths(&b, &geo, &partner, paths, &[]), vec![0]);
+        // a third pin of D_P (the second pad of a USB-C socket): any new trouble does
         b.nets[0].pins.push(b.pins.len());
         b.pins.push(b.pins[0].clone());
-        assert_eq!(worse_paths(&b, &geo, &fin, std::slice::from_ref(&path), &[]), vec![0]);
-        assert!(worse_paths(&b, &geo, &fin, std::slice::from_ref(&path), &[0]).is_empty());
+        assert_eq!(worse_paths(&b, &geo, &foreign, paths, &[]), vec![0]);
+        assert!(worse_paths(&b, &geo, &foreign, paths, &[0]).is_empty());
     }
 
     #[test]

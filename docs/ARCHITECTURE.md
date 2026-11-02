@@ -284,6 +284,9 @@ track and split afterwards.
    split decides there how the tracks leave the pads and where the vias go.
 3. Split: the centre line is offset to both sides, arcs stay arcs, folds on the inner side of tight
    bends are cut out. The tracks leave the pads straight and join the curves past the pad tips.
+   Where the pads lie farther apart than the pair (an edge connector, a BGA), each track first
+   steps over towards its partner within its pad (`pairs::pad_step`), so that the two run out at
+   the pair's gap: at the pitch of the pads KiCad takes them as coupled at a gap out of range.
    After the 45 degree step the outer side of a corner of at most 45 degrees is mitred, so both
    tracks stay on the grid, and the side of the pads the band leaves to is judged 1 mm along it.
    At a breakout the band may leave its start in any direction: the tracks go straight out of
@@ -295,8 +298,9 @@ track and split afterwards.
    passes the near via, which takes room. So all vias of a pair stand side by side where that
    gives the polarity the pads ask for (the P pad on the same or on different sides at the two
    ends), else one joint gets its vias in line, where the legs are longest and best where the
-   band goes on (`pairs::side_changes`). A crossed pair without a via is routed as two single
-   nets.
+   band goes on (`pairs::side_changes`). A crossed pair without a via keeps its sides to the
+   far end, where the tracks would cross before the pads: the repair takes them back by 3 mm at
+   least (`CROSS_CUT`) and the router joins them to their pads.
    Via pairs (experimental, `--via-pairs`): after the search a trial split tells which joints get
    their vias side by side (`pairs::pair_vias`; not where the band turns nearly square). Each
    such via of the wide track becomes a via pair (`Via::half`): a capsule along the line of the
@@ -311,7 +315,9 @@ track and split afterwards.
    than three times as long as the straight line plus 3 mm (it would set the aim of its length
    group), the pair is given
    up and its nets are routed as single tracks (reported as such); only if they find no way
-   either do the ends that found no way keep the two tracks they had.
+   either do the ends that found no way keep the two tracks they had (a crossed pair never
+   keeps its crossed tracks, it stays open). Repaired ends that cross each other on their way to
+   the pads give the pair up as well.
 6. Last pass: what is still open is routed around everything as single tracks. A pair with pins
    without partner (the second pads of a USB-C socket) whose single tracks this pass joins with
    new clearance problems (along the pair, onto its partner) gives up its wide track as well,

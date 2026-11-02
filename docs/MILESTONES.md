@@ -109,6 +109,16 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   wide track: Lichtschnitzel `--pairs --breakouts` 3 instead of 502 KiCad errors; DDR5,
   `diff_pairs` and `matching` unchanged (byte for byte). The pair itself still needs a way for
   those pins next to the socket.
+  Pads at the pair's gap and crossed pairs (2026-11-02): where the pads lie farther apart than
+  the pair (an edge connector), the two tracks ran out of them at the pad pitch, which KiCad
+  takes as coupled at a gap out of range; each now steps over towards its partner within its
+  pad. A pair whose polarity is crossed and whose wide track has no via (DDR5 CLK) no longer
+  falls apart into two single tracks with 20 mm uncoupled: the tracks cross just before the far
+  pads, where the repair reroutes them (and gives the pair up rather than keep crossed tracks).
+  DDR5 over seeds 1 to 8, KiCad errors: `--pairs` 183 instead of 243 (pair gap 19 instead of
+  41, clearance and shorts 12 instead of 26), `--pairs --breakouts` 156 instead of 175 (pair
+  gap 29 instead of 51); CLK coupled in most seeds with 4.5 to 8 mm uncoupled. `diff_pairs` and
+  `matching` unchanged in KiCad errors.
   Open: room in the router itself, phase matching near the source, carrying the pair to its
   end, the open end with pairs.
 - Rule engine: more custom rule conditions (positions, footprints, layers).
