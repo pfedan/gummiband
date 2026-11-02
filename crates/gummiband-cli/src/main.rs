@@ -686,14 +686,23 @@ fn main() -> Result<()> {
                         intruders.len(),
                         intruders.join(" ")
                     );
+                    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
                     let placed = place_board(
                         &board,
                         &PlaceOptions {
                             scope: Scope::Only(intruders),
                             corridors: true,
+                            gap: env("GB_CC_GAP").unwrap_or(opts.gap),
+                            halo: env("GB_CC_HALO").unwrap_or(opts.halo),
+                            escape_halo: env("GB_CC_ESCAPE").is_some_and(|v| v > 0.0),
+                            semantic: env("GB_CC_SEMANTIC").is_some_and(|v| v > 0.0),
                             ..opts
                         },
                     )?;
+                    println!(
+                        "corridors: smallest courtyard distance {:.2} mm",
+                        placed.report.min_separation
+                    );
                     std::fs::create_dir_all(&cleared_dir)?;
                     let path = cleared_dir.join(board.file_name().unwrap_or_default());
                     std::fs::write(&path, &placed.text)?;

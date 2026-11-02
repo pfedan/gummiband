@@ -1290,7 +1290,8 @@ fn corridors(
 /// Parts that `place_board` would move (with `opts`) and that sit in the band of a track group
 /// whose nets they are not on: the parts a re-placement with [`PlaceOptions::corridors`] should
 /// take out of the way, before the routing. The ends of every group stay, and so do decoupling
-/// capacitors (two pads, both on a plane or supply net): they belong at their IC pin.
+/// capacitors (a capacitor on a ground or a supply, or two pads both on supply nets): they belong
+/// at their IC pin.
 pub fn corridor_intruders(path: &Path, opts: &PlaceOptions) -> Result<Vec<String>> {
     let kb = read_board(
         path,
@@ -1325,11 +1326,11 @@ pub fn corridor_intruders(path: &Path, opts: &PlaceOptions) -> Result<Vec<String
             || is_ground(&d.nets[n])
             || pads_on[n] >= 8
     };
-    let decap = |p: &crate::model::Part| {
-        p.pads.len() == 2
-            && p.pads
-                .iter()
-                .all(|x| x.net.is_some_and(|n| n < d.nets.len() && supply(n)))
+    let on = |x: &crate::model::Pad, f: &dyn Fn(usize) -> bool| x.net.is_some_and(|n| n < d.nets.len() && f(n));
+    // decoupling capacitors stay: they belong at their IC pin
+    let stays = |p: &crate::model::Part| {
+        let cap = p.reference.starts_with('C') && p.reference[1..].starts_with(|c: char| c.is_ascii_digit());
+        (p.pads.len() == 2 && p.pads.iter().all(|x| on(x, &supply))) || (cap && p.pads.iter().any(|x| on(x, &supply)))
     };
     let mut out: Vec<String> = Vec::new();
     for g in &groups {
@@ -1352,7 +1353,7 @@ pub fn corridor_intruders(path: &Path, opts: &PlaceOptions) -> Result<Vec<String
         }
         let (dx, dy) = (ab.x / len, ab.y / len);
         for (i, p) in d.parts.iter().enumerate() {
-            if fixed[i] || g.on.contains(&i) || decap(p) || out.contains(&p.reference) {
+            if fixed[i] || g.on.contains(&i) || stays(p) || out.contains(&p.reference) {
                 continue;
             }
             let hit = p.court.iter().any(|r| {
