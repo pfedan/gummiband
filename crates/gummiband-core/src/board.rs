@@ -443,8 +443,14 @@ impl Board {
     /// Kept tracks and vias that touch no pad of their net are pieces of a route in progress:
     /// each such island becomes a pin of the net, so that the router connects it.
     pub fn add_island_pins(&mut self) {
+        self.add_island_pins_of(|_| true);
+    }
+
+    /// [`Board::add_island_pins`] for the kept tracks and vias (by obstacle index) that `of`
+    /// takes.
+    pub fn add_island_pins_of(&mut self, of: impl Fn(usize) -> bool) {
         let kept: Vec<usize> = (0..self.obstacles.len())
-            .filter(|&i| matches!(self.obstacles[i].kind, ObstacleKind::Track | ObstacleKind::Via))
+            .filter(|&i| matches!(self.obstacles[i].kind, ObstacleKind::Track | ObstacleKind::Via) && of(i))
             .collect();
         let touches = |a: &Obstacle, b: &Obstacle| {
             a.net == b.net && a.layers.intersects(b.layers) && a.shape.dist(&b.shape) <= 0.0

@@ -318,7 +318,10 @@ track and split afterwards.
    either do the ends that found no way keep the two tracks they had (a crossed pair never
    keeps its crossed tracks, it stays open). Repaired ends that cross each other on their way to
    the pads give the pair up as well.
-6. Last pass: what is still open is routed around everything as single tracks. A pair with pins
+6. Last pass: what is still open is routed around everything as single tracks. Copper of a pair
+   net that no pad of its net holds any more (a wide track repaired at both ends) is a pin of its
+   net there, else the tracks of its pins without partner, joined among themselves, would leave
+   the net looking done. A pair with pins
    without partner (the second pads of a USB-C socket) whose single tracks this pass joins with
    new clearance problems (along the pair, onto its partner) gives up its wide track as well,
    once; only if its single tracks then find no way does it keep the tracks of the pass.

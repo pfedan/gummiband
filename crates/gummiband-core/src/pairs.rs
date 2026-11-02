@@ -2372,6 +2372,12 @@ pub fn route_pairs(
         let mut cut_map = cut_nets(&mut b, &cuts, kept_from);
         let first_join = b.nets.len();
         let join_map = join_nets(&mut b, &joins, kept_from, first_cut);
+        // copper of a pair net that no pad of its net holds any more (a wide track cut back at
+        // both ends, beside the tracks of its pins without partner) is a pin of that net: else
+        // the search takes the net as done once those pins are joined among themselves
+        let ours: Vec<NetId> = paths.iter().flat_map(|p| [p.p, p.n]).collect();
+        let nets_of = b.obstacles.iter().map(|o| o.net).collect::<Vec<_>>();
+        b.add_island_pins_of(|i| i >= kept_from && nets_of[i].is_some_and(|n| ours.contains(&n)));
         let (_, mut fin) = route_board(&b, sub_cfg, base, &finish);
         // a join that finds no way, or only a long way round, is left to its net
         let failed_joins: Vec<(usize, usize)> = (first_join..b.nets.len())
@@ -3035,6 +3041,61 @@ mod tests {
         b.pins.push(b.pins[0].clone());
         assert_eq!(worse_paths(&b, &geo, &foreign, paths, &[]), vec![0]);
         assert!(worse_paths(&b, &geo, &foreign, paths, &[0]).is_empty());
+    }
+
+    #[test]
+    fn wide_copper_that_no_pad_holds_gets_joined_in_the_last_pass() {
+        let mut b = pair_board();
+        // a pin without partner of D_P beside J0, joined to J0 by a track
+        let (id, o) = (b.pins.len(), b.obstacles.len());
+        let mut pad = b.obstacles[b.pins[0].obstacles[0]].clone();
+        let shift = pt(0., 3.);
+        if let Shape::Polygon(poly) = &mut pad.shape {
+            for q in poly.pts.iter_mut() {
+                *q = *q + shift;
+            }
+        }
+        pad.pin = Some(id);
+        b.obstacles.push(pad);
+        let mut pin = b.pins[0].clone();
+        pin.pos = pin.pos + shift;
+        pin.obstacles = vec![o];
+        b.pins.push(pin);
+        b.nets[0].pins.push(id);
+        // the last pass routes D_P only: its wide track cut back from both pads (J1 taken by
+        // the cut there) and the track of the pin without partner
+        b.nets[0].pins.retain(|&p| p != 1);
+        b.nets[1].pins.clear();
+        let kept_from = b.obstacles.len();
+        let geo = Geometry {
+            tracks: vec![
+                polyline(&[pt(8., 5.), pt(22., 5.)], 0),
+                polyline(&[pt(4., 5.), pt(4., 8.)], 0),
+            ],
+            vias: Vec::new(),
+        };
+        lock_geometry(&mut b, &geo);
+        let search = SearchConfig {
+            population: 2,
+            generations: 0,
+            geometry_generations: 0,
+            frames: false,
+            progress: None,
+            seed: None,
+            open_end: None,
+            air: 0.0,
+            prefer_width: 0.0,
+            open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
+        };
+        // the two pins are joined: the search finds nothing to do and leaves the wide copper
+        let (_, res) = route_board(&b, &SubstrateConfig::default(), &RouterConfig::default(), &search);
+        assert_eq!(res.stats.conns, 0);
+        // the wide copper is a pin of D_P: the search joins it
+        b.add_island_pins_of(|i| i >= kept_from);
+        assert_eq!(b.nets[0].pins.len(), 3);
+        let (_, res) = route_board(&b, &SubstrateConfig::default(), &RouterConfig::default(), &search);
+        assert_eq!((res.stats.conns, res.stats.routed), (1, 1));
+        assert!(res.geometry.tracks.iter().any(|t| t.net == 0));
     }
 
     #[test]
