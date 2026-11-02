@@ -1502,7 +1502,39 @@ fn search_fixed(
         }
         best
     };
-    let best = finish(best, true);
+    let mut best = finish(best, true);
+    // tracks with a clearance problem at their pad go back onto the middle of their fine pitch
+    // pad, one by one, where that leaves fewer problems
+    let mut now = check::check(board, &best.geo);
+    let mut straightened = 0;
+    for ti in 0..best.geo.tracks.len() {
+        let t = &best.geo.tracks[ti];
+        let (Some(&first), Some(&last)) = (t.pts.first(), t.pts.last()) else {
+            continue;
+        };
+        let near = |v: &check::Violation| {
+            (v.nets.0 == t.net || v.nets.1 == Some(t.net)) && (v.at.dist(first) < 1.5 || v.at.dist(last) < 1.5)
+        };
+        if !now.iter().any(near) {
+            continue;
+        }
+        let mut g = best.geo.clone();
+        if relax::straighten_exits(board, &mut g, Some(ti)) > 0 {
+            let after = check::check(board, &g);
+            if after.len() < now.len() {
+                best.stats.violations = Some(after.len());
+                best.geo = g;
+                now = after;
+                straightened += 1;
+            }
+        }
+    }
+    if straightened > 0 {
+        eprintln!(
+            "pad exits: {straightened} tracks back on the middle of their pads, {} violations left",
+            now.len()
+        );
+    }
     let alternatives = others
         .into_iter()
         .map(|c| {
