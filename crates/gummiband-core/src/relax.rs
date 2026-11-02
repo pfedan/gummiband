@@ -202,6 +202,78 @@ fn follow(r: &Rail, pts: &mut [Point], from_end: bool) {
     }
 }
 
+/// Put the ends of the finished tracks back on the rails of their fine pitch pads (see
+/// [`pin_rails`]). The main relaxation runs without rails, and its tension pulls a track that
+/// turns right behind a long narrow pad a little off the middle line: as wide as the pad, it then
+/// sticks out of it towards the neighbour. The pieces on the rail become straight lines on it.
+/// Returns the number of tracks that changed.
+/// `only`: just that track.
+pub(crate) fn straighten_exits(board: &Board, geo: &mut Geometry, only: Option<usize>) -> usize {
+    let by_net = pin_rails(board);
+    let mut changed = 0;
+    for (ti, t) in geo.tracks.iter_mut().enumerate() {
+        if only.is_some_and(|o| o != ti) {
+            continue;
+        }
+        let Some(rails) = by_net.get(&t.net) else {
+            continue;
+        };
+        if t.elems.is_empty() || t.pts.len() < 2 {
+            continue;
+        }
+        let ends = [rail_of(rails, t.pts.iter()), rail_of(rails, t.pts.iter().rev())];
+        let mut elems = t.elems.clone();
+        for (from_end, r) in ends.iter().enumerate() {
+            let Some(r) = r else {
+                continue;
+            };
+            let proj = |p: Point| r.at + r.dir * (p - r.at).dot(r.dir).max(0.0);
+            let n = elems.len();
+            for k in 0..n {
+                let i = if from_end == 1 { n - 1 - k } else { k };
+                let (a, b) = match elems[i] {
+                    Elem::Line(a, b) | Elem::Arc(a, _, b) => (a, b),
+                };
+                // a and b in the order seen from the pad
+                let (near, far) = if from_end == 1 { (b, a) } else { (a, b) };
+                if !r.holds(near) {
+                    break;
+                }
+                let far_on = r.holds(far);
+                let (near, far) = (proj(near), if far_on { proj(far) } else { far });
+                elems[i] = if from_end == 1 {
+                    Elem::Line(far, near)
+                } else {
+                    Elem::Line(near, far)
+                };
+                if !far_on {
+                    break;
+                }
+            }
+        }
+        // the neighbours of a replaced piece share its ends
+        for i in 1..elems.len() {
+            let end = match elems[i - 1] {
+                Elem::Line(_, b) | Elem::Arc(_, _, b) => b,
+            };
+            match &mut elems[i] {
+                Elem::Line(a, _) | Elem::Arc(a, _, _) => *a = end,
+            }
+        }
+        elems.retain(|e| !matches!(e, Elem::Line(a, b) if a.dist(*b) < 1e-9));
+        if elems.is_empty() {
+            continue;
+        }
+        let pts = crate::realize::flatten(&elems);
+        if pts.len() != t.pts.len() || pts.iter().zip(&t.pts).any(|(p, q)| p.dist(*q) > 1e-9) {
+            t.elems = elems;
+            t.pts = pts;
+            changed += 1;
+        }
+    }
+    changed
+}
+
 /// Squared distances are compared with this much slack, so that a rejection is certain and
 /// only the rare remaining candidates need the exact test.
 const SURE: f64 = 1.0 + 1e-9;
@@ -2558,6 +2630,52 @@ mod tests {
         assert_eq!(pts[2], pt(0.0, -0.2));
         assert_eq!(pts[3], pt(-1.0, -0.2));
         assert_eq!(pts[4], pt(-4.0, -0.2));
+    }
+
+    /// A track that leaves a long centre strip a little off its middle line comes back onto it;
+    /// past the rail it stays as it was.
+    #[test]
+    fn a_finished_track_goes_back_onto_its_rail() {
+        use crate::board::{Obstacle, Pin};
+        use crate::geom::roundrect_polygon;
+        let mut b = crate::topo::tests::two_pad_board();
+        for (k, x) in [4.5, 5.0, 5.5, 6.0].into_iter().enumerate() {
+            let o = b.obstacles.len();
+            b.obstacles.push(Obstacle {
+                shape: Shape::Polygon(roundrect_polygon(pt(x, 5.0), 0.3, 2.4, 0.0, 0.0, 0.005)),
+                layers: LayerSet::single(0),
+                net: Some(0),
+                kind: ObstacleKind::Pad,
+                hole: None,
+                clearance: 0.2,
+                pin: Some(b.pins.len()),
+                locked: true,
+            });
+            b.pins.push(Pin {
+                name: format!("U.{}", k + 1),
+                footprint: "U".into(),
+                net: 0,
+                pos: pt(x, 5.0),
+                layers: LayerSet::single(0),
+                obstacles: vec![o],
+                size: (0.3, 2.4),
+            });
+        }
+        let mut t = crate::check::tests::line((5.0, 5.0), (5.04, 3.98), 0);
+        t.elems.push(Elem::Line(pt(5.04, 3.98), pt(5.6, 3.0)));
+        t.elems.push(Elem::Line(pt(5.6, 3.0), pt(9.0, 3.0)));
+        t.pts = crate::realize::flatten(&t.elems);
+        let mut geo = Geometry {
+            tracks: vec![t],
+            vias: Vec::new(),
+        };
+        assert_eq!(straighten_exits(&b, &mut geo, None), 1);
+        let t = &geo.tracks[0];
+        assert!(t.pts.iter().any(|p| p.dist(pt(5.0, 3.98)) < 1e-9), "{:?}", t.pts);
+        assert!(t.pts.iter().all(|p| p.dist(pt(5.04, 3.98)) > 1e-6));
+        assert!(t.pts.iter().any(|p| p.dist(pt(5.6, 3.0)) < 1e-9));
+        assert_eq!(*t.pts.last().unwrap(), pt(9.0, 3.0));
+        assert_eq!(straighten_exits(&b, &mut geo, None), 0, "a second run changes nothing");
     }
 
     /// A centre pad has a rail at each end; the track takes the one it leaves by.
