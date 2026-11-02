@@ -603,7 +603,30 @@ no DRC (cloud):
   On parts_multi_feed the tracks get 11 % shorter at 15 more vias.
 - Moving the decoupling capacitors of parts_hard out of the band gave 39 vias, but they belong
   at their IC; a capacitor between a ground and a supply (a plane, a power class, or a net with 8
-  or more pads) now stays.
+  or more pads) now stays, and so does any capacitor with a pad on a ground or supply.
+
+Lichtschnitzel (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-02):
+
+| Variant | Vias | mm | Clearance errors |
+| --- | --- | --- | --- |
+| A original placement, no hints | 261/263/267 | 2612/2553/2638 | 0/0/0 |
+| A, `pairs,groups` | 279/286/263 | 2708/2508/2575 | 1/2/14 |
+| B `--clear-corridors`, `pairs,groups` (before the leash) | 265/259/235 | 2606/2582/2693 | 40/33/4 |
+| C `place`, `pairs,groups` | 267/227/218 | 2199/2201/2119 | 0/0/1 |
+| D `place --semantic --corridors --escape-halo`, no hints | 242/256/200 | 2398/2161/2351 | 0/0/0 |
+| D, `pairs,groups` | 289/236/220 | 2271/2236/2263 | 0/0/0 |
+
+- D is the cleanest: no clearance error and no short in 9 runs, 12 % shorter than A. It is a new
+  placement though (only connectors and mechanics stay), the power stages sit elsewhere.
+- With the placement fixed the hints do not help on Lichtschnitzel.
+- B moved the power stage U5 21 mm: its place next to its neighbours is tighter than the gap and
+  halo of the placement, so the legalisation found no room for it at home. More gap and halo made
+  it worse; `--air` 0.03 or 0.05 removed only the smallest deficits.
+- Fix: `place --leash MM`. A part with 4 or more pads pays for every mm beyond its leash (squared),
+  starts at home, gets no halo and keeps the room it has where its neighbours sit closer than the
+  gap. `--clear-corridors` leashes ICs and connectors at 1.5 mm (`GB_CC_LEASH`): U5 moves 0.1 mm,
+  U22 1.5 mm. With move rounds, seeds 1 to 3, Gummiband's own clearance check: 272/276/300 vias,
+  2461/2543/2552 mm, 0/2/1 violations. The KiCad DRC of this state is still open.
 
 ## M4b: GPU experiment
 
