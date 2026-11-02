@@ -60,12 +60,14 @@ Standing decisions of the project owner, kept here so that they survive any sess
   within 8 mm; the try with the fewest open connections is kept, so giving way never costs a
   connection. In the night series of 2026-11-01 plain left 4 of 16 re-laid nets open, shove none.
   Second step: the last step tapers a track at a spot that misses its clearance by a few
-  micrometres, down to the minimum width of its class and never wider elsewhere. A neck that a
-  minimum width rule allows in a courtyard is for the pin there, not for the current: the way
-  between two pins that can take the minimum never passes one (Daniel's question about VBUS_F,
-  2026-11-01), even where KiCad's DRC would let it pass; the neck ends at the edge of the
-  courtyard, and a layer change on such a way gets the vias that carry its current (IPC-2221;
-  the current check of PR #43 found single 0.4 mm vias on the 4.1 A paths of the finished board).
+  micrometres, down to the minimum width of its class and never wider elsewhere. A class without a
+  minimum width rule keeps its class width there: the spot stays until the search finds another way
+  (Daniel, 2026-11-02, about VBUS_P at U6.10, which 0.25 instead of 0.3 mm would have cleared). A
+  neck that a minimum width rule allows in a courtyard is for the pin there, not for the current:
+  the way between two pins that can take the minimum never passes one (Daniel's question about
+  VBUS_F, 2026-11-01), even where KiCad's DRC would let it pass; the neck ends at the edge of the
+  courtyard, and a layer change on such a way gets the vias that carry its current (IPC-2221; the
+  current check of PR #43 found single 0.4 mm vias on the 4.1 A paths of the finished board).
   Parts move by default since PR #40. Third step: when the whole plain search leaves a few
   connections open (at most 15 %), a second search negotiates and the better result counts; a
   search that completes the board stays as it is. Fourth step: finishing nets open ended, with
