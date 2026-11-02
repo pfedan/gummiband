@@ -800,11 +800,7 @@ pub fn relax_while(
     // a via on a dog-bone place of a ball field stays there: between the balls and the vias next
     // to it there is room for exactly one track in the middle of each channel
     let pinned: Vec<bool> = {
-        let dogs = if std::env::var("GB_DOG_PIN").as_deref() == Ok("0") {
-            Vec::new()
-        } else {
-            crate::patterns::dog_bones(board)
-        };
+        let dogs = crate::patterns::dog_bones(board);
         geo.vias
             .iter()
             .map(|v| v.drill > 0.0 && !v.is_pair() && dogs.iter().any(|d| d.dist(v.at) < 1e-6))
