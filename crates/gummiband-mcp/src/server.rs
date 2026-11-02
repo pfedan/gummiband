@@ -437,6 +437,13 @@ pub struct PlacePartsIn {
     /// count their full length, so an input chain stays in order. Connectors and power stages
     /// you care about still belong in `fixed`.
     pub semantic: Option<bool>,
+    /// Experimental: keep a band free for every group of tracks between two parts (ICs and
+    /// connectors that share at least two signal nets, a bus, SPI, I2C); other parts pay for the
+    /// area of the band they cover. Default false.
+    pub corridors: Option<bool>,
+    /// Experimental: room for the escape per side of a part with five or more pads, from its
+    /// signal pins on that side, instead of the same halo all round. Default false.
+    pub escape_halo: Option<bool>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -580,7 +587,8 @@ pub struct RouteIn {
     /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
     pub layer_dirs: Option<f64>,
     /// Hints from the local patterns of board_patterns, comma separated: shares, decaps, rows,
-    /// all or none (default none), as `gummiband route --patterns`.
+    /// pairs (differential pairs first), groups (part to part connections as one block), all or
+    /// none (default none), as `gummiband route --patterns`.
     pub patterns: Option<String>,
     /// Generations of the evolutionary order search after the portfolio (default 3).
     pub generations: Option<usize>,
@@ -1774,6 +1782,8 @@ impl Gummiband {
             gap: p.gap.unwrap_or(defaults.gap),
             halo: p.halo.unwrap_or(defaults.halo),
             semantic: p.semantic.unwrap_or(false),
+            corridors: p.corridors.unwrap_or(false),
+            escape_halo: p.escape_halo.unwrap_or(false),
             ..defaults
         };
         let path = self.with_entry(&p.board, |e| Ok(e.path.clone()))?;

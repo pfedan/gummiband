@@ -85,7 +85,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `board_patterns` | `board` | local patterns of the board: pin rows (part, pins in order, pitch, the side tracks leave to), pad grids, decoupling capacitors with their IC pin, pins of a plane net that can share a fan-out via, buses between two parts; a summary line per kind |
 | `part_info` | `board`, `reference` | value, position, rotation, locked, sheet, pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
 | `move_part` | `board`, `reference`, `x`, `y`, `rotation?`, `follow?` | id and path of the working copy with the footprint at its new position, `items_added`, `warnings` |
-| `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?` | id and path of the working copy, the new poses, decoupling assignment, crossings, smallest courtyard distance, pins off their plane, pads without via room, released connectors, with `semantic` inductors, groups and ties, `warnings` |
+| `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?`, `corridors?`, `escape_halo?` | id and path of the working copy, the new poses, decoupling assignment, crossings, smallest courtyard distance, pins off their plane, pads without via room, released connectors, with `semantic` inductors, groups and ties, `warnings` |
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?`, `pad_connection?`, `thermal_spoke_width?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `width?`, `reset?` | the net's options and effective priority |
@@ -187,7 +187,7 @@ The structure a person sees at a glance, found from the pins: rows of pins of on
 regular pitch, pad grids (BGA), two pin parts that decouple an IC pin, pins of a plane net close
 enough to share one fan-out via, and buses (runs of neighbouring pins whose nets each go to one
 pin of another row, with the flag whether the order is kept). `route` uses them as hints when
-`patterns` names them (`decaps`, `rows`, `shares`, `all`), with the syntax of `gummiband route
+`patterns` names them (`decaps`, `rows`, `shares`, `pairs`, `groups`, `all`), with the syntax of `gummiband route
 --patterns`.
 
 ```json
@@ -260,6 +260,10 @@ out of scope); the tool never returns such a placement silently. Unlocked tracks
 before `route`. The tool places, it does not judge: `route` and `drc` tell how good the result is,
 another `seed` gives another try, and seeds differ a lot. Neighbouring seeds share no starts. The
 crossing count is no forecast of the routed result.
+
+`corridors` and `escape_halo` (both default false, experimental) keep room for groups of tracks
+between two parts and for the escape of each side of a part, as `gummiband place --corridors` and
+`--escape-halo` do.
 
 `semantic` (default false) uses the schematic beyond the netlist, as `gummiband place --semantic`
 does: sheets and clusters around an IC stay together, an inductor sits at the switch pins of its

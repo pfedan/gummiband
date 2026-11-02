@@ -547,6 +547,116 @@ A small gain on every run, Corne complete; three runs are not proof, the search 
 default. Not built yet from the concept: pad grid via sites and quadrant directions, local
 preferred directions per tile, buses as bundles (after the differential pair concept).
 
+## Routing order: pairs and part to part groups
+
+The first topology routes the connections in the order of `Router::plan()`: priority, then the
+jittered length. Two opt-in hints (`--patterns pairs,groups`, also in the MCP and the plugin
+patterns) change that order. Without them the plan and the result stay byte-identical (Mac,
+seed 1, all 16 bench boards).
+
+- `pairs`: pairs come first, the longest first, the partners next to each other. With `--pairs`
+  a pair is one wide net, so it moves only as a pair.
+- `groups`: connections between two parts with 4 or more pins (chips and connectors) that share
+  at least 2 nets form a group, routed as a block, the members in order across the band so they
+  do not cross. `GB_GROUP_ORDER` picks the order of the blocks: `long` (longest first, the
+  default of the hint), `short`, or `inline` (blocks in place, only the members together).
+- New synthetic boards in `bench/gen_boards.py`: `pair_wall`, `pair_traffic`, and part to part in
+  rising steps `parts_easy`, `parts_medium`, `parts_hard`, `parts_multi` (MCU and PHY with a 12
+  net bus, peripherals, three pairs), `parts_multi_feed` (40 scattered 0603 parts in the way),
+  `parts_xhard` (the same on a board 25 % smaller in each direction).
+
+KiCad DRC on the Mac, seeds 1 to 3, means (2026-11-02, 210 runs):
+
+| Board | none | `groups` long | `groups` short | `pairs` |
+| --- | --- | --- | --- | --- |
+| parts_hard | 56.3 vias, 1106 mm | 48.7 vias, 1070 mm | 54.3 vias, 1070 mm | |
+| parts_multi | 66.7 vias, 1399 mm | 58.7 vias, 1424 mm | 84.0 vias, 1330 mm | 71.0 vias |
+| parts_multi_feed | 126.7 vias, 1902 mm | 98.0 vias, 1897 mm, 1 pair gap error | 115.0 vias | 119.7 vias |
+| parts_xhard | 103.0 vias, 1324 mm | 101.3 vias, 1393 mm | 115.7 vias | 104.7 vias |
+| crossing | 26.0 vias | 14.7 vias | 14.7 vias | |
+| matching | 28.0 vias, 2.7 errors | 5.3 vias, 11.0 length and skew errors | same | |
+| pair_traffic | 2.0 vias, 581 mm, 4.0 mm uncoupled | | | 6.7 vias, 503 mm, 2.2 mm uncoupled |
+| diff_pairs | 1.7 errors, 43 mm uncoupled | | | 5.3 errors, 21 mm uncoupled |
+| Lichtschnitzel | 0 clearance | 0.3 clearance | 5.3 clearance | 0 clearance, 61 % coupled (42) |
+| Arty | 161.3 vias | 165.0 vias | 175.3 vias | 159.7 vias; `pairs,groups` 141.0 |
+| DDR5 | 23.3 errors | 20.7 errors | 19.0 errors, 145 vias (125) | 24.3 errors |
+| Corne (seed 1) | 181 errors | 171 errors | | `pairs,groups` 323 errors |
+
+- `groups long` is the best order on boards with several chips: fewer vias, a few percent more
+  length. `short` hurts Lichtschnitzel, `inline` is the weakest overall. The small boards stay
+  neutral (plus or minus one via).
+- `pairs` shortens and couples the pairs better, but costs vias and DRC errors on diff_pairs.
+- No hint wins everywhere, so both stay opt-in.
+
+## Placement: room for track groups
+
+- `place --corridors`: the annealer knows the track groups (parts with 4 or more pads sharing 2
+  or more short signal nets) and keeps a band between the two parts free: other parts in it pay
+  depth times length. Bands between two fixed parts count too.
+- `place --escape-halo`: instead of the uniform 0.3 mm halo, each side of a part with 5 or more
+  pads gets a skirt as deep as its signal pins need to leave (sum of track and clearance per
+  routing layer, at most 3 mm). Plane pins do not count.
+- `route --clear-corridors`: before routing, movable parts in a band that are not on the group's
+  nets are placed again (`Scope::Only`, corridors on). Decoupling capacitors (two pads, both on
+  supply nets) stay at their IC.
+
+Placement from scratch, then `route --patterns groups` (long) seed 1, placement seeds 1 to 3,
+no DRC (cloud):
+
+| Board | none | `--corridors` | `--escape-halo` | both |
+| --- | --- | --- | --- | --- |
+| parts_hard | 0.33 open, 46.7 vias, 562 mm | 0.67 open, 39.3 vias, 535 mm | 0 open, 42.0 vias, 659 mm | 0 open, 38.7 vias, 643 mm |
+| parts_multi_feed | 1.33 open, 92.0 vias, 844 mm | 1.00 open, 86.7 vias, 808 mm | 0 open, 86.7 vias, 899 mm | 0 open, 93.7 vias, 928 mm, 1 violation |
+
+- The annealer packs the parts tight for short wires, so the router misses a connection now and
+  then. The escape halo removes that at about 15 % more length; the corridor term saves vias.
+- Both together are best on parts_hard; on parts_multi_feed one seed (110 vias) pulls the mean up.
+- `route --move-parts` changes nothing on these placements: it reacts only to violations and open
+  connections of the geometry generations.
+
+`route --clear-corridors --patterns groups` (long), seeds 1 to 3, no DRC (cloud), all complete:
+
+| Board | none | `groups` | `groups`, `--clear-corridors` | parts moved |
+| --- | --- | --- | --- | --- |
+| parts_hard | 60.3 vias, 1084 mm | 48.7 vias, 1071 mm | 48.7 vias, 1017 mm | 3 |
+| parts_multi | 69.3 vias, 1372 mm | 58.7 vias, 1424 mm | 56.7 vias, 1403 mm | 1 |
+| parts_multi_feed | 126.7 vias, 1902 mm | 98.0 vias, 1897 mm | 112.7 vias, 1692 mm | 9 |
+| parts_xhard | 103.0 vias, 1324 mm | 101.3 vias, 1392 mm | 83.0 vias, 1279 mm | 11 |
+
+- The tighter the board, the more it gives: parts_xhard 18 % fewer vias and 8 % less length.
+  On parts_multi_feed the tracks get 11 % shorter at 15 more vias.
+- Moving the decoupling capacitors of parts_hard out of the band gave 39 vias, but they belong
+  at their IC; a capacitor between a ground and a supply (a plane, a power class, or a net with 8
+  or more pads) now stays, and so does any capacitor with a pad on a ground or supply.
+
+Lichtschnitzel (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-02):
+
+| Variant | Vias | mm | Clearance errors |
+| --- | --- | --- | --- |
+| A original placement, no hints | 261/263/267 | 2612/2553/2638 | 0/0/0 |
+| A, `pairs,groups` | 279/286/263 | 2708/2508/2575 | 1/2/14 |
+| B `--clear-corridors`, `pairs,groups` (before the leash) | 265/259/235 | 2606/2582/2693 | 40/33/4 |
+| C `place`, `pairs,groups` | 267/227/218 | 2199/2201/2119 | 0/0/1 |
+| D `place --semantic --corridors --escape-halo`, no hints | 242/256/200 | 2398/2161/2351 | 0/0/0 |
+| D, `pairs,groups` | 289/236/220 | 2271/2236/2263 | 0/0/0 |
+
+- D is the cleanest: no clearance error and no short in 9 runs, 12 % shorter than A. It is a new
+  placement though (only connectors and mechanics stay), the power stages sit elsewhere.
+- With the placement fixed the hints do not help on Lichtschnitzel.
+- B moved the power stage U5 21 mm: its place next to its neighbours is tighter than the gap and
+  halo of the placement, so the legalisation found no room for it at home. More gap and halo made
+  it worse; `--air` 0.03 or 0.05 removed only the smallest deficits.
+- Fix: `place --leash MM`. A part with 4 or more pads pays for every mm beyond its leash (squared),
+  starts at home, gets no halo and keeps the room it has where its neighbours sit closer than the
+  gap. `--clear-corridors` leashes ICs and connectors at 1.5 mm (`GB_CC_LEASH`): U5 moves 0.1 mm,
+  U22 1.5 mm. With move rounds, seeds 1 to 3, Gummiband's own clearance check: 272/276/300 vias,
+  2461/2543/2552 mm, 0/2/1 violations. The KiCad DRC of this state is still open.
+- With move rounds (the router's own moves, KiCad DRC, before the leash): little change at about
+  twice the run time; D stays without a clearance error or short in all 18 runs. In B, U22 may
+  move 6.9 mm and gives the shortest result (down to 2292 mm); holding U5 alone is enough for 0 to
+  1 clearance errors. So the leash, not a fixed IC, is the right default; a switching regulator
+  with its power nets may need a shorter one.
+
 ## M4b: GPU experiment
 
 - Opt-in: `--features gpu` at build time and `GB_GPU=1` at run time, Metal through wgpu. Without
