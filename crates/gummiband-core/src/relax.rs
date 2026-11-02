@@ -797,15 +797,6 @@ pub fn relax_while(
     // takes its neighbours along, everything else stays as it is
     let mut awake: Vec<bool> = geo.tracks.iter().map(|t| !t.resting).collect();
     let mut via_awake: Vec<bool> = geo.vias.iter().map(|v| !v.resting).collect();
-    // a via on a dog-bone place of a ball field stays there: between the balls and the vias next
-    // to it there is room for exactly one track in the middle of each channel
-    let pinned: Vec<bool> = {
-        let dogs = crate::patterns::dog_bones(board);
-        geo.vias
-            .iter()
-            .map(|v| v.drill > 0.0 && !v.is_pair() && dogs.iter().any(|d| d.dist(v.at) < 1e-6))
-            .collect()
-    };
     let lazy = awake.iter().chain(&via_awake).any(|a| !a);
     let via_layer: Vec<Option<LayerId>> = geo.vias.iter().map(|v| v.layer).collect();
     // per via pair the tracks that end on it (and whether with their start)
@@ -1010,7 +1001,7 @@ pub fn relax_while(
             .par_iter()
             .enumerate()
             .map_init(Sweep::default, |sweep: &mut Sweep, (vi, &(vc, vr, vn, vclr))| {
-                if !via_awake[vi] || pinned[vi] || (on_gpu_now && !starts_batch(it)) {
+                if !via_awake[vi] || (on_gpu_now && !starts_batch(it)) {
                     return vc;
                 }
                 let half = halves[vi];

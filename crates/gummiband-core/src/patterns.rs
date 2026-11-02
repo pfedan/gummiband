@@ -280,28 +280,6 @@ pub fn grids(board: &Board) -> Vec<PadGrid> {
     out
 }
 
-/// The dog-bone places of the ball fields ([`grids`]): the middle between every four balls and
-/// half a pitch outside the outer ones, each place once.
-pub fn dog_bones(board: &Board) -> Vec<Point> {
-    let mut out: Vec<Point> = Vec::new();
-    for g in grids(board) {
-        let (u, v) = (g.dir, g.dir.perp());
-        let h = g.pitch / 2.0;
-        let first = out.len();
-        for &p in &g.pins {
-            let b = board.pins[p].pos;
-            for (su, sv) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
-                let q = b + u * (su * h) + v * (sv * h);
-                // (balls a little off the lattice give the same place four times)
-                if !out[first..].iter().any(|&c| c.dist(q) < 0.1 * g.pitch) {
-                    out.push(q);
-                }
-            }
-        }
-    }
-    out
-}
-
 fn has_plane(board: &Board, net: NetId) -> bool {
     board.planes.iter().any(|p| p.net == net)
 }
