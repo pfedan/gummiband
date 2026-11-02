@@ -98,6 +98,11 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   seeds 1 to 3 (DDR5 1 to 4) KiCad errors `diff_pairs` 10 instead of 16 (no clearance errors or
   shorts left), `matching` 28 instead of 53, DDR5 151 instead of 206 (clearance and shorts 8
   instead of 44, lengths out of range 48 instead of 52), Lichtschnitzel unchanged.
+  Skew bumps without a flat top (2026-11-02): most remaining pair gap errors on DDR5 were the
+  tops of the bumps, which KiCad takes as coupled at a gap of up to 0.66 mm. As points the
+  bumps gain as much and only count as uncoupled length: DDR5 107 instead of 151 KiCad errors
+  over seeds 1 to 4 (pair gap 21 instead of 65), `diff_pairs` 5 instead of 10, `matching`
+  unchanged.
   Open: room in the router itself, phase matching near the source, carrying the pair to its
   end, the open end with pairs.
 - Rule engine: more custom rule conditions (positions, footprints, layers).
