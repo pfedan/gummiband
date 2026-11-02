@@ -30,6 +30,7 @@ only unconnected items.
 | `parts_hard` | 2 | level 3: QFN-48 with shared SPI to two devices, shared I2C with pull-ups to two more, 8 bit bus with two swaps to an edge connector, USB pair, random local nets |
 | `parts_multi` | 4 (planes) | level 4: MCU (QFN-48) and PHY (QFN-32) with a 12 net bus with swaps, SPI flash, 6 bit latch bus, I2C shared by both chips with pull-ups, three pairs, a debug header wired to both, random local nets |
 | `parts_multi_feed` | 4 (planes) | level 5: `parts_multi` with 40 scattered 0603 parts (chicken feed), half of them with a plane via |
+| `parts_xhard` | 4 (planes) | extra hard: `parts_multi_feed` on a board 25 % smaller in each direction (positions scaled, edge connectors at their edge, overlaps spread apart) |
 
 `run_suite.sh [board ...]` builds the CLI, routes every board into `boards/out/`
 one board after another (`--runs 4 --generations 1 --geometry-generations 0` with `RAYON_NUM_THREADS=4`, override with

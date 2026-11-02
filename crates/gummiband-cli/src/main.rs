@@ -179,6 +179,12 @@ enum Cmd {
         /// First seed of --placements.
         #[arg(long, default_value_t = 1)]
         placement_seed: u64,
+        /// Before the routing, parts that sit in the band of a group of tracks between two parts
+        /// (ICs, connectors sharing at least two signal nets) and are not on its nets get new
+        /// positions with `place --corridors`; everything else stays. Pairs with `--patterns
+        /// groups`. Experimental.
+        #[arg(long)]
+        clear_corridors: bool,
         /// Track width per net from a JSON file {"net name": width_mm, ...} (e.g. the widths
         /// of an existing routing, see bench/net_widths.py).
         #[arg(long)]
@@ -535,6 +541,7 @@ fn main() -> Result<()> {
             fixed,
             placements,
             placement_seed,
+            clear_corridors,
             progress,
             until_stop,
             open_via_cost,
@@ -658,6 +665,48 @@ fn main() -> Result<()> {
                     gummiband_core::pairs::apply_zdiff(&mut kb.board, z);
                 }
                 Ok(kb)
+            };
+            // parts in the corridors of track groups move out of the way first
+            let cleared_dir = std::env::temp_dir().join(format!("gummiband-corridors-{}", std::process::id()));
+            let board = if clear_corridors {
+                use gummiband_place::auto::{PlaceOptions, Scope, corridor_intruders, place_board};
+                let opts = PlaceOptions {
+                    fixed: fixed.clone(),
+                    seed: placement_seed,
+                    plane_layers: cli.plane_layers.clone(),
+                    ..Default::default()
+                };
+                let intruders = corridor_intruders(&board, &opts)?;
+                if intruders.is_empty() {
+                    println!("corridors: no part in the way");
+                    board
+                } else {
+                    println!(
+                        "corridors: {} parts in the way get new positions: {}",
+                        intruders.len(),
+                        intruders.join(" ")
+                    );
+                    let placed = place_board(
+                        &board,
+                        &PlaceOptions {
+                            scope: Scope::Only(intruders),
+                            corridors: true,
+                            ..opts
+                        },
+                    )?;
+                    std::fs::create_dir_all(&cleared_dir)?;
+                    let path = cleared_dir.join(board.file_name().unwrap_or_default());
+                    std::fs::write(&path, &placed.text)?;
+                    for ext in ["kicad_pro", "kicad_dru"] {
+                        let src = board.with_extension(ext);
+                        if src.exists() {
+                            std::fs::copy(&src, path.with_extension(ext))?;
+                        }
+                    }
+                    path
+                }
+            } else {
+                board
             };
             let input = board;
             let placed_dir = std::env::temp_dir().join(format!("gummiband-placements-{}", std::process::id()));

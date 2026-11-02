@@ -1166,18 +1166,20 @@ const CORRIDOR_WEIGHT: f64 = 2.0;
 /// Parts with at least this many pads on nets end a corridor: ICs and connectors, not passives.
 const CORRIDOR_PADS: usize = 4;
 
-/// The groups of tracks between two parts, as corridors: two parts with at least
-/// [`CORRIDOR_PADS`] pads on nets that share at least two signal nets of at most 4 pads (a pull-up
-/// on the way is part of the net). The band is as wide as the tracks of the group with their
-/// clearances.
-fn corridors(
-    d: &Design,
-    board: &Board,
-    real_nets: usize,
-    terms: &Nets,
-    fixed: &[bool],
-    part_pins: &[Vec<(usize, usize)>],
-) -> Vec<crate::anneal::Corridor> {
+/// A group of tracks between two parts: the parts, the nets and the half width of its band.
+struct TrackGroup {
+    a: usize,
+    b: usize,
+    nets: Vec<usize>,
+    radius: f64,
+    /// Parts on the nets of the group (the ends, series resistors, pull-ups).
+    on: Vec<usize>,
+}
+
+/// The groups of tracks between two parts: two parts with at least [`CORRIDOR_PADS`] pads on
+/// nets that share at least two signal nets of at most 4 pads (a pull-up on the way is part of
+/// the net). The band is as wide as the tracks of the group with their clearances.
+fn track_groups(d: &Design, board: &Board, real_nets: usize, terms: &Nets) -> Vec<TrackGroup> {
     let net_pads = |p: &crate::model::Part| p.pads.iter().filter(|x| x.net.is_some_and(|n| n < real_nets)).count();
     let ends: Vec<bool> = d.parts.iter().map(|p| net_pads(p) >= CORRIDOR_PADS).collect();
     let mut on: Vec<Vec<usize>> = vec![Vec::new(); real_nets];
@@ -1212,24 +1214,9 @@ fn corridors(
     }
     let mut out = Vec::new();
     for ((a, b), nets) in by_pair {
-        if nets.len() < 2 || (fixed[a] && fixed[b]) {
+        if nets.len() < 2 {
             continue;
         }
-        let end = |i: usize| -> Vec<Result<(usize, usize), Point>> {
-            d.parts[i]
-                .pads
-                .iter()
-                .enumerate()
-                .filter(|(_, x)| x.net.is_some_and(|n| nets.contains(&n)))
-                .map(|(k, x)| {
-                    if fixed[i] {
-                        Err(d.parts[i].pad_world(x))
-                    } else {
-                        Ok(part_pins[i][k])
-                    }
-                })
-                .collect()
-        };
         let mut width = 0.0;
         let mut clear: f64 = 0.0;
         for &n in &nets {
@@ -1240,9 +1227,49 @@ fn corridors(
             width += c.track_width + c.clearance;
             clear = clear.max(c.clearance);
         }
-        let mut exempt: Vec<usize> = Vec::new();
-        for &n in &nets {
-            for &i in &on[n] {
+        let mut parts: Vec<usize> = nets.iter().flat_map(|&n| on[n].iter().copied()).collect();
+        parts.sort_unstable();
+        parts.dedup();
+        out.push(TrackGroup {
+            a,
+            b,
+            nets,
+            radius: (width + clear) / 2.0,
+            on: parts,
+        });
+    }
+    out
+}
+
+/// The track groups as corridors of the annealer.
+fn corridors(
+    d: &Design,
+    board: &Board,
+    real_nets: usize,
+    terms: &Nets,
+    fixed: &[bool],
+    part_pins: &[Vec<(usize, usize)>],
+) -> Vec<crate::anneal::Corridor> {
+    track_groups(d, board, real_nets, terms)
+        .into_iter()
+        .map(|g| {
+            let end = |i: usize| -> Vec<Result<(usize, usize), Point>> {
+                d.parts[i]
+                    .pads
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, x)| x.net.is_some_and(|n| g.nets.contains(&n)))
+                    .map(|(k, x)| {
+                        if fixed[i] {
+                            Err(d.parts[i].pad_world(x))
+                        } else {
+                            Ok(part_pins[i][k])
+                        }
+                    })
+                    .collect()
+            };
+            let mut exempt: Vec<usize> = Vec::new();
+            for &i in &g.on {
                 if !fixed[i]
                     && let Some(&(u, _)) = part_pins[i].first()
                     && !exempt.contains(&u)
@@ -1250,15 +1277,80 @@ fn corridors(
                     exempt.push(u);
                 }
             }
+            crate::anneal::Corridor {
+                ends: [end(g.a), end(g.b)],
+                radius: g.radius,
+                exempt,
+                weight: CORRIDOR_WEIGHT,
+            }
+        })
+        .collect()
+}
+
+/// Parts that `place_board` would move (with `opts`) and that sit in the band of a track group
+/// whose nets they are not on: the parts a re-placement with [`PlaceOptions::corridors`] should
+/// take out of the way, before the routing. The ends of every group stay.
+pub fn corridor_intruders(path: &Path, opts: &PlaceOptions) -> Result<Vec<String>> {
+    let kb = read_board(
+        path,
+        &ReadOptions {
+            move_parts: true,
+            fixed: opts.fixed.clone(),
+            plane_layers: opts.plane_layers.clone(),
+            ..Default::default()
+        },
+    )?;
+    let d = Design::from_root(&kb.root);
+    let outer = kb
+        .board
+        .outline
+        .iter()
+        .max_by(|a, b| a.signed_area().abs().total_cmp(&b.signed_area().abs()))
+        .context("the board has no outline")?;
+    let Fixing { fixed, .. } = fixed_parts(&d, &kb, opts, outer)?;
+    let terms = net_terms(&d, &kb.board, outer.signed_area().abs());
+    let groups = track_groups(&d, &kb.board, d.nets.len(), &terms);
+    let mut out: Vec<String> = Vec::new();
+    for g in &groups {
+        let centre = |i: usize| {
+            let pts: Vec<Point> = d.parts[i]
+                .pads
+                .iter()
+                .filter(|x| x.net.is_some_and(|n| g.nets.contains(&n)))
+                .map(|x| d.parts[i].pad_world(x))
+                .collect();
+            let n = pts.len().max(1) as f64;
+            let s = pts.iter().fold(pt(0.0, 0.0), |s, &p| s + p);
+            pt(s.x / n, s.y / n)
+        };
+        let (a, b) = (centre(g.a), centre(g.b));
+        let ab = b - a;
+        let len = ab.x.hypot(ab.y);
+        if len < 1e-6 {
+            continue;
         }
-        out.push(crate::anneal::Corridor {
-            ends: [end(a), end(b)],
-            radius: (width + clear) / 2.0,
-            exempt,
-            weight: CORRIDOR_WEIGHT,
-        });
+        let (dx, dy) = (ab.x / len, ab.y / len);
+        for (i, p) in d.parts.iter().enumerate() {
+            if fixed[i] || g.on.contains(&i) || out.contains(&p.reference) {
+                continue;
+            }
+            let hit = p.court.iter().any(|r| {
+                let r = r.transformed_bbox(p.pos, p.rot);
+                let m = r.center();
+                let t = (m.x - a.x) * dx + (m.y - a.y) * dy;
+                let (hw, hh) = (r.w() / 2.0, r.h() / 2.0);
+                let along = hw * dx.abs() + hh * dy.abs();
+                let across = hw * dy.abs() + hh * dx.abs();
+                let off = ((m.x - a.x) * dy - (m.y - a.y) * dx).abs();
+                t > -along && t < len + along && off < g.radius + across
+            });
+            if hit {
+                out.push(p.reference.clone());
+            }
+        }
     }
-    out
+    out.sort();
+    Ok(out)
 }
 
 /// Crossings between the spanning trees of the nets (pads in their final position).
