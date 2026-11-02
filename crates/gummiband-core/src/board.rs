@@ -684,7 +684,8 @@ impl Board {
     }
 
     /// Nets with unlocked tracks within `radius` of the pins of unrouted connections, given as
-    /// "NET from PIN".
+    /// "NET from PIN": around the pin and the pins of its net, or for a plane net around the pin
+    /// only.
     pub fn nets_near_pins(&self, unrouted: &[String], radius: f64) -> Vec<String> {
         let mut out = Vec::new();
         for u in unrouted {
@@ -695,7 +696,14 @@ impl Board {
             else {
                 continue;
             };
-            let targets = self.nets[pin.net as usize].pins.iter().map(|&p| self.pins[p].pos);
+            // a pin of a plane net goes to its plane through a via next to it: the other pins of
+            // the net (all over the board) are no end of that connection
+            let to_plane = self.planes.iter().any(|p| p.net == pin.net);
+            let targets = self.nets[pin.net as usize]
+                .pins
+                .iter()
+                .filter(|_| !to_plane)
+                .map(|&p| self.pins[p].pos);
             for at in std::iter::once(pin.pos).chain(targets) {
                 for o in &self.obstacles {
                     if !o.locked
@@ -1024,5 +1032,54 @@ mod tests {
         // the outline keeps its larger margin
         assert!(!pl.takes_via(crate::geom::pt(19.5, 15.0), r));
         assert!(pl.takes_via(crate::geom::pt(19.3, 15.0), r));
+    }
+
+    /// An open connection of a plane net goes to the plane next to its pin: only the tracks
+    /// around that pin give way, not those around every other pin of the net.
+    #[test]
+    fn a_plane_net_gives_way_around_its_open_pin_only() {
+        let pt = crate::geom::pt;
+        let mut b = Board::default();
+        for (name, pins) in [("GND", vec![0, 1]), ("A", vec![]), ("B", vec![])] {
+            b.nets.push(Net {
+                name: name.into(),
+                class: 0,
+                pins,
+                planes: LayerSet::default(),
+                priority: 0,
+            });
+        }
+        for (i, at) in [pt(5.0, 5.0), pt(40.0, 40.0)].into_iter().enumerate() {
+            b.pins.push(Pin {
+                name: format!("R{i}.1"),
+                footprint: format!("R{i}"),
+                net: 0,
+                pos: at,
+                layers: LayerSet(1),
+                obstacles: vec![],
+                size: (1.0, 1.0),
+            });
+        }
+        // a track of A next to the open pin, one of B next to the far pin
+        for (net, y) in [(1, 6.0), (2, 41.0)] {
+            b.obstacles.push(Obstacle {
+                shape: Shape::Capsule {
+                    a: pt(y - 6.0, y),
+                    b: pt(y + 4.0, y),
+                    r: 0.1,
+                },
+                layers: LayerSet(1),
+                net: Some(net),
+                kind: ObstacleKind::Track,
+                hole: None,
+                clearance: 0.2,
+                pin: None,
+                locked: false,
+            });
+        }
+        let open = ["GND from R0.1".to_string()];
+        assert_eq!(b.nets_near_pins(&open, 2.0), vec!["A".to_string(), "B".to_string()]);
+        b.planes.push(Plane::new(0, 1, rect(0.0, 0.0, 50.0, 50.0)));
+        assert_eq!(b.nets_near_pins(&open, 2.0), vec!["A".to_string()]);
     }
 }
