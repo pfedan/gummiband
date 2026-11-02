@@ -15,6 +15,9 @@ pub struct ReturnVias {
     pub ground: Option<String>,
     /// Signal vias that needed one.
     pub signal_vias: usize,
+    /// Of those, the ones where the ground net has no two planes to join (a via to one plane
+    /// only carries no return current, and KiCad calls it dangling).
+    pub one_plane: usize,
     /// Of those, the ones that had a ground via (or ground hole) in reach already.
     pub had_one: usize,
     /// Vias added.
@@ -74,6 +77,21 @@ pub fn return_vias(board: &Board, geo: &mut Geometry, nets: &[NetId], reach: f64
     for vi in signal {
         let v = geo.vias[vi].clone();
         rep.signal_vias += 1;
+        let planes = |at: Point| {
+            let mut l: Vec<_> = board
+                .planes
+                .iter()
+                .filter(|p| p.net == gnd && p.covers(at))
+                .map(|p| p.layer)
+                .collect();
+            l.sort_unstable();
+            l.dedup();
+            l.len()
+        };
+        if planes(v.at) < 2 {
+            rep.one_plane += 1;
+            continue;
+        }
         let near = |p: Point| p.dist(v.at) <= reach + 1e-9;
         let has = geo.vias.iter().any(|w| w.net == gnd && w.drill > 0.0 && near(w.at))
             || ground_holes.iter().any(|&h| near(h));
@@ -104,7 +122,7 @@ pub fn return_vias(board: &Board, geo: &mut Geometry, nets: &[NetId], reach: f64
             for i in 0..16 {
                 let a = i as f64 * std::f64::consts::PI / 8.0;
                 let at = v.at + pt(a.cos(), a.sin()) * r;
-                if hole_room(at, geo) && copper.clear(gnd, &[], &[(at, dia)]) {
+                if planes(at) >= 2 && hole_room(at, geo) && copper.clear(gnd, &[], &[(at, dia)]) {
                     found = Some(at);
                     break 'search;
                 }
@@ -165,7 +183,10 @@ mod tests {
             priority: 0,
         });
         let all = Polygon::new(vec![pt(0., 0.), pt(10., 0.), pt(10., 10.), pt(0., 10.)]);
-        b.planes.push(Plane::new(1, 1, all));
+        b.planes.push(Plane::new(1, 1, all.clone()));
+        let one = return_vias(&b, &mut g, &[0], 1.0);
+        assert_eq!((one.one_plane, one.added), (1, 0), "one plane: nothing to join");
+        b.planes.push(Plane::new(1, 0, all));
         let rep = return_vias(&b, &mut g, &[0], 1.0);
         assert_eq!((rep.signal_vias, rep.added, rep.missing.len()), (1, 1, 0));
         let gv = g.vias.iter().find(|v| v.net == 1).unwrap();

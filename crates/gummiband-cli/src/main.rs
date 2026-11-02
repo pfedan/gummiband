@@ -953,9 +953,10 @@ fn main() -> Result<()> {
                 let nets = gummiband_core::returns::fast_nets(b);
                 let rep = gummiband_core::returns::return_vias(b, &mut res.geometry, &nets, reach);
                 println!(
-                    "return vias ({}): {} signal vias, {} had one, {} added, {} without room",
+                    "return vias ({}): {} signal vias, {} with one ground plane only, {} had one, {} added, {} without room",
                     rep.ground.as_deref().unwrap_or("no ground plane"),
                     rep.signal_vias,
+                    rep.one_plane,
                     rep.had_one,
                     rep.added,
                     rep.missing.len()
