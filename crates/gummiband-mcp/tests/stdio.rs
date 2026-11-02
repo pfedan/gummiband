@@ -233,8 +233,26 @@ fn initialize_list_load_route() {
     assert!(r["routed"].as_u64().unwrap() >= 1, "{r}");
     assert!(!r["nets"].as_array().unwrap().is_empty(), "{r}");
 
-    // keep_all adds to a routed board: net B joins, the tracks of A stay
+    // locked copper on a routed track of another net is a short: refused, nothing written
+    let text = std::fs::read_to_string(dir.join("tiny.routed.kicad_pcb")).unwrap();
+    let seg = &text[text.find("(segment").unwrap()..];
+    let num = |key: &str| -> (f64, f64) {
+        let at = &seg[seg.find(key).unwrap() + key.len()..];
+        let v: Vec<f64> = at.split([' ', ')']).filter_map(|t| t.parse().ok()).take(2).collect();
+        (v[0], v[1])
+    };
+    let ((ax, ay), (bx, by)) = (num("(start "), num("(end "));
     let routed = s.call("load_board", json!({"path": dir.join("tiny.routed.kicad_pcb")}));
+    let short = s.request(
+        "tools/call",
+        json!({"name": "add_locked_copper", "arguments": {"board": routed["board"],
+            "vias": [{"net": "B", "x": (ax + bx) / 2.0, "y": (ay + by) / 2.0}]}}),
+    );
+    assert_eq!(short["isError"], true, "{short}");
+    assert!(short.to_string().contains("touches A"), "{short}");
+    assert!(!dir.join("tiny.routed.prerouted.kicad_pcb").exists());
+
+    // keep_all adds to a routed board: net B joins, the tracks of A stay
     let keep_out = dir.join("tiny.kept.kicad_pcb");
     let r = s.call(
         "route",

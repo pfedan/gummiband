@@ -91,8 +91,9 @@ pub struct AddLockedOut {
     /// The working copy (<input>.prerouted.kicad_pcb); the input file stays untouched.
     pub path: String,
     pub items_added: usize,
-    /// Problems found at the points of the new copper (only those: the track between two
-    /// points is not checked): off board, touching other nets, on a plane layer.
+    /// Problems of the new copper: points off the board, tracks on a plane layer, and pieces
+    /// closer to the copper of other nets than the clearance (routed tracks included). Copper
+    /// that would touch another net is refused, and nothing is written.
     pub warnings: Vec<String>,
 }
 
@@ -1467,17 +1468,62 @@ impl Gummiband {
         };
         let b = &kb.board;
         let mut warnings = Vec::new();
-        let foreign = |at: gummiband_core::geom::Point, r: f64, layer: Option<u8>, net: u32| -> Option<String> {
-            b.obstacles
+        // all copper of the file, the routed tracks included: a new via on a track of another net
+        // is a short, whether that track is locked or not
+        let from = if work.is_file() { work.clone() } else { path.clone() };
+        let all = read_board(
+            &from,
+            &ReadOptions {
+                keep: KeepCopper::All,
+                ..Default::default()
+            },
+        )?;
+        let ab = &all.board;
+        let mut shorts = Vec::new();
+        // the nearest copper of another net to the piece a..b of radius r: (net name, gap, needed gap)
+        let foreign = |a: gummiband_core::geom::Point,
+                       bb: gummiband_core::geom::Point,
+                       r: f64,
+                       layer: Option<u8>,
+                       net: u32|
+         -> Option<(String, f64, f64)> {
+            let own = b.class_of(net).clearance.max(b.rules.min_clearance);
+            ab.obstacles
                 .iter()
-                .find(|o| {
-                    o.net.is_some_and(|n| n != net)
-                        && layer.is_none_or(|l| o.layers.has(l))
-                        && o.shape.dist_to_point(at) < r
+                .filter(|o| {
+                    o.net
+                        .is_some_and(|n| ab.nets[n as usize].name != b.nets[net as usize].name)
                 })
-                .and_then(|o| o.net)
-                .map(|n| b.nets[n as usize].name.clone())
+                .filter(|o| layer.is_none_or(|l| o.layers.has(l)))
+                // zones are filled around the new copper; pads, tracks and vias stay where they are
+                .filter(|o| {
+                    matches!(
+                        o.kind,
+                        gummiband_core::board::ObstacleKind::Pad
+                            | gummiband_core::board::ObstacleKind::Track
+                            | gummiband_core::board::ObstacleKind::Via
+                    )
+                })
+                .filter_map(|o| {
+                    let gap = o.shape.dist_to_seg(a, bb) - r;
+                    let need = own.max(o.clearance);
+                    let n = o.net?;
+                    (gap < need).then(|| (ab.nets[n as usize].name.clone(), gap, need))
+                })
+                .min_by(|x, y| x.1.total_cmp(&y.1))
         };
+        let judge =
+            |warnings: &mut Vec<String>, shorts: &mut Vec<String>, what: String, hit: Option<(String, f64, f64)>| {
+                if let Some((other, gap, need)) = hit {
+                    if gap <= 0.0 {
+                        shorts.push(format!("{what} touches {other}"));
+                    } else {
+                        warnings.push(format!(
+                            "{what} is {gap:.3} mm from {other}, the clearance asks for {need:.3} mm"
+                        ));
+                    }
+                }
+            };
         let net_of = |name: &str| b.net_id(name).with_context(|| format!("no net named {name:?}"));
         let mut items = Vec::new();
         for t in &p.tracks {
@@ -1500,9 +1546,21 @@ impl Gummiband {
                 if !b.inside(at) {
                     warnings.push(format!("track of {} leaves the board at {}, {}", t.net, q[0], q[1]));
                 }
-                if let Some(o) = foreign(at, width / 2.0, Some(layer), net) {
-                    warnings.push(format!("track of {} touches {o} at {}, {}", t.net, q[0], q[1]));
-                }
+            }
+            for w in t.points.windows(2) {
+                let (pa, pb) = (
+                    gummiband_core::geom::pt(w[0][0], w[0][1]),
+                    gummiband_core::geom::pt(w[1][0], w[1][1]),
+                );
+                judge(
+                    &mut warnings,
+                    &mut shorts,
+                    format!(
+                        "track of {} from {}, {} to {}, {}",
+                        t.net, w[0][0], w[0][1], w[1][0], w[1][1]
+                    ),
+                    foreign(pa, pb, width / 2.0, Some(layer), net),
+                );
             }
             for w in t.points.windows(2) {
                 items.push(write::Item::Track {
@@ -1521,9 +1579,12 @@ impl Gummiband {
             if !b.inside(at) {
                 warnings.push(format!("via of {} off the board at {}, {}", v.net, v.x, v.y));
             }
-            if let Some(o) = foreign(at, v.diameter.unwrap_or(c.via_diameter) / 2.0, None, net) {
-                warnings.push(format!("via of {} touches {o} at {}, {}", v.net, v.x, v.y));
-            }
+            judge(
+                &mut warnings,
+                &mut shorts,
+                format!("via of {} at {}, {}", v.net, v.x, v.y),
+                foreign(at, at, v.diameter.unwrap_or(c.via_diameter) / 2.0, None, net),
+            );
             items.push(write::Item::Via {
                 at: gummiband_core::geom::pt(v.x, v.y),
                 diameter: v.diameter.unwrap_or(c.via_diameter),
@@ -1533,6 +1594,12 @@ impl Gummiband {
         }
         if items.is_empty() {
             bail!("nothing to add");
+        }
+        if !shorts.is_empty() {
+            bail!(
+                "nothing added: the new copper would short other nets (KiCad would join them): {}",
+                shorts.join("; ")
+            );
         }
         std::fs::write(&work, write::add_locked(&kb, &items)).with_context(|| format!("writing {}", work.display()))?;
         if work != path {
