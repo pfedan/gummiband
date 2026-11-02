@@ -314,7 +314,9 @@ track and split afterwards.
    either do the ends that found no way keep the two tracks they had.
 6. Last pass: what is still open is routed around everything as single tracks.
 7. Tuning: the shorter track of a path gets 45 degree bumps on its outer side, where they fit,
-   down to `--pair-skew` or a `skew` rule.
+   down to `--pair-skew` or a `skew` rule. A bump is a point without a flat top: KiCad's DRC
+   takes a top parallel to the other track as coupled at a wider gap (`diff_pair_gap`), the two
+   slopes only count as uncoupled length.
 
 Width, gap and via gap per layer come from `diff_pair_gap` and `track_width` rules in the
 `.kicad_dru`, then the net class. `--pair-zdiff` sets the width per layer from the stackup with the

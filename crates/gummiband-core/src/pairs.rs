@@ -1640,7 +1640,9 @@ fn bumps(
     want: f64,
 ) -> (Vec<Elem>, f64) {
     let len = a.dist(b);
-    let top = 2.0 * w;
+    // a bump is a point without a flat top: no piece of it runs parallel to the other track at
+    // a wider gap (KiCad's DRC counts such a piece as coupled at the wrong gap), its two slopes
+    // count as uncoupled
     let mut from = 0.3;
     let mut cur = a;
     let mut elems = Vec::new();
@@ -1654,28 +1656,25 @@ fn bumps(
             if h < 0.02 {
                 break;
             }
-            let span = 2.0 * h + top;
+            let span = 2.0 * h;
             if from + span + 0.3 > len {
                 continue;
             }
             let p0 = a + u * from;
             let p1 = p0 + u * h + out * h;
-            let p2 = p1 + u * top;
-            let p3 = p2 + u * h - out * h;
+            let p3 = p1 + u * h - out * h;
             // around the bump: its copper and the clearance on the far side
-            let free = [(p0, p1), (p1, p2), (p2, p3)]
+            let free = [(p0, p1), (p1, p3)]
                 .iter()
                 .all(|&(x, y)| around.slack(net, x, y, w, clr, layer) >= 0.02)
-                && around.board.edge_dist(p1) >= edge
-                && around.board.edge_dist(p2) >= edge;
+                && around.board.edge_dist(p1) >= edge;
             if free {
                 elems.push(Elem::Line(cur, p0));
                 elems.push(Elem::Line(p0, p1));
-                elems.push(Elem::Line(p1, p2));
-                elems.push(Elem::Line(p2, p3));
+                elems.push(Elem::Line(p1, p3));
                 cur = p3;
                 gained += h * BUMP_GAIN;
-                from += span + 2.0 * top;
+                from += span + 4.0 * w;
                 placed = true;
                 break;
             }
