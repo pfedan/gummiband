@@ -583,6 +583,35 @@ cores against main (e92bba4), KiCad DRC:
 Next: the overlong nets of a length group, CA and CLK first (a CA/CLK skew costs more than a DQ
 one, see the JLCPCB DDR5 layout guidelines).
 
+## Skew need in the search cost
+
+A single net routed the long way round sets the aim of its whole skew group, and tuning then
+has to stretch every other net of the group towards it, often without room. `RunStats::skew_need`
+is what tuning would have to add: per skew rule (not within pairs), the mm each net lacks to the
+longest net of the rule beyond the allowed skew, track lengths only. `cost()` adds it with weight
+0.5 (`GB_SKEW_WEIGHT` sets another one), so the search prefers routes of similar length. Measured
+on 2026-11-03 in the cloud on 4 cores against main (337ff24), KiCad DRC:
+
+- DDR5 testbed, `--pairs --no-move-parts`, seeds 1 to 8: 147 instead of 155 errors, skew errors
+  73 instead of 108, every net routed. Weight 0.2 on seeds 1 to 4: skew 47 instead of 31; 1.0:
+  the same as 0.5.
+- Synthetic boards: `matching` 3 instead of 6 errors (default) and 6 instead of 12 with
+  `--pairs` (own check 0 instead of 17), every other board the same.
+
+Tried and not kept:
+
+- The skew need only in the choice among relaxed candidates, not in the search: seeds 1 to 4
+  75 errors, skew 50; the effect comes from the early choices.
+- Vias on dog-bone places pinned in the relaxation: on a copy of the testbed with the DDR
+  package 5 mm further from the connector 64 instead of 76 errors (seeds 1 to 4), on the testbed
+  itself 363 instead of 147 (seeds 1 to 8), clearance errors below the field where the
+  capacitors leave no room.
+- Room for meanders with no new clearance spot inside a ball field (the push squeezed two
+  tracks between dog-bone vias in one seed): 182 instead of 147, because in two seeds every push
+  then failed and the meanders had no room.
+- Return vias (a GND via next to every signal via that changes the reference plane): the
+  testbed has one GND plane, so they only dangled. Set aside.
+
 ## Routing order: pairs and part to part groups
 
 The first topology routes the connections in the order of `Router::plan()`: priority, then the
