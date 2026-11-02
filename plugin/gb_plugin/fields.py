@@ -12,13 +12,17 @@ class Field:
     name: str
     label: str
     tip: str
-    kind: str  # "int", "float", "check", "refs" or "file"
+    # "int", "float", "check", "refs", "file", "choice" (one of ``choices``) or "seed" (an int
+    # with a button that draws a new one)
+    kind: str
     low: float = 0
     high: float = 0
     step: float = 1
     digits: int = 2
-    # the field is greyed out unless this check box is on
+    # the field is greyed out unless this check box is on (or this number is not 0)
     requires: Optional[str] = None
+    # kind "choice": (value, label) pairs
+    choices: Tuple[Tuple[str, str], ...] = ()
 
 
 def int_field(name, label, tip, low, high, step=1) -> Field:
@@ -29,6 +33,22 @@ def float_field(name, label, tip, low, high, step, digits=2, requires=None) -> F
     return Field(name, label, tip, "float", low, high, step, digits, requires)
 
 
+def seed_field(name, label, tip, low=0, requires=None) -> Field:
+    return Field(name, label, tip, "seed", low, SEED_MAX, 1, requires=requires)
+
+
+def check(name, label, tip, requires=None) -> Field:
+    return Field(name, label, tip, "check", requires=requires)
+
+
+SEED_MAX = 2_000_000_000
+
+# The opt-in options are off because none wins on every board; a tooltip says what the option
+# does, where it helped and where it hurt in the measurements (docs/guide/options.md).
+COMPARE = ("Compare with a run without it over the same two or three seeds: results scatter a "
+           "lot from seed to seed.")
+
+
 THREADS = int_field("threads", "Worker threads:",
                     "How many cores the run may use, 0 = all. The result does not depend on it.",
                     0, 256)
@@ -37,7 +57,9 @@ PLANE_LAYERS = Field("plane_layers", "Plane layers:",
                      "They are not routed and their zones stay. Layers of KiCad type power are "
                      "planes anyway. Not remembered.", "refs")
 
-# A tab is (title, sections), a section is (title or None, fields).
+# A tab is (title, sections), a section is (title or None, fields) or (title or None, fields,
+# intro): the intro is a short text above the fields, for advice that should not hide in a
+# tooltip.
 ROUTE_TABS: Tuple = (
     ("Basic", ((None, (
         Field("keep_locked", "Keep locked tracks and vias",
@@ -84,6 +106,16 @@ ROUTE_TABS: Tuple = (
                   "Places the parts that are not locked or mechanical from the netlist this many "
                   "times, routes each result with these settings and keeps the best. Each one "
                   "costs a full route. 0 keeps the placement.", 0, 64),
+        seed_field("placement_seed", "First placement seed:",
+                   "The placements to try use this seed and the ones after it. After every run "
+                   "it moves on by the number of placements, so the next run tries placements "
+                   "it has not seen yet; the report names the seed of the winner. Placements "
+                   "differ a lot from seed to seed.", low=1, requires="placements"),
+        seed_field("seed", "Search seed:",
+                   "Seed of the routing search. The same board, settings and seed give the same "
+                   "result; another seed is another attempt, often with quite different vias "
+                   "and violations. 0 = the router's fixed seed. \"New\" draws another one: try "
+                   "two or three before you judge a setting."),
         Field("fixed", "Parts that never move:",
               "References that stay in addition, separated by commas or spaces. Not remembered.",
               "refs"),
@@ -95,6 +127,61 @@ ROUTE_TABS: Tuple = (
               "One image per generation and evolution.gif in gummiband-evolution next to the "
               "project. Needs rsvg-convert and ImageMagick.", "check"),
     )),)),
+    ("Hints", (
+        ("Routing order (all off: none wins on every board)", (
+            check("hint_groups", "Route buses between parts as blocks (groups)",
+                  "The connections between two parts with 4 or more pins that share at least two "
+                  "nets (a bus, SPI, I2C, a connector) are routed as one block in pin order, so "
+                  "they do not cross each other.\n\n"
+                  "Helps on boards with several chips: up to 23 % fewer vias on the test boards "
+                  "with an MCU, a PHY and buses, at a few percent more length.\n"
+                  "Hurts a board whose placement is final and already routes cleanly: there it "
+                  "added clearance violations.\n\n" + COMPARE),
+            Field("group_order", "Order of the blocks:",
+                  "Longest first: the default and the best order on most boards.\n"
+                  "Shortest first: best on a DDR memory fan-out, worse elsewhere (more vias, "
+                  "more violations).\n"
+                  "In place: each block keeps the place of its connections in the normal order; "
+                  "the weakest overall, for experiments.", "choice", requires="hint_groups",
+                  choices=(("long", "Longest first"), ("short", "Shortest first"),
+                           ("inline", "In place"))),
+            check("hint_pairs", "Differential pairs first (pairs)",
+                  "Differential pairs are routed before the other signals, the longest first, "
+                  "both nets next to each other.\n\n"
+                  "Helps pairs: shorter and better coupled. Together with the blocks above the "
+                  "best result on an FPGA board with many pairs (12 % fewer vias).\n"
+                  "Hurts when the pairs are few and the rest is dense: more vias and DRC errors."
+                  "\n\n" + COMPARE),
+            check("hint_decaps", "Decoupling capacitors first (decaps)",
+                  "A decoupling capacitor is connected to its IC pin before everything else, and "
+                  "the via serves both.\n\n"
+                  "Helps boards with many capacitors at their ICs (7 % on the Lichtschnitzel "
+                  "controller).\nHurts fine pitch boards without planes.\n\n" + COMPARE),
+            check("hint_rows", "Lay pin rows again in pin order (rows)",
+                  "While improving after the search, the connections of a pin row are laid "
+                  "again in pin order. Acts only with \"Keep improving\" on the Basic tab.\n\n"
+                  "A small gain on every board measured so far, but few runs.",
+                  requires="until_stop"),
+            check("hint_shares", "Neighbouring plane pins share a via (shares)",
+                  "Pins of a plane net next to each other reach the plane through one via.\n\n"
+                  "Rarely helps: the router already shares a via that lies close. Cost 70 vias "
+                  "on an FPGA board. For experiments."),
+        ), "Off by default because none wins on every board. Several chips with buses: the "
+           "blocks. FPGA or BGA with many pairs: blocks and pairs. DDR fan-out: blocks, "
+           "shortest first. A placement that already routes cleanly: leave them off. Hover "
+           "for what each did in the measurements, and compare with a plain run over the "
+           "same seeds."),
+        ("Room for buses", (
+            check("clear_corridors", "Move small parts out of the way of buses (experimental)",
+                  "Before routing, movable parts that sit in the band of a bus between two parts "
+                  "(see the blocks above) and are not on its nets get new positions next to it. "
+                  "ICs and connectors move at most 1.5 mm, decoupling capacitors stay at their IC. "
+                  "The moves arrive in the same undo step.\n\n"
+                  "Helps tight boards with several chips, together with the blocks: up to 18 % "
+                  "fewer vias and 8 % less length.\n"
+                  "Not for a board whose placement you have settled: it moves parts."),
+        ), "For tight boards with several chips, together with the blocks above."),
+    )),
     ("Advanced", (
         ("Search", (
             float_field("via_pitch", "Via grid pitch (mm):",
@@ -119,6 +206,12 @@ ROUTE_TABS: Tuple = (
                   "final run.", "check"),
         )),
         ("Result", (
+            float_field("air", "Extra air over the clearance (mm):",
+                        "The finished copper gets this reserve on top of the clearances where "
+                        "there is room: a rubber band lies right at the limit, this pushes it off "
+                        "and evens out tight bundles. A result with new violations is dropped. "
+                        "Applies with \"Keep improving\"; 0.03 is the router's value there.",
+                        0, 0.5, 0.01, digits=2, requires="until_stop"),
             Field("angles_45", "45 degree tracks (conventional look)",
                   "Turns the any-angle tracks and arcs into straight pieces in steps of 45 degrees "
                   "with chamfered corners, as a last step. Tracks get a few percent longer. It "
@@ -144,9 +237,23 @@ ROUTE_TABS: Tuple = (
             float_field("pair_zdiff", "Differential impedance (ohm):",
                         "Sets the track width per layer from the stackup, the gap stays. 0 keeps "
                         "the widths of the net class.", 0, 500, 5, requires="pairs"),
+            check("pair_all", "Also pairs without a pair rule or class",
+                  "Couples every pair recognised by name (_P/_N, +/-). Without it only pairs "
+                  "that a diff_pair_gap rule or a net class of their own marks.",
+                  requires="pairs"),
+            check("via_pairs", "Vias of a pair as one capsule (experimental)",
+                  "Two vias side by side are one via pair that turns with the wide track, "
+                  "instead of the circle around both. Helps pairs that change layers often "
+                  "(DDR5: 10 % fewer DRC errors).", requires="pairs"),
+            check("breakouts", "Single tracks into the pads (experimental)",
+                  "The wide track ends just outside the pads, two short single tracks go in, "
+                  "and their room stays free. Helps at connector rows, still worse on a DDR "
+                  "fan-out.", requires="pairs"),
             float_field("pair_pull", "Pair pull:",
                         "How strongly the two nets of a pair attract each other while routing, "
-                        "also without the wide track. 0 = off.", 0, 20, 0.1),
+                        "also without the wide track. 0 = off, 1 is a good start. The gentle way "
+                        "to couple pairs on a board that is not dense; the wide track keeps them "
+                        "closer but costs connections there.", 0, 20, 0.1),
         )),
     )),
 )
@@ -164,10 +271,36 @@ PLACE_TABS: Tuple = (
         float_field("halo", "Room around ICs (mm):",
                     "Extra room around parts with five or more pads, for their escape.",
                     0, 5, 0.05),
-        int_field("seed", "Seed:",
-                  "First seed, the parallel runs count up from it. Placements differ a lot from "
-                  "seed to seed: for another attempt, change it.", 0, 2_000_000_000),
+        seed_field("seed", "Seed:",
+                   "First seed, the parallel runs count up from it. Placements differ a lot "
+                   "from seed to seed: for another attempt, press \"New\". A good seed is "
+                   "often worth more than any other option."),
     )),)),
+    ("Strategy", ((None, (
+        check("semantic", "Use the schematic",
+              "Beyond the netlist: parts of a sheet and clusters around an IC stay together, an "
+              "inductor sits at the switch pins of its converter, decoupling capacitors prefer "
+              "an IC of their own sheet, current paths count their full length.\n\n"
+              "Helps boards with power stages and several sheets: with the two options below "
+              "the cleanest placements of the Lichtschnitzel controller (no clearance error in 9 "
+              "runs, 12 % shorter)."),
+        check("corridors", "Keep bands free for buses (experimental)",
+              "Two parts with 4 or more pads that share at least two signal nets (a bus, SPI, "
+              "I2C) get a free band between them: other parts in it pay for the area they cover."
+              "\n\nHelps boards with several chips: fewer vias. Route the result with "
+              "\"Route buses between parts as blocks\"."),
+        check("escape_halo", "Room for the escape per side (experimental)",
+              "Instead of the same room all round, each side of a part with five or more pads "
+              "gets as much as the tracks leaving it need (at most 3 mm), and the room setting "
+              "is not used for it.\n\n"
+              "Helps tightly packed ICs: no more missed connections next to them, at about 15 % "
+              "more length."),
+        float_field("leash", "Leash for ICs and connectors (mm):",
+                    "Parts with 4 or more pads stay within this distance of where they sit: a "
+                    "local change instead of a new placement, for example with \"Selected parts\". "
+                    "0 = free.", 0, 50, 0.5, digits=1),
+    ), "For a placement from scratch, the first three together gave the cleanest results. "
+       "Try two or three seeds and route each: a good seed is worth more than any option."),)),
     ("Advanced", ((None, (
         Field("free", "Release (references):",
               "Parts that may move although they count as mechanical, separated by commas or "
@@ -184,4 +317,4 @@ PLACE_TABS: Tuple = (
 
 
 def all_fields(tabs) -> list:
-    return [f for _title, sections in tabs for _heading, group in sections for f in group]
+    return [f for _title, sections in tabs for section in sections for f in section[1]]

@@ -33,7 +33,14 @@ copy. To change one net on a routed board: load the routed file -> route with ke
 reroute (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short), add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Good practice around routing (the prompt good_practice walks through a whole board): \
 power_plan before routing (currents -> widths, planes, vias; apply stores the widths), \
 current_check after routing (narrowest cross-section of every current path), ground_pour (GND \
-pours and stitching vias), then drc. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
+pours and stitching vias), then drc. Opt-in options (route patterns, clear_corridors, \
+pairs, place_parts semantic, corridors, escape_halo, leash) are off because none wins on every board; \
+results scatter strongly between seeds, so compare a setting with the plain run over the same 2 or 3 \
+seeds (mean and worst, judged by drc). Rough guide: several chips with buses -> patterns groups, on a \
+tight board also clear_corridors, or track_corridors and place_parts only + corridors + leash 1.5 to \
+decide yourself; FPGA/BGA with pairs -> pairs,groups; DDR -> groups-short; a fixed placement that \
+already routes cleanly -> no hints, try seeds and open_end_seconds; placement from scratch -> \
+place_parts semantic + corridors + escape_halo over a few seeds. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
 Routing is CPU heavy (seconds to minutes); routes run one at a time.";
 
 // ------------------------------------------------------------------------------ session
@@ -444,6 +451,44 @@ pub struct PlacePartsIn {
     /// Experimental: room for the escape per side of a part with five or more pads, from its
     /// signal pins on that side, instead of the same halo all round. Default false.
     pub escape_halo: Option<bool>,
+    /// Parts with 4 or more pads (ICs, connectors) stay within this many mm of where they sit
+    /// (default 0: free). A local change instead of a new placement: with `only` and
+    /// `corridors` it moves the parts that track_corridors lists out of a band while the ICs
+    /// keep their place; route's clear_corridors uses 1.5.
+    pub leash: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrackCorridorsIn {
+    /// Board id from load_board.
+    pub board: String,
+    /// References that count as fixed in addition to the locked and mechanical parts: they are
+    /// never listed as in the way.
+    #[serde(default)]
+    pub fixed: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CorridorOut {
+    /// References of the two parts the group of tracks connects.
+    pub a: String,
+    pub b: String,
+    /// The signal nets of the group.
+    pub nets: Vec<String>,
+    /// Width of the band in mm: the tracks of the group with their clearances.
+    pub width_mm: f64,
+    /// Length of the band in mm, between the pads of the group on the two parts.
+    pub length_mm: f64,
+    /// Movable parts in the band that are not on its nets.
+    pub in_the_way: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TrackCorridorsOut {
+    pub corridors: Vec<CorridorOut>,
+    /// Every part in the way of some band, once: what route with clear_corridors would place
+    /// again.
+    pub in_the_way: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -586,10 +631,26 @@ pub struct RouteIn {
     pub pair_via_pairs: Option<bool>,
     /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
     pub layer_dirs: Option<f64>,
-    /// Hints from the local patterns of board_patterns, comma separated: shares, decaps, rows,
-    /// pairs (differential pairs first), groups (part to part connections as one block), all or
-    /// none (default none), as `gummiband route --patterns`.
+    /// Hints from the local patterns of board_patterns, comma separated (default none), as
+    /// `gummiband route --patterns`. All are opt-in because none wins on every board:
+    /// `groups` (connections between two chips or a chip and a connector as one block in pin
+    /// order, the longest block first; `groups-short` shortest first, `groups-inline` blocks in
+    /// place) saves vias on boards with several chips and buses; `pairs` (differential pairs
+    /// first, longest first) couples pairs better at a few vias; `pairs,groups` was best on an
+    /// FPGA board; `groups-short` suited a DDR fan-out; `decaps` (a decoupling capacitor to its IC
+    /// pin first) helps boards with many decaps on one side; `rows` (the open end re-lays pin
+    /// rows in pin order) only acts with open_end_seconds; `shares` (neighbouring plane pins
+    /// share a via) usually costs vias. On a board whose placement is final and already
+    /// routes cleanly, hints rarely help. `all` or `none`.
     pub patterns: Option<String>,
+    /// Experimental: before routing, movable parts that sit in the band of a group of tracks
+    /// between two parts (see track_corridors) and are not on its nets are placed again around
+    /// it, ICs and connectors at most 1.5 mm from where they sit; decoupling capacitors stay.
+    /// The result goes into the working copy <input>.prerouted.kicad_pcb, and the route uses it
+    /// (`board` of the result). Pairs with patterns groups; it gives most on tight boards with
+    /// several chips. To decide yourself what moves, use track_corridors and place_parts
+    /// instead. Not with keep_all.
+    pub clear_corridors: Option<bool>,
     /// Generations of the evolutionary order search after the portfolio (default 3).
     pub generations: Option<usize>,
     /// Generations that select by clearance violations after the geometry step (default 3, as
@@ -988,6 +1049,8 @@ pub struct RouteOut {
     pub length_tuning: Vec<TunedOut>,
     /// The length, skew, uncoupled and gap rules of the .kicad_dru after the tuning.
     pub length_rules: Vec<LengthRuleOut>,
+    /// With clear_corridors: the parts that were placed again before the routing.
+    pub cleared_corridors: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1761,6 +1824,80 @@ impl Gummiband {
         Ok((msg, out))
     }
 
+    /// The file a placement starts from: the working copy if there is one.
+    fn current_file(&self, board: &str) -> Result<PathBuf> {
+        let path = self.with_entry(board, |e| Ok(e.path.clone()))?;
+        let work = Self::working_copy(&path);
+        Ok(if work.is_file() { work } else { path })
+    }
+
+    fn corridors_of(&self, p: TrackCorridorsIn) -> Result<(String, TrackCorridorsOut)> {
+        use gummiband_place::auto::{PlaceOptions, corridor_groups};
+        let from = self.current_file(&p.board)?;
+        let opts = PlaceOptions {
+            fixed: p.fixed.clone(),
+            ..Default::default()
+        };
+        let groups = corridor_groups(&from, &opts)?;
+        let mut all: Vec<String> = groups.iter().flat_map(|g| g.intruders.iter().cloned()).collect();
+        all.sort();
+        all.dedup();
+        let mut text = format!("{} track corridors, {} parts in the way", groups.len(), all.len());
+        for g in &groups {
+            text += &format!(
+                "\n{} - {}: {} nets, {:.1} x {:.1} mm, in the way: {}",
+                g.a,
+                g.b,
+                g.nets.len(),
+                g.length,
+                g.width,
+                if g.intruders.is_empty() {
+                    "none".to_string()
+                } else {
+                    g.intruders.join(" ")
+                }
+            );
+        }
+        let out = TrackCorridorsOut {
+            corridors: groups
+                .into_iter()
+                .map(|g| CorridorOut {
+                    a: g.a,
+                    b: g.b,
+                    nets: g.nets,
+                    width_mm: g.width,
+                    length_mm: g.length,
+                    in_the_way: g.intruders,
+                })
+                .collect(),
+            in_the_way: all,
+        };
+        Ok((text, out))
+    }
+
+    /// `route --clear-corridors`: place the parts in the way of a track corridor again, into
+    /// the working copy. Returns the board id to route and the parts that moved.
+    fn clear_corridors(&self, board: &str, fixed: Vec<String>) -> Result<(String, Vec<String>)> {
+        use gummiband_place::auto::{CLEAR_CORRIDORS_LEASH, PlaceOptions, Scope, corridor_intruders, place_board};
+        let from = self.current_file(board)?;
+        let opts = PlaceOptions {
+            fixed,
+            ..Default::default()
+        };
+        let intruders = corridor_intruders(&from, &opts)?;
+        if intruders.is_empty() {
+            return Ok((board.to_string(), intruders));
+        }
+        let place = PlaceOptions {
+            scope: Scope::Only(intruders.clone()),
+            corridors: true,
+            leash: CLEAR_CORRIDORS_LEASH,
+            ..opts
+        };
+        let (id, _) = self.edit_copy(board, |_, _| Ok(place_board(&from, &place)?.text))?;
+        Ok((id, intruders))
+    }
+
     fn do_place_parts(&self, p: PlacePartsIn) -> Result<(String, PlacePartsOut)> {
         use gummiband_place::auto::{PlaceOptions, Scope, place_board};
         let scope = if !p.only.is_empty() {
@@ -1784,6 +1921,7 @@ impl Gummiband {
             semantic: p.semantic.unwrap_or(false),
             corridors: p.corridors.unwrap_or(false),
             escape_halo: p.escape_halo.unwrap_or(false),
+            leash: p.leash.unwrap_or(defaults.leash),
             ..defaults
         };
         let path = self.with_entry(&p.board, |e| Ok(e.path.clone()))?;
@@ -2351,6 +2489,7 @@ fn route_blocking(
         .collect();
     let st = &res.stats;
     let out = RouteOut {
+        cleared_corridors: Vec::new(),
         moved,
         angles_45,
         length_tuning,
@@ -2660,6 +2799,19 @@ impl Gummiband {
     }
 
     #[tool(
+        description = "Groups of tracks between two parts (ICs and connectors sharing at least two short signal nets: a bus, SPI, I2C, a parallel interface) with the band they need and the movable parts that sit in it without being on its nets. Nothing moves: decide yourself, e.g. place_parts with only = some of in_the_way, corridors true and leash 1.5, then route with patterns groups. Decoupling capacitors and the parts on the group's nets are never listed. route with clear_corridors does the same for every listed part at once.",
+        output_schema = schema_for_output::<TrackCorridorsOut>(),
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn track_corridors(&self, Parameters(p): Parameters<TrackCorridorsIn>) -> Result<CallToolResult, ErrorData> {
+        let me = self.clone();
+        match blocking(move || me.corridors_of(p)).await {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
         description = "Pads (name, net, position, size, layers), courtyard and neighbouring parts of one footprint. Use it to plan a pre-routed layout, for example a datasheet recommendation, around a critical part.",
         output_schema = schema_for_output::<PartInfoOut>(),
         annotations(read_only_hint = true, open_world_hint = false)
@@ -2740,8 +2892,23 @@ impl Gummiband {
         output_schema = schema_for_output::<RouteOut>(),
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
-    async fn route(&self, Parameters(p): Parameters<RouteIn>) -> Result<CallToolResult, ErrorData> {
+    async fn route(&self, Parameters(mut p): Parameters<RouteIn>) -> Result<CallToolResult, ErrorData> {
         let _guard = self.route_lock.lock().await;
+        let mut cleared = Vec::new();
+        if p.clear_corridors == Some(true) {
+            if p.keep_all == Some(true) {
+                return fail("clear_corridors places parts before routing the whole board: not with keep_all");
+            }
+            let me = self.clone();
+            let (board, fixed) = (p.board.clone(), p.fixed.clone());
+            match blocking(move || me.clear_corridors(&board, fixed)).await {
+                Ok((id, moved)) => {
+                    p.board = id;
+                    cleared = moved;
+                }
+                Err(e) => return fail(format!("{e:#}")),
+            }
+        }
         let keep =
             |e: &mut Entry| -> Result<_> { Ok((e.path.clone(), e.kb.clone(), e.options.clone(), e.keep_locked)) };
         let (path, kb, options, loaded_keep) = match self.with_entry(&p.board, keep) {
@@ -2773,7 +2940,13 @@ impl Gummiband {
         })
         .await;
         match res {
-            Ok((s, out)) => ok(s, &out),
+            Ok((mut s, mut out)) => {
+                if !cleared.is_empty() {
+                    s = format!("placed again out of the track corridors: {}\n{s}", cleared.join(" "));
+                }
+                out.cleared_corridors = cleared;
+                ok(s, &out)
+            }
             Err(e) => fail(format!("{e:#}")),
         }
     }

@@ -31,6 +31,7 @@ except ImportError:  # e.g. Linux system Python without wxPython: run with defau
 TITLE = "Route with Gummiband"
 API_TIMEOUT_MS = 120_000  # creating thousands of items in one commit takes a while
 TEARDROP_ACTION = "pcbnew.GlobalEdit.editTeardrops"
+INTRO_WIDTH = 520  # pixels: the advice above a section wraps at this width
 
 
 # User interface ----------------------------------------------------------------------------
@@ -66,6 +67,8 @@ class OptionForm:
     def __init__(self, dlg, tabs, opts, header=None):
         self.fields = fields.all_fields(tabs)
         self.controls = {}
+        self.labels = {}
+        self.buttons = {}
         self.book = wx.Notebook(dlg)
         self.pages = []
         for i, (title, sections) in enumerate(tabs):
@@ -75,11 +78,16 @@ class OptionForm:
             box = wx.BoxSizer(wx.VERTICAL)
             if i == 0 and header is not None:
                 header(page, box)
-            for heading, group in sections:
+            for heading, group, *intro in sections:
                 if heading is None:
+                    for text in intro:
+                        box.Add(self.intro(page, text), 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
                     box.Add(self.grid(page, group), 0, wx.ALL | wx.EXPAND, 12)
                     continue
                 frame = wx.StaticBoxSizer(wx.VERTICAL, page, heading)
+                for text in intro:
+                    frame.Add(self.intro(frame.GetStaticBox(), text), 0,
+                              wx.LEFT | wx.RIGHT | wx.TOP, 8)
                 frame.Add(self.grid(frame.GetStaticBox(), group), 0, wx.ALL | wx.EXPAND, 8)
                 box.Add(frame, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.EXPAND, 8)
             box.AddSpacer(8)
@@ -90,6 +98,14 @@ class OptionForm:
             self.book.AddPage(page, title)
             self.pages.append(page)
         self.set_values(opts)
+
+    @staticmethod
+    def intro(parent, text: str):
+        """Advice above the fields of a section, a little smaller than the labels."""
+        label = wx.StaticText(parent, label=text)
+        label.SetFont(label.GetFont().Smaller())
+        label.Wrap(INTRO_WIDTH)
+        return label
 
     def grid(self, parent, group):
         grid = wx.GridBagSizer(8, 12)
@@ -102,15 +118,36 @@ class OptionForm:
                 continue
             label = wx.StaticText(parent, label=f.label)
             label.SetToolTip(f.tip)
+            self.labels[f.name] = label
             grid.Add(label, (row, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-            grid.Add(ctrl, (row, 1), flag=wx.EXPAND)
+            if f.kind == "seed":
+                grid.Add(self.with_new_button(parent, ctrl, f), (row, 1), flag=wx.EXPAND)
+            else:
+                grid.Add(ctrl, (row, 1), flag=wx.EXPAND)
         grid.AddGrowableCol(1)
         return grid
 
+    def with_new_button(self, parent, ctrl, f: fields.Field):
+        """A seed field with a button that draws another seed: another attempt."""
+        new = wx.Button(parent, label="New", style=wx.BU_EXACTFIT)
+        new.SetToolTip("Draw another seed: another attempt with the same settings.")
+        new.Bind(wx.EVT_BUTTON, lambda _event: ctrl.SetValue(runner.random_seed()))
+        self.buttons[f.name] = new
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
+        row.Add(new, 0, wx.LEFT | wx.ALIGN_CENTER_VERTICAL, 6)
+        return row
+
     def control(self, parent, f: fields.Field):
-        if f.kind == "int":
+        if f.kind in ("int", "seed"):
             ctrl = wx.SpinCtrl(parent, min=int(f.low), max=int(f.high))
             ctrl.SetIncrement(int(f.step))
+            # a number can switch other fields on, as "placements" does for its seed
+            ctrl.Bind(wx.EVT_SPINCTRL, lambda _event: self.update_enabled())
+            return ctrl
+        if f.kind == "choice":
+            ctrl = wx.Choice(parent, choices=[label for _value, label in f.choices])
+            ctrl.SetToolTip(f.tip)
             return ctrl
         if f.kind == "float":
             ctrl = wx.SpinCtrlDouble(parent, min=f.low, max=f.high, inc=f.step)
@@ -132,6 +169,9 @@ class OptionForm:
                 ctrl.SetValue(", ".join(value or []))
             elif f.kind == "file":
                 ctrl.SetPath(value or "")
+            elif f.kind == "choice":
+                keys = [v for v, _label in f.choices]
+                ctrl.SetSelection(keys.index(value) if value in keys else 0)
             else:
                 ctrl.SetValue(value)
         self.update_enabled()
@@ -144,6 +184,8 @@ class OptionForm:
                 out[f.name] = runner.parse_references(ctrl.GetValue()) or None
             elif f.kind == "file":
                 out[f.name] = ctrl.GetPath() or None
+            elif f.kind == "choice":
+                out[f.name] = f.choices[max(ctrl.GetSelection(), 0)][0]
             else:
                 out[f.name] = ctrl.GetValue()
         return out
@@ -151,7 +193,10 @@ class OptionForm:
     def update_enabled(self):
         for f in self.fields:
             if f.requires is not None:
-                self.controls[f.name].Enable(self.controls[f.requires].GetValue())
+                on = bool(self.controls[f.requires].GetValue())
+                for widget in (self.controls, self.labels, self.buttons):
+                    if f.name in widget:
+                        widget[f.name].Enable(on)
 
 
 def options_dialog(title: str, tabs, opts, factory, note: str, header=None):
@@ -433,7 +478,8 @@ def save_copy(board, folder: Path) -> Path:
 
 
 def report(plan: bf.ImportPlan, applied, res: runner.RouteResult,
-           moves: Optional[bf.PartMoves] = None) -> str:
+           moves: Optional[bf.PartMoves] = None,
+           opts: Optional[runner.RouteOptions] = None) -> str:
     lines = [
         f"Removed: {bf.format_counts(applied.removed)}",
         f"Created: {bf.format_counts(applied.created)}",
@@ -455,6 +501,17 @@ def report(plan: bf.ImportPlan, applied, res: runner.RouteResult,
     viol = res.violations()
     if viol:
         lines.append(f"Clearance check of the router: {viol} violations (run DRC)")
+    cleared = res.cleared_corridors()
+    if cleared:
+        lines.append(f"Moved out of the way of buses: {' '.join(cleared)}")
+    if opts is not None and opts.placements:
+        won = res.placement_seed()
+        upcoming = runner.next_placement_seed(opts).placement_seed
+        lines.append((f"Best placement: seed {won}. " if won is not None else "")
+                     + f"The next run starts at seed {upcoming}.")
+    if opts is not None:
+        lines.append(f"Search seed {opts.seed}" if opts.seed else
+                     "Search seed: the router's fixed one. Another seed is another attempt.")
     unrouted = res.unrouted()
     if unrouted:
         lines.append(f"Unrouted ({len(unrouted)}{'+' if len(unrouted) >= 40 else ''}):")
@@ -514,7 +571,8 @@ def main() -> int:
         **saved))
     if opts is None:
         return 0
-    runner.save_options("route", opts, runner.ROUTE_SAVED)
+    # the next run tries placements this one has not seen
+    runner.save_options("route", runner.next_placement_seed(opts), runner.ROUTE_SAVED)
 
     work = Path(tempfile.mkdtemp(prefix="gummiband-"))
     try:
@@ -531,7 +589,8 @@ def main() -> int:
             out = Path(chosen)
         before, after = src.read_text(encoding="utf-8"), out.read_text(encoding="utf-8")
         plan = bf.plan_from_texts(before, after, opts.keep_locked)
-        moves = bf.plan_moves(before, after) if opts.move_parts or opts.placements else None
+        moves = (bf.plan_moves(before, after)
+                 if opts.move_parts or opts.placements or opts.clear_corridors else None)
         zones = []
         if opts.placements:
             zones = json.loads(report_file.read_text(encoding="utf-8"))["placement"]["zones"]
@@ -546,7 +605,7 @@ def main() -> int:
         ui.error(f"Routing failed:\n\n{traceback.format_exc()}\nFiles kept in {work}")
         return 1
     shutil.rmtree(work, ignore_errors=True)
-    ui.info(report(plan, applied, res, moves))
+    ui.info(report(plan, applied, res, moves, opts))
     if opts.teardrops:
         open_teardrops(kicad)
     return 0

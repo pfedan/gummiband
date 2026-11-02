@@ -1294,12 +1294,45 @@ fn corridors(
         .collect()
 }
 
+/// How far `route --clear-corridors` lets an IC or connector move from where it sits (mm), see
+/// [`PlaceOptions::leash`].
+pub const CLEAR_CORRIDORS_LEASH: f64 = 1.5;
+
+/// A group of tracks between two parts and the parts in its band, see [`corridor_groups`].
+#[derive(Debug, Clone)]
+pub struct CorridorGroup {
+    /// References of the two parts the group connects.
+    pub a: String,
+    pub b: String,
+    /// The signal nets of the group.
+    pub nets: Vec<String>,
+    /// Width of the band in mm: the tracks of the group with their clearances.
+    pub width: f64,
+    /// Length of the band in mm, between the centres of the group's pads on the two parts.
+    pub length: f64,
+    /// Parts that `place_board` would move and that sit in the band without being on its nets.
+    pub intruders: Vec<String>,
+}
+
 /// Parts that `place_board` would move (with `opts`) and that sit in the band of a track group
 /// whose nets they are not on: the parts a re-placement with [`PlaceOptions::corridors`] should
 /// take out of the way, before the routing. The ends of every group stay, and so do decoupling
 /// capacitors (a capacitor on a ground or a supply, or two pads both on supply nets): they belong
 /// at their IC pin.
 pub fn corridor_intruders(path: &Path, opts: &PlaceOptions) -> Result<Vec<String>> {
+    let mut out: Vec<String> = corridor_groups(path, opts)?
+        .into_iter()
+        .flat_map(|g| g.intruders)
+        .collect();
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// The groups of tracks between two parts (parts with 4 or more pads sharing 2 or more short
+/// signal nets: a bus, SPI, I2C) with the parts in their band, as [`corridor_intruders`] sees
+/// them. Nothing moves: for an agent or a front end that decides itself what to place again.
+pub fn corridor_groups(path: &Path, opts: &PlaceOptions) -> Result<Vec<CorridorGroup>> {
     let kb = read_board(
         path,
         &ReadOptions {
@@ -1339,7 +1372,7 @@ pub fn corridor_intruders(path: &Path, opts: &PlaceOptions) -> Result<Vec<String
         let cap = p.reference.starts_with('C') && p.reference[1..].starts_with(|c: char| c.is_ascii_digit());
         (p.pads.len() == 2 && p.pads.iter().all(|x| on(x, &supply))) || (cap && p.pads.iter().any(|x| on(x, &supply)))
     };
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<CorridorGroup> = Vec::new();
     for g in &groups {
         let centre = |i: usize| {
             let pts: Vec<Point> = d.parts[i]
@@ -1359,8 +1392,9 @@ pub fn corridor_intruders(path: &Path, opts: &PlaceOptions) -> Result<Vec<String
             continue;
         }
         let (dx, dy) = (ab.x / len, ab.y / len);
+        let mut intruders: Vec<String> = Vec::new();
         for (i, p) in d.parts.iter().enumerate() {
-            if fixed[i] || g.on.contains(&i) || stays(p) || out.contains(&p.reference) {
+            if fixed[i] || g.on.contains(&i) || stays(p) {
                 continue;
             }
             let hit = p.court.iter().any(|r| {
@@ -1374,11 +1408,21 @@ pub fn corridor_intruders(path: &Path, opts: &PlaceOptions) -> Result<Vec<String
                 t > -along && t < len + along && off < g.radius + across
             });
             if hit {
-                out.push(p.reference.clone());
+                intruders.push(p.reference.clone());
             }
         }
+        intruders.sort();
+        let mut nets: Vec<String> = g.nets.iter().map(|&n| d.nets[n].clone()).collect();
+        nets.sort();
+        out.push(CorridorGroup {
+            a: d.parts[g.a].reference.clone(),
+            b: d.parts[g.b].reference.clone(),
+            nets,
+            width: 2.0 * g.radius,
+            length: len,
+            intruders,
+        });
     }
-    out.sort();
     Ok(out)
 }
 

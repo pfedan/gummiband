@@ -159,7 +159,8 @@ fn initialize_list_load_route() {
             "power_plan",
             "render",
             "route",
-            "set_net_options"
+            "set_net_options",
+            "track_corridors"
         ]
     );
     for t in tools["tools"].as_array().unwrap() {
@@ -597,5 +598,75 @@ fn create_board_from_a_netlist() {
     let text = std::fs::read_to_string(&pcb).unwrap();
     assert!(text.contains("(property \"LCSC\" \"C25804\""));
     assert!(text.contains("(path \"/1111\")"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn track_corridors_list_the_parts_in_the_way() {
+    let dir = std::env::temp_dir().join(format!("gummiband-mcp-corridors-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let bench = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/boards");
+    for ext in ["kicad_pcb", "kicad_pro", "kicad_dru"] {
+        std::fs::copy(bench.join(format!("parts_xhard.{ext}")), dir.join(format!("x.{ext}"))).unwrap();
+    }
+    let mut s = Server::start();
+    s.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}),
+    );
+    s.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    let pcb = dir.join("x.kicad_pcb");
+    let before = std::fs::read_to_string(&pcb).unwrap();
+    s.call("load_board", json!({"path": pcb.display().to_string()}));
+
+    let c = s.call("track_corridors", json!({"board": "b1"}));
+    let all: Vec<&str> = c["in_the_way"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    // the same parts as `gummiband route --clear-corridors` on this board
+    assert_eq!(
+        all,
+        [
+            "F10", "F11", "F12", "F14", "F2", "F32", "F33", "F37", "F38", "F39", "R13"
+        ],
+        "{c}"
+    );
+    let corridors = c["corridors"].as_array().unwrap();
+    assert!(!corridors.is_empty());
+    for g in corridors {
+        assert!(g["nets"].as_array().unwrap().len() >= 2, "{g}");
+        assert!(g["width_mm"].as_f64().unwrap() > 0.0, "{g}");
+        assert!(g["length_mm"].as_f64().unwrap() > 0.0, "{g}");
+    }
+    // only listed, nothing moved
+    assert_eq!(std::fs::read_to_string(&pcb).unwrap(), before);
+    assert!(!dir.join("x.prerouted.kicad_pcb").exists());
+
+    // a part named fixed is never in the way
+    let c = s.call("track_corridors", json!({"board": "b1", "fixed": ["R13"]}));
+    assert!(!c["in_the_way"].as_array().unwrap().iter().any(|v| v == "R13"), "{c}");
+
+    // the agent moves some of them itself, with a short leash
+    let placed = s.call(
+        "place_parts",
+        json!({"board": "b1", "only": ["F10", "F11"], "corridors": true, "leash": 1.5}),
+    );
+    let moved: Vec<&str> = placed["placed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["reference"].as_str().unwrap())
+        .collect();
+    assert_eq!(moved, ["F10", "F11"], "{placed}");
+
+    let err = s.call_err(
+        "route",
+        json!({"board": "b1", "clear_corridors": true, "keep_all": true}),
+    );
+    assert!(err.contains("not with keep_all"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }

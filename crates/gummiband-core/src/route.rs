@@ -126,8 +126,15 @@ impl RouterConfig {
         self.decaps_first = hints.contains(&"decaps");
         self.row_moves = if hints.contains(&"rows") { 0.15 } else { 0.0 };
         self.pairs_first = hints.contains(&"pairs");
-        // the place of the groups is an experiment: `GB_GROUP_ORDER` = long (default), short, inline
-        self.groups = if hints.contains(&"groups") {
+        // `groups-short` and `groups-inline` pick the place of the blocks; plain `groups` is long,
+        // unless `GB_GROUP_ORDER` (short, inline) says otherwise, as in earlier measurements
+        self.groups = if hints.contains(&"groups-short") {
+            GroupOrder::Short
+        } else if hints.contains(&"groups-inline") {
+            GroupOrder::Inline
+        } else if hints.contains(&"groups-long") {
+            GroupOrder::Long
+        } else if hints.contains(&"groups") {
             match std::env::var("GB_GROUP_ORDER").as_deref() {
                 Ok("short") => GroupOrder::Short,
                 Ok("inline") => GroupOrder::Inline,

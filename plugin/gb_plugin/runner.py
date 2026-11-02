@@ -7,15 +7,17 @@ import os
 import re
 import shutil
 import subprocess
+import random
 import tempfile
 import threading
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import MISSING, dataclass, fields, replace
 from pathlib import Path
 from typing import Callable, List, Mapping, Optional, Sequence, Tuple
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 SETTINGS_FILE = PLUGIN_DIR / "settings.json"
 ENV_VAR = "GUMMIBAND_BIN"
+SEED_MAX = 2_000_000_000
 
 # KiCad started from the macOS Finder gets a minimal PATH; look in the usual places too.
 EXTRA_DIRS = ("~/.cargo/bin", "/opt/homebrew/bin", "/usr/local/bin")
@@ -70,6 +72,26 @@ class RouteOptions:
     gpu: bool = False  # sets GB_GPU for the router, needs a binary built with the gpu feature
     # turn the result into conventional 45 degree routing as a last step
     angles_45: bool = False
+    # seed of the search, 0 = the router's fixed seed
+    seed: int = 0
+    # first seed of the placements to try; moves on after every run
+    placement_seed: int = 1
+    # routing order hints (--patterns), all off: none wins on every board
+    hint_groups: bool = False
+    group_order: str = "long"  # "long", "short" or "inline"
+    hint_pairs: bool = False
+    hint_decaps: bool = False
+    hint_rows: bool = False
+    hint_shares: bool = False
+    # place the parts in the way of a bus again before routing
+    clear_corridors: bool = False
+    # with pairs: every pair recognised by name, vias side by side as a capsule, single tracks
+    # into the pads
+    pair_all: bool = False
+    via_pairs: bool = False
+    breakouts: bool = False
+    # reserve over the clearances with the open end, the router's default there
+    air: float = 0.03
 
 
 @dataclass
@@ -83,6 +105,10 @@ class PlaceOptions:
     starts: int = 1  # the crossings hardly predict the routed result: change the seed instead
     gap: float = 0.3
     halo: float = 0.3
+    semantic: bool = False  # sheets, IC clusters, converters and current paths
+    corridors: bool = False  # free bands for the buses between two parts
+    escape_halo: bool = False  # room per side from the pins instead of the halo
+    leash: float = 0.0  # parts with 4 or more pads stay this close to where they sit, 0 = free
     # the defaults of the advanced options are those of the command line
     seed: int = 1
     iters: int = 3_000_000
@@ -97,8 +123,11 @@ class PlaceOptions:
 ROUTE_SAVED = ("keep_locked", "runs", "via_cost", "geometry_generations", "animate", "move_parts", "placements",
                "teardrops", "generations", "via_pitch", "layer_dirs", "via_pass", "negotiate", "threads", "pairs", "pair_pull",
                "pair_skew", "pair_zdiff", "until_stop", "open_via_cost", "prefer_width", "gpu",
-               "angles_45")
-PLACE_SAVED = ("starts", "gap", "halo", "seed", "iters", "margin", "threads")
+               "angles_45", "seed", "placement_seed", "hint_groups", "group_order", "hint_pairs",
+               "hint_decaps", "hint_rows", "hint_shares", "clear_corridors", "pair_all",
+               "via_pairs", "breakouts", "air")
+PLACE_SAVED = ("starts", "gap", "halo", "seed", "iters", "margin", "threads", "semantic",
+               "corridors", "escape_halo", "leash")
 
 # Options of the command line that are left out at their default value.
 ROUTE_FLAGS = (("generations", "--generations"), ("via_pitch", "--via-pitch"),
@@ -106,7 +135,13 @@ ROUTE_FLAGS = (("generations", "--generations"), ("via_pitch", "--via-pitch"),
                ("negotiate", "--negotiate"), ("pair_pull", "--pair-pull"),
                ("placements", "--placements"), ("prefer_width", "--prefer-width"))
 PAIR_FLAGS = (("pair_skew", "--pair-skew"), ("pair_zdiff", "--pair-zdiff"))
-PLACE_FLAGS = (("seed", "--seed"), ("iters", "--iters"), ("margin", "--margin"))
+PAIR_SWITCHES = (("pair_all", "--pair-all"), ("via_pairs", "--via-pairs"),
+                 ("breakouts", "--breakouts"))
+PLACE_FLAGS = (("seed", "--seed"), ("iters", "--iters"), ("margin", "--margin"),
+               ("leash", "--leash"))
+PLACE_SWITCHES = (("semantic", "--semantic"), ("corridors", "--corridors"),
+                  ("escape_halo", "--escape-halo"))
+GROUP_ORDERS = ("long", "short", "inline")
 
 
 def load_settings(path: Path = SETTINGS_FILE) -> dict:
@@ -215,6 +250,22 @@ def _changed(opts, flags: tuple) -> List[str]:
     return cmd
 
 
+def _switches(opts, switches: tuple) -> List[str]:
+    return [flag for name, flag in switches if getattr(opts, name)]
+
+
+def patterns(opts: RouteOptions) -> Optional[str]:
+    """The value of ``--patterns`` for the hints that are on, or None."""
+    hints = []
+    if opts.hint_groups:
+        order = opts.group_order if opts.group_order in GROUP_ORDERS else "long"
+        hints.append("groups" if order == "long" else f"groups-{order}")
+    hints += [name for name in ("pairs", "decaps", "shares") if getattr(opts, "hint_" + name)]
+    if opts.hint_rows and open_ended(opts):
+        hints.append("rows")
+    return ",".join(hints) or None
+
+
 def open_ended(opts: RouteOptions) -> bool:
     """Whether the run goes on until the user accepts it: not with the wide tracks of pairs, and
     not for finishing tracks, a quick action without a window to accept the result in."""
@@ -240,6 +291,16 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
     cmd += ["--runs", str(int(opts.runs)), "--via-cost", repr(float(opts.via_cost)),
             "--geometry-generations", str(int(opts.geometry_generations))]
     cmd += _changed(opts, ROUTE_FLAGS)
+    if opts.seed:
+        cmd += ["--seed", str(int(opts.seed))]
+    if opts.placements:
+        cmd += ["--placement-seed", str(int(opts.placement_seed))]
+    hints = patterns(opts)
+    if hints:
+        cmd += ["--patterns", hints]
+    # the corridors are cleared by placing parts: not for finishing nets
+    if opts.clear_corridors and not opts.finish_nets:
+        cmd.append("--clear-corridors")
     # parts move by default when the whole board is routed; finishing nets keeps them in place
     if not opts.move_parts and not opts.finish_nets:
         cmd.append("--no-move-parts")
@@ -247,7 +308,7 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
         cmd += ["--fixed", ",".join(opts.fixed)]
     if opts.pairs:
         cmd.append("--pairs")
-        cmd += _changed(opts, PAIR_FLAGS)
+        cmd += _changed(opts, PAIR_FLAGS) + _switches(opts, PAIR_SWITCHES)
     if opts.net_widths:
         cmd += ["--net-widths", str(opts.net_widths)]
     if opts.net_priorities:
@@ -256,6 +317,8 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
         cmd += ["--angles", "45"]
     if open_ended(opts):
         cmd += ["--until-stop", "--open-via-cost", repr(float(opts.open_via_cost))]
+        if opts.air != _default(RouteOptions, "air"):
+            cmd += ["--air", repr(float(opts.air))]
     if opts.frames_dir:
         cmd += ["--frames", str(opts.frames_dir)]
     if opts.report:
@@ -294,7 +357,22 @@ def build_place_command(binary: str, board: Path, output: Path, report: Path,
         cmd += ["--fixed", ",".join(opts.fixed)]
     if opts.free:
         cmd += ["--free", ",".join(opts.free)]
-    return cmd + _changed(opts, PLACE_FLAGS) + _global_flags(opts)
+    return (cmd + _changed(opts, PLACE_FLAGS) + _switches(opts, PLACE_SWITCHES)
+            + _global_flags(opts))
+
+
+def next_placement_seed(opts: RouteOptions) -> RouteOptions:
+    """The options to remember after a run: with placements to try, the next run starts after
+    the seeds this one used, so that it tries placements it has not seen."""
+    if not opts.placements:
+        return opts
+    seed = int(opts.placement_seed) + int(opts.placements)
+    return replace(opts, placement_seed=seed if seed <= SEED_MAX else 1)
+
+
+def random_seed() -> int:
+    """A new seed for the "New" buttons of the dialogs."""
+    return random.randint(1, 999_999)
 
 
 def parse_references(text: str) -> List[str]:
@@ -340,6 +418,17 @@ class RouteResult:
     def alternatives(self) -> List[Tuple[str, str]]:
         """(file, summary) of the results the open end leaves to choose from."""
         return re.findall(r"^alternative: (.*): (\d+/\d+ routed.*)$", self.stdout, re.M)
+
+    def placement_seed(self) -> Optional[int]:
+        """The seed of the placement that won ``--placements``."""
+        m = re.search(r"^best placement: seed (\d+)", self.stdout, re.M)
+        return int(m.group(1)) if m else None
+
+    def cleared_corridors(self) -> List[str]:
+        """The parts ``--clear-corridors`` placed again."""
+        m = re.search(r"^corridors: \d+ parts in the way get new positions: (.*)$", self.stdout,
+                      re.M)
+        return m.group(1).split() if m else []
 
     def violations(self) -> Optional[int]:
         m = re.search(r"^clearance check: (\d+) violations", self.stdout, re.M)
