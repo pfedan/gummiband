@@ -32,6 +32,8 @@ pub struct PadGrid {
     pub rows: usize,
     pub cols: usize,
     pub center: Point,
+    /// Unit vector along one axis of the grid (the other axis is its normal).
+    pub dir: Point,
 }
 
 /// A two pin part next to a pin of a larger part: one pin on a plane net (or a plane like
@@ -206,7 +208,76 @@ fn grid_of(board: &Board, fp: &str, pins: &[usize], pitch: f64, rows: &[PinRow])
         rows: lines(&along),
         cols: lines(&across),
         center: centre(board, pins),
+        dir: d0,
     })
+}
+
+/// The ball fields of a board for via placement: per part, the SMD pads that have a neighbour
+/// one pitch away along both axes of a square lattice, if they span at least 3 lines in each
+/// direction and make at least half of the part's SMD pads. Unlike [`find`] this takes fields
+/// of short rows too (a DDR package is two blocks of 3 columns), and leaves out the pads off
+/// the lattice (support balls, a thermal pad).
+pub fn grids(board: &Board) -> Vec<PadGrid> {
+    let mut out = Vec::new();
+    for (fp, all) in &by_footprint(board) {
+        let smd = |p: usize| {
+            board.pins[p]
+                .obstacles
+                .iter()
+                .all(|&o| board.obstacles[o].hole.is_none())
+        };
+        let pins: Vec<usize> = all.iter().copied().filter(|&p| smd(p)).collect();
+        if pins.len() < 9 {
+            continue;
+        }
+        let pos = |p: usize| board.pins[p].pos;
+        // the pitch is the usual distance to the nearest pad (the smallest one may come from a
+        // pad between the balls, or from the two pins of a merged pair)
+        let mut nearest: Vec<(f64, usize, usize)> = pins
+            .iter()
+            .filter_map(|&a| {
+                pins.iter()
+                    .filter(|&&b| b != a && pos(a).dist(pos(b)) > 0.05)
+                    .map(|&b| (pos(a).dist(pos(b)), a, b))
+                    .min_by(|x, y| x.0.total_cmp(&y.0))
+            })
+            .collect();
+        nearest.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let Some(&(pitch, a, b)) = nearest.get(nearest.len() / 2) else {
+            continue;
+        };
+        let u = (pos(b) - pos(a)).norm();
+        let v = u.perp();
+        let tol = 0.1 * pitch;
+        let has = |a: Point, d: Point| pins.iter().any(|&q| (pos(q) - (a + d)).len() < tol);
+        let balls: Vec<usize> = pins
+            .iter()
+            .copied()
+            .filter(|&p| {
+                let a = pos(p);
+                (has(a, u * pitch) || has(a, u * -pitch)) && (has(a, v * pitch) || has(a, v * -pitch))
+            })
+            .collect();
+        let lines = |n: Point| {
+            let mut at: Vec<f64> = balls.iter().map(|&p| pos(p).dot(n)).collect();
+            at.sort_by(f64::total_cmp);
+            at.dedup_by(|a, b| (*a - *b).abs() < tol);
+            at.len()
+        };
+        if balls.len() * 2 < pins.len() || lines(u) < 3 || lines(v) < 3 {
+            continue;
+        }
+        out.push(PadGrid {
+            footprint: fp.to_string(),
+            rows: lines(v),
+            cols: lines(u),
+            center: centre(board, &balls),
+            pins: balls,
+            pitch,
+            dir: u,
+        });
+    }
+    out
 }
 
 fn has_plane(board: &Board, net: NetId) -> bool {
@@ -705,6 +776,41 @@ mod tests {
         let left = p.rows.iter().find(|r| b.pins[r.pins[0]].pos.x < -1.0).unwrap();
         assert!(left.out.x < -0.99, "the left row faces left: {:?}", left.out);
         assert!((left.pitch - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_memory_package_of_two_narrow_blocks_is_a_ball_field() {
+        // two blocks of 3 columns and 13 rows, 1.6 mm apart, and four support balls
+        let mut b = board(1);
+        let mut k = 0;
+        for x in [-4.0, -3.2, -2.4, 2.4, 3.2, 4.0] {
+            for j in 0..13 {
+                pin(&mut b, "U1", k, 0, x, -4.8 + 0.8 * j as f64);
+                k += 1;
+            }
+        }
+        for (x, y) in [(-4.8, -4.8), (4.8, -4.8), (-4.8, 4.8), (4.8, 4.8)] {
+            pin(&mut b, "U1", k, 0, x, y);
+            k += 1;
+        }
+        assert!(find(&b).grids.is_empty(), "rows of 3 are no pin rows");
+        let g = grids(&b);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].pins.len(), 78, "the support balls are off the lattice");
+        assert!((g[0].pitch - 0.8).abs() < 1e-9);
+        assert_eq!((g[0].rows.min(g[0].cols), g[0].rows.max(g[0].cols)), (6, 13));
+    }
+
+    #[test]
+    fn a_qfn_is_no_ball_field() {
+        let mut b = board(1);
+        for k in 0..4 {
+            pin(&mut b, "U1", k, 0, -1.5, -0.75 + 0.5 * k as f64);
+            pin(&mut b, "U1", 4 + k, 0, 1.5, -0.75 + 0.5 * k as f64);
+            pin(&mut b, "U1", 8 + k, 0, -0.75 + 0.5 * k as f64, -1.5);
+            pin(&mut b, "U1", 12 + k, 0, -0.75 + 0.5 * k as f64, 1.5);
+        }
+        assert!(grids(&b).is_empty());
     }
 
     #[test]
