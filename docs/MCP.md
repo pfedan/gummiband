@@ -245,7 +245,11 @@ pre-routed copper before this call, not after. A part that still sits in the pil
 touches it. Pads of a net with a plane (small SMD pads, which need a fan-out via) keep a via site
 free next to them: kept tracks and vias of other nets on any layer, holes and rule areas without
 vias push them off, so that a ground pad does not land over a locked track on the other side.
-Pads that found no room anyway are listed in `no_via_room`.
+Pads that found no room anyway are listed in `no_via_room`. When the parts do not fit, the error
+names the parts that found no spot (largest first), the courtyard area they and all movable parts
+need with `gap`, the free area, and the options with their size: the `gap` that would make the
+room, what `halo: 0` frees, about how much more board area it takes, and the area the fixed parts
+take.
 
 With the default scope connectors, modules, buttons and test points stay, unless they sit piled up,
 on a pad of a larger part (one that was moved onto them) or off the board: then they are placed

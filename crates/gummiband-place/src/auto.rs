@@ -1129,8 +1129,9 @@ fn unit_poses(d: &Design, units: &[Unit], s: &State) -> Vec<(Point, f64)> {
     pose
 }
 
-/// One annealing run from random positions; None if it finds no legal placement.
-fn run(p: &Problem, bbox: &R, seed: u64, iters: usize) -> Option<(State, f64)> {
+/// One annealing run from random positions; without a legal placement the units that found no
+/// spot, biggest first.
+fn run(p: &Problem, bbox: &R, seed: u64, iters: usize) -> Result<(State, f64), Vec<usize>> {
     let mut rng = Rng::new(seed);
     let n = p.units.len();
     let pos = (0..n)
@@ -1140,12 +1141,13 @@ fn run(p: &Problem, bbox: &R, seed: u64, iters: usize) -> Option<(State, f64)> {
     let size = bbox.w().max(bbox.h());
     pl.anneal(&mut rng, iters, 30.0, 0.05, 0.3, 400.0, size / 3.0, 0.2, false);
     // a crowded corner may have to give a small part to the other end of the board
-    if pl.legalize(0.25, size.max(40.0)) > 0 || pl.total_overlap() > 1e-6 {
-        return None;
+    let failed = pl.legalize(0.25, size.max(40.0));
+    if !failed.is_empty() || pl.total_overlap() > 1e-6 {
+        return Err(failed);
     }
     pl.anneal(&mut rng, iters / 3, 0.8, 0.01, 0.0, 0.0, 2.0, 0.1, true);
     let wire = pl.wire();
-    Some((pl.s, wire))
+    Ok((pl.s, wire))
 }
 
 fn zone_points(z: &Node) -> Vec<Point> {
@@ -1199,6 +1201,116 @@ fn keepout_owner(pts: &[Point], d: &Design, fixed: &[bool]) -> Option<usize> {
         .filter(|x| x.1 >= 0.5 * zb.area())
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
         .map(|x| x.0)
+}
+
+/// Legal runs (start, state, wire, crossings) and the units without a spot of each failed run.
+type Runs = (Vec<(usize, State, f64, usize)>, Vec<Vec<usize>>);
+
+/// What a failed placement tells the caller.
+struct NoFit {
+    /// The units without a spot in the run that came closest, biggest first.
+    names: Vec<String>,
+    /// Their courtyards (halo included), per unit.
+    missing: Vec<Vec<R>>,
+    /// Every movable courtyard (halo included) and whether it carries the halo.
+    movable: Vec<(R, bool)>,
+    free: f64,
+    gap: f64,
+    halo: f64,
+    /// Fixed parts with the board area their courtyards and gap take.
+    fixed: Vec<(String, f64)>,
+}
+
+/// Area a courtyard takes with half the gap on each side.
+fn with_gap(r: &R, gap: f64) -> f64 {
+    (r.w() + gap) * (r.h() + gap)
+}
+
+/// The parts that found no spot, how much room is missing and what would make it.
+fn no_fit_message(f: &NoFit) -> String {
+    let need = |g: f64| f.movable.iter().map(|(r, _)| with_gap(r, g)).sum::<f64>();
+    let need_now = need(f.gap);
+    let missing: f64 = f.missing.iter().flatten().map(|r| with_gap(r, f.gap)).sum();
+    let mut s = String::from("no legal placement: ");
+    if f.names.is_empty() {
+        s += "every part found a spot but some still overlap";
+    } else {
+        let shown: Vec<String> = f
+            .names
+            .iter()
+            .zip(&f.missing)
+            .take(5)
+            .map(|(n, rs)| {
+                let b = rs.iter().fold(R::empty(), |a, r| a.union(r));
+                format!("{n} ({:.1}x{:.1} mm)", b.w(), b.h())
+            })
+            .collect();
+        s += &format!("no spot for {}", shown.join(", "));
+        if f.names.len() > 5 {
+            s += &format!(" and {} more", f.names.len() - 5);
+        }
+        s += &format!(" (together {missing:.0} mm2 with gap)");
+    }
+    s += &format!(
+        "; movable courtyards need {need_now:.0} mm2 with gap {} mm and halo {} mm, {:.0} mm2 are free ({:.0} %). Options:",
+        f.gap,
+        f.halo,
+        f.free,
+        100.0 * need_now / f.free.max(1e-9)
+    );
+    let mut opts = Vec::new();
+    // the gap that saves as much as is missing
+    let target = need_now - missing.max(1.0);
+    if f.gap > 0.0 {
+        if need(0.0) <= target {
+            let (mut lo, mut hi) = (0.0, f.gap);
+            for _ in 0..40 {
+                let m = 0.5 * (lo + hi);
+                if need(m) <= target { lo = m } else { hi = m }
+            }
+            opts.push(format!("gap {:.2} mm or less", (lo * 100.0).floor() / 100.0));
+        } else {
+            opts.push(format!(
+                "a smaller gap alone is not enough (gap 0 frees {:.0} mm2)",
+                need_now - need(0.0)
+            ));
+        }
+    }
+    if f.halo > 0.0 {
+        let saved: f64 = f
+            .movable
+            .iter()
+            .filter(|(_, h)| *h)
+            .map(|(r, _)| with_gap(r, f.gap) - with_gap(&r.grow(-f.halo), f.gap))
+            .sum();
+        if saved >= 1.0 {
+            opts.push(format!("halo 0 frees {saved:.0} mm2"));
+        }
+    }
+    // at the fill the closest run reached, the missing parts take this much more board
+    let placed = need_now - missing;
+    let more = if placed > 0.0 {
+        f.free * missing / placed
+    } else {
+        missing
+    };
+    opts.push(format!(
+        "a board larger by about {:.0} mm2",
+        (more / 10.0).ceil() * 10.0
+    ));
+    if !f.fixed.is_empty() {
+        let mut fx = f.fixed.clone();
+        fx.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let total: f64 = fx.iter().map(|x| x.1).sum();
+        let top: Vec<String> = fx.iter().take(3).map(|(n, a)| format!("{n} {a:.0}")).collect();
+        opts.push(format!(
+            "fewer fixed parts ({} fixed take {total:.0} mm2, largest {})",
+            fx.len(),
+            top.join(", ")
+        ));
+    }
+    s += &format!(" {}", opts.join("; "));
+    s
 }
 
 /// Place the board in the file at `path`. The file text comes back with the footprints moved; the
@@ -1447,31 +1559,103 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
 
     // ---- the starts, in parallel; the fewest crossings win, then the shortest wires
     let starts: Vec<usize> = (1..=opts.starts.max(1)).collect();
-    let attempt = |prob: &Problem| -> Vec<(usize, State, f64, usize)> {
-        starts
+    // the legal runs, and the units that found no spot in each of the others
+    let attempt = |prob: &Problem| -> Runs {
+        let all: Vec<_> = starts
             .par_iter()
-            .filter_map(|&start| {
+            .map(|&start| {
                 let seed = opts.seed.wrapping_sub(1).wrapping_mul(SEED_STEP) + start as u64;
                 let (s, wire) = run(prob, &bbox, seed, opts.iters)?;
                 let c = crossings(&d, &unit_poses(&d, &units, &s), &terms.weight);
-                Some((start, s, wire, c))
+                Ok((start, s, wire, c))
             })
-            .collect()
+            .collect();
+        let mut ok = Vec::new();
+        let mut failed = Vec::new();
+        for r in all {
+            match r {
+                Ok(x) => ok.push(x),
+                Err(f) => failed.push(f),
+            }
+        }
+        (ok, failed)
     };
-    let mut results = attempt(&prob);
+    let (mut results, mut failures) = attempt(&prob);
     let mut escape_soft = false;
     if results.is_empty() && escape_of.values().next().is_some() {
         // too tight to keep every via site free: the free sites only count as cost then
         prob.escape_overlap = 0.0;
         escape_soft = true;
-        results = attempt(&prob);
+        (results, failures) = attempt(&prob);
     }
     results.sort_by(|a, b| (a.3, a.2).partial_cmp(&(b.3, b.2)).unwrap());
     let starts: Vec<(usize, f64, usize)> = results.iter().map(|r| (r.0, r.2, r.3)).collect();
     let Some((start, state, wire, crossed)) = results.into_iter().next() else {
+        let units_of = |f: &Vec<usize>| -> Vec<Vec<R>> { f.iter().map(|&u| prob.units[u].rects[0].clone()).collect() };
+        // the run that came closest: the least courtyard area without a spot
+        let closest = failures.iter().map(|f| (f, units_of(f))).min_by(|a, b| {
+            let area = |rs: &Vec<Vec<R>>| rs.iter().flatten().map(|r| r.area()).sum::<f64>();
+            area(&a.1).partial_cmp(&area(&b.1)).unwrap()
+        });
+        let (names, missing): (Vec<String>, Vec<Vec<R>>) = match closest {
+            Some((f, rs)) => (
+                f.iter()
+                    .map(|&u| {
+                        let refs: Vec<&str> = units[u]
+                            .members
+                            .iter()
+                            .map(|m| d.parts[m.part].reference.as_str())
+                            .collect();
+                        refs.join("+")
+                    })
+                    .collect(),
+                rs,
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        let movable: Vec<(R, bool)> = units
+            .iter()
+            .flat_map(|u| &u.members)
+            .flat_map(|m| {
+                let p = &d.parts[m.part];
+                p.court.iter().map(move |r| (*r, p.pads.len() >= 5))
+            })
+            .collect();
+        let fixed_parts: Vec<(String, f64)> = d
+            .parts
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| fixed[*i])
+            .map(|(_, p)| {
+                let a = p
+                    .court
+                    .iter()
+                    .map(|r| {
+                        Quad {
+                            pos: p.pos,
+                            rot: p.rot,
+                            r: *r,
+                        }
+                        .bbox()
+                        .grow(opts.gap)
+                        .overlap(&bbox)
+                    })
+                    .sum::<f64>();
+                (p.reference.clone(), a)
+            })
+            .filter(|x| x.1 > 0.0)
+            .collect();
         bail!(
-            "no legal placement: movable courtyards {movable_area:.0} mm2 on {free_area:.0} mm2 free, \
-             try a smaller --gap or --halo"
+            "{}",
+            no_fit_message(&NoFit {
+                names,
+                missing,
+                movable,
+                free: free_area,
+                gap: opts.gap,
+                halo: opts.halo,
+                fixed: fixed_parts,
+            })
         );
     };
     let pose = unit_poses(&d, &units, &state);
@@ -1948,6 +2132,71 @@ mod tests {
         let text = text.replace("(at 125 115)", "(at 106.8 105)");
         let p = place(&text, "beside", &quick()).unwrap();
         assert!(p.report.released.is_empty(), "{:?}", p.report.released);
+    }
+
+    /// A board too small for its parts: the error names the parts without a spot, the room they
+    /// miss and what would make it.
+    #[test]
+    fn a_failed_placement_names_the_parts_and_the_options() {
+        let text = board(|_| (160.0, 160.0)).replace("(end 130 120)", "(end 109 105)");
+        let opts = PlaceOptions { gap: 0.1, ..quick() };
+        let e = place(&text, "nofit", &opts).err().expect("no room").to_string();
+        assert!(e.starts_with("no legal placement: no spot for "), "{e}");
+        assert!(
+            ["C1", "C2", "R1", "U2", "J1"]
+                .iter()
+                .any(|r| e.contains(&format!("{r} (2.0x2.0 mm)"))),
+            "{e}"
+        );
+        assert!(e.contains(" mm2 with gap); movable courtyards need "), "{e}");
+        assert!(e.contains("with gap 0.1 mm and halo 0.3 mm"), "{e}");
+        assert!(e.contains("a smaller gap alone is not enough"), "{e}");
+        assert!(e.contains("a board larger by about "), "{e}");
+        assert!(e.contains("fewer fixed parts (1 fixed take"), "{e}");
+        assert!(e.contains("largest U1 "), "{e}");
+    }
+
+    #[test]
+    fn the_failure_message_sizes_the_options() {
+        let sq = |a: f64| R {
+            x0: 0.0,
+            y0: 0.0,
+            x1: a,
+            y1: a,
+        };
+        // 100 parts of 1 mm and one IC of 4 mm with halo, 2 mm small parts missing their spot
+        let mut movable: Vec<(R, bool)> = (0..100).map(|_| (sq(1.0), false)).collect();
+        movable.push((sq(4.0), true));
+        let f = NoFit {
+            names: (1..=7).map(|i| format!("C{i}")).collect(),
+            missing: (0..7).map(|_| vec![sq(1.0)]).collect(),
+            movable,
+            free: 150.0,
+            gap: 0.3,
+            halo: 0.3,
+            fixed: vec![("J1".into(), 20.0), ("H1".into(), 5.0)],
+        };
+        let e = no_fit_message(&f);
+        // 100 x 1.69 + 4.3^2 = 187.5 mm2 need, 7 x 1.69 = 11.8 mm2 missing
+        assert!(e.contains("no spot for C1 (1.0x1.0 mm), C2"), "{e}");
+        assert!(
+            e.contains("C5 (1.0x1.0 mm) and 2 more (together 12 mm2 with gap)"),
+            "{e}"
+        );
+        assert!(
+            e.contains("need 187 mm2 with gap 0.3 mm and halo 0.3 mm, 150 mm2 are free (125 %)"),
+            "{e}"
+        );
+        // need(g) = 100 (1+g)^2 + (4+g)^2 <= 187.5 - 11.8 up to g = 0.25
+        assert!(e.contains("gap 0.25 mm or less"), "{e}");
+        // 4.3^2 - 3.7^2
+        assert!(e.contains("halo 0 frees 5 mm2"), "{e}");
+        // 150 * 11.8 / 175.7 = 10.1, rounded up to 20
+        assert!(e.contains("a board larger by about 20 mm2"), "{e}");
+        assert!(
+            e.contains("fewer fixed parts (2 fixed take 25 mm2, largest J1 20, H1 5)"),
+            "{e}"
+        );
     }
 
     #[test]
