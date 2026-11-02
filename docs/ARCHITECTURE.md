@@ -363,6 +363,11 @@ finds no spot that was not there before; otherwise it bisects the set and pushes
 top of what was accepted, at most 12 pushes. In `pairs.rs` this runs on the merged board, before
 the split.
 
+The search already looks ahead to the tuning: `RunStats::cost` adds 0.5 per mm of
+`skew_need`, the mm the nets of each skew rule lack to the longest net of the rule beyond the
+allowed skew (`GB_SKEW_WEIGHT` sets the weight). One net the long way round would make the
+whole group meander towards it.
+
 `tune.rs` runs after the routing (and after the 45 degree step) when the board has such rules.
 It computes an aim per net (length window first, then the skew groups against their longest
 net), then places meanders: per straight line of the track, and per run of lines and arcs
