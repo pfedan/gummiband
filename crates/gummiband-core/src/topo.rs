@@ -747,6 +747,27 @@ fn build_sites(board: &Board, shared: &Shared, pitch: f64) -> Vec<Site> {
         y += pitch * 0.866;
         row += 1;
     }
+    // a pad grid (BGA) also gets via sites where a person puts them: in the middle between four
+    // balls and half a pitch outside the outer ones, the dog-bone places. On the raster above a
+    // via between the balls lands off the diagonal and closes the channel next to it. (The
+    // raster sites stay: a field with only dog-bone sites routed worse on the DDR5 board, with
+    // clearance errors between neighbouring vias.)
+    for g in crate::patterns::grids(board) {
+        let (u, v) = (g.dir, g.dir.perp());
+        let balls: Vec<Point> = g.pins.iter().map(|&p| board.pins[p].pos).collect();
+        let h = g.pitch / 2.0;
+        let mut dog: Vec<Point> = Vec::new();
+        for &b in &balls {
+            for (su, sv) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+                let q = b + u * (su * h) + v * (sv * h);
+                // (balls a little off the lattice give the same place four times)
+                if !dog.iter().any(|&c| c.dist(q) < 0.1 * g.pitch) {
+                    dog.push(q);
+                }
+            }
+        }
+        candidates.extend(dog);
+    }
     candidates
         .par_iter()
         .filter_map(|&p| {

@@ -94,8 +94,9 @@ into ghost points on the other, and capacities went wrong).
   for obstacle sides leaving the vertex at a sharp angle.
 - Apex constraints: an obstacle or via at the vertex opposite an edge blocks the middle of the
   edge; each crossing knows on which side of that apex it passes.
-- Via sites: a 0.4 mm grid of candidate points, plus via-in-pad points for plane nets. Placing a
-  via splits the triangle that holds the site in every layer mesh; routes that already cross it
+- Via sites: a 0.4 mm grid of candidate points, plus via-in-pad points for plane nets, plus the
+  dog-bone points of every ball field (`patterns::grids`: the middle between four balls and half a
+  pitch outside the outer ones). Placing a via splits the triangle that holds the site in every layer mesh; routes that already cross it
   are threaded through the three new triangles.
 - Phantom points: Steiner vertices and via vertices whose via was ripped up keep a half
   clearance, so tracks never bunch up at a free vertex.
@@ -509,6 +510,11 @@ to), pad grids of at least 3 x 3 (BGA), decoupling capacitors (a two pin part ne
 larger part, on the supply net they share, its other pin on a plane or a net with many pins),
 pins of a plane net close enough to reach the plane through one via, and buses between two pin
 rows. `gummiband info`, `route --report` and the MCP tool `board_patterns` list them.
+
+The via sites use the ball fields of `patterns::grids` always, without a hint: the SMD pads of a
+part with a neighbour one pitch away along both axes of a square lattice, at least 3 lines each
+way. Unlike the pad grids above this takes fields of short rows (a DDR package: two blocks of 3
+columns) and leaves out the pads off the lattice (support balls, a thermal pad).
 
 A pattern is only a hint to the search, never fixed copper: what does not fit a board costs at
 most the run that tried it, and nothing is ever given up for it. `route --patterns` switches the
