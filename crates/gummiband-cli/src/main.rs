@@ -236,11 +236,6 @@ enum Cmd {
         /// .kicad_dru (without such rules nothing is tuned anyway)
         #[arg(long)]
         no_tune: bool,
-        /// A via of the ground net (the largest GND plane) next to every via of the nets of the
-        /// length, skew and pair rules and of the differential pairs, at most this far away in
-        /// mm (0.75 when given without a value), where it keeps every clearance
-        #[arg(long, num_args = 0..=1, default_missing_value = "0.75")]
-        return_vias: Option<f64>,
         /// Highest meander bump in mm (centre line above the original line)
         #[arg(long, default_value_t = 1.0)]
         tune_amplitude: f64,
@@ -585,7 +580,6 @@ fn main() -> Result<()> {
             net_priorities,
             angles,
             no_tune,
-            return_vias,
             tune_amplitude,
             tune_spacing,
         } => {
@@ -949,20 +943,6 @@ fn main() -> Result<()> {
                 }
                 rep
             });
-            let returns = return_vias.map(|reach| {
-                let nets = gummiband_core::returns::fast_nets(b);
-                let rep = gummiband_core::returns::return_vias(b, &mut res.geometry, &nets, reach);
-                println!(
-                    "return vias ({}): {} signal vias, {} with one ground plane only, {} had one, {} added, {} without room",
-                    rep.ground.as_deref().unwrap_or("no ground plane"),
-                    rep.signal_vias,
-                    rep.one_plane,
-                    rep.had_one,
-                    rep.added,
-                    rep.missing.len()
-                );
-                rep
-            });
             println!(
                 "substrate: {} vertices, {} triangles, {} via sites",
                 sub.m.iter().map(|m| m.verts.len()).sum::<usize>(),
@@ -1274,7 +1254,6 @@ fn main() -> Result<()> {
                     "patterns": gummiband_core::patterns::find(b).named(b),
                     "angles_45": octo,
                     "length_tuning": tuned,
-                    "return_vias": returns,
                     "items_written": items,
                     "violations": viol.iter().map(|v| serde_json::json!({
                         "what": v.what,
