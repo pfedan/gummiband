@@ -1526,20 +1526,19 @@ fn search_fixed(
 /// The geometry of `geo` (routed on `from`) with every track end and via that sits on a pad
 /// moved along with that pad's footprint on `to` (same board, other offsets).
 pub(crate) fn follow_parts(from: &Board, to: &Board, geo: &Geometry) -> Geometry {
-    let shift = |p: geom::Point, net: NetId| -> geom::Point {
-        for (a, b) in from.pins.iter().zip(&to.pins) {
-            if a.net != net || a.pos.dist(b.pos) < 1e-9 {
-                continue;
-            }
-            if a.obstacles
-                .iter()
-                .any(|&o| from.obstacles[o].shape.dist_to_point(p) < 1e-6)
-            {
-                return p + (b.pos - a.pos);
-            }
-        }
-        p
+    // the moved pad under p (its obstacles on `from`) and where p goes with it
+    let pad_at = |p: geom::Point, net: NetId| -> Option<(&[usize], geom::Point)> {
+        from.pins.iter().zip(&to.pins).find_map(|(a, b)| {
+            (a.net == net
+                && a.pos.dist(b.pos) >= 1e-9
+                && a.obstacles
+                    .iter()
+                    .any(|&o| from.obstacles[o].shape.dist_to_point(p) < 1e-6))
+            .then(|| (a.obstacles.as_slice(), p + (b.pos - a.pos)))
+        })
     };
+    let on = |obs: &[usize], p: geom::Point| obs.iter().any(|&o| from.obstacles[o].shape.dist_to_point(p) < 1e-6);
+    let shift = |p: geom::Point, net: NetId| pad_at(p, net).map_or(p, |x| x.1);
     let mut g = geo.clone();
     for t in &mut g.tracks {
         // neck zones go with the part they belong to
@@ -1561,22 +1560,36 @@ pub(crate) fn follow_parts(from: &Board, to: &Board, geo: &Geometry) -> Geometry
         if n == 0 {
             continue;
         }
-        let (a, b) = (shift(t.pts[0], t.net), shift(t.pts[n - 1], t.net));
-        let (da, db) = (a - t.pts[0], b - t.pts[n - 1]);
+        let (pa, pb) = (pad_at(t.pts[0], t.net), pad_at(t.pts[n - 1], t.net));
+        let da = pa.map_or(geom::Point::default(), |x| x.1 - t.pts[0]);
+        let db = pb.map_or(geom::Point::default(), |x| x.1 - t.pts[n - 1]);
         if da.len() + db.len() == 0.0 {
             continue;
         }
-        // spread the end moves along the track so that it does not kink at the pad
-        let len: f64 = t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>().max(1e-9);
-        let reach = len.min(1.0);
-        let fade = |x: f64| (1.0 - x / reach).max(0.0);
-        let mut s = 0.0;
         let pts = t.pts.clone();
+        let mut at = vec![0.0; n];
+        for i in 1..n {
+            at[i] = at[i - 1] + pts[i].dist(pts[i - 1]);
+        }
+        let len = at[n - 1].max(1e-9);
+        // the part of the track on the pad moves with the pad as a whole: a narrow pad holds a
+        // track as wide as itself only on its middle line
+        let a0 = pa.map_or(0.0, |(obs, _)| {
+            (0..n).take_while(|&i| on(obs, pts[i])).last().map_or(0.0, |i| at[i])
+        });
+        let b0 = pb.map_or(len, |(obs, _)| {
+            (0..n)
+                .rev()
+                .take_while(|&i| on(obs, pts[i]))
+                .last()
+                .map_or(len, |i| at[i])
+        });
+        let (a0, b0) = if a0 < b0 { (a0, b0) } else { (0.0, len) };
+        // spread the rest of the end moves along the track so that it does not kink at the pad
+        let reach = (b0 - a0).min(1.0).max(1e-9);
+        let fade = |x: f64| if x <= 0.0 { 1.0 } else { (1.0 - x / reach).max(0.0) };
         for i in 0..n {
-            if i > 0 {
-                s += pts[i].dist(pts[i - 1]);
-            }
-            t.pts[i] = pts[i] + da * fade(s) + db * fade(len - s);
+            t.pts[i] = pts[i] + da * fade(at[i] - a0) + db * fade(b0 - at[i]);
         }
         t.elems.clear();
     }
@@ -1762,6 +1775,30 @@ mod tests {
             min: pt(x, y),
             max: pt(x + w, y + h),
         }
+    }
+
+    /// A part moves sideways: the piece of its track on the pad goes along as a whole and stays
+    /// on the middle line of the pad, only the rest of the track bends.
+    #[test]
+    fn the_track_on_a_moved_pad_stays_on_its_middle() {
+        let from = crate::topo::tests::two_pad_board();
+        let mut to = from.clone();
+        to.pins[0].pos = to.pins[0].pos + pt(0.0, -0.05);
+        let mut t = crate::check::tests::line((2.0, 5.0), (8.0, 5.0), 0);
+        t.pts = (0..=60).map(|i| pt(2.0 + 0.1 * i as f64, 5.0)).collect();
+        let geo = Geometry {
+            tracks: vec![t],
+            vias: Vec::new(),
+        };
+        let g = follow_parts(&from, &to, &geo);
+        let pts = &g.tracks[0].pts;
+        // the pad reaches to x 2.5
+        for p in pts.iter().filter(|p| p.x <= 2.5 + 1e-9) {
+            assert!((p.y - 4.95).abs() < 1e-9, "{p:?}");
+        }
+        assert!(pts.iter().all(|p| p.y <= 5.0 + 1e-12 && p.y >= 4.95 - 1e-12));
+        assert!((pts[30].y - 5.0).abs() < 1e-9, "the far part stays: {:?}", pts[30]);
+        assert!((pts[60].y - 5.0).abs() < 1e-9);
     }
 
     /// The search negotiates on its own only where the plain one left a few connections open.
