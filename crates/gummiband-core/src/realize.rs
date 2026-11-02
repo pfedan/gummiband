@@ -528,7 +528,7 @@ impl Router<'_> {
                         })
                         .collect();
                 }
-                let pts = flatten(&elems);
+                let mut pts = flatten(&elems);
                 let layer = self.sub.layers[s.li as usize];
                 // the stretches on kept copper of the net need no new track
                 let on_kept = |p: Point| {
@@ -540,6 +540,22 @@ impl Router<'_> {
                             && o.shape.dist_to_point(p) <= 0.0
                     })
                 };
+                if self.has_kept {
+                    // a straight piece from one piece of kept copper to another is new copper
+                    // between them: a point of it off the copper keeps it
+                    let mut with = Vec::with_capacity(pts.len());
+                    for (i, &p) in pts.iter().enumerate() {
+                        if i > 0 && on_kept(pts[i - 1]) && on_kept(p) {
+                            let a = pts[i - 1];
+                            let n = ((a.dist(p) / 0.05).ceil() as usize).clamp(2, 200);
+                            if let Some(q) = (1..n).map(|k| a.lerp(p, k as f64 / n as f64)).find(|&q| !on_kept(q)) {
+                                with.push(q);
+                            }
+                        }
+                        with.push(p);
+                    }
+                    pts = with;
+                }
                 let track = |pts: Vec<Point>, elems: Vec<Elem>| Track {
                     seg: sid,
                     tap: match s.end {

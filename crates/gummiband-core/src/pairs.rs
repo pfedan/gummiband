@@ -34,6 +34,9 @@ struct MergedPair {
     /// The net that stands for the pair (the P net) and its partner.
     p: NetId,
     n: NetId,
+    /// The net of the wide track in the merged board: the P net for the first segment of a
+    /// pair, a net of its own for each further one (see [`segments`]).
+    wide: NetId,
     ends: Vec<PairEnd>,
     /// Net of the P pins without partner while the pair is merged.
     rest: Option<NetId>,
@@ -45,6 +48,10 @@ struct Merged {
     pairs: Vec<MergedPair>,
     /// Pairs that stay two nets, and why.
     skipped: Vec<(String, String)>,
+    /// Pads of one net that the last pass joins on their own, short and away from the pair:
+    /// the second pad row of a USB-C socket to the first, the pads on either side of a part the
+    /// pair runs through (see [`segments`]).
+    joins: Vec<(usize, usize)>,
     /// The wide tracks run on the 45 degree grid: the outer side of a corner of the two
     /// tracks is a corner as well, not an arc.
     miter: bool,
@@ -156,6 +163,20 @@ fn bridge(b: &Board, p: usize, n: usize, carrier_clr: f64) -> Option<Obstacle> {
 /// the pads that faces the other end of the pair (else on the other side), as close as the hull
 /// keeps its distance from everything foreign.
 fn breakout(b: &Board, p: usize, n: usize, toward: Point, wide: f64, carrier_clr: f64) -> Option<(Point, Obstacle)> {
+    breakout_with(b, p, n, toward, wide, carrier_clr, false).map(|(c, mut z)| (c, z.remove(0)))
+}
+
+/// [`breakout`], and with `apart` for pads that cannot be bridged (foreign pads between them,
+/// as at a flow-through ESD part): a zone from each pad to the start of the wide track.
+fn breakout_with(
+    b: &Board,
+    p: usize,
+    n: usize,
+    toward: Point,
+    wide: f64,
+    carrier_clr: f64,
+    apart: bool,
+) -> Option<(Point, Vec<Obstacle>)> {
     let (pp, pn) = (&b.pins[p], &b.pins[n]);
     let mid = (pp.pos + pn.pos) * 0.5;
     let axis = (pp.pos - pn.pos).norm();
@@ -180,9 +201,10 @@ fn breakout(b: &Board, p: usize, n: usize, toward: Point, wide: f64, carrier_clr
     }
     [first, first * -1.0]
         .into_iter()
-        .find_map(|x| breakout_towards(b, p, n, x, &part, wide, carrier_clr))
+        .find_map(|x| breakout_towards(b, p, n, x, &part, wide, carrier_clr, apart))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn breakout_towards(
     b: &Board,
     p: usize,
@@ -191,7 +213,8 @@ fn breakout_towards(
     part: &crate::geom::Rect,
     wide: f64,
     carrier_clr: f64,
-) -> Option<(Point, Obstacle)> {
+    apart: bool,
+) -> Option<(Point, Vec<Obstacle>)> {
     let (pp, pn) = (&b.pins[p], &b.pins[n]);
     let mid = (pp.pos + pn.pos) * 0.5;
     let reach = [pp, pn]
@@ -214,9 +237,19 @@ fn breakout_towards(
                 c + pt(a.cos(), a.sin()) * r
             })
             .collect();
-        if let Some(mut o) = zone(b, p, n, &disc, carrier_clr) {
-            o.clearance = o.clearance.max(carrier_clr);
-            return Some((c, o));
+        let zones: Option<Vec<Obstacle>> = if apart {
+            [p, n]
+                .into_iter()
+                .map(|pad| zone_of(b, p, n, &[pad], &disc, carrier_clr))
+                .collect()
+        } else {
+            zone(b, p, n, &disc, carrier_clr).map(|o| vec![o])
+        };
+        if let Some(mut zs) = zones {
+            for o in zs.iter_mut() {
+                o.clearance = o.clearance.max(carrier_clr);
+            }
+            return Some((c, zs));
         }
         d += 0.1;
     }
@@ -226,6 +259,11 @@ fn breakout_towards(
 /// The hull of two pads and the points `extra`, if it keeps its distance from everything
 /// foreign.
 fn zone(b: &Board, p: usize, n: usize, extra: &[Point], carrier_clr: f64) -> Option<Obstacle> {
+    zone_of(b, p, n, &[p, n], extra, carrier_clr)
+}
+
+/// [`zone`] around the pads `hulled` of the pair end `p`, `n` only.
+fn zone_of(b: &Board, p: usize, n: usize, hulled: &[usize], extra: &[Point], carrier_clr: f64) -> Option<Obstacle> {
     let (pp, pn) = (&b.pins[p], &b.pins[n]);
     let layers = LayerSet(pp.layers.0 & pn.layers.0 & b.routing_layers().0);
     if layers.is_empty() {
@@ -237,8 +275,7 @@ fn zone(b: &Board, p: usize, n: usize, extra: &[Point], carrier_clr: f64) -> Opt
             .flat_map(|&o| b.obstacles[o].shape.to_polygon(b.rules.max_error).pts)
             .collect::<Vec<_>>()
     };
-    let mut pts = polys(pp);
-    pts.extend(polys(pn));
+    let mut pts: Vec<Point> = hulled.iter().flat_map(|&x| polys(&b.pins[x])).collect();
     pts.extend_from_slice(extra);
     let poly = Polygon::new(hull(pts));
     let bb = poly.bbox();
@@ -363,10 +400,154 @@ pub fn apply_zdiff(b: &mut Board, zdiff: f64) {
     }
 }
 
+/// Pair ends per segment, and the pads the last pass joins (see [`Merged::joins`]).
+type Segments = (Vec<Vec<(PairEnd, Vec<Obstacle>)>>, Vec<(usize, usize)>);
+
+/// A pair with more pin groups than its two ends as a chain of pair segments, each one wide
+/// track: a part with two ends of the pair either repeats one row of pins (the double row of a
+/// USB-C socket: one end, whose pads the other ones join right there), or the pair runs
+/// through it (an ESD part or a common mode choke: the pair ends on one side and starts again
+/// on the other, and the pads on either side are joined across the part). Pads that cannot be
+/// bridged (foreign pads between them) become breakouts. `ends` are the pair ends that can be
+/// bridged, `loose` the others. None if the pins do not form such a chain: exactly two parts
+/// with one end, the others with two.
+fn segments(
+    b: &Board,
+    ends: &[(PairEnd, Vec<Obstacle>)],
+    loose: &[PairEnd],
+    class: &crate::board::NetClass,
+) -> Option<Segments> {
+    let mut all: Vec<(PairEnd, Option<Obstacle>)> = ends
+        .iter()
+        .map(|(e, o)| (*e, o.first().cloned()))
+        .chain(loose.iter().map(|&e| (e, None)))
+        .collect();
+    if all.len() <= 2 {
+        return None;
+    }
+    let mid = |e: &PairEnd| (b.pins[e.p].pos + b.pins[e.n].pos) * 0.5;
+    let part = |e: &PairEnd| {
+        let fp = &b.pins[e.p].footprint;
+        (!fp.is_empty() && *fp == b.pins[e.n].footprint).then_some(fp)
+    };
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (i, (e, _)) in all.iter().enumerate() {
+        match groups
+            .iter_mut()
+            .find(|g| part(e).is_some() && part(&all[g[0]].0) == part(e))
+        {
+            Some(g) => g.push(i),
+            None => groups.push(vec![i]),
+        }
+    }
+    let pads_of = |e: &PairEnd| -> Vec<Point> {
+        [e.p, e.n]
+            .iter()
+            .flat_map(|&q| b.pins[q].obstacles.iter())
+            .flat_map(|&o| b.obstacles[o].shape.to_polygon(b.rules.max_error).pts)
+            .collect()
+    };
+    // the ends of the chain, each with the candidates of a part with a second row of pins
+    let mut terminals: Vec<Vec<usize>> = Vec::new();
+    let mut through: Vec<[usize; 2]> = Vec::new();
+    let mut joins: Vec<(usize, usize)> = Vec::new();
+    for g in &groups {
+        match g[..] {
+            [t] => terminals.push(vec![t]),
+            [i, j] => {
+                let (x, y) = (all[i].0, all[j].0);
+                // one hull around the four pads with nothing foreign in it: a second row of
+                // the same pins
+                if zone(b, x.p, x.n, &pads_of(&y), class.clearance).is_some() {
+                    // the band may end on either pad of each net
+                    let mut cand = vec![i, j];
+                    for (p, n) in [(x.p, y.n), (y.p, x.n)] {
+                        cand.push(all.len());
+                        all.push((PairEnd { p, n, out: None }, bridge(b, p, n, class.clearance)));
+                    }
+                    terminals.push(cand);
+                } else {
+                    through.push([i, j]);
+                }
+            }
+            _ => return None,
+        }
+    }
+    let rows = terminals.iter().any(|t| t.len() > 1);
+    if terminals.len() != 2 || (through.is_empty() && !rows) {
+        return None;
+    }
+    // from one end through the nearest part on to the next, the pads nearer first
+    let mut chain = vec![terminals[0][0]];
+    let mut at = mid(&all[terminals[0][0]].0);
+    while !through.is_empty() {
+        let d = |k: usize| mid(&all[k].0).dist(at);
+        let (pick, _) = through
+            .iter()
+            .enumerate()
+            .map(|(x, t)| (x, d(t[0]).min(d(t[1]))))
+            .min_by(|a, b| a.1.total_cmp(&b.1))?;
+        let [i, j] = through.remove(pick);
+        let (i, j) = if d(i) <= d(j) { (i, j) } else { (j, i) };
+        joins.push((all[i].0.p, all[j].0.p));
+        joins.push((all[i].0.n, all[j].0.n));
+        chain.extend([i, j]);
+        at = mid(&all[j].0);
+    }
+    chain.push(terminals[1][0]);
+    // of a second row the end that can be bridged, whose polarity the band keeps to the other
+    // end of its segment (seen along the straight line), and whose pads are closest
+    let twisted = |e: &PairEnd, o: &PairEnd| {
+        let u = (mid(o) - mid(e)).norm();
+        cross(u, b.pins[e.p].pos - b.pins[e.n].pos) * cross(u, b.pins[o.p].pos - b.pins[o.n].pos) < 0.0
+    };
+    let gap = |k: usize| b.pins[all[k].0.p].pos.dist(b.pins[all[k].0.n].pos);
+    for (t, slot, partner) in [(0, 0, 1), (1, chain.len() - 1, chain.len() - 2)] {
+        let o = all[chain[partner]].0;
+        let keep = *terminals[t].iter().min_by(|&&x, &&y| {
+            let key = |k: usize| (all[k].1.is_none(), twisted(&all[k].0, &o));
+            key(x).cmp(&key(y)).then(gap(x).total_cmp(&gap(y)))
+        })?;
+        // the end of the band must be bridged
+        all[keep].1.as_ref()?;
+        let k = all[keep].0;
+        let pads: Vec<PairEnd> = terminals[t].iter().map(|&c| all[c].0).collect();
+        for e in &pads {
+            if e.p != k.p && !joins.contains(&(e.p, k.p)) {
+                joins.push((e.p, k.p));
+            }
+            if e.n != k.n && !joins.contains(&(e.n, k.n)) {
+                joins.push((e.n, k.n));
+            }
+        }
+        chain[slot] = keep;
+    }
+    let mut segs = Vec::new();
+    for s in chain.chunks(2) {
+        let mut seg = Vec::new();
+        for (k, &i) in s.iter().enumerate() {
+            let (mut e, o) = all[i].clone();
+            let zs = match o {
+                Some(o) => vec![o],
+                None => {
+                    let other = mid(&all[s[1 - k]].0);
+                    let (c, zs) = breakout_with(b, e.p, e.n, other, class.track_width, class.clearance, true)?;
+                    e.out = Some(c);
+                    zs
+                }
+            };
+            seg.push((e, zs));
+        }
+        segs.push(seg);
+    }
+    Some((segs, joins))
+}
+
 fn merge(board: &Board, all: bool, breakouts: bool) -> Merged {
     let mut b = board.clone();
     let mut pairs = Vec::new();
     let mut skipped = Vec::new();
+    let mut all_joins = Vec::new();
     let coupled = board.coupled_pairs(all);
     for (p, n) in board.diff_pairs() {
         if !coupled.contains(&(p, n)) {
@@ -388,70 +569,99 @@ fn merge(board: &Board, all: bool, breakouts: bool) -> Merged {
             continue;
         }
         let class = carrier_class(&b, p, n);
-        let mut ends: Vec<(PairEnd, Obstacle)> = Vec::new();
+        let mut ends: Vec<(PairEnd, Vec<Obstacle>)> = Vec::new();
+        let mut loose: Vec<PairEnd> = Vec::new();
         for e in match_pads(&b, p, n) {
-            if let Some(o) = bridge(&b, e.p, e.n, class.clearance) {
-                ends.push((e, o));
+            match bridge(&b, e.p, e.n, class.clearance) {
+                Some(o) => ends.push((e, vec![o])),
+                None => loose.push(e),
             }
         }
-        if ends.len() < 2 {
-            skipped.push((
-                name(p),
-                "pads of the two nets do not sit next to each other".to_string(),
-            ));
-            continue;
-        }
-        // one wide track, between the two ends farthest apart: wide tracks of one net could run
-        // on top of each other, and they cannot branch. The other pins get single tracks later.
-        if ends.len() > 2 {
-            let mid = |e: &PairEnd| (b.pins[e.p].pos + b.pins[e.n].pos) * 0.5;
-            let mut far = (0.0, 0, 1);
-            for i in 0..ends.len() {
-                for j in i + 1..ends.len() {
-                    let d = mid(&ends[i].0).dist(mid(&ends[j].0));
-                    if d > far.0 {
-                        far = (d, i, j);
-                    }
-                }
-            }
-            let second = ends.swap_remove(far.2);
-            let first = ends.swap_remove(far.1);
-            ends = vec![first, second];
-        }
-        if breakouts {
-            let mids: Vec<Point> = ends
-                .iter()
-                .map(|(e, _)| (b.pins[e.p].pos + b.pins[e.n].pos) * 0.5)
-                .collect();
-            let ours: Vec<usize> = ends.iter().flat_map(|(e, _)| [e.p, e.n]).collect();
-            for (i, (e, o)) in ends.iter_mut().enumerate() {
-                // a part with more pins of the pair (a USB-C socket) keeps the end at its pads:
-                // the single tracks of those pins join the pair there
-                let (fp, fn_) = (&b.pins[e.p].footprint, &b.pins[e.n].footprint);
-                let crowded = b.nets[p as usize]
-                    .pins
-                    .iter()
-                    .chain(&b.nets[n as usize].pins)
-                    .any(|&x| !ours.contains(&x) && (&b.pins[x].footprint == fp || &b.pins[x].footprint == fn_));
-                if crowded {
+        let (mut segs, joins) = match segments(&b, &ends, &loose, &class) {
+            Some(plan) => plan,
+            None => {
+                if ends.len() < 2 {
+                    skipped.push((
+                        name(p),
+                        "pads of the two nets do not sit next to each other".to_string(),
+                    ));
                     continue;
                 }
-                // towards the other end of the pair
-                if let Some((c, z)) = breakout(&b, e.p, e.n, mids[1 - i], class.track_width, class.clearance) {
-                    e.out = Some(c);
-                    *o = z;
-                    if std::env::var("GB_PAIR_LOG").is_ok() {
-                        eprintln!("breakout {} at {:.2},{:.2}", board.nets[p as usize].name, c.x, c.y);
+                // one wide track, between the two ends farthest apart: wide tracks of one net
+                // could run on top of each other, and they cannot branch. The other pins get
+                // single tracks later.
+                if ends.len() > 2 {
+                    let mid = |e: &PairEnd| (b.pins[e.p].pos + b.pins[e.n].pos) * 0.5;
+                    let mut far = (0.0, 0, 1);
+                    for i in 0..ends.len() {
+                        for j in i + 1..ends.len() {
+                            let d = mid(&ends[i].0).dist(mid(&ends[j].0));
+                            if d > far.0 {
+                                far = (d, i, j);
+                            }
+                        }
+                    }
+                    let second = ends.swap_remove(far.2);
+                    let first = ends.swap_remove(far.1);
+                    ends = vec![first, second];
+                }
+                (vec![ends], Vec::new())
+            }
+        };
+        if std::env::var("GB_PAIR_LOG").is_ok() && (segs.len() > 1 || !joins.is_empty()) {
+            eprintln!(
+                "segments {}: {}, joins {:?}",
+                name(p),
+                segs.len(),
+                joins
+                    .iter()
+                    .map(|&(x, y): &(usize, usize)| format!("{}-{}", board.pins[x].name, board.pins[y].name))
+                    .collect::<Vec<_>>()
+            );
+        }
+        if breakouts {
+            let ours: Vec<usize> = segs.iter().flatten().flat_map(|(e, _)| [e.p, e.n]).collect();
+            for seg in segs.iter_mut() {
+                let mids: Vec<Point> = seg
+                    .iter()
+                    .map(|(e, _)| e.out.unwrap_or((b.pins[e.p].pos + b.pins[e.n].pos) * 0.5))
+                    .collect();
+                for (i, (e, o)) in seg.iter_mut().enumerate() {
+                    if e.out.is_some() {
+                        continue;
+                    }
+                    // a part with more pins of the pair (a USB-C socket) keeps the end at its
+                    // pads: the single tracks of those pins join the pair there
+                    let (fp, fn_) = (&b.pins[e.p].footprint, &b.pins[e.n].footprint);
+                    let crowded = b.nets[p as usize]
+                        .pins
+                        .iter()
+                        .chain(&b.nets[n as usize].pins)
+                        .any(|&x| !ours.contains(&x) && (&b.pins[x].footprint == fp || &b.pins[x].footprint == fn_));
+                    if crowded {
+                        continue;
+                    }
+                    // towards the other end of the pair
+                    if let Some((c, z)) = breakout(&b, e.p, e.n, mids[1 - i], class.track_width, class.clearance) {
+                        e.out = Some(c);
+                        *o = vec![z];
                     }
                 }
             }
         }
-        // the class first: from here on the pair is one net
+        if std::env::var("GB_PAIR_LOG").is_ok() {
+            for (e, _) in segs.iter().flatten() {
+                if let Some(c) = e.out {
+                    eprintln!("breakout {} at {:.2},{:.2}", board.nets[p as usize].name, c.x, c.y);
+                }
+            }
+        }
+        // the class first: from here on the pair is one net per segment
         b.classes.push(class);
         let cid = (b.classes.len() - 1) as ClassId;
         let (pins_p, pins_n) = (b.nets[p as usize].pins.clone(), b.nets[n as usize].pins.clone());
-        let matched_p: Vec<usize> = ends.iter().map(|(e, _)| e.p).collect();
-        let matched_n: Vec<usize> = ends.iter().map(|(e, _)| e.n).collect();
+        let matched_p: Vec<usize> = segs.iter().flatten().map(|(e, _)| e.p).collect();
+        let matched_n: Vec<usize> = segs.iter().flatten().map(|(e, _)| e.n).collect();
         let free_p: Vec<usize> = pins_p.iter().copied().filter(|x| !matched_p.contains(x)).collect();
         // P pins without partner must not count as the wide net's own copper
         let rest = (!free_p.is_empty()).then(|| {
@@ -468,68 +678,102 @@ fn merge(board: &Board, all: bool, breakouts: bool) -> Merged {
             }
             id
         });
-        b.nets[p as usize].pins = matched_p;
+        let priority = b.nets[p as usize].priority.min(b.nets[n as usize].priority);
+        // the first segment is the P net, every further one a net of its own
+        let mut wides = vec![p];
+        for (k, seg) in segs.iter().enumerate().skip(1) {
+            let id = b.nets.len() as NetId;
+            let mut net = b.nets[p as usize].clone();
+            net.name = format!("{}~seg{k}", net.name);
+            net.pins = seg.iter().map(|(e, _)| e.p).collect();
+            net.class = cid;
+            net.priority = priority;
+            b.nets.push(net);
+            for (e, _) in seg {
+                b.pins[e.p].net = id;
+                for i in b.pins[e.p].obstacles.clone() {
+                    b.obstacles[i].net = Some(id);
+                }
+            }
+            wides.push(id);
+        }
+        b.nets[p as usize].pins = segs[0].iter().map(|(e, _)| e.p).collect();
         b.nets[p as usize].class = cid;
-        b.nets[p as usize].priority = b.nets[p as usize].priority.min(b.nets[n as usize].priority);
+        b.nets[p as usize].priority = priority;
         b.nets[n as usize].pins = pins_n.iter().copied().filter(|x| !matched_n.contains(x)).collect();
-        for (e, o) in &ends {
-            let mid = e.out.unwrap_or((b.pins[e.p].pos + b.pins[e.n].pos) * 0.5);
-            if e.out.is_some() {
-                // at a breakout the wide track ends outside the pads and must not run over
-                // them: they block it like copper of no net
-                let mut pads = std::mem::take(&mut b.pins[e.p].obstacles);
-                pads.extend(b.pins[e.n].obstacles.iter().copied());
-                for i in pads {
-                    b.obstacles[i].net = None;
-                    b.obstacles[i].pin = None;
-                }
-            }
-            for i in b.pins[e.n].obstacles.clone() {
+        for (seg, &w) in segs.iter().zip(&wides) {
+            for (e, zs) in seg {
+                let mid = e.out.unwrap_or((b.pins[e.p].pos + b.pins[e.n].pos) * 0.5);
                 if e.out.is_some() {
-                    break;
+                    // at a breakout the wide track ends outside the pads and must not run over
+                    // them: they block it like copper of no net
+                    let mut pads = std::mem::take(&mut b.pins[e.p].obstacles);
+                    pads.extend(b.pins[e.n].obstacles.iter().copied());
+                    for i in pads {
+                        b.obstacles[i].net = None;
+                        b.obstacles[i].pin = None;
+                    }
                 }
-                b.obstacles[i].net = Some(p);
-                b.obstacles[i].pin = Some(e.p);
-                b.pins[e.p].obstacles.push(i);
-            }
-            let (fp, fn_) = (b.pins[e.p].footprint.clone(), b.pins[e.n].footprint.clone());
-            let id = b.obstacles.len();
-            b.obstacles.push(o.clone());
-            b.pins[e.p].obstacles.push(id);
-            b.pins[e.p].pos = mid;
-            b.pins[e.p].layers = LayerSet(b.pins[e.p].layers.0 & b.pins[e.n].layers.0);
-            b.footprint_obstacles.entry(fp.clone()).or_default().push(id);
-            if fp != fn_ {
-                // a pair end across two parts stays where it is
-                b.movable.retain(|f| *f != fp && *f != fn_);
-            }
-        }
-        // custom clearances of the partner hold for the wide net
-        let extra: Vec<((NetId, NetId), f64)> = b
-            .pair_clearance
-            .iter()
-            .filter(|((x, y), _)| *x == n || *y == n)
-            .map(|(&k, &v)| (k, v))
-            .collect();
-        for ((x, y), c) in extra {
-            let other = if x == n { y } else { x };
-            if other != p {
-                let k = (p.min(other), p.max(other));
-                let e = b.pair_clearance.entry(k).or_insert(c);
-                *e = e.max(c);
+                for i in b.pins[e.n].obstacles.clone() {
+                    if e.out.is_some() {
+                        break;
+                    }
+                    b.obstacles[i].net = Some(w);
+                    b.obstacles[i].pin = Some(e.p);
+                    b.pins[e.p].obstacles.push(i);
+                }
+                let (fp, fn_) = (b.pins[e.p].footprint.clone(), b.pins[e.n].footprint.clone());
+                for o in zs {
+                    let id = b.obstacles.len();
+                    let mut o = o.clone();
+                    o.net = Some(w);
+                    b.obstacles.push(o);
+                    b.pins[e.p].obstacles.push(id);
+                    b.footprint_obstacles.entry(fp.clone()).or_default().push(id);
+                }
+                b.pins[e.p].pos = mid;
+                b.pins[e.p].layers = LayerSet(b.pins[e.p].layers.0 & b.pins[e.n].layers.0);
+                if fp != fn_ {
+                    // a pair end across two parts stays where it is
+                    b.movable.retain(|f| *f != fp && *f != fn_);
+                }
             }
         }
-        pairs.push(MergedPair {
-            p,
-            n,
-            ends: ends.into_iter().map(|(e, _)| e).collect(),
-            rest,
-        });
+        // custom clearances of the partner hold for the wide net, those of both nets for the
+        // further segments
+        for &w in &wides {
+            let from: &[NetId] = if w == p { &[n] } else { &[p, n] };
+            let extra: Vec<((NetId, NetId), f64)> = b
+                .pair_clearance
+                .iter()
+                .filter(|((x, y), _)| from.contains(x) || from.contains(y))
+                .map(|(&k, &v)| (k, v))
+                .collect();
+            for ((x, y), c) in extra {
+                let other = if from.contains(&x) { y } else { x };
+                if other != p && other != n {
+                    let k = (w.min(other), w.max(other));
+                    let e = b.pair_clearance.entry(k).or_insert(c);
+                    *e = e.max(c);
+                }
+            }
+        }
+        all_joins.extend(joins);
+        for (k, (seg, w)) in segs.into_iter().zip(wides).enumerate() {
+            pairs.push(MergedPair {
+                p,
+                n,
+                wide: w,
+                ends: seg.into_iter().map(|(e, _)| e).collect(),
+                rest: if k == 0 { rest } else { None },
+            });
+        }
     }
     Merged {
         board: b,
         pairs,
         skipped,
+        joins: all_joins,
         miter: false,
     }
 }
@@ -896,7 +1140,7 @@ fn pair_vias(real: &Board, m: &Merged, geo: &mut Geometry) -> usize {
     let probe = split(real, m, geo);
     let mut made = 0;
     for (net, c, half) in probe.side {
-        let Some(mp) = m.pairs.iter().find(|p| p.p == net) else {
+        let Some(mp) = m.pairs.iter().find(|p| p.wide == net) else {
             continue;
         };
         let (cp, cn) = (real.class_of(mp.p), real.class_of(mp.n));
@@ -942,7 +1186,7 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
         tracks: Vec::new(),
         vias: Vec::new(),
     };
-    let carriers: HashMap<NetId, &MergedPair> = m.pairs.iter().map(|p| (p.p, p)).collect();
+    let carriers: HashMap<NetId, &MergedPair> = m.pairs.iter().map(|p| (p.wide, p)).collect();
     let rest: HashMap<NetId, NetId> = m.pairs.iter().filter_map(|p| p.rest.map(|r| (r, p.p))).collect();
     for t in &geo.tracks {
         if !carriers.contains_key(&t.net) {
@@ -964,10 +1208,20 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
         tracks: out.tracks.iter().map(|t| (track_box(t), t.clone())).collect(),
         vias: out.vias.clone(),
     };
-    let mut reports = Vec::new();
+    let mut reports: Vec<PairReport> = Vec::new();
     let mut unfinished = Vec::new();
     let mut tuned = Vec::new();
     let mut side = Vec::new();
+    // one report per pair, for all its segments
+    let mut report_of: Vec<usize> = Vec::new();
+    for pair in &m.pairs {
+        let first = m.pairs.iter().position(|q| q.p == pair.p).unwrap();
+        report_of.push(if first < report_of.len() {
+            report_of[first]
+        } else {
+            report_of.iter().max().map_or(0, |r| r + 1)
+        });
+    }
     for (pi, pair) in m.pairs.iter().enumerate() {
         let mut rep = PairReport {
             p: real.nets[pair.p as usize].name.clone(),
@@ -975,8 +1229,8 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
             wide: true,
             ..Default::default()
         };
-        let tracks: Vec<&Track> = geo.tracks.iter().filter(|t| t.net == pair.p).collect();
-        let vias: Vec<&Via> = geo.vias.iter().filter(|v| v.net == pair.p).collect();
+        let tracks: Vec<&Track> = geo.tracks.iter().filter(|t| t.net == pair.wide).collect();
+        let vias: Vec<&Via> = geo.vias.iter().filter(|v| v.net == pair.wide).collect();
         let mids: Vec<Point> = pair
             .ends
             .iter()
@@ -1214,7 +1468,7 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                     (near, far) = (c + n * h, c - n * h);
                     // (a band that turns nearly square could turn the other way in the end)
                     if ua.dot(ub).abs() >= 0.2 {
-                        side.push((pair.p, c, n * h));
+                        side.push((pair.wide, c, n * h));
                     }
                     el.push(Elem::Line(point_at_end(&cl), near));
                     er.push(Elem::Line(point_at_end(&cr), far));
@@ -1249,7 +1503,7 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                 reach_start = Some(joint_trim);
             }
             tuned.push(PairPath {
-                report: pi,
+                report: report_of[pi],
                 p: pair.p,
                 n: pair.n,
                 tracks: (first_track..out.tracks.len()).collect(),
@@ -1262,8 +1516,8 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
         // ends that no wide track reached, and pins without partner
         let reached: Vec<usize> = paths.iter().flat_map(|(a, _, b, _)| [*a, *b]).collect();
         let open = (0..pair.ends.len()).any(|i| !reached.contains(&i));
-        let free = real.nets[pair.p as usize].pins.len() > pair.ends.len()
-            || real.nets[pair.n as usize].pins.len() > pair.ends.len();
+        let all_ends: usize = m.pairs.iter().filter(|q| q.p == pair.p).map(|q| q.ends.len()).sum();
+        let free = real.nets[pair.p as usize].pins.len() > all_ends || real.nets[pair.n as usize].pins.len() > all_ends;
         if open || free {
             if open {
                 rep.note = "no way for the wide track".to_string();
@@ -1273,7 +1527,18 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
             unfinished.push(rep.p.clone());
             unfinished.push(rep.n.clone());
         }
-        reports.push(rep);
+        if let Some(r) = reports.get_mut(report_of[pi]) {
+            // a further segment of the pair
+            r.width = r.width.max(rep.width);
+            r.gap = r.gap.max(rep.gap);
+            r.vias += rep.vias;
+            r.swaps += rep.swaps;
+            if r.note.is_empty() {
+                r.note = rep.note;
+            }
+        } else {
+            reports.push(rep);
+        }
     }
     Split {
         geo: out,
@@ -1532,6 +1797,62 @@ fn cut_nets(b: &mut Board, cuts: &[Cut], kept_from: usize) -> HashMap<NetId, Net
             planes: LayerSet::default(),
             priority: 0,
         });
+    }
+    map
+}
+
+/// Around the pads of a join, the copper of their net there belongs to the join (mm).
+const JOIN_REACH: f64 = 1.0;
+
+/// A join longer than this many times the distance of its pads, plus [`JOIN_SLACK`] mm, went a
+/// long way round: its pins join their net in the last pass instead.
+const JOIN_DETOUR: f64 = 3.0;
+const JOIN_SLACK: f64 = 6.0;
+
+/// In the board of the last pass every join (see [`Merged::joins`]) becomes a net of its own,
+/// from pad to pad with the copper of their net right at the pads, so that the search joins
+/// them there and does not ride the pair's other copper. A pad that is in a net of a cut or an
+/// earlier join already (from `first_new` on) brings the other pad into that net. Returns the
+/// real net of each new net.
+fn join_nets(b: &mut Board, joins: &[(usize, usize)], kept_from: usize, first_new: usize) -> HashMap<NetId, NetId> {
+    let mut map = HashMap::new();
+    let move_pin = |b: &mut Board, pin: usize, to: NetId| {
+        let from = b.pins[pin].net;
+        b.nets[from as usize].pins.retain(|&x| x != pin);
+        b.nets[to as usize].pins.push(pin);
+        b.pins[pin].net = to;
+        for o in b.pins[pin].obstacles.clone() {
+            b.obstacles[o].net = Some(to);
+        }
+    };
+    for (i, &(a, c)) in joins.iter().enumerate() {
+        let (na, nc) = (b.pins[a].net, b.pins[c].net);
+        if nc as usize >= first_new {
+            move_pin(b, a, nc);
+            continue;
+        }
+        if na as usize >= first_new {
+            move_pin(b, c, na);
+            continue;
+        }
+        let id = b.nets.len() as NetId;
+        map.insert(id, na);
+        b.nets.push(crate::board::Net {
+            name: format!("{}~join{i}", b.nets[na as usize].name),
+            class: b.nets[na as usize].class,
+            pins: Vec::new(),
+            planes: LayerSet::default(),
+            priority: 0,
+        });
+        for pin in [a, c] {
+            let at = b.pins[pin].pos;
+            move_pin(b, pin, id);
+            for o in b.obstacles[kept_from..].iter_mut() {
+                if o.net == Some(na) && o.shape.dist_to_point(at) < JOIN_REACH {
+                    o.net = Some(id);
+                }
+            }
+        }
     }
     map
 }
@@ -2024,7 +2345,7 @@ pub fn route_pairs(
             moved = merged.board.with_offsets(&res.offsets);
             &moved
         };
-        let wide: Vec<NetId> = merged.pairs.iter().map(|p| p.p).collect();
+        let wide: Vec<NetId> = merged.pairs.iter().map(|p| p.wide).collect();
         // the split decides at the pads and at the vias how the two tracks leave the wide one
         // (exit, via pair, polarity): the wide tracks keep their direction there
         let mut held: HashMap<usize, (usize, usize)> = HashMap::new();
@@ -2051,7 +2372,7 @@ pub fn route_pairs(
         // while it goes onto the grid
         let widths: Vec<f64> = res.geometry.tracks.iter().map(|t| t.width).collect();
         for t in res.geometry.tracks.iter_mut() {
-            if let Some(mp) = merged.pairs.iter().find(|mp| mp.p == t.net) {
+            if let Some(mp) = merged.pairs.iter().find(|mp| mp.wide == t.net) {
                 let (w, g, _) = real.pair_shape(mp.p, mp.n, t.layer);
                 let s = (w + g) / 2.0;
                 let out = s * (1.0 / (std::f64::consts::PI / 8.0).cos() - 1.0);
@@ -2095,6 +2416,7 @@ pub fn route_pairs(
             [
                 real.nets[p.p as usize].name.clone(),
                 real.nets[p.n as usize].name.clone(),
+                merged.board.nets[p.wide as usize].name.clone(),
             ]
         })
         .collect();
@@ -2126,22 +2448,65 @@ pub fn route_pairs(
     let mut failed_ends: Vec<(usize, bool)> = Vec::new();
     let mut keep: Vec<(usize, bool)> = Vec::new();
     let mut worse_tried: Vec<usize> = Vec::new();
-    let (geo_done, fin) = loop {
+    // the joins of the pairs (see [`Merged::joins`]) but those that found no short way: the
+    // last pass connects their pins along with the rest of their nets
+    let mut joins_off: Vec<(usize, usize)> = Vec::new();
+    let (geo_done, fin, cut_paths) = loop {
         let mut geo = split_geo.clone();
         let (repaired, cuts) = repair(&real, &mut geo, &paths, &given_up, &keep);
         let mut names = unfinished.clone();
         names.extend(repaired);
+        // a pair that is given up gets no joins: its single tracks need those pads
+        let gone: Vec<NetId> = given_up.iter().flat_map(|&pi| [paths[pi].p, paths[pi].n]).collect();
+        let joins: Vec<(usize, usize)> = merged
+            .joins
+            .iter()
+            .copied()
+            .filter(|&(a, c)| !joins_off.contains(&(a, c)) && !gone.contains(&real.pins[a].net))
+            .collect();
+        names.extend(
+            joins
+                .iter()
+                .map(|&(a, _)| real.nets[real.pins[a].net as usize].name.clone()),
+        );
         names.sort();
         names.dedup();
         if names.is_empty() {
-            break (geo, None);
+            break (geo, None, Vec::new());
         }
         let mut b = real.only_nets(&names, &Default::default());
         let kept_from = b.obstacles.len();
         lock_geometry(&mut b, &geo);
         let first_cut = b.nets.len();
-        let cut_map = cut_nets(&mut b, &cuts, kept_from);
+        let mut cut_map = cut_nets(&mut b, &cuts, kept_from);
+        let first_join = b.nets.len();
+        let join_map = join_nets(&mut b, &joins, kept_from, first_cut);
         let (_, mut fin) = route_board(&b, sub_cfg, base, &finish);
+        // a join that finds no way, or only a long way round, is left to its net
+        let failed_joins: Vec<(usize, usize)> = (first_join..b.nets.len())
+            .filter(|&id| {
+                let nm = &b.nets[id].name;
+                let routed: f64 = fin
+                    .geometry
+                    .tracks
+                    .iter()
+                    .filter(|t| t.net == id as NetId)
+                    .map(track_len)
+                    .sum();
+                let (a, c) = (b.nets[id].pins[0], b.nets[id].pins[1]);
+                fin.stats.unrouted.iter().any(|u| u.starts_with(&format!("{nm} from ")))
+                    || routed > JOIN_DETOUR * b.pins[a].pos.dist(b.pins[c].pos) + JOIN_SLACK
+            })
+            .filter_map(|id| joins.iter().copied().find(|&(a, c)| b.nets[id].pins == [a, c]))
+            .collect();
+        if std::env::var("GB_PAIR_LOG").is_ok() && !failed_joins.is_empty() {
+            eprintln!("joins without a short way: {failed_joins:?}");
+        }
+        if !failed_joins.is_empty() {
+            joins_off.extend(failed_joins);
+            continue;
+        }
+        cut_map.extend(join_map);
         // a cut that found no way, or only a long way round (which would set the aim of its
         // length group), counts as failed
         let detour = |i: usize, c: &Cut| {
@@ -2186,6 +2551,16 @@ pub fn route_pairs(
             keep.extend(failed_ends.iter().filter(|(pi, _)| lost.contains(pi)));
             continue;
         }
+        // which path each track of a cut belongs to: it counts for the length of the path
+        let cut_paths: Vec<Option<usize>> = fin
+            .geometry
+            .tracks
+            .iter()
+            .map(|t| {
+                let i = (t.net as usize).checked_sub(first_cut)?;
+                cuts.get(i).map(|c| c.path)
+            })
+            .collect();
         for t in fin.geometry.tracks.iter_mut() {
             t.net = cut_map.get(&t.net).copied().unwrap_or(t.net);
         }
@@ -2208,7 +2583,7 @@ pub fn route_pairs(
             given_up.extend(worse);
             continue;
         }
-        break (geo, Some(fin));
+        break (geo, Some(fin), cut_paths);
     };
     let mut geo = geo_done;
     given_up.sort_unstable();
@@ -2222,6 +2597,16 @@ pub fn route_pairs(
             "routed as single tracks: an end of the wide track found no way to its pads"
         }
         .to_string();
+    }
+    let mut paths = paths;
+    if fin.is_some() {
+        // the single tracks that connect a cut of a path belong to the path
+        let start = geo.tracks.len();
+        for (i, &c) in cut_paths.iter().enumerate() {
+            if let Some(path) = c.and_then(|c| paths.get_mut(c)).filter(|p| !p.whole) {
+                path.tracks.push(start + i);
+            }
+        }
     }
     let mut paths: Vec<PairPath> = paths
         .into_iter()
@@ -2249,11 +2634,29 @@ pub fn route_pairs(
     for (r, skew) in tune(&real, &mut geo, &paths, cfg.skew) {
         reports[r].skew = reports[r].skew.max(skew);
     }
+    // a pair with more pins than its ends counts the length of its pair segments only, not
+    // of the single tracks to its other pins
+    let mut seg_len: HashMap<usize, (f64, f64)> = HashMap::new();
+    for path in paths.iter().filter(|p| !p.whole) {
+        let e = seg_len.entry(path.report).or_default();
+        for &ti in &path.tracks {
+            let t = &geo.tracks[ti];
+            if t.net == path.p {
+                e.0 += track_len(t);
+            } else if t.net == path.n {
+                e.1 += track_len(t);
+            }
+        }
+    }
     geo.tracks.retain(|t| t.pts.len() >= 2);
-    for rep in reports.iter_mut().filter(|r| r.wide) {
+    for (ri, rep) in reports.iter_mut().enumerate().filter(|(_, r)| r.wide) {
         if let (Some(p), Some(n)) = (real.net_id(&rep.p), real.net_id(&rep.n)) {
-            rep.length_p = crate::matching::net_length(&real, &geo, p).total();
-            rep.length_n = crate::matching::net_length(&real, &geo, n).total();
+            if let Some(&(lp, ln)) = seg_len.get(&ri) {
+                (rep.length_p, rep.length_n) = (lp, ln);
+            } else {
+                rep.length_p = crate::matching::net_length(&real, &geo, p).total();
+                rep.length_n = crate::matching::net_length(&real, &geo, n).total();
+            }
             rep.skew = rep.length_p - rep.length_n;
             let (c, t) = crate::matching::coupling(&real, &geo, p, n, crate::matching::gap_rule(&real, p));
             rep.uncoupled = (t - c).max(0.0);
@@ -2608,6 +3011,179 @@ mod tests {
 
     fn polyline(pts: &[Point], net: NetId) -> Track {
         make_track(pts.windows(2).map(|w| Elem::Line(w[0], w[1])).collect(), 0.2, 0, net)
+    }
+
+    /// A USB 2.0 pair as on most boards: the double pad row of a USB-C socket (B7 A6 A7 B6),
+    /// a flow-through ESD part with ground and supply between the pads of the pair, and the
+    /// two pins of the controller. Returns the board and the pins by name.
+    fn usb_board() -> (Board, HashMap<String, usize>) {
+        let mut b = pair_board();
+        b.obstacles.clear();
+        b.pins.clear();
+        b.nets.clear();
+        b.outline = vec![Polygon::new(vec![pt(0., 0.), pt(40., 0.), pt(40., 16.), pt(0., 16.)])];
+        let mut usb = b.classes[0].clone();
+        usb.name = "USB".into();
+        b.classes.push(usb);
+        let mut names = HashMap::new();
+        let mut pad = |b: &mut Board, name: &str, net: &str, at: Point, size: (f64, f64)| {
+            let ni = match b.net_id(net) {
+                Some(i) => i,
+                None => {
+                    b.nets.push(Net {
+                        name: net.to_string(),
+                        class: if net.starts_with("USB") { 1 } else { 0 },
+                        pins: Vec::new(),
+                        planes: LayerSet::default(),
+                        priority: 0,
+                    });
+                    (b.nets.len() - 1) as NetId
+                }
+            };
+            let (id, o) = (b.pins.len(), b.obstacles.len());
+            let (lo, hi) = (at - pt(size.0, size.1) * 0.5, at + pt(size.0, size.1) * 0.5);
+            b.obstacles.push(Obstacle {
+                shape: Shape::Polygon(Polygon::new(vec![lo, pt(hi.x, lo.y), hi, pt(lo.x, hi.y)])),
+                layers: LayerSet::single(0),
+                net: Some(ni),
+                kind: ObstacleKind::Pad,
+                hole: None,
+                clearance: 0.1,
+                pin: Some(id),
+                locked: false,
+            });
+            b.pins.push(Pin {
+                name: name.to_string(),
+                footprint: name.split('.').next().unwrap().to_string(),
+                net: ni,
+                pos: at,
+                layers: LayerSet::single(0),
+                obstacles: vec![o],
+                size: (size.1, size.0),
+            });
+            b.nets[ni as usize].pins.push(id);
+            names.insert(name.to_string(), id);
+        };
+        let row = (1.2, 0.3);
+        for (name, net, y) in [
+            ("J1.A5", "CC1", 6.75),
+            ("J1.B7", "USB_N", 7.25),
+            ("J1.A6", "USB_P", 7.75),
+            ("J1.A7", "USB_N", 8.25),
+            ("J1.B6", "USB_P", 8.75),
+            ("J1.A8", "SBU1", 9.25),
+        ] {
+            pad(&mut b, name, net, pt(3.0, y), row);
+        }
+        let sot = (1.0, 0.5);
+        for (name, net, at) in [
+            ("U2.1", "USB_P", pt(16.0, 7.0)),
+            ("U2.2", "GND", pt(16.0, 7.95)),
+            ("U2.3", "USB_N", pt(16.0, 8.9)),
+            ("U2.4", "USB_N", pt(18.2, 8.9)),
+            ("U2.5", "VBUS", pt(18.2, 7.95)),
+            ("U2.6", "USB_P", pt(18.2, 7.0)),
+        ] {
+            pad(&mut b, name, net, at, sot);
+        }
+        pad(&mut b, "U10.13", "USB_P", pt(34.0, 7.8), row);
+        pad(&mut b, "U10.14", "USB_N", pt(34.0, 8.6), row);
+        (b, names)
+    }
+
+    #[test]
+    fn a_usb_pair_runs_in_segments_through_its_esd_part_and_joins_the_second_row_at_the_socket() {
+        let (b, pin) = usb_board();
+        let m = merge(&b, true, false);
+        // socket to ESD part, ESD part to controller
+        assert_eq!(m.pairs.len(), 2, "{:?}", m.skipped);
+        let (dp, dn) = (b.net_id("USB_P").unwrap(), b.net_id("USB_N").unwrap());
+        let ends: Vec<[usize; 2]> = m.pairs.iter().flat_map(|s| s.ends.iter().map(|e| [e.p, e.n])).collect();
+        // at the socket one of the two adjacent pad pairs of the row (which one is a tie)
+        let socket = ends[0];
+        assert!(
+            socket == [pin["J1.A6"], pin["J1.A7"]] || socket == [pin["J1.A6"], pin["J1.B7"]],
+            "{socket:?}"
+        );
+        assert_eq!(
+            ends[1..].to_vec(),
+            vec![
+                [pin["U2.1"], pin["U2.3"]],
+                [pin["U2.6"], pin["U2.4"]],
+                [pin["U10.13"], pin["U10.14"]],
+            ]
+        );
+        // the pads of the ESD part cannot be bridged (ground between them): breakouts
+        assert!(m.pairs[0].ends[1].out.is_some() && m.pairs[1].ends[0].out.is_some());
+        // the other pads of the socket join the band's pads there, those of the ESD part
+        // each other across it
+        let other_n = if socket[1] == pin["J1.A7"] {
+            pin["J1.B7"]
+        } else {
+            pin["J1.A7"]
+        };
+        let mut joins = m.joins.clone();
+        joins.sort_unstable();
+        let mut want = vec![
+            (pin["J1.B6"], pin["J1.A6"]),
+            (other_n, socket[1]),
+            (pin["U2.1"], pin["U2.6"]),
+            (pin["U2.3"], pin["U2.4"]),
+        ];
+        want.sort_unstable();
+        assert_eq!(joins, want);
+        let search = SearchConfig {
+            population: 2,
+            generations: 0,
+            geometry_generations: 0,
+            frames: false,
+            progress: None,
+            seed: None,
+            open_end: None,
+            air: 0.0,
+            prefer_width: 0.0,
+            open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
+        };
+        let (_, res, rep) = route_pairs(
+            &b,
+            &SubstrateConfig::default(),
+            &RouterConfig::default(),
+            &search,
+            &PairConfig {
+                all: true,
+                ..PairConfig::default()
+            },
+        );
+        assert!(res.stats.unrouted.is_empty(), "{:?}", res.stats.unrouted);
+        assert_eq!(rep.len(), 1, "{rep:?}");
+        assert!(rep[0].wide, "{:?}", rep[0]);
+        let viol = crate::check::check(&b, &res.geometry);
+        assert!(viol.is_empty(), "{viol:?}");
+        // the joins are short: no single track rides along the pair, the ESD part's pads are
+        // joined straight across it
+        let copper = |net: NetId| -> f64 { res.geometry.tracks.iter().filter(|t| t.net == net).map(track_len).sum() };
+        for net in [dp, dn] {
+            assert!(copper(net) < 31.0 + 2.2 + 6.0, "{} mm", copper(net));
+        }
+        for (a, c) in [("U2.1", "U2.6"), ("U2.3", "U2.4")] {
+            let (a, c) = (b.pins[pin[a]].pos, b.pins[pin[c]].pos);
+            let across = |t: &Track| {
+                let (s, e) = (t.pts[0], *t.pts.last().unwrap());
+                (close(s, a) && close(e, c)) || (close(s, c) && close(e, a))
+            };
+            assert!(
+                res.geometry.tracks.iter().any(|t| across(t) && track_len(t) < 2.5),
+                "{a:?} {c:?}"
+            );
+        }
+        // the report counts the two segments only, which are about as long as each other
+        let span = (16.0 - 3.0) + (34.0 - 18.2);
+        assert!(
+            rep[0].length_p < span + 3.0 && rep[0].length_p > span - 3.0,
+            "{:?}",
+            rep[0]
+        );
+        assert!(rep[0].skew.abs() <= 0.1 + 1e-6, "{:?}", rep[0]);
     }
 
     #[test]
