@@ -201,8 +201,9 @@ fn court_overlap(a: &[R], b: &[R]) -> f64 {
 }
 
 /// Parts that are not placed yet in the input: off the board, or sitting on another part, which
-/// covers more than [`PILE_OVERLAP`] of its courtyard (the pile of a fresh import). A big part
-/// whose courtyard reaches over a pile is not in it.
+/// covers more than [`PILE_OVERLAP`] of its courtyard (the pile of a fresh import), or whose pad
+/// lies in its courtyard (a part moved onto it). A big part whose courtyard reaches over a pile
+/// or over the pads of a small part is not in it.
 fn unplaced_parts(d: &Design, outer: &Polygon) -> Vec<Option<Unplaced>> {
     let boxes = court_boxes(d);
     let all: Vec<R> = boxes
@@ -219,9 +220,20 @@ fn unplaced_parts(d: &Design, outer: &Polygon) -> Vec<Option<Unplaced>> {
                 return Some(Unplaced::Off);
             }
             let area: f64 = boxes[i].iter().map(|r| r.area()).sum();
+            let inside = |q: Point| {
+                boxes[i]
+                    .iter()
+                    .any(|r| r.x0 < q.x && q.x < r.x1 && r.y0 < q.y && q.y < r.y1)
+            };
             (0..d.parts.len())
                 .find(|&j| {
-                    j != i && all[i].overlap(&all[j]) > 0.0 && court_overlap(&boxes[i], &boxes[j]) > PILE_OVERLAP * area
+                    if j == i || all[i].overlap(&all[j]) <= 0.0 {
+                        return false;
+                    }
+                    // in the pile, or on a pad of a part at least as large: no place to keep
+                    court_overlap(&boxes[i], &boxes[j]) > PILE_OVERLAP * area
+                        || (area <= d.parts[j].court_area()
+                            && d.parts[j].pads.iter().any(|pd| inside(d.parts[j].pad_world(pd))))
                 })
                 .map(Unplaced::On)
         })
@@ -1920,6 +1932,22 @@ mod tests {
         let p = place(&board(|_| (116.0, 110.0)), "placed", &quick()).unwrap();
         assert!(p.report.released.is_empty());
         assert!(p.report.fixed.contains(&"J1".to_string()));
+    }
+
+    /// A connector that a part moved onto, with a pad of that part under its courtyard, has no
+    /// place to keep: it is placed with a warning, even where the courtyards overlap only a little.
+    #[test]
+    fn a_connector_on_a_pad_of_another_part_is_placed() {
+        // J1 x 105.5..107.5 over U1 x 104..106: a quarter of its courtyard, and U1's pad at 105.6
+        let text = board(|_| (160.0, 160.0)).replace("(at 125.0 115.0)", "(at 106.5 105)");
+        let text = text.replace("(at 125 115)", "(at 106.5 105)");
+        let p = place(&text, "onpad", &quick()).unwrap();
+        assert_eq!(p.report.released, vec!["J1"], "{:?}", p.report.warnings);
+        // over the courtyard of U1 but off its pads it stays
+        let text = board(|_| (160.0, 160.0)).replace("(at 125.0 115.0)", "(at 106.8 105)");
+        let text = text.replace("(at 125 115)", "(at 106.8 105)");
+        let p = place(&text, "beside", &quick()).unwrap();
+        assert!(p.report.released.is_empty(), "{:?}", p.report.released);
     }
 
     #[test]
