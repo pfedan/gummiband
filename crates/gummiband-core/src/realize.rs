@@ -558,39 +558,63 @@ impl Router<'_> {
                     fitted: Vec::new(),
                     pattern: None,
                 };
-                let kept: Vec<bool> = if self.has_kept {
-                    pts.iter().map(|&p| on_kept(p)).collect()
-                } else {
-                    Vec::new()
-                };
-                if !kept.iter().any(|&k| k) {
-                    return vec![track(pts, elems)];
-                }
-                // runs of points off the copper, with one point on it at each end
-                let mut out = Vec::new();
-                let mut run: Vec<Point> = Vec::new();
-                for (i, &p) in pts.iter().enumerate() {
-                    let free = !kept[i] || (i + 1 < pts.len() && !kept[i + 1]) || (i > 0 && !kept[i - 1]);
-                    if free {
-                        run.push(p);
-                    }
-                    if !free || (kept[i] && i > 0 && !kept[i - 1]) {
-                        if run.len() >= 2 {
+                let runs = if self.has_kept { off_kept(&pts, on_kept) } else { None };
+                match runs {
+                    None => vec![track(pts, elems)],
+                    Some(runs) => runs
+                        .into_iter()
+                        .map(|run| {
                             let e = run.windows(2).map(|w| Elem::Line(w[0], w[1])).collect();
-                            out.push(track(std::mem::take(&mut run), e));
-                        } else {
-                            run.clear();
-                        }
-                    }
+                            track(run, e)
+                        })
+                        .collect(),
                 }
-                if run.len() >= 2 {
-                    let e = run.windows(2).map(|w| Elem::Line(w[0], w[1])).collect();
-                    out.push(track(run, e));
-                }
-                out
             }
         }
     }
+}
+
+/// The pieces of a route `pts` off the kept copper of its net (`on_kept`), each with one point
+/// on the copper at either end where it meets it; None if no point lies on kept copper. A
+/// straight piece from one piece of kept copper to another is new copper between them: a point
+/// of it off the copper keeps it.
+fn off_kept(pts: &[Point], on_kept: impl Fn(Point) -> bool) -> Option<Vec<Vec<Point>>> {
+    let mut with = Vec::with_capacity(pts.len());
+    for (i, &p) in pts.iter().enumerate() {
+        if i > 0 && on_kept(pts[i - 1]) && on_kept(p) {
+            let a = pts[i - 1];
+            let n = ((a.dist(p) / 0.05).ceil() as usize).clamp(2, 200);
+            if let Some(q) = (1..n).map(|k| a.lerp(p, k as f64 / n as f64)).find(|&q| !on_kept(q)) {
+                with.push(q);
+            }
+        }
+        with.push(p);
+    }
+    let pts = with;
+    let kept: Vec<bool> = pts.iter().map(|&p| on_kept(p)).collect();
+    if !kept.iter().any(|&k| k) {
+        return None;
+    }
+    // runs of points off the copper, with one point on it at each end
+    let mut out = Vec::new();
+    let mut run: Vec<Point> = Vec::new();
+    for (i, &p) in pts.iter().enumerate() {
+        let free = !kept[i] || (i + 1 < pts.len() && !kept[i + 1]) || (i > 0 && !kept[i - 1]);
+        if free {
+            run.push(p);
+        }
+        if !free || (kept[i] && i > 0 && !kept[i - 1]) {
+            if run.len() >= 2 {
+                out.push(std::mem::take(&mut run));
+            } else {
+                run.clear();
+            }
+        }
+    }
+    if run.len() >= 2 {
+        out.push(run);
+    }
+    Some(out)
 }
 
 /// Where the segment a-b, on its way into or out of one of the zones, comes within reach of it
@@ -817,6 +841,27 @@ mod tests {
             zone.touches_seg(p[0], p[1]) && zone.dist_seg(p[1], p[2]) > 0.75 / 2.0,
             "{p:?}"
         );
+    }
+
+    /// A route keeps its pieces off kept copper and drops those on it; a straight piece from
+    /// one piece of kept copper to another is new copper, though both its ends lie on copper.
+    #[test]
+    fn a_straight_piece_between_two_kept_tracks_stays() {
+        let close = |a: Point, b: Point| a.dist(b) < 1e-9;
+        let kept = |p: Point| p.x <= 1.0 || p.x >= 9.0;
+        let runs = off_kept(&[pt(0., 0.), pt(10., 0.)], kept).unwrap();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert!(
+            close(runs[0][0], pt(0., 0.)) && close(*runs[0].last().unwrap(), pt(10., 0.)),
+            "{runs:?}"
+        );
+        // a route along kept copper only needs nothing new
+        assert!(off_kept(&[pt(0., 0.), pt(0.5, 0.)], kept).unwrap().is_empty());
+        // off the copper as a whole: no pieces to cut
+        assert!(off_kept(&[pt(2., 0.), pt(8., 0.)], kept).is_none());
+        // from the copper out to a point: one piece
+        let runs = off_kept(&[pt(0., 0.), pt(0.5, 0.), pt(5., 0.)], kept).unwrap();
+        assert_eq!(runs, vec![vec![pt(0.5, 0.), pt(5., 0.)]]);
     }
 
     #[test]
