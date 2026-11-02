@@ -560,6 +560,29 @@ A small gain on every run, Corne complete; three runs are not proof, the search 
 default. Not built yet from the concept: pad grid via sites and quadrant directions, local
 preferred directions per tile, buses as bundles (after the differential pair concept).
 
+## Dog-bone via sites in ball fields
+
+On the DDR5 testbed CA5 (and in other seeds CA7, DQ5) stayed open: a via between the balls sat
+wherever the 0.4 mm raster had a site, mostly off the diagonal, and a GND track to it closed the
+channel of the ball next to it. `patterns::grids` now finds ball fields from the lattice of SMD
+pads (also fields of short rows, like the two 3 column blocks of a DDR package; the pad grids of
+`patterns::find` need rows of 4), and `build_sites` adds a via site in the middle between every
+four balls and half a pitch outside the outer ones. Measured on 2026-11-02 in the cloud on 4
+cores against main (e92bba4), KiCad DRC:
+
+- DDR5 testbed, `--pairs --no-move-parts`, seeds 1 to 8: every net routed in every seed (main:
+  11 open nets in 8 runs); errors 155 instead of 144, all of them more skew errors: with every
+  net routed, single nets far too long (CLK_N 48 mm in seed 8) set the aim of their group, and
+  tuning stretches the others towards it.
+- Synthetic boards, default and `--pairs`: `bga_dense` 0 instead of 8 open connections, in 12
+  instead of 304 s (392 s with pairs), every other board the same.
+- Dog-bone sites only (the raster removed within 0.75 pitch of a ball): DDR5 seeds 1 to 4 had
+  118 instead of 67 errors, with clearance errors where the search led two tracks between two
+  neighbouring dog-bone vias. Not kept.
+
+Next: the overlong nets of a length group, CA and CLK first (a CA/CLK skew costs more than a DQ
+one, see the JLCPCB DDR5 layout guidelines).
+
 ## Routing order: pairs and part to part groups
 
 The first topology routes the connections in the order of `Router::plan()`: priority, then the
