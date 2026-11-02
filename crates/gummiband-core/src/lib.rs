@@ -72,34 +72,21 @@ impl RunStats {
         (self.conns - self.routed) as f64 * 1e4
             + self.vias as f64 * VIA_WEIGHT
             + self.length * LENGTH_WEIGHT
-            + if skew_final() {
-                0.0
-            } else {
-                self.skew_need * skew_weight()
-            }
+            + self.skew_need * skew_weight()
     }
 }
 
-/// Weight of a mm of [`RunStats::skew_need`] (experiment: `GB_SKEW_WEIGHT`, default 0).
-/// Experiment `GB_SKEW_FINAL=1`: the skew need counts only where the violations of the relaxed
-/// geometry count too ([`final_skew`]), not in the choices before.
-fn skew_final() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("GB_SKEW_FINAL").is_ok_and(|v| v == "1"))
-}
-
-/// The skew need term of a judged geometry under `GB_SKEW_FINAL=1`, else 0 (it is in `cost()`).
-fn final_skew(s: &RunStats) -> f64 {
-    if skew_final() { s.skew_need * skew_weight() } else { 0.0 }
-}
-
+/// Weight of a mm of [`RunStats::skew_need`]: a group of nets with a skew rule whose routes
+/// differ a lot needs meanders the board may have no room for, so the search prefers routes of
+/// similar length. 0.5 measured best on the DDR5 testbed (0.2 too weak, 1.0 the same as 0.5);
+/// `GB_SKEW_WEIGHT` sets another one.
 fn skew_weight() -> f64 {
     static W: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *W.get_or_init(|| {
         std::env::var("GB_SKEW_WEIGHT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0)
+            .unwrap_or(0.5)
     })
 }
 
@@ -814,7 +801,7 @@ fn place_and_route(
     let score = |b: &Board, r: &RouteResult| -> (usize, f64, Vec<geom::Point>) {
         let v = check::check(b, &r.geometry);
         let shorts = v.iter().filter(|x| x.actual <= 0.0).count();
-        let cost = r.stats.cost() + final_skew(&r.stats) + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0;
+        let cost = r.stats.cost() + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0;
         // places that ask for room: clearance problems, and the pins of open connections,
         // where the parts around may step aside to let a track out
         let mut hot: Vec<geom::Point> = v.iter().map(|x| x.at).collect();
@@ -945,7 +932,6 @@ fn place_and_route(
 /// weighs six violations.
 fn full_cost(c: &Candidate) -> f64 {
     c.stats.cost()
-        + final_skew(&c.stats)
         + c.stats.violations.unwrap_or(0) as f64 * 1000.0
         + c.stats.shorts.unwrap_or(0) as f64 * 5000.0
 }
@@ -987,7 +973,7 @@ fn better_search(
         let shorts = v.iter().filter(|x| x.actual <= 0.0).count();
         (
             r.stats.routed,
-            r.stats.cost() + final_skew(&r.stats) + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0,
+            r.stats.cost() + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0,
         )
     };
     let (a, b) = (key(&negotiated.1), key(&plain.1));
