@@ -247,8 +247,9 @@ free next to them: kept tracks and vias of other nets on any layer, holes and ru
 vias push them off, so that a ground pad does not land over a locked track on the other side.
 Pads that found no room anyway are listed in `no_via_room`.
 
-With the default scope connectors, modules, buttons and test points stay, unless they sit piled up
-or off the board: then they are placed with the rest and listed in `released`, with a warning.
+With the default scope connectors, modules, buttons and test points stay, unless they sit piled up,
+on a pad of a larger part (one that was moved onto them) or off the board: then they are placed
+with the rest and listed in `released`, with a warning.
 Place them yourself with `move_part` and name them in `fixed` for a real layout. `warnings` also
 names every part that stays piled up or with its courtyard outside the outline (fixed, locked or
 out of scope); the tool never returns such a placement silently. Unlocked tracks and vias do not follow, so call it

@@ -470,7 +470,7 @@ pub struct PlacePartsOut {
     /// With `semantic`: two-pin parts and small regulators with the part they were pulled to.
     pub ties: Vec<(String, String)>,
     /// Connectors, buttons and test points outside the scope that were placed anyway because
-    /// they sat piled up or off the board.
+    /// they sat piled up, on a pad of a larger part or off the board.
     pub released: Vec<String>,
     /// Pads of a plane net without room for their fan-out via (kept copper, a hole or a rule
     /// area around them on some layer).
@@ -2595,7 +2595,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Give parts a position from the netlist in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. By default all parts move except locked ones, connectors, modules, mounting holes, buttons and test points (those move too while they sit piled up or off the board, listed in `released`); `only`, `scope` and `fixed` narrow that, so you can place the key parts yourself with move_part and leave the small parts to this tool. Run it before route: tracks do not follow. Read `warnings`: parts that stay piled up or off the board, pads of a plane net without room for their via (`no_via_room`).",
+        description = "Give parts a position from the netlist in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. By default all parts move except locked ones, connectors, modules, mounting holes, buttons and test points (those move too while they sit piled up, on a pad of a larger part or off the board, listed in `released`); `only`, `scope` and `fixed` narrow that, so you can place the key parts yourself with move_part and leave the small parts to this tool. Run it before route: tracks do not follow. Read `warnings`: parts that stay piled up or off the board, pads of a plane net without room for their via (`no_via_room`).",
         output_schema = schema_for_output::<PlacePartsOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
