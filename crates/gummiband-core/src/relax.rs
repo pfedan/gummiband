@@ -144,15 +144,22 @@ fn pin_rails(board: &Board) -> crate::index::FastMap<u32, Vec<Rail>> {
             let bb = board.obstacles[o].shape.bbox();
             let (w, h) = (bb.width(), bb.height());
             let out_of_part = pin.pos - centre;
-            let (dir, along) = if w >= h {
-                (pt(out_of_part.x.signum(), 0.0), w)
+            let (axis, off, along) = if w >= h {
+                (pt(1.0, 0.0), out_of_part.x, w)
             } else {
-                (pt(0.0, out_of_part.y.signum()), h)
+                (pt(0.0, 1.0), out_of_part.y, h)
             };
-            if dir.len2() > 0.0 {
+            // A pad across the middle of its part (the centre strip of a DFN, say) can be left
+            // at either end; its side of the centre is only rounding then, so both ends get a rail.
+            let dirs: &[f64] = if off.abs() < along / 4.0 {
+                &[1.0, -1.0]
+            } else {
+                &[off.signum()]
+            };
+            for &sg in dirs {
                 out.entry(pin.net).or_default().push(Rail {
                     at: pin.pos,
-                    dir,
+                    dir: axis * sg,
                     len: along / 2.0 + RAIL_OUT,
                 });
             }
@@ -164,9 +171,10 @@ fn pin_rails(board: &Board) -> crate::index::FastMap<u32, Vec<Rail>> {
 /// The rail a track end at index 0 of `pts` follows: a pad of its net, and the track goes that way.
 fn rail_of<'a>(rails: &[Rail], pts: impl Iterator<Item = &'a Point> + Clone) -> Option<Rail> {
     let start = *pts.clone().next()?;
-    let r = *rails.iter().find(|r| r.at.dist(start) < 0.35)?;
-    let far = pts.map(|p| *p - r.at).find(|d| d.len() >= r.len)?;
-    (far.dot(r.dir) >= 0.5 * far.len()).then_some(r)
+    rails.iter().filter(|r| r.at.dist(start) < 0.35).find_map(|r| {
+        let far = pts.clone().map(|p| *p - r.at).find(|d| d.len() >= r.len)?;
+        (far.dot(r.dir) >= 0.5 * far.len()).then_some(*r)
+    })
 }
 
 impl Rail {
@@ -2550,6 +2558,24 @@ mod tests {
         assert_eq!(pts[2], pt(0.0, -0.2));
         assert_eq!(pts[3], pt(-1.0, -0.2));
         assert_eq!(pts[4], pt(-4.0, -0.2));
+    }
+
+    /// A centre pad has a rail at each end; the track takes the one it leaves by.
+    #[test]
+    fn a_centre_pad_rails_both_ways() {
+        let rail = |y: f64| Rail {
+            at: pt(0.0, 0.0),
+            dir: pt(0.0, y),
+            len: 1.3,
+        };
+        let rails = [rail(1.0), rail(-1.0)];
+        let north = [pt(0.0, 0.0), pt(0.04, -1.0), pt(0.3, -1.7), pt(2.0, -3.0)];
+        assert_eq!(rail_of(&rails, north.iter()).map(|r| r.dir), Some(pt(0.0, -1.0)));
+        let south = [pt(0.0, 0.0), pt(0.0, 1.2), pt(0.1, 2.0)];
+        assert_eq!(rail_of(&rails, south.iter()).map(|r| r.dir), Some(pt(0.0, 1.0)));
+        let mut pts = north.to_vec();
+        follow(&rail(-1.0), &mut pts, false);
+        assert_eq!(pts[1], pt(0.0, -1.0));
     }
 
     #[test]
