@@ -96,9 +96,44 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `power_plan` | `board`, `currents? [{net, amps, short_amps?}]`, `temp_rise?`, `apply?` | per power net the IPC-2221 width per layer, the track width to route with, vias per layer change, planes and zones, advice; board notes (GND plane, reference planes); the widths as `.kicad_dru` rules; with `apply` the widths stored as net options |
 | `current_check` | `path`, `paths? [{net, amps, short_amps?, from?, to?, name?}]`, `temp_rise?`, `refill?`, `max_segments?` | per current path the narrow segments, the narrowest single band and the total cross-section between the terminals (pours and vias included) with their position, vias against the current, verdict `ok` or `FLAG` |
 | `power_copper` | `board`, `paths [{net, amps, short_amps?, from, to?, layer?, name?}]`, `temp_rise?`, `margin?`, `max_span?`, `via_diameter?`, `via_drill?`, `priority?`, `unlocked?` | id and path of the working copy with "gb:" power pours over the pads of each path and, for plane nets, locked via fields with a pour into the plane; per pour its outline, area, what cut it, vias needed and placed; a `current_check` of the pours; the unlocked copper on the board, with `unlocked: "clear"` what was removed (`cleared`) and the nets to route again (`reroute_nets`); `warnings` |
+| `reference_check` | `path`, `nets?`, `min_gap?`, `refill?`, `max_items?` | per routing layer its reference layers and their zone nets; signal tracks over no copper (`gap`, with length) or across the border between two zone nets (`split`) on their reference layer, with position; per net the length over no copper; short gaps only counted |
 | `ground_pour` | `path`, `net?`, `layers?`, `pitch?`, `edge_pitch?`, `edge_inset?`, `avoid_courtyards?`, `via_diameter?`, `via_drill?`, `priority?`, `pad_connection?`, `thermal_spoke_width?`, `output?` | id and path of `<input>.gnd.kicad_pcb` with ground zones on the outer layers and locked stitching vias, `warnings` |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?`, `refill?` | PNG (image content) and its path, region, pixels per mm |
+
+### Manufacturer limits: JLCPCB as an example
+
+Gummiband routes to the rules of the project (`.kicad_pro` net classes and design rules, the
+`.kicad_dru`); it has no fab profile of its own. When a board goes to JLCPCB, an agent should
+set the rules of `create_board` (or the project) from the numbers below. JLCPCB's routing guide
+(jlcpcb.com/blog/pcb-routing-rules-best-practices, 2026) gives these minimums; start with the
+recommended values and go down to the minimum only where it is needed (BGA and fine pitch fan-out,
+best as a local `.kicad_dru` rule for the courtyard of that part).
+
+| Rule | Minimum 1 to 2 layers | Minimum 4+ layers | Recommended |
+| --- | --- | --- | --- |
+| Track width, 1 oz | 0.10 mm (4 mil) | 0.09 mm (3.5 mil), 0.075 mm at extra cost | signals 0.2 to 0.25 mm (8 to 10 mil) |
+| Track to track, 1 oz | 0.10 mm | 0.09 mm, 0.075 mm locally in BGA fan-out | wider wherever there is room |
+| Track to track, 2 oz | 0.16 mm | 0.15 mm | |
+| Power and ground tracks | | | 0.4 to 0.5 mm (15 to 20 mil) and more, sized by `power_plan` |
+| Via drill / diameter | 0.15 / 0.25 mm | 0.15 / 0.25 mm | 0.3 / 0.6 mm; 0.2 / 0.4 mm for fast signals (less parasitic) |
+| Hole to hole | 0.20 mm | 0.20 mm | |
+| Annular ring, plated holes | 0.25 mm (at least 0.18) | 0.20 mm (at least 0.15) | |
+| Copper to board edge | 0.2 mm milled, 0.4 mm V-cut | same | |
+| Solder mask to track | 0.09 mm | 0.09 mm | |
+| Silkscreen to pad, text height | 0.15 mm, 1.0 mm | same | |
+
+The same guide's craft rules and where Gummiband has them: decoupling capacitors at the pins
+(`board_patterns`, `place_parts`), critical nets first (net class priority, `set_net_options`),
+compact switching loops (`power_copper`, `add_locked_copper`), widths by current (`power_plan`,
+`current_check`, IPC-2221), every signal layer next to a solid ground plane (`power_plan` board
+notes) and unbroken under its tracks (`reference_check`), 45 degree corners or arcs (the router
+draws arcs; `angles_45`), meanders at 3W (`tune_spacing` 2 track widths of air), ground pour with
+stitching (`ground_pour`), DRC without errors (`drc`). Spacing against crosstalk (the 3W rule,
+centre to centre three track widths) is no router option: give sensitive nets (clocks, analog
+inputs, references) a larger clearance with a `.kicad_dru` rule, which the router reads, e.g.
+`(rule "3W clocks" (condition "A.NetClass == 'CLK'") (constraint clearance (min 0.4)))` for
+0.2 mm tracks.
 
 ### create_board
 
@@ -525,11 +560,11 @@ nets. The output goes to `<input>.45.kicad_pcb` by default, with the `.kicad_pro
 {"name": "angles_45", "arguments": {"path": "/abs/path/lichtschnitzel.routed.kicad_pcb"}}
 ```
 
-### Good practice: power_plan, power_copper, current_check, ground_pour
+### Good practice: power_plan, power_copper, current_check, reference_check, ground_pour
 
 The router does the heavy lifting; around it go the rules of the craft a careful layouter
 applies: plan the power copper before routing, check the current carrying capacity after it,
-pour ground and stitch it. These four tools and the prompt `good_practice` (below) cover that,
+check that fast signals run over unbroken reference copper, pour ground and stitch it. These five tools and the prompt `good_practice` (below) cover that,
 so an agent can take a board from netlist to DRC in one go. Currents follow IPC-2221
 (I = k * dT^0.44 * A^0.725, A in mil², k = 0.048 outer, 0.024 inner, default rise 20 K) with the
 copper thickness of each layer from the board's stackup (35 um without one). A via counts with
@@ -739,6 +774,44 @@ check. For a pour or via field from `power_copper` there are two ways:
   connections open in every run. Compare such a run with one without the via field over the same
   seeds before keeping it.
 
+#### reference_check
+
+After routing (and after `ground_pour` on two layer boards, where the pour is the reference).
+The return current of a signal flows in the plane right under its track. Where that plane has no
+copper (a slot, the edge of a zone, antipads of a via row that merged into one hole) or where the
+track passes from the zone of one net into the zone of another (a split plane, such as several
+supply zones on one inner layer), the return current detours: loop inductance, ringing, EMI, and
+under a differential pair lost common mode rejection. KiCad's DRC does not look at this.
+
+The tool takes the copper layers next to each routing layer in the stackup that carry zones as
+its reference layers (F.Cu over In1.Cu, B.Cu over In2.Cu on four layers; on two layers the
+other side's pour), rasters their filled zones at 0.05 mm and walks the centre line of every
+track of the checked nets over them:
+
+- `gap`: a stretch with no copper on any reference layer. The antipad of the track's own via or
+  through hole pin (where it changes layer) does not count. Gaps shorter than `min_gap`
+  (0.5 mm), mostly a single antipad of a neighbouring via, are counted in `short_gaps` only.
+- `split`: the zone net under the track changes on a reference layer, while no other reference
+  layer (an inner layer between two planes) runs on unbroken underneath.
+
+By default every net with tracks is checked except the ground net, nets with a plane and nets of
+clearly wide classes (power); `nets` names others (globs allowed). Zones without fill are refilled
+with kicad-cli first; without kicad-cli their outline counts, which hides the antipads (a note
+says so). The result lists the findings (splits first, then gaps longest first), the nets with
+findings worst first, and per routing layer the reference layers with their zone nets.
+
+On the Lichtschnitzel board (fills as saved): F.Cu over the GND plane on In1.Cu has no finding;
+B.Cu runs over In2.Cu with the zones of +5V_A, +5V_B, VBUS_P and VBUS_IN, and 11 nets cross a
+border there (the LED data lines at y 130 between +5V_B and +5V_A, USB_DN between VBUS_P and
++5V_A). Fix a split by routing the track over one zone or on the layer next to ground, or with a
+stitching capacitor between the two nets next to the crossing; a gap by moving the track, by
+moving vias apart so their antipads do not merge, or by closing the slot.
+
+```json
+{"name": "reference_check", "arguments": {"path": "/abs/lichtschnitzel.routed.kicad_pcb",
+  "nets": ["USB_D?", "LED_D*"]}}
+```
+
 #### ground_pour
 
 After routing: zones of the ground net (default `GND`, or the net with the most pins whose name
@@ -768,8 +841,8 @@ The server offers one MCP prompt, `good_practice` (arguments `path`, optional `c
 `notes`). It asks the agent to take the board through the whole sequence without asking back
 unless the design intent changes: look at the board and its power paths, settle the currents,
 plan with `power_plan` (planes, pours, datasheet layouts as locked copper, `dru_rules` into the
-project), place and route, `current_check` every path and fix the flags, `ground_pour`, `drc`
-and `render`, and report a table of the current paths. In Claude Code it appears as
+project), place and route, `current_check` every path and fix the flags, `ground_pour`,
+`reference_check` for the fast signals and pairs, `drc` and `render`, and report a table of the current paths. In Claude Code it appears as
 `/mcp__gummiband__good_practice`.
 
 ### drc

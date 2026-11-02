@@ -157,6 +157,7 @@ fn initialize_list_load_route() {
             "place_parts",
             "power_copper",
             "power_plan",
+            "reference_check",
             "render",
             "route",
             "set_layer_type",

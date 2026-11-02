@@ -1877,7 +1877,9 @@ check again until every path is ok. Too few vias where the current changes layer
 6. Ground: ground_pour on the routed file (GND pours on the outer layers, stitching vias on a grid \
 and along the edge). Use the returned file from now on.
 
-7. Judge: drc on the final file (it refills the zones). Fix clearance violations and unconnected \
+7. Judge: reference_check on the final file: fast signals and differential pairs over a gap or a \
+split of their reference plane get routed over unbroken copper (or on the layer next to ground). \
+drc on the final file (it refills the zones). Fix clearance violations and unconnected \
 items, render the regions of power stages, necks and dense areas and look at them. angles_45 only \
 if 45 degree routing is wanted, then drc again.
 
