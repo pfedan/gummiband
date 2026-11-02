@@ -10,6 +10,9 @@ use gummiband_core::route::RouterConfig;
 use gummiband_core::topo::SubstrateConfig;
 use gummiband_kicad::{KeepCopper, ReadOptions, read_board, write};
 
+/// How far `route --clear-corridors` may move an IC or connector from where it sits (mm).
+const CLEAR_LEASH: f64 = 1.5;
+
 /// Track angles of a routed result.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum Angles {
@@ -298,6 +301,10 @@ enum Cmd {
         /// mm), instead of the same halo all round. Experimental.
         #[arg(long)]
         escape_halo: bool,
+        /// Parts with 4 or more pads (ICs, connectors) stay within this distance of where they
+        /// sit (mm, 0 = free): a local change instead of a new placement, e.g. with --only.
+        #[arg(long, default_value_t = 0.0)]
+        leash: f64,
         /// Write a machine readable JSON report.
         #[arg(long)]
         report: Option<PathBuf>,
@@ -696,6 +703,7 @@ fn main() -> Result<()> {
                             halo: env("GB_CC_HALO").unwrap_or(opts.halo),
                             escape_halo: env("GB_CC_ESCAPE").is_some_and(|v| v > 0.0),
                             semantic: env("GB_CC_SEMANTIC").is_some_and(|v| v > 0.0),
+                            leash: env("GB_CC_LEASH").unwrap_or(CLEAR_LEASH),
                             ..opts
                         },
                     )?;
@@ -1269,6 +1277,7 @@ fn main() -> Result<()> {
             semantic,
             corridors,
             escape_halo,
+            leash,
             report,
         } => {
             use gummiband_place::auto::{PlaceOptions, Scope};
@@ -1295,6 +1304,7 @@ fn main() -> Result<()> {
                 semantic,
                 corridors,
                 escape_halo,
+                leash,
             };
             let placed = gummiband_place::auto::place_board(&board, &opts)?;
             let r = &placed.report;

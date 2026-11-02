@@ -107,6 +107,9 @@ pub struct PlaceOptions {
     /// Room for the escape per side of a part with five or more pads, from the pins on that
     /// side: their tracks with clearance, shared by the routing layers, see [`escape_skirts`].
     pub escape_halo: bool,
+    /// Movable parts with 4 or more pads (ICs, connectors) stay within this distance of their
+    /// current position (mm, 0: free), for a local change such as clearing a corridor.
+    pub leash: f64,
 }
 
 impl Default for PlaceOptions {
@@ -125,6 +128,7 @@ impl Default for PlaceOptions {
             semantic: false,
             corridors: false,
             escape_halo: false,
+            leash: 0.0,
         }
     }
 }
@@ -1079,6 +1083,9 @@ fn net_terms(d: &Design, board: &Board, board_area: f64) -> Nets {
     }
 }
 
+/// What a leashed part's courtyard gives up beyond its deficit, so that its place stays legal
+/// in the rounding of the grid (mm).
+const LEASH_SLACK: f64 = 0.02;
 /// Largest skirt of [`escape_skirts`] in mm.
 const SKIRT_MAX: f64 = 3.0;
 
@@ -1438,8 +1445,12 @@ fn unit_poses(d: &Design, units: &[Unit], s: &State) -> Vec<(Point, f64)> {
 fn run(p: &Problem, bbox: &R, seed: u64, iters: usize) -> Option<(State, f64)> {
     let mut rng = Rng::new(seed);
     let n = p.units.len();
+    // a leashed unit starts at home, the others anywhere
     let pos = (0..n)
-        .map(|_| pt(bbox.x0 + rng.f() * bbox.w(), bbox.y0 + rng.f() * bbox.h()))
+        .map(|u| {
+            let r = pt(bbox.x0 + rng.f() * bbox.w(), bbox.y0 + rng.f() * bbox.h());
+            p.leash.get(u).copied().flatten().map_or(r, |(home, _)| home)
+        })
         .collect();
     let mut pl = Placer::new(p, State { pos, k: vec![0; n] });
     let size = bbox.w().max(bbox.h());
@@ -1533,8 +1544,12 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
     } = fixed_parts(&d, &kb, opts, outer)?;
     // the courtyards as the file has them, before the halo, for the report
     let boxes = court_boxes(&d);
-    for p in &mut d.parts {
-        if p.pads.len() >= 5 {
+    // leashed parts (see PlaceOptions::leash) get no halo
+    let leashed: Vec<bool> = (0..d.parts.len())
+        .map(|i| opts.leash > 0.0 && !fixed[i] && d.parts[i].pads.len() >= CORRIDOR_PADS)
+        .collect();
+    for (i, p) in d.parts.iter_mut().enumerate() {
+        if p.pads.len() >= 5 && !leashed[i] {
             for r in &mut p.court {
                 *r = r.grow(opts.halo);
             }
@@ -1542,6 +1557,47 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
     }
     if opts.escape_halo {
         escape_skirts(&mut d, &kb.board);
+    }
+    // a leashed part keeps the room it has: where its neighbours sit closer than the gap, its
+    // courtyard shrinks by the difference, so that its own place stays legal
+    if leashed.contains(&true) {
+        let quads = |i: usize| court_quads(&d.parts[i]);
+        let shrink: Vec<f64> = (0..d.parts.len())
+            .map(|i| {
+                if !leashed[i] {
+                    return 0.0;
+                }
+                let mut sep = f64::INFINITY;
+                for q in quads(i) {
+                    for j in (0..d.parts.len()).filter(|&j| j != i) {
+                        for o in quads(j) {
+                            if q.bbox().grow(opts.gap + 1.0).overlap(&o.bbox()) > 0.0 {
+                                sep = sep.min(q.separation(&o));
+                            }
+                        }
+                    }
+                }
+                (opts.gap - sep + LEASH_SLACK).max(0.0)
+            })
+            .collect();
+        for (p, s) in d.parts.iter_mut().zip(shrink) {
+            if s > 0.0 {
+                for r in &mut p.court {
+                    let g = r.grow(-s);
+                    let c = r.center();
+                    *r = if g.x1 > g.x0 && g.y1 > g.y0 {
+                        g
+                    } else {
+                        R {
+                            x0: c.x,
+                            y0: c.y,
+                            x1: c.x,
+                            y1: c.y,
+                        }
+                    };
+                }
+            }
+        }
     }
     let units = movable_units(&d, &kb, &fixed);
     if units.is_empty() {
@@ -1754,6 +1810,15 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
     prob.escape_overlap = ESCAPE_OVERLAP;
     if opts.corridors {
         prob.corridors = corridors(&d, &kb.board, real_nets, &terms, &fixed, &part_pins);
+    }
+    if opts.leash > 0.0 {
+        prob.leash = units
+            .iter()
+            .map(|u| {
+                let pads: usize = u.members.iter().map(|m| d.parts[m.part].pads.len()).sum();
+                (pads >= CORRIDOR_PADS).then_some((u.pos, opts.leash))
+            })
+            .collect();
     }
 
     // ---- the starts, in parallel; the fewest crossings win, then the shortest wires
@@ -2140,6 +2205,25 @@ mod tests {
         };
         let p = place(&board(|i| (110.0 + i as f64 * 4.0, 110.0)), "only", &opts).unwrap();
         assert_eq!(p.report.moved, vec!["C1"]);
+    }
+
+    #[test]
+    fn a_leashed_ic_stays_close() {
+        let spot = |i: usize| [(122.0, 110.0), (110.0, 115.0), (114.0, 115.0), (118.0, 115.0)][i];
+        let only = |leash| PlaceOptions {
+            scope: Scope::Only(vec!["U2".into()]),
+            leash,
+            ..quick()
+        };
+        let dist = |p: &Placed| {
+            let (x, y) = pose(&p.report, "U2");
+            ((x - 122.0).powi(2) + (y - 110.0).powi(2)).sqrt()
+        };
+        // free, U2 goes to U1, which it shares all its nets with
+        let free = place(&board(spot), "free", &only(0.0)).unwrap();
+        assert!(dist(&free) > 3.0, "{}", dist(&free));
+        let leashed = place(&board(spot), "leash", &only(1.5)).unwrap();
+        assert!(dist(&leashed) < 1.7, "{}", dist(&leashed));
     }
 
     #[test]

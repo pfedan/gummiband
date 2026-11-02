@@ -185,6 +185,9 @@ pub struct Corridor {
     pub weight: f64,
 }
 
+/// Cost per mm2 of a leashed unit beyond its leash: far above the wire a move can save.
+const LEASH_WEIGHT: f64 = 200.0;
+
 pub struct Problem {
     pub units: Vec<UnitGeom>,
     pub nets: Vec<NetTerm>,
@@ -198,6 +201,8 @@ pub struct Problem {
     pub escape_overlap: f64,
     /// Bands kept free for groups of tracks (empty: off).
     pub corridors: Vec<Corridor>,
+    /// Per unit: its home and how far it may move from there before it pays (empty: off).
+    pub leash: Vec<Option<(Point, f64)>>,
 }
 
 impl Problem {
@@ -331,6 +336,7 @@ impl Problem {
                 field_weight: 0.0,
                 escape_overlap: 0.0,
                 corridors: Vec::new(),
+                leash: Vec::new(),
             },
             part_pins,
         )
@@ -446,7 +452,18 @@ impl<'a> Placer<'a> {
                 s += self.p.fields[*f].at(self.pin(u, i));
             }
         }
-        s * self.p.field_weight
+        s * self.p.field_weight + self.leash_cost(u)
+    }
+
+    /// A leashed unit pays for every mm beyond its leash, squared, so it stays close to home.
+    fn leash_cost(&self, u: usize) -> f64 {
+        match self.p.leash.get(u) {
+            Some(Some((home, r))) => {
+                let over = (self.s.pos[u].dist(*home) - r).max(0.0);
+                LEASH_WEIGHT * over * over
+            }
+            _ => 0.0,
+        }
     }
 
     /// Centre line of a corridor: from the centre of the pins at one end to the other.
