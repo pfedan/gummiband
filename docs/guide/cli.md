@@ -243,6 +243,8 @@ gummiband route placed.kicad_pcb -o routed.kicad_pcb
 | `--margin MM` | 0.5 | distance of the courtyards from the outline |
 | `--halo MM` | 0.3 | extra room around parts with five or more pads, for their escape |
 | `--semantic` | off | use the schematic beyond the netlist, see below |
+| `--corridors` | off | experimental: keep a band free for each group of tracks between two parts, see below |
+| `--escape-halo` | off | experimental: room for the escape per side of a part, from its pins on that side, see below |
 | `--report FILE` | | JSON report: poses, decoupling assignment, crossings, every start, with `--semantic` inductors and groups |
 
 Without a scope option, all parts move except locked footprints, connectors, modules, mounting
@@ -277,6 +279,19 @@ default; without it the output is the same as before.
   box, at a weight that grows with the class width. A series chain such as connector, fuse,
   shunt, eFuse then stays in order, and a TVS or input capacitor stays on the path instead of
   anywhere inside its box.
+
+`--corridors` keeps room for groups of tracks: two parts with at least 4 pads on nets (ICs,
+connectors) that share at least two signal nets (a bus, SPI, I2C; a pull-up on the way does not
+count) get a band between the centres of their pins, as wide as the tracks of the group with
+their clearances. Another part pays 2 mm of wire per mm2 of the band it covers; parts on the nets
+of the group (series resistors, pull-ups) may sit there. It pairs with `route --patterns groups`,
+which routes such a group as one block.
+
+`--escape-halo` replaces the even halo of parts with five or more pads by a strip in front of each
+side, as deep as the tracks of the signal pins on that side with their clearances, shared by the
+routing layers (at most 3 mm; pins of a plane net leave through a via and do not count). A full
+side of a QFN keeps room for its fan-out, an empty side none, and two chips with a bus between
+them stay apart by what their pins need.
 
 The console lists the inductors and groups. Connectors and power stages that matter still belong
 in `--fixed`. On the Lichtschnitzel controller (only connectors fixed, four seeds) the routed

@@ -437,6 +437,13 @@ pub struct PlacePartsIn {
     /// count their full length, so an input chain stays in order. Connectors and power stages
     /// you care about still belong in `fixed`.
     pub semantic: Option<bool>,
+    /// Experimental: keep a band free for every group of tracks between two parts (ICs and
+    /// connectors that share at least two signal nets, a bus, SPI, I2C); other parts pay for the
+    /// area of the band they cover. Default false.
+    pub corridors: Option<bool>,
+    /// Experimental: room for the escape per side of a part with five or more pads, from its
+    /// signal pins on that side, instead of the same halo all round. Default false.
+    pub escape_halo: Option<bool>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1775,6 +1782,8 @@ impl Gummiband {
             gap: p.gap.unwrap_or(defaults.gap),
             halo: p.halo.unwrap_or(defaults.halo),
             semantic: p.semantic.unwrap_or(false),
+            corridors: p.corridors.unwrap_or(false),
+            escape_halo: p.escape_halo.unwrap_or(false),
             ..defaults
         };
         let path = self.with_entry(&p.board, |e| Ok(e.path.clone()))?;

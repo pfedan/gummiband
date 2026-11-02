@@ -174,6 +174,17 @@ pub struct Decap {
     pub weight: f64,
 }
 
+/// Room for a group of tracks between two parts (a bus, SPI, I2C): a band of `radius` around the
+/// line between the centres of the pins at either end. A unit that is not `exempt` costs the
+/// area it covers of the band, times `weight`.
+pub struct Corridor {
+    pub ends: [Vec<Result<(usize, usize), Point>>; 2],
+    pub radius: f64,
+    /// Units that may sit in the band: the two ends and the parts on the nets of the group.
+    pub exempt: Vec<usize>,
+    pub weight: f64,
+}
+
 pub struct Problem {
     pub units: Vec<UnitGeom>,
     pub nets: Vec<NetTerm>,
@@ -185,6 +196,8 @@ pub struct Problem {
     pub field_weight: f64,
     /// Overlap (mm2) a pin without room for its via adds to its unit; 0 leaves it to the cost.
     pub escape_overlap: f64,
+    /// Bands kept free for groups of tracks (empty: off).
+    pub corridors: Vec<Corridor>,
 }
 
 impl Problem {
@@ -317,6 +330,7 @@ impl Problem {
                 fields: Vec::new(),
                 field_weight: 0.0,
                 escape_overlap: 0.0,
+                corridors: Vec::new(),
             },
             part_pins,
         )
@@ -435,6 +449,97 @@ impl<'a> Placer<'a> {
         s * self.p.field_weight
     }
 
+    /// Centre line of a corridor: from the centre of the pins at one end to the other.
+    fn corridor_line(&self, c: &Corridor) -> (Point, Point) {
+        let centre = |e: &Vec<Result<(usize, usize), Point>>| {
+            let n = e.len().max(1) as f64;
+            let s = e.iter().fold(pt(0.0, 0.0), |s, x| {
+                s + match *x {
+                    Ok((u, i)) => self.pin(u, i),
+                    Err(q) => q,
+                }
+            });
+            pt(s.x / n, s.y / n)
+        };
+        (centre(&c.ends[0]), centre(&c.ends[1]))
+    }
+
+    /// Area of the band of corridor `c` (line a, b) that the courtyards of unit `u` cover, about:
+    /// per rectangle the depth it reaches into the band times its extent along the band.
+    fn intrusion(&self, u: usize, c: &Corridor, a: Point, b: Point) -> f64 {
+        let ab = b - a;
+        let len = ab.x.hypot(ab.y);
+        if len < 1e-6 {
+            return 0.0;
+        }
+        let (dx, dy) = (ab.x / len, ab.y / len);
+        let mut s = 0.0;
+        for r in self.rects(u) {
+            let m = r.center();
+            let t = (m.x - a.x) * dx + (m.y - a.y) * dy;
+            let (hw, hh) = (r.w() / 2.0, r.h() / 2.0);
+            let along = hw * dx.abs() + hh * dy.abs();
+            if t < -along || t > len + along {
+                continue;
+            }
+            let across = hw * dy.abs() + hh * dx.abs();
+            let off = ((m.x - a.x) * dy - (m.y - a.y) * dx).abs();
+            let depth = (c.radius + across - off).min(2.0 * c.radius).min(2.0 * across);
+            if depth > 0.0 {
+                // the part of the rectangle beyond the ends of the line does not count
+                let inside = (t + along).min(len) - (t - along).max(0.0);
+                s += depth * inside.max(0.0);
+            }
+        }
+        s
+    }
+
+    /// Corridor cost of a move of the units `us`: every corridor with an end among them in full,
+    /// else what the moved units cover.
+    fn corridor_cost(&self, us: &[usize]) -> f64 {
+        let mut s = 0.0;
+        for c in &self.p.corridors {
+            let moves_end = c
+                .ends
+                .iter()
+                .flatten()
+                .any(|e| matches!(e, Ok((u, _)) if us.contains(u)));
+            let (a, b) = self.corridor_line(c);
+            if moves_end {
+                s += c.weight
+                    * (0..self.p.units.len())
+                        .filter(|v| !c.exempt.contains(v))
+                        .map(|v| self.intrusion(v, c, a, b))
+                        .sum::<f64>();
+            } else {
+                s += c.weight
+                    * us.iter()
+                        .filter(|v| !c.exempt.contains(v))
+                        .map(|&v| self.intrusion(v, c, a, b))
+                        .sum::<f64>();
+            }
+        }
+        s
+    }
+
+    /// Corridor cost of the whole placement.
+    pub fn corridors_total(&self) -> f64 {
+        let all: Vec<usize> = (0..self.p.units.len()).collect();
+        self.p
+            .corridors
+            .iter()
+            .map(|c| {
+                let (a, b) = self.corridor_line(c);
+                c.weight
+                    * all
+                        .iter()
+                        .filter(|v| !c.exempt.contains(v))
+                        .map(|&v| self.intrusion(v, c, a, b))
+                        .sum::<f64>()
+            })
+            .sum()
+    }
+
     pub fn rects(&self, u: usize) -> impl Iterator<Item = R> + '_ {
         let o = self.s.pos[u];
         self.p.units[u].rects[self.s.k[u]].iter().map(move |r| r.shift(o))
@@ -493,6 +598,7 @@ impl<'a> Placer<'a> {
         self.net_cost.iter().sum::<f64>()
             + (0..self.p.decaps.len()).map(|d| self.decap(d)).sum::<f64>()
             + (0..self.p.units.len()).map(|u| self.field_cost(u)).sum::<f64>()
+            + self.corridors_total()
     }
 
     pub fn total_overlap(&self) -> f64 {
@@ -510,7 +616,8 @@ impl<'a> Placer<'a> {
     fn local_cost(&self, us: &[usize], nets: &[usize], decs: &[usize], lambda: f64) -> (f64, f64) {
         let w: f64 = nets.iter().map(|&n| self.hpwl(n)).sum::<f64>()
             + decs.iter().map(|&d| self.decap(d)).sum::<f64>()
-            + us.iter().map(|&u| self.field_cost(u)).sum::<f64>();
+            + us.iter().map(|&u| self.field_cost(u)).sum::<f64>()
+            + self.corridor_cost(us);
         let mut ov = 0.0;
         if lambda > 0.0 {
             for &u in us {
@@ -679,7 +786,8 @@ impl<'a> Placer<'a> {
                         }
                         let w: f64 = nets.iter().map(|&n| self.hpwl(n)).sum::<f64>()
                             + decs.iter().map(|&d| self.decap(d)).sum::<f64>()
-                            + self.field_cost(u);
+                            + self.field_cost(u)
+                            + self.corridor_cost(&[u]);
                         let cost = w + 2.0 * c.dist(home);
                         if best.is_none_or(|b| cost < b.0) {
                             best = Some((cost, c, k));

@@ -282,6 +282,16 @@ enum Cmd {
         /// wide nets and switch nodes count their full length.
         #[arg(long)]
         semantic: bool,
+        /// Keep a band free for every group of tracks between two parts (ICs and connectors that
+        /// share at least two signal nets, a bus, SPI, I2C): other parts pay for the area of the
+        /// band they cover. Experimental.
+        #[arg(long)]
+        corridors: bool,
+        /// Room for the escape per side of a part with five or more pads, from its signal pins
+        /// on that side (their tracks with clearance, shared by the routing layers, at most 3
+        /// mm), instead of the same halo all round. Experimental.
+        #[arg(long)]
+        escape_halo: bool,
         /// Write a machine readable JSON report.
         #[arg(long)]
         report: Option<PathBuf>,
@@ -1199,6 +1209,8 @@ fn main() -> Result<()> {
             margin,
             halo,
             semantic,
+            corridors,
+            escape_halo,
             report,
         } => {
             use gummiband_place::auto::{PlaceOptions, Scope};
@@ -1223,6 +1235,8 @@ fn main() -> Result<()> {
                 halo,
                 plane_layers: cli.plane_layers.clone(),
                 semantic,
+                corridors,
+                escape_halo,
             };
             let placed = gummiband_place::auto::place_board(&board, &opts)?;
             let r = &placed.report;

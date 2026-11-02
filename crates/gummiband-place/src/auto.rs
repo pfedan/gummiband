@@ -100,6 +100,13 @@ pub struct PlaceOptions {
     /// capacitors go to an IC of their own sheet, and current paths (wide nets, switch nodes)
     /// count their full length instead of a box, so a series chain stays in order.
     pub semantic: bool,
+    /// Keep a band free for each group of tracks between two parts (ICs, connectors with at least
+    /// 4 pads on nets that share at least two signal nets): other parts pay for the area of the
+    /// band they cover, see [`Corridor`](crate::anneal::Corridor).
+    pub corridors: bool,
+    /// Room for the escape per side of a part with five or more pads, from the pins on that
+    /// side: their tracks with clearance, shared by the routing layers, see [`escape_skirts`].
+    pub escape_halo: bool,
 }
 
 impl Default for PlaceOptions {
@@ -116,6 +123,8 @@ impl Default for PlaceOptions {
             halo: 0.3,
             plane_layers: Vec::new(),
             semantic: false,
+            corridors: false,
+            escape_halo: false,
         }
     }
 }
@@ -1070,6 +1079,188 @@ fn net_terms(d: &Design, board: &Board, board_area: f64) -> Nets {
     }
 }
 
+/// Largest skirt of [`escape_skirts`] in mm.
+const SKIRT_MAX: f64 = 3.0;
+
+/// Skirts for the escape: each side of a part with five or more pads gets a strip in front of its
+/// pins, as deep as the tracks of its signal pins (width and clearance of their class) side by
+/// side, shared by the routing layers. Pins of a net with a plane leave through a via and do not
+/// count. The strips are courtyard: other parts keep out, so a full side of a QFN keeps its fan
+/// out and two chips with a bus between them keep the room for it.
+fn escape_skirts(d: &mut Design, board: &Board) {
+    let layers = board.routing_layers().iter().count().max(1) as f64;
+    let plane_net = |name: &str| {
+        board
+            .net_id(name)
+            .is_some_and(|id| board.planes.iter().any(|p| p.net == id))
+    };
+    for p in &mut d.parts {
+        if p.pads.len() < 5 {
+            continue;
+        }
+        let bb = p.court.iter().fold(R::empty(), |a, r| a.union(r));
+        // demand per side: left, right, top, bottom (footprint frame), and the extent of its pins
+        let mut need = [0.0f64; 4];
+        let mut span = [R::empty(); 4];
+        for pad in &p.pads {
+            let Some(n) = pad.net else { continue };
+            let Some(name) = d.nets.get(n) else { continue };
+            if plane_net(name) || name.starts_with("unconnected-") {
+                continue;
+            }
+            let q = pad.local;
+            let dist = [q.x - bb.x0, bb.x1 - q.x, q.y - bb.y0, bb.y1 - q.y];
+            let side = (0..4).min_by(|&a, &b| dist[a].total_cmp(&dist[b])).unwrap();
+            let c = board
+                .net_id(name)
+                .map(|id| board.class_of(id).clone())
+                .unwrap_or_default();
+            need[side] += (c.track_width + c.clearance) / layers;
+            let r = &mut span[side];
+            r.x0 = r.x0.min(q.x);
+            r.y0 = r.y0.min(q.y);
+            r.x1 = r.x1.max(q.x);
+            r.y1 = r.y1.max(q.y);
+        }
+        for side in 0..4 {
+            let e = need[side].min(SKIRT_MAX);
+            if e <= 0.0 {
+                continue;
+            }
+            let sp = span[side];
+            // a strip along the side, as long as the pins it serves plus the depth at both ends
+            let strip = match side {
+                0 => R {
+                    x0: bb.x0 - e,
+                    x1: bb.x0,
+                    y0: sp.y0 - e,
+                    y1: sp.y1 + e,
+                },
+                1 => R {
+                    x0: bb.x1,
+                    x1: bb.x1 + e,
+                    y0: sp.y0 - e,
+                    y1: sp.y1 + e,
+                },
+                2 => R {
+                    x0: sp.x0 - e,
+                    x1: sp.x1 + e,
+                    y0: bb.y0 - e,
+                    y1: bb.y0,
+                },
+                _ => R {
+                    x0: sp.x0 - e,
+                    x1: sp.x1 + e,
+                    y0: bb.y1,
+                    y1: bb.y1 + e,
+                },
+            };
+            p.court.push(strip);
+        }
+    }
+}
+
+/// Weight of the corridor area (per mm2 of band a foreign part covers), against wire length in mm.
+const CORRIDOR_WEIGHT: f64 = 2.0;
+
+/// Parts with at least this many pads on nets end a corridor: ICs and connectors, not passives.
+const CORRIDOR_PADS: usize = 4;
+
+/// The groups of tracks between two parts, as corridors: two parts with at least
+/// [`CORRIDOR_PADS`] pads on nets that share at least two signal nets of at most 4 pads (a pull-up
+/// on the way is part of the net). The band is as wide as the tracks of the group with their
+/// clearances.
+fn corridors(
+    d: &Design,
+    board: &Board,
+    real_nets: usize,
+    terms: &Nets,
+    fixed: &[bool],
+    part_pins: &[Vec<(usize, usize)>],
+) -> Vec<crate::anneal::Corridor> {
+    let net_pads = |p: &crate::model::Part| p.pads.iter().filter(|x| x.net.is_some_and(|n| n < real_nets)).count();
+    let ends: Vec<bool> = d.parts.iter().map(|p| net_pads(p) >= CORRIDOR_PADS).collect();
+    let mut on: Vec<Vec<usize>> = vec![Vec::new(); real_nets];
+    for (i, p) in d.parts.iter().enumerate() {
+        for pad in &p.pads {
+            if let Some(n) = pad.net.filter(|&n| n < real_nets)
+                && !on[n].contains(&i)
+            {
+                on[n].push(i);
+            }
+        }
+    }
+    let mut by_pair: std::collections::BTreeMap<(usize, usize), Vec<usize>> = Default::default();
+    for (n, parts) in on.iter().enumerate() {
+        let pads: usize = parts
+            .iter()
+            .map(|&i| d.parts[i].pads.iter().filter(|x| x.net == Some(n)).count())
+            .sum();
+        // signal nets only: no plane, no current path, no supply with many pins
+        if terms.weight[n] == 0.0 || !terms.partial[n].is_empty() || terms.power[n] || pads > 4 {
+            continue;
+        }
+        let big: Vec<usize> = parts.iter().copied().filter(|&i| ends[i]).collect();
+        for x in 0..big.len() {
+            for y in x + 1..big.len() {
+                by_pair
+                    .entry((big[x].min(big[y]), big[x].max(big[y])))
+                    .or_default()
+                    .push(n);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for ((a, b), nets) in by_pair {
+        if nets.len() < 2 || (fixed[a] && fixed[b]) {
+            continue;
+        }
+        let end = |i: usize| -> Vec<Result<(usize, usize), Point>> {
+            d.parts[i]
+                .pads
+                .iter()
+                .enumerate()
+                .filter(|(_, x)| x.net.is_some_and(|n| nets.contains(&n)))
+                .map(|(k, x)| {
+                    if fixed[i] {
+                        Err(d.parts[i].pad_world(x))
+                    } else {
+                        Ok(part_pins[i][k])
+                    }
+                })
+                .collect()
+        };
+        let mut width = 0.0;
+        let mut clear: f64 = 0.0;
+        for &n in &nets {
+            let c = board
+                .net_id(&d.nets[n])
+                .map(|id| board.class_of(id).clone())
+                .unwrap_or_default();
+            width += c.track_width + c.clearance;
+            clear = clear.max(c.clearance);
+        }
+        let mut exempt: Vec<usize> = Vec::new();
+        for &n in &nets {
+            for &i in &on[n] {
+                if !fixed[i]
+                    && let Some(&(u, _)) = part_pins[i].first()
+                    && !exempt.contains(&u)
+                {
+                    exempt.push(u);
+                }
+            }
+        }
+        out.push(crate::anneal::Corridor {
+            ends: [end(a), end(b)],
+            radius: (width + clear) / 2.0,
+            exempt,
+            weight: CORRIDOR_WEIGHT,
+        });
+    }
+    out
+}
+
 /// Crossings between the spanning trees of the nets (pads in their final position).
 fn crossings(d: &Design, pose: &[(Point, f64)], weight: &[f64]) -> usize {
     let mut pins: Vec<Vec<Point>> = vec![Vec::new(); d.nets.len()];
@@ -1234,6 +1425,9 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
                 *r = r.grow(opts.halo);
             }
         }
+    }
+    if opts.escape_halo {
+        escape_skirts(&mut d, &kb.board);
     }
     let units = movable_units(&d, &kb, &fixed);
     if units.is_empty() {
@@ -1444,6 +1638,9 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         }
     }
     prob.escape_overlap = ESCAPE_OVERLAP;
+    if opts.corridors {
+        prob.corridors = corridors(&d, &kb.board, real_nets, &terms, &fixed, &part_pins);
+    }
 
     // ---- the starts, in parallel; the fewest crossings win, then the shortest wires
     let starts: Vec<usize> = (1..=opts.starts.max(1)).collect();
