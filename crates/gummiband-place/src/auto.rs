@@ -1311,7 +1311,20 @@ pub fn corridor_intruders(path: &Path, opts: &PlaceOptions) -> Result<Vec<String
     let Fixing { fixed, .. } = fixed_parts(&d, &kb, opts, outer)?;
     let terms = net_terms(&d, &kb.board, outer.signed_area().abs());
     let groups = track_groups(&d, &kb.board, d.nets.len(), &terms);
-    let supply = |n: usize| terms.weight[n] == 0.0 || !terms.partial[n].is_empty() || terms.power[n];
+    // a rail: a plane, a current path, a ground or a net with many pads (a routed supply)
+    let mut pads_on = vec![0usize; d.nets.len()];
+    for x in d.parts.iter().flat_map(|p| &p.pads) {
+        if let Some(n) = x.net.filter(|&n| n < d.nets.len()) {
+            pads_on[n] += 1;
+        }
+    }
+    let supply = |n: usize| {
+        terms.weight[n] == 0.0
+            || !terms.partial[n].is_empty()
+            || terms.power[n]
+            || is_ground(&d.nets[n])
+            || pads_on[n] >= 8
+    };
     let decap = |p: &crate::model::Part| {
         p.pads.len() == 2
             && p.pads
