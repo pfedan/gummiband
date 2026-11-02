@@ -233,7 +233,8 @@ SEVERITIES = {
 
 class Board:
     def __init__(self, name, w, h, inner=None, title=""):
-        """inner: None (2 layers), "power" (In1/In2 planes) or "signal" (4 routing layers)."""
+        """inner: None (2 layers), "power" (In1/In2 planes), "signal" (4 routing layers) or a list
+        of the inner layer types from In1 down ("power" or "signal")."""
         self.name, self.w, self.h, self.inner, self.title = name, w, h, inner, title
         self.fps = []
         self.zones = []  # (net, layer)
@@ -336,9 +337,9 @@ class Board:
         w(f'\t(title_block\n\t\t(title "Gummiband bench: {self.name}")\n\t\t(comment 1 "{self.title}")\n\t)')
         w("\t(layers")
         w('\t\t(0 "F.Cu" signal)')
-        if self.inner:
-            w(f'\t\t(4 "In1.Cu" {self.inner})')
-            w(f'\t\t(6 "In2.Cu" {self.inner})')
+        inner = [self.inner] * 2 if isinstance(self.inner, str) else (self.inner or [])
+        for i, kind in enumerate(inner):
+            w(f'\t\t({4 + 2 * i} "In{i + 1}.Cu" {kind})')
         w('\t\t(2 "B.Cu" signal)')
         for line in ('(13 "F.Paste" user)', '(15 "B.Paste" user)', '(5 "F.SilkS" user "F.Silkscreen")',
                      '(7 "B.SilkS" user "B.Silkscreen")', '(1 "F.Mask" user)', '(3 "B.Mask" user)',
@@ -688,14 +689,14 @@ def board_four_signal_layers():
     return b
 
 
-def _bga_board(name, n, rings, size, title):
+def _bga_board(name, n, rings, size, title, inner="power", zones=(("GND", "In1.Cu"), ("+3V3", "In2.Cu"))):
     """n x n BGA at 0.8 mm in the middle: the outer `rings` rings are signals that escape to four
     0.5 mm edge connectors (one per side), the inner balls alternate GND and 3V3 (planes)."""
-    b = Board(name, size, size, inner="power", title=title)
+    b = Board(name, size, size, inner=inner, title=title)
     b.classes = [("Default", 0.1, 0.1, 0.45, 0.2)]
     b.net_class("Power", 0.2, 0.1, 0.45, 0.2, ["GND", "+3V3"])
     b.rules.update(min_clearance=0.1, min_hole_clearance=0.15, min_via_diameter=0.45, min_via_annular_width=0.1)
-    b.zones = [("GND", "In1.Cu"), ("+3V3", "In2.Cu")]
+    b.zones = list(zones)
     c = size / 2
     u = b.add(bga("U1", n, 0.8, 0.4), c, c)
     letters = "ABCDEFGHJKLMNPRTUVWY"
@@ -744,6 +745,26 @@ def board_bga_escape():
 def board_bga_dense():
     return _bga_board("bga_dense", 10, 3, 36,
                       "4 layers, 10x10 BGA 0.8 mm with 3 signal rings (84 signals) to four edge connectors")
+
+
+def board_return_vias():
+    """bga_dense on 6 layers with a GND plane next to every signal layer (F.Cu, In1 GND, In2, In3,
+    In4 GND, B.Cu): a signal via from the top half to the bottom half changes its reference from
+    In1 to In4, a GND via next to it joins the two. The inner balls are all GND, and a skew rule
+    with room to spare makes the signals fast nets (`route --return-vias`)."""
+    b = _bga_board("return_vias", 10, 3, 36,
+                   "6 layers, 10x10 BGA 0.8 mm, GND planes on In1 and In4 next to every signal layer",
+                   inner=["power", "signal", "signal", "power"], zones=(("GND", "In1.Cu"), ("GND", "In4.Cu")))
+    for fp in b.fps:
+        for p in fp.pads:
+            if p.net == "+3V3":
+                p.net = "GND"
+    b.dru = """
+(rule "fast"
+  (condition "A.NetName == 'B*'")
+  (constraint skew (max 30mm)))
+"""
+    return b
 
 
 def board_fine_pitch():
@@ -1226,7 +1247,7 @@ def scatter(b, rng, prefix, n, keep_out=(), tries=4000):
 
 
 BOARDS = [board_easy, board_medium, board_bus, board_power_mix, board_crossing, board_qfn_fanout,
-          board_four_signal_layers, board_bga_escape, board_bga_dense, board_fine_pitch, board_fine_pitch_mixed,
+          board_four_signal_layers, board_bga_escape, board_bga_dense, board_return_vias, board_fine_pitch, board_fine_pitch_mixed,
           board_diff_pairs, board_matching, board_pair_wall, board_pair_traffic, board_parts_easy,
           board_parts_medium, board_parts_hard, board_parts_multi,
           board_parts_multi_feed, board_parts_xhard]

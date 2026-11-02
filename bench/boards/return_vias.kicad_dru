@@ -1,0 +1,4 @@
+(version 1)
+(rule "fast"
+  (condition "A.NetName == 'B*'")
+  (constraint skew (max 30mm)))

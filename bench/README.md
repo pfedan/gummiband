@@ -19,6 +19,7 @@ only unconnected items.
 | `four_signal_layers` | 4 signal | dense random netlist around two QFN-32 and two SOIC-14 |
 | `bga_escape` | 4 (planes) | 8x8 BGA at 0.8 mm, 48 signals escape to four edge connectors, 0.1/0.1 mm rules |
 | `bga_dense` | 4 (planes) | 10x10 BGA at 0.8 mm, 3 signal rings (84 signals): the inner ring needs vias on 2 signal layers |
+| `return_vias` | 6 (GND planes on In1 and In4) | `bga_dense` with a GND plane next to every signal layer and all inner balls GND; a loose skew rule makes the signals fast nets. For `route --return-vias`: a signal via between the two halves changes its reference plane |
 | `fine_pitch` | 2 | QFN-56 at 0.4 mm with 0.2/0.19 mm rules, nets in pin order: a clean straight fan-out |
 | `fine_pitch_mixed` | 2 | the same part with shuffled nets: vias and crossings right at the pins, the Corne problem in small |
 | `diff_pairs` | 2 | 8 differential pairs (`_P`, `_N`) with a ground between them, 0.5 mm connectors at an angle, parts in the way |
