@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import os
 import stat
@@ -428,6 +429,17 @@ class OptInCommandTest(unittest.TestCase):
         self.assertEqual(c[c.index("--leash") + 1], "1.5")
         c = runner.build_place_command("gb", Path("a"), Path("b"), Path("r"), runner.PlaceOptions())
         for flag in ("--semantic", "--corridors", "--escape-halo", "--leash"):
+            self.assertNotIn(flag, c)
+
+    def test_two_sided_takes_its_options(self):
+        opts = runner.PlaceOptions(two_sided=True, back_cost=2.0, back_max_pads=16)
+        c = runner.build_place_command("gb", Path("a"), Path("b"), Path("r"), opts)
+        self.assertIn("--two-sided", c)
+        self.assertEqual(c[c.index("--back-cost") + 1], "2.0")
+        self.assertEqual(c[c.index("--back-max-pads") + 1], "16")
+        one = dataclasses.replace(opts, two_sided=False)
+        c = runner.build_place_command("gb", Path("a"), Path("b"), Path("r"), one)
+        for flag in ("--two-sided", "--back-cost", "--back-max-pads"):
             self.assertNotIn(flag, c)
 
     def test_parse_seed_and_corridors(self):

@@ -178,7 +178,9 @@ wins, 1 by default: the crossings hardly predict how well the board routes), *Co
 five or more pads) and *Seed* (1); placements differ a lot from seed to seed, so for another attempt
 press *New* next to it. The *Strategy* tab has the options of a placement from scratch, all off:
 *Use the schematic* (`--semantic`), *Keep bands free for buses* (`--corridors`), *Room for the
-escape per side* (`--escape-halo`) and *Leash for ICs and connectors* (`--leash`, mm, 0 = free).
+escape per side* (`--escape-halo`), *Leash for ICs and connectors* (`--leash`, mm, 0 = free) and
+*Place on both sides* (`--two-sided`) with *Cost of a part on the back* (`--back-cost`, 6 mm) and
+*Largest part for the back* (`--back-max-pads`, 8 pads).
 The first three together gave the cleanest placements of the Lichtschnitzel controller; the
 tooltips say what each does, and [Choosing the opt-in options](options.md) compares them. The
 *Advanced* tab has *Release* (parts that may move although they count as mechanical),
@@ -187,15 +189,18 @@ tooltips say what each does, and [Choosing the opt-in options](options.md) compa
 remembers its numbers like the routing dialog does.
 
 The footprints and the keepouts that belong to them move in one undo step, so Ctrl/Cmd+Z takes the
-placement back entirely. Tracks and vias do not follow, so use it before routing. The message box
+placement back entirely. With *Place on both sides* the parts that change sides are flipped by
+KiCad itself in the same step; that needs KiCad 10.0.6 or newer and kicad-python 0.8 (the API to
+flip items), an older KiCad gets a clear message and keeps the board as it was. Tracks and vias do not follow, so use it before routing. The message box
 at the end says how many parts moved, how many stayed, the crossings between the nets and which
-pins ended up off their plane. Without wxPython the action runs with the defaults: the selected
+pins ended up off their plane, with both sides also how many parts sit on the back and how many
+changed sides. Without wxPython the action runs with the defaults: the selected
 parts if there is a selection, otherwise all unlocked parts.
 
 The button is new and not yet tested live in KiCad. The placer knows no datasheet layouts: place
-a power stage or a crystal by hand, lock it, and let the button do the rest around it. Parts on
-both sides of the board share the same space, so a two sided board comes out less dense than it
-could be.
+a power stage or a crystal by hand, lock it, and let the button do the rest around it. Without
+*Place on both sides* the parts of both sides share the same space, so a two sided board comes out
+less dense than it could be.
 
 ## Without a dialog
 

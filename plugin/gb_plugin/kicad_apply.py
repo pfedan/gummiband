@@ -180,6 +180,35 @@ class PlaceResult:
     moved: int
     zones: int
     missing: List[str]
+    flipped: int = 0
+
+
+def other_side(layer: int) -> int:
+    """The layer on the other side of the board (``F.Cu`` for ``B.Cu`` ...); inner and board wide
+    layers stay."""
+    name = BoardLayer.Name(layer)
+    for a, b in (("BL_F_", "BL_B_"), ("BL_B_", "BL_F_")):
+        if name.startswith(a):
+            return BoardLayer.Value(b + name[len(a):])
+    return layer
+
+
+def flip_footprints(board, refs: Sequence[str]) -> tuple:
+    """Put the footprints ``refs`` on the other side of the board, mirrored as KiCad's flip
+    does (their pose is set afterwards). Returns how many it flipped and the references not
+    found."""
+    if not refs:
+        return 0, []
+    if not hasattr(board, "flip_items"):
+        raise RuntimeError("placing on both sides needs kicad-python 0.8 and KiCad 10.0.6 or newer "
+                           "(the API to flip footprints)")
+    wanted = set(refs)
+    fps = [fp for fp in board.get_footprints() if fp.reference_field.text.value in wanted]
+    done = 0
+    for chunk in _chunks(fps, CHUNK):
+        done += len(board.flip_items(list(chunk)))
+    found = {fp.reference_field.text.value for fp in fps}
+    return done, sorted(wanted - found)
 
 
 def set_outline(zone, points: Sequence[bf.Point]) -> None:
@@ -193,24 +222,32 @@ def set_outline(zone, points: Sequence[bf.Point]) -> None:
     zone.outline = poly
 
 
-def reshape_zones(board, zones: Sequence[dict]) -> List[object]:
+def reshape_zones(board, zones: Sequence[dict], flipped: Sequence[str] = ()) -> List[object]:
     """Set the outlines of ``zones`` on the zones of the board, which still has to take them with
-    ``update_items``. Returns those zones."""
+    ``update_items``; the zones ``flipped`` (ids) also go to the layers of the other side.
+    Returns those zones."""
     outlines = {z["id"]: z["points"] for z in zones}
     followers = [z for z in board.get_zones() if z.id.value in outlines] if outlines else []
+    to_flip = set(flipped)
     for z in followers:
         set_outline(z, outlines[z.id.value])
+        if z.id.value in to_flip:
+            z.layers = [other_side(layer) for layer in z.layers]
     return followers
 
 
-def apply_placement(board, poses: Sequence, zones: Sequence[dict]) -> PlaceResult:
-    """Move footprints to the poses of ``gummiband place`` and the keepouts of moved parts to
-    their new outlines, all in one commit (one undo step)."""
-    changed, missing = move_footprints(board, poses)
-    moved = len(changed)
-    followers = reshape_zones(board, zones)
+def apply_placement(board, poses: Sequence, zones: Sequence[dict], flipped: Sequence[str] = (),
+                    flipped_zones: Sequence[str] = ()) -> PlaceResult:
+    """Put the footprints ``flipped`` on the other side of the board, move footprints to the
+    poses of ``gummiband place`` and the keepouts of moved parts to their new outlines (and
+    sides), all in one commit (one undo step)."""
     commit = board.begin_commit()
     try:
+        turned, missing = flip_footprints(board, flipped)
+        changed, not_found = move_footprints(board, poses)
+        missing += [r for r in not_found if r not in missing]
+        moved = len(changed)
+        followers = reshape_zones(board, zones, flipped_zones)
         for chunk in _chunks(changed + followers, CHUNK):
             board.update_items(list(chunk))
     except BaseException:
@@ -220,4 +257,4 @@ def apply_placement(board, poses: Sequence, zones: Sequence[dict]) -> PlaceResul
             pass  # report the original error, not the failed rollback
         raise
     board.push_commit(commit, PLACE_MESSAGE)
-    return PlaceResult(moved, len(followers), missing)
+    return PlaceResult(moved, len(followers), missing, turned)

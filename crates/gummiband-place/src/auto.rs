@@ -110,7 +110,34 @@ pub struct PlaceOptions {
     /// Movable parts with 4 or more pads (ICs, connectors) stay within this distance of their
     /// current position (mm, 0: free), for a local change such as clearing a corridor.
     pub leash: f64,
+    /// Place on both sides: each side has its own room; a through hole part takes its courtyard on
+    /// its side and only its hole pads on the other ([`crate::model::Part::under`]). SMD
+    /// parts with at most [`back_max_pads`](Self::back_max_pads) pads may change sides, and pay
+    /// [`back_cost`](Self::back_cost) for the back and for a net that then needs a via between
+    /// the sides ([`SIDE_VIA`](crate::anneal::SIDE_VIA)), so the back takes what does not fit
+    /// on the front or saves more wire there. Off: one room for both sides, every part keeps its
+    /// side.
+    pub two_sided: bool,
+    /// With `two_sided`: cost of a part on the back in mm of wire (weighted like the nets). A
+    /// part goes to the back if the front has no room for it or the back saves at least this
+    /// much; 0 treats both sides alike.
+    pub back_cost: f64,
+    /// With `two_sided`: parts with more pads keep their side (the large ICs).
+    pub back_max_pads: usize,
+    /// With `two_sided`: movable parts that go on the front, or on the back, whatever their
+    /// pads (an SMD part with its own courtyard; through hole parts and blocks keep their side).
+    pub on_front: Vec<String>,
+    pub on_back: Vec<String>,
 }
+
+/// Default of [`PlaceOptions::back_cost`] in mm: a second side is a second assembly step, the
+/// back is for what does not fit on the front, and for a part that saves this much wire there
+/// (a pull resistor right under its pin), not for every part a move shortens by a millimetre.
+pub const BACK_COST: f64 = 6.0;
+
+/// Default of [`PlaceOptions::back_max_pads`]: passives, diodes, transistors, small regulators
+/// and other small chips up to SOT-23-8 or SOIC-8.
+pub const BACK_MAX_PADS: usize = 8;
 
 impl Default for PlaceOptions {
     fn default() -> Self {
@@ -129,6 +156,11 @@ impl Default for PlaceOptions {
             corridors: false,
             escape_halo: false,
             leash: 0.0,
+            two_sided: false,
+            back_cost: BACK_COST,
+            back_max_pads: BACK_MAX_PADS,
+            on_front: Vec::new(),
+            on_back: Vec::new(),
         }
     }
 }
@@ -175,6 +207,15 @@ pub struct PlaceReport {
     pub free_area: f64,
     pub movable_area: f64,
     pub min_separation: f64,
+    /// With `two_sided`: of `free_area` the room on the back (else 0).
+    pub back_free_area: f64,
+    /// With `two_sided`: moved parts that changed sides.
+    pub flipped: Vec<String>,
+    /// With `two_sided`: moved parts that sit on the back.
+    pub back: Vec<String>,
+    /// With `two_sided`: ids of the keepouts in [`zones`](Self::zones) that followed a part to
+    /// the other side, their layers swapped front for back.
+    pub flipped_zones: Vec<String>,
 }
 
 pub struct Placed {
@@ -206,6 +247,54 @@ fn court_boxes(d: &Design) -> Vec<Vec<R>> {
         .iter()
         .map(|p| court_quads(p).map(|q| q.bbox()).collect())
         .collect()
+}
+
+/// Two parts that can collide: on the same side, or one goes through the board.
+fn same_side(a: &crate::model::Part, b: &crate::model::Part) -> bool {
+    a.through || b.through || a.bottom == b.bottom
+}
+
+/// What a part takes on `side` (1 front, 2 back, 3 the one room of a one sided placement), in
+/// its footprint frame: the courtyard on its own side, the hole pads of a through hole part on
+/// the other ([`crate::model::Part::under`]).
+fn side_rects(p: &crate::model::Part, side: u8) -> &[R] {
+    if side == 3 || side == 1 << p.bottom as u8 {
+        &p.court
+    } else if p.through {
+        &p.under
+    } else {
+        &[]
+    }
+}
+
+/// Courtyard overlap of parts `i` and `j` in mm2 where they can collide: their courtyards on the
+/// same side, a through hole part's hole pads with a part on the other side.
+fn side_overlap(d: &Design, boxes: &[Vec<R>], i: usize, j: usize) -> f64 {
+    let (a, b) = (&d.parts[i], &d.parts[j]);
+    if a.bottom == b.bottom {
+        return court_overlap(&boxes[i], &boxes[j]);
+    }
+    let under = |p: &crate::model::Part| -> Vec<R> {
+        p.under
+            .iter()
+            .map(|r| {
+                Quad {
+                    pos: p.pos,
+                    rot: p.rot,
+                    r: *r,
+                }
+                .bbox()
+            })
+            .collect()
+    };
+    let mut s = 0.0;
+    if a.through {
+        s += court_overlap(&under(a), &boxes[j]);
+    }
+    if b.through {
+        s += court_overlap(&boxes[i], &under(b));
+    }
+    s
 }
 
 /// Overlap of two sets of courtyard rectangles in mm2.
@@ -240,13 +329,19 @@ fn unplaced_parts(d: &Design, outer: &Polygon) -> Vec<Option<Unplaced>> {
             };
             (0..d.parts.len())
                 .find(|&j| {
-                    if j == i || all[i].overlap(&all[j]) <= 0.0 {
+                    // a part on the back under one on the front is no pile
+                    if j == i || all[i].overlap(&all[j]) <= 0.0 || !same_side(&d.parts[i], &d.parts[j]) {
                         return false;
                     }
+                    let pads_here = |pd: &&crate::model::Pad| pd.through || d.parts[j].bottom == d.parts[i].bottom;
                     // in the pile, or on a pad of a part at least as large: no place to keep
-                    court_overlap(&boxes[i], &boxes[j]) > PILE_OVERLAP * area
+                    side_overlap(d, &boxes, i, j) > PILE_OVERLAP * area
                         || (area <= d.parts[j].court_area()
-                            && d.parts[j].pads.iter().any(|pd| inside(d.parts[j].pad_world(pd))))
+                            && d.parts[j]
+                                .pads
+                                .iter()
+                                .filter(pads_here)
+                                .any(|pd| inside(d.parts[j].pad_world(pd))))
                 })
                 .map(Unplaced::On)
         })
@@ -375,15 +470,26 @@ struct CopperGrid<'a> {
 impl<'a> CopperGrid<'a> {
     const CELL: f64 = 2.0;
 
-    fn new(board: &'a Board, d: &Design, fixed: &[bool], bbox: R, reach: f64) -> CopperGrid<'a> {
-        let mut layers = LayerSet::default();
-        for p in &board.pins {
-            if d.by_ref.get(&p.footprint).is_some_and(|&i| !fixed[i]) {
-                for l in p.layers.iter() {
-                    layers.insert(l);
+    /// Copper on `layers`, or without them on the layers of the moving pins.
+    fn new(
+        board: &'a Board,
+        d: &Design,
+        fixed: &[bool],
+        bbox: R,
+        reach: f64,
+        layers: Option<LayerSet>,
+    ) -> CopperGrid<'a> {
+        let layers = layers.unwrap_or_else(|| {
+            let mut layers = LayerSet::default();
+            for p in &board.pins {
+                if d.by_ref.get(&p.footprint).is_some_and(|&i| !fixed[i]) {
+                    for l in p.layers.iter() {
+                        layers.insert(l);
+                    }
                 }
             }
-        }
+            layers
+        });
         let cols = (bbox.w() / Self::CELL).ceil() as usize + 1;
         let rows = (bbox.h() / Self::CELL).ceil() as usize + 1;
         let mut cells = vec![Vec::new(); cols * rows];
@@ -1284,8 +1390,16 @@ fn corridors(
                     exempt.push(u);
                 }
             }
+            let side = |i: usize| -> u8 {
+                if d.parts[i].through {
+                    3
+                } else {
+                    1 << d.parts[i].bottom as u8
+                }
+            };
             crate::anneal::Corridor {
                 ends: [end(g.a), end(g.b)],
+                fixed_sides: [side(g.a), side(g.b)],
                 radius: g.radius,
                 exempt,
                 weight: CORRIDOR_WEIGHT,
@@ -1427,12 +1541,17 @@ pub fn corridor_groups(path: &Path, opts: &PlaceOptions) -> Result<Vec<CorridorG
 }
 
 /// Crossings between the spanning trees of the nets (pads in their final position).
-fn crossings(d: &Design, pose: &[(Point, f64)], weight: &[f64]) -> usize {
+fn crossings(d: &Design, pose: &[(Point, f64)], flips: &[bool], weight: &[f64]) -> usize {
     let mut pins: Vec<Vec<Point>> = vec![Vec::new(); d.nets.len()];
     for (i, p) in d.parts.iter().enumerate() {
         for pad in &p.pads {
             if let Some(n) = pad.net {
-                pins[n].push(pose[i].0 + kicad_rot(pad.local, pose[i].1));
+                let l = if flips[i] {
+                    pt(pad.local.x, -pad.local.y)
+                } else {
+                    pad.local
+                };
+                pins[n].push(pose[i].0 + kicad_rot(l, pose[i].1));
             }
         }
     }
@@ -1485,6 +1604,19 @@ fn unit_poses(d: &Design, units: &[Unit], s: &State) -> Vec<(Point, f64)> {
     pose
 }
 
+/// Per part: placed on the other side than in the input.
+fn unit_flips(d: &Design, units: &[Unit], s: &State) -> Vec<bool> {
+    let mut out = vec![false; d.parts.len()];
+    for (ui, u) in units.iter().enumerate() {
+        if s.k[ui] >= 4 {
+            for m in &u.members {
+                out[m.part] = true;
+            }
+        }
+    }
+    out
+}
+
 /// One annealing run from random positions; without a legal placement the units that found no
 /// spot, biggest first.
 fn run(p: &Problem, bbox: &R, seed: u64, iters: usize) -> Result<(State, f64), Vec<usize>> {
@@ -1497,7 +1629,8 @@ fn run(p: &Problem, bbox: &R, seed: u64, iters: usize) -> Result<(State, f64), V
             p.leash.get(u).copied().flatten().map_or(r, |(home, _)| home)
         })
         .collect();
-    let mut pl = Placer::new(p, State { pos, k: vec![0; n] });
+    let k = (0..n).map(|u| p.start_k(u)).collect();
+    let mut pl = Placer::new(p, State { pos, k });
     let size = bbox.w().max(bbox.h());
     pl.anneal(&mut rng, iters, 30.0, 0.05, 0.3, 400.0, size / 3.0, 0.2, false);
     // a crowded corner may have to give a small part to the other end of the board
@@ -1563,6 +1696,61 @@ fn keepout_owner(pts: &[Point], d: &Design, fixed: &[bool]) -> Option<usize> {
         .map(|x| x.0)
 }
 
+/// What the parts of one side have to avoid: the outline, cutouts, rule areas, kept copper and
+/// the fixed courtyards of that side.
+struct Room<'a> {
+    kb: &'a KicadBoard,
+    outer: &'a Polygon,
+    cutouts: &'a [&'a Polygon],
+    /// Rule areas that bar parts, with their sides (bit 0 front, bit 1 back).
+    barred: &'a [(Polygon, u8)],
+    fixed: &'a [bool],
+    bbox: R,
+    margin: f64,
+    gap: f64,
+}
+
+impl Room<'_> {
+    /// Raster of `side`: 1 front, 2 back, 3 the one room of a one sided placement (the kept
+    /// copper on the layers of the moving pins, every fixed part).
+    fn raster(&self, d: &Design, side: u8) -> Raster {
+        let cell = 0.1;
+        let half_diag = cell * std::f64::consts::FRAC_1_SQRT_2 + 1e-6;
+        let edge = self.margin + half_diag;
+        let board = &self.kb.board;
+        let layers = match side {
+            1 => board.layer_id("F.Cu").map(LayerSet::single),
+            2 => board.layer_id("B.Cu").map(LayerSet::single),
+            _ => None,
+        };
+        let copper = CopperGrid::new(board, d, self.fixed, self.bbox, self.gap + half_diag, layers);
+        let inside = |c: Point| -> bool {
+            self.outer.contains(c)
+                && self.outer.boundary_dist(c) >= edge
+                && !self.cutouts.iter().any(|h| h.contains(c) || h.boundary_dist(c) < edge)
+                && !self
+                    .barred
+                    .iter()
+                    .any(|(z, m)| (side == 3 || m & side != 0) && (z.contains(c) || z.boundary_dist(c) < half_diag))
+                && !copper.near(c)
+        };
+        let quads: Vec<Quad> = d
+            .parts
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.fixed[*i])
+            .flat_map(|(_, p)| {
+                side_rects(p, side).iter().map(|r| Quad {
+                    pos: p.pos,
+                    rot: p.rot,
+                    r: *r,
+                })
+            })
+            .collect();
+        Raster::over(self.bbox, &inside, &quads, self.gap, cell)
+    }
+}
+
 /// Legal runs (start, state, wire, crossings) and the units without a spot of each failed run.
 type Runs = (Vec<(usize, State, f64, usize)>, Vec<Vec<usize>>);
 
@@ -1579,6 +1767,103 @@ struct NoFit {
     halo: f64,
     /// Fixed parts with the board area their courtyards and gap take.
     fixed: Vec<(String, f64)>,
+    /// Found before the search: what does not fit, and the area missing (mm2).
+    early: Option<(String, f64)>,
+    /// One sided: the free room of front and back together, for the advice to place on both
+    /// sides.
+    back_free: Option<f64>,
+    /// Two sided: the courtyard area of the parts that keep the front (the hole pads of through
+    /// hole parts on the back included) and the free room of the front.
+    front_load: Option<(f64, f64)>,
+}
+
+/// Area covered by rectangles that may overlap (the slabs of a courtyard grown by the halo).
+fn union_area(rs: &[R]) -> f64 {
+    let mut xs: Vec<f64> = rs.iter().flat_map(|r| [r.x0, r.x1]).collect();
+    xs.sort_by(f64::total_cmp);
+    xs.dedup();
+    let mut a = 0.0;
+    for w in xs.windows(2) {
+        let m = 0.5 * (w[0] + w[1]);
+        let mut ys: Vec<(f64, f64)> = rs
+            .iter()
+            .filter(|r| r.x0 < m && m < r.x1)
+            .map(|r| (r.y0, r.y1))
+            .collect();
+        ys.sort_by(|p, q| p.0.total_cmp(&q.0));
+        let (mut len, mut end) = (0.0, f64::NEG_INFINITY);
+        for (y0, y1) in ys {
+            if y1 > end {
+                len += y1 - y0.max(end);
+                end = y1;
+            }
+        }
+        a += len * (w[1] - w[0]);
+    }
+    a
+}
+
+/// Every movable courtyard (halo included) and whether it carries the halo.
+fn movable_courts(d: &Design, units: &[Unit]) -> Vec<(R, bool)> {
+    units
+        .iter()
+        .flat_map(|u| &u.members)
+        .flat_map(|m| {
+            let p = &d.parts[m.part];
+            p.court.iter().map(move |r| (*r, p.pads.len() >= 5))
+        })
+        .collect()
+}
+
+/// Fixed parts with the board area their courtyards and gap take.
+fn fixed_areas(d: &Design, fixed: &[bool], gap: f64, bbox: &R) -> Vec<(String, f64)> {
+    d.parts
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| fixed[*i])
+        .map(|(_, p)| {
+            let a = p
+                .court
+                .iter()
+                .map(|r| {
+                    Quad {
+                        pos: p.pos,
+                        rot: p.rot,
+                        r: *r,
+                    }
+                    .bbox()
+                    .grow(gap)
+                    .overlap(bbox)
+                })
+                .sum::<f64>();
+            (p.reference.clone(), a)
+        })
+        .filter(|x| x.1 > 0.0)
+        .collect()
+}
+
+/// Sides a keepout bars, from its layers: bit 0 front, bit 1 back. Inner layers alone keep no
+/// footprint out; without layers it bars both.
+fn zone_sides(z: &Node) -> u8 {
+    let mut layers: Vec<&str> = Vec::new();
+    for h in ["layer", "layers"] {
+        if let Some(l) = z.child(h) {
+            layers.extend(l.args().iter().filter_map(|x| x.as_str()));
+        }
+    }
+    if layers.is_empty() {
+        return 3;
+    }
+    let mut m = 0;
+    for l in layers {
+        match l {
+            "F.Cu" => m |= 1,
+            "B.Cu" => m |= 2,
+            "*.Cu" | "F&B.Cu" => m |= 3,
+            _ => {}
+        }
+    }
+    m
 }
 
 /// Area a courtyard takes with half the gap on each side.
@@ -1590,9 +1875,14 @@ fn with_gap(r: &R, gap: f64) -> f64 {
 fn no_fit_message(f: &NoFit) -> String {
     let need = |g: f64| f.movable.iter().map(|(r, _)| with_gap(r, g)).sum::<f64>();
     let need_now = need(f.gap);
-    let missing: f64 = f.missing.iter().flatten().map(|r| with_gap(r, f.gap)).sum();
+    let missing: f64 = match &f.early {
+        Some((_, short)) => *short,
+        None => f.missing.iter().flatten().map(|r| with_gap(r, f.gap)).sum(),
+    };
     let mut s = String::from("no legal placement: ");
-    if f.names.is_empty() {
+    if let Some((early, _)) = &f.early {
+        s += early;
+    } else if f.names.is_empty() {
         s += "every part found a spot but some still overlap";
     } else {
         let shown: Vec<String> = f
@@ -1658,6 +1948,18 @@ fn no_fit_message(f: &NoFit) -> String {
         "a board larger by about {:.0} mm2",
         (more / 10.0).ceil() * 10.0
     ));
+    if let Some((need, free)) = f.front_load.filter(|&(n, fr)| n > 0.7 * fr) {
+        opts.push(format!(
+            "the parts that keep the front (more pads than back_max_pads, through hole) take \
+             {need:.0} of its {free:.0} mm2: a larger back_max_pads, or on_back for some of them"
+        ));
+    }
+    if let Some(both) = f.back_free.filter(|&b| b - f.free >= missing.max(1.0)) {
+        opts.push(format!(
+            "two_sided (front and back have {both:.0} mm2 free, {:.0} more)",
+            both - f.free
+        ));
+    }
     if !f.fixed.is_empty() {
         let mut fx = f.fixed.clone();
         fx.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
@@ -1717,16 +2019,29 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
     // a leashed part keeps the room it has: where its neighbours sit closer than the gap, its
     // courtyard shrinks by the difference, so that its own place stays legal
     if leashed.contains(&true) {
-        let quads = |i: usize| court_quads(&d.parts[i]);
+        // what part `j` takes on the side of part `i` (both parts in the one room of one side)
+        let quads = |j: usize, i: usize| {
+            let p = &d.parts[j];
+            let side = if opts.two_sided {
+                1 << d.parts[i].bottom as u8
+            } else {
+                3
+            };
+            side_rects(p, side).iter().map(|r| Quad {
+                pos: p.pos,
+                rot: p.rot,
+                r: *r,
+            })
+        };
         let shrink: Vec<f64> = (0..d.parts.len())
             .map(|i| {
                 if !leashed[i] {
                     return 0.0;
                 }
                 let mut sep = f64::INFINITY;
-                for q in quads(i) {
+                for q in court_quads(&d.parts[i]) {
                     for j in (0..d.parts.len()).filter(|&j| j != i) {
-                        for o in quads(j) {
+                        for o in quads(j, i) {
                             if q.bbox().grow(opts.gap + 1.0).overlap(&o.bbox()) > 0.0 {
                                 sep = sep.min(q.separation(&o));
                             }
@@ -1768,8 +2083,48 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         y1: bb.max.y,
     };
 
-    // ---- what the parts have to avoid
-    let mut barred: Vec<Polygon> = Vec::new();
+    // with two sides: the small SMD parts that may change sides, counted before the groups of
+    // the semantic placement add their pads
+    let chosen = |r: &str| -> Option<u8> {
+        if opts.on_back.iter().any(|x| x == r) {
+            Some(1)
+        } else if opts.on_front.iter().any(|x| x == r) {
+            Some(0)
+        } else {
+            None
+        }
+    };
+    for r in opts.on_front.iter().chain(&opts.on_back) {
+        if !opts.two_sided {
+            bail!("on_front and on_back need two_sided");
+        }
+        let Some(&i) = d.by_ref.get(r) else {
+            bail!("no footprint {r} on the board")
+        };
+        let single = units.iter().any(|u| u.members.len() == 1 && u.members[0].part == i);
+        if fixed[i] || !single || d.parts[i].through {
+            bail!("{r} cannot be put on a side: it is fixed, locked, in a block or a through hole part");
+        }
+    }
+    let flips: Vec<bool> = units
+        .iter()
+        .map(|u| {
+            let i = u.members[0].part;
+            let p = &d.parts[i];
+            opts.two_sided
+                && u.members.len() == 1
+                && !p.through
+                && (p.pads.len() <= opts.back_max_pads || chosen(&p.reference).is_some())
+                && !leashed[i]
+        })
+        .collect();
+    let locks: Vec<Option<u8>> = units
+        .iter()
+        .map(|u| chosen(&d.parts[u.members[0].part].reference))
+        .collect();
+
+    // ---- what the parts have to avoid, per side (bit 0 front, bit 1 back)
+    let mut barred: Vec<(Polygon, u8)> = Vec::new();
     let mut followers: Vec<(&Node, usize)> = Vec::new();
     for n in kb.root.args() {
         if n.head() == Some("zone") && n.child("keepout").is_some() {
@@ -1780,7 +2135,7 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
             if let Some(i) = keepout_owner(&pts, &d, &fixed) {
                 followers.push((n, i));
             } else if bars_parts(n) {
-                barred.push(Polygon::new(pts));
+                barred.push((Polygon::new(pts), zone_sides(n)));
             }
         }
         if matches!(n.head(), Some("footprint") | Some("module")) {
@@ -1789,43 +2144,112 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
                 for z in n.children("zone").filter(|z| bars_parts(z)) {
                     let pts = zone_points(z);
                     if pts.len() >= 3 {
-                        barred.push(Polygon::new(pts));
+                        barred.push((Polygon::new(pts), zone_sides(z)));
                     }
                 }
             }
         }
     }
-    let fixed_quads: Vec<Quad> = d
-        .parts
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| fixed[*i])
-        .flat_map(|(_, p)| {
-            p.court.iter().map(|r| Quad {
-                pos: p.pos,
-                rot: p.rot,
-                r: *r,
-            })
-        })
-        .collect();
-    let cell = 0.1;
-    let half_diag = cell * std::f64::consts::FRAC_1_SQRT_2 + 1e-6;
-    let edge = opts.margin + half_diag;
-    let copper = CopperGrid::new(&kb.board, &d, &fixed, bbox, opts.gap + half_diag);
-    let inside = |c: Point| -> bool {
-        outer.contains(c)
-            && outer.boundary_dist(c) >= edge
-            && !cutouts.iter().any(|h| h.contains(c) || h.boundary_dist(c) < edge)
-            && !barred.iter().any(|z| z.contains(c) || z.boundary_dist(c) < half_diag)
-            && !copper.near(c)
+    let room = Room {
+        kb: &kb,
+        outer,
+        cutouts,
+        barred: &barred,
+        fixed: &fixed,
+        bbox,
+        margin: opts.margin,
+        gap: opts.gap,
     };
-    let raster = Raster::over(bbox, &inside, &fixed_quads, opts.gap, cell);
-    let free_area = bbox.area() - raster.blocked(&bbox);
+    let side_raster = |d: &Design, side: u8| room.raster(d, side);
+    let raster = side_raster(&d, if opts.two_sided { 1 } else { 3 });
+    let back_raster = opts.two_sided.then(|| side_raster(&d, 2));
+    let free_of = |r: &Raster| bbox.area() - r.blocked(&bbox);
+    let front_free = free_of(&raster);
+    let back_free = back_raster.as_ref().map_or(0.0, &free_of);
+    let free_area = front_free + back_free;
     let movable_area: f64 = units
         .iter()
         .flat_map(|u| &u.members)
         .map(|m| d.parts[m.part].court_area())
         .sum();
+    // the room of front and back together that a one sided placement leaves unused, for the
+    // advice of a failure
+    let back_room = |d: &Design| -> Option<f64> {
+        (!opts.two_sided).then(|| free_of(&side_raster(d, 1)) + free_of(&side_raster(d, 2)))
+    };
+
+    // ---- does it fit at all: courtyard area (without gap) against the free room of each side
+    let front_load = {
+        let area = |u: &Unit| -> f64 { u.members.iter().map(|m| union_area(&d.parts[m.part].court)).sum() };
+        // through hole parts keep their side and take their hole pads on the other
+        let (mut holes, mut front, mut back, mut either) = (0.0, 0.0, 0.0, 0.0);
+        for (ui, u) in units.iter().enumerate() {
+            let a = area(u);
+            let p = &d.parts[u.members[0].part];
+            if !opts.two_sided {
+                front += a;
+            } else if u.members.iter().any(|m| d.parts[m.part].through) {
+                let h: f64 = u.members.iter().map(|m| union_area(&d.parts[m.part].under)).sum();
+                holes += h;
+                if p.bottom {
+                    back += a;
+                    front += h;
+                } else {
+                    front += a;
+                    back += h;
+                }
+            } else if let Some(side) = locks[ui] {
+                if side == 1 {
+                    back += a;
+                } else {
+                    front += a;
+                }
+            } else if flips[ui] {
+                either += a;
+            } else if p.bottom {
+                back += a;
+            } else {
+                front += a;
+            }
+        }
+        let short = if !opts.two_sided {
+            front - front_free
+        } else {
+            (front - front_free)
+                .max(back - back_free)
+                .max(front + back + either - front_free - back_free)
+        };
+        if short > 0.0 {
+            let mut early = format!(
+                "the movable courtyards alone (without gap) take {:.0} mm2, {free_area:.0} mm2 are free, \
+                 {short:.0} mm2 are missing before any search",
+                front + back + either
+            );
+            if opts.two_sided {
+                early += &format!(
+                    " (front {front_free:.0} mm2 free, back {back_free:.0}; parts that keep the front take \
+                     {front:.0}, the back {back:.0}, parts that may change sides {either:.0}; the hole \
+                     pads of through hole parts on the side they are not on count with {holes:.0})"
+                );
+            }
+            bail!(
+                "{}",
+                no_fit_message(&NoFit {
+                    names: Vec::new(),
+                    missing: Vec::new(),
+                    early: Some((early, short)),
+                    movable: movable_courts(&d, &units),
+                    free: free_area,
+                    gap: opts.gap,
+                    halo: opts.halo,
+                    fixed: fixed_areas(&d, &fixed, opts.gap, &bbox),
+                    back_free: back_room(&d),
+                    front_load: opts.two_sided.then_some((front, front_free)),
+                })
+            );
+        }
+        opts.two_sided.then_some((front, front_free))
+    };
 
     // ---- nets
     let terms = net_terms(&d, &kb.board, outer.signed_area().abs());
@@ -1853,6 +2277,7 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
                 number: String::new(),
                 local: c,
                 net: Some(n),
+                through: false,
             });
         }
     }
@@ -1922,13 +2347,22 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         let small = pin.layers.0.count_ones() == 1 && pin.size.0.max(pin.size.1) <= ESCAPE_PAD;
         *escapes.entry(pin.name.as_str()).or_insert(true) &= small;
     }
-    let escapes_at = |i: usize, k: usize| -> bool {
-        let p = &d.parts[i];
-        escapes
-            .get(format!("{}.{}", p.reference, p.pads[k].number).as_str())
-            .copied()
-            .unwrap_or(false)
-    };
+    let escape_pads: Vec<Vec<bool>> = d
+        .parts
+        .iter()
+        .map(|p| {
+            p.pads
+                .iter()
+                .map(|x| {
+                    escapes
+                        .get(format!("{}.{}", p.reference, x.number).as_str())
+                        .copied()
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .collect();
+    let escapes_at = |i: usize, k: usize| -> bool { escape_pads[i][k] };
     let mut field_of: HashMap<(usize, bool), usize> = HashMap::new();
     let mut escape_of: HashMap<usize, usize> = HashMap::new();
     prob.field_weight = PLANE_WEIGHT;
@@ -1967,6 +2401,21 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
     if opts.corridors {
         prob.corridors = corridors(&d, &kb.board, real_nets, &terms, &fixed, &part_pins);
     }
+    if let Some(back) = back_raster {
+        let mut fixed_sides = vec![0u8; d.nets.len()];
+        for (i, p) in d.parts.iter().enumerate().filter(|(i, _)| fixed[*i]) {
+            for pad in &p.pads {
+                if let Some(n) = pad.net {
+                    fixed_sides[n] |= if pad.through { 4 } else { 1 << p.bottom as u8 };
+                }
+                let _ = i;
+            }
+        }
+        // a plane or a partial plane takes its pins through a via anyway; groups are no copper
+        let via = |n: usize| n < real_nets && terms.partial[n].is_empty() && !is_ground(&d.nets[n]);
+        prob.two_sided(&d, &units, back, &flips, &locks, &|n| fixed_sides[n], &via);
+        prob.back_cost = opts.back_cost;
+    }
     if opts.leash > 0.0 {
         prob.leash = units
             .iter()
@@ -1986,7 +2435,12 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
             .map(|&start| {
                 let seed = opts.seed.wrapping_sub(1).wrapping_mul(SEED_STEP) + start as u64;
                 let (s, wire) = run(prob, &bbox, seed, opts.iters)?;
-                let c = crossings(&d, &unit_poses(&d, &units, &s), &terms.weight);
+                let c = crossings(
+                    &d,
+                    &unit_poses(&d, &units, &s),
+                    &unit_flips(&d, &units, &s),
+                    &terms.weight,
+                );
                 Ok((start, s, wire, c))
             })
             .collect();
@@ -2033,79 +2487,61 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
             ),
             None => (Vec::new(), Vec::new()),
         };
-        let movable: Vec<(R, bool)> = units
-            .iter()
-            .flat_map(|u| &u.members)
-            .flat_map(|m| {
-                let p = &d.parts[m.part];
-                p.court.iter().map(move |r| (*r, p.pads.len() >= 5))
-            })
-            .collect();
-        let fixed_parts: Vec<(String, f64)> = d
-            .parts
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| fixed[*i])
-            .map(|(_, p)| {
-                let a = p
-                    .court
-                    .iter()
-                    .map(|r| {
-                        Quad {
-                            pos: p.pos,
-                            rot: p.rot,
-                            r: *r,
-                        }
-                        .bbox()
-                        .grow(opts.gap)
-                        .overlap(&bbox)
-                    })
-                    .sum::<f64>();
-                (p.reference.clone(), a)
-            })
-            .filter(|x| x.1 > 0.0)
-            .collect();
         bail!(
             "{}",
             no_fit_message(&NoFit {
                 names,
                 missing,
-                movable,
+                early: None,
+                movable: movable_courts(&d, &units),
                 free: free_area,
                 gap: opts.gap,
                 halo: opts.halo,
-                fixed: fixed_parts,
+                fixed: fixed_areas(&d, &fixed, opts.gap, &bbox),
+                back_free: back_room(&d),
+                front_load,
             })
         );
     };
     let pose = unit_poses(&d, &units, &state);
+    // the parts that change sides, mirrored as KiCad's flip mirrors them; the input pose stays
+    // for the zones and texts that follow
+    let flipped = unit_flips(&d, &units, &state);
+    for (_, p) in d.parts.iter_mut().enumerate().filter(|(i, _)| flipped[*i]) {
+        p.mirror();
+    }
 
-    // ---- exact check on the grid positions
-    let quads: Vec<(usize, Quad)> = d
-        .parts
-        .iter()
-        .enumerate()
-        .flat_map(|(i, p)| {
-            let (pos, rot) = pose[i];
-            p.court.iter().map(move |r| (i, Quad { pos, rot, r: *r }))
-        })
-        .collect();
+    // ---- exact check on the grid positions, per side (what each part takes there)
+    let side_quads = |side: u8| -> Vec<(usize, Quad)> {
+        d.parts
+            .iter()
+            .enumerate()
+            .flat_map(|(i, p)| {
+                let (pos, rot) = pose[i];
+                side_rects(p, side).iter().map(move |r| (i, Quad { pos, rot, r: *r }))
+            })
+            .collect()
+    };
+    let rooms: &[u8] = if opts.two_sided { &[1, 2] } else { &[3] };
     let mut min_sep = (f64::INFINITY, String::new());
-    for (a, (i, q)) in quads.iter().enumerate() {
-        for (j, o) in &quads[a + 1..] {
-            if i == j || (fixed[*i] && fixed[*j]) || q.bbox().grow(1.0).overlap(&o.bbox()) == 0.0 {
-                continue;
-            }
-            let s = q.separation(o);
-            if s < min_sep.0 {
-                min_sep = (s, format!("{}-{}", d.parts[*i].reference, d.parts[*j].reference));
+    for &side in rooms {
+        let quads = side_quads(side);
+        for (a, (i, q)) in quads.iter().enumerate() {
+            for (j, o) in &quads[a + 1..] {
+                if i == j || (fixed[*i] && fixed[*j]) || q.bbox().grow(1.0).overlap(&o.bbox()) == 0.0 {
+                    continue;
+                }
+                let s = q.separation(o);
+                if s < min_sep.0 {
+                    min_sep = (s, format!("{}-{}", d.parts[*i].reference, d.parts[*j].reference));
+                }
             }
         }
     }
     if min_sep.0 < 0.0 {
         bail!("placement check failed: courtyards {} overlap", min_sep.1);
     }
-    for (i, q) in &quads {
+    for (i, q) in &side_quads(3) {
         if !fixed[*i] && q.corners().iter().any(|c| !outer.contains(*c)) {
             bail!("placement check failed: {} leaves the board", d.parts[*i].reference);
         }
@@ -2115,20 +2551,33 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
     let xf = |i: usize| {
         let (p0, r0) = (d.parts[i].pos, d.parts[i].rot);
         let (p1, r1) = pose[i];
-        move |q: Point| p1 + kicad_rot(q - p0, r1 - r0)
+        let flip = flipped[i];
+        move |q: Point| {
+            let l = kicad_rot(q - p0, -r0);
+            p1 + kicad_rot(if flip { pt(l.x, -l.y) } else { l }, r1)
+        }
     };
     let mut patch = Patch::new(opts.seed ^ 0x706c_6163);
     for (i, p) in d.parts.iter().enumerate() {
-        if !fixed[i] {
+        if flipped[i] {
+            patch.flip_footprint(&kb.root.args()[p.node], pose[i].0, pose[i].1);
+        } else if !fixed[i] {
             patch.move_footprint(&kb.root.args()[p.node], pose[i].0, pose[i].1);
         }
     }
     let mut zones = Vec::new();
+    let mut flipped_zones = Vec::new();
     for (z, i) in &followers {
         let f = xf(*i);
+        if flipped[*i] {
+            patch.flip_zone_layers(z);
+        }
         patch.transform_zone(z, &f);
         if let Some(id) = z.child_str("uuid").or_else(|| z.child_str("tstamp")) {
             zones.push((id.to_string(), zone_points(z).into_iter().map(&f).collect()));
+            if flipped[*i] {
+                flipped_zones.push(id.to_string());
+            }
         }
     }
     for n in kb.root.args().iter().filter(|n| n.head() == Some("gr_text")) {
@@ -2136,15 +2585,26 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
             && at.len() >= 2
         {
             let c = pt(at[0], at[1]);
-            let owner = quads
-                .iter()
+            // in the courtyard the part had in the input (a flipped part's is mirrored now)
+            let owner = side_quads(3)
+                .into_iter()
                 .map(|(i, q)| {
+                    let r = if flipped[i] {
+                        R {
+                            x0: q.r.x0,
+                            y0: -q.r.y1,
+                            x1: q.r.x1,
+                            y1: -q.r.y0,
+                        }
+                    } else {
+                        q.r
+                    };
                     (
-                        *i,
+                        i,
                         Quad {
-                            pos: d.parts[*i].pos,
-                            rot: d.parts[*i].rot,
-                            r: q.r,
+                            pos: d.parts[i].pos,
+                            rot: d.parts[i].rot,
+                            r,
                         },
                     )
                 })
@@ -2219,7 +2679,12 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         .filter_map(|i| {
             let area: f64 = boxes[i].iter().map(|r| r.area()).sum();
             (0..d.parts.len())
-                .find(|&j| j != i && fixed[j] && court_overlap(&boxes[i], &boxes[j]) > PILE_OVERLAP * area)
+                .find(|&j| {
+                    j != i
+                        && fixed[j]
+                        && same_side(&d.parts[i], &d.parts[j])
+                        && side_overlap(&d, &boxes, i, j) > PILE_OVERLAP * area
+                })
                 .map(|j| format!("{} on {}", d.parts[i].reference, d.parts[j].reference))
         })
         .collect();
@@ -2295,6 +2760,10 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
             free_area,
             movable_area,
             min_separation: min_sep.0,
+            back_free_area: back_free,
+            flipped: refs(&mut (0..d.parts.len()).filter(|&i| flipped[i])),
+            back: refs(&mut (0..d.parts.len()).filter(|&i| !fixed[i] && d.parts[i].bottom)),
+            flipped_zones,
         },
     })
 }
@@ -2614,6 +3083,9 @@ mod tests {
             gap: 0.3,
             halo: 0.3,
             fixed: vec![("J1".into(), 20.0), ("H1".into(), 5.0)],
+            early: None,
+            back_free: None,
+            front_load: None,
         };
         let e = no_fit_message(&f);
         // 100 x 1.69 + 4.3^2 = 187.5 mm2 need, 7 x 1.69 = 11.8 mm2 missing
@@ -2900,6 +3372,209 @@ mod tests {
         // U1 with R1 on EN/VIN is a cluster; R3 on EN belongs to another sheet
         let cluster = p.report.groups.iter().find(|g| g.0 == "power/U1").map(|g| &g.1);
         assert_eq!(cluster, None, "two parts are no cluster: {:?}", p.report.groups);
+    }
+
+    /// A 14 x 10 mm board: a locked IC, a through hole header at the left edge, 22 small parts
+    /// (2 x 2 mm courtyards) in a pile off the board: more than the front holds.
+    fn crowded() -> String {
+        let mut s = String::from(
+            "(kicad_pcb (version 20240108) (generator test)\n\
+             \t(layers (0 \"F.Cu\" signal) (31 \"B.Cu\" signal) (44 \"Edge.Cuts\" user))\n\
+             \t(setup (pad_to_mask_clearance 0))\n\
+             \t(gr_rect (start 100 100) (end 114 110) (stroke (width 0.1) (type solid)) (fill none) \
+             (layer \"Edge.Cuts\"))\n",
+        );
+        s += &fp(
+            "Lib:IC",
+            "U1",
+            (107.0, 105.0),
+            true,
+            &[("1", "A0"), ("2", "VCC"), ("3", "GND"), ("4", "A1")],
+        );
+        s += "\t(footprint \"Connector:Header\" (layer \"F.Cu\") (at 101.8 105)\n\
+              \t\t(property \"Reference\" \"J1\" (at 0 0 0) (layer \"F.SilkS\"))\n\
+              \t\t(fp_rect (start -1 -3) (end 1 3) (layer \"F.CrtYd\"))\n\
+              \t\t(pad \"1\" thru_hole circle (at 0 -1.27) (size 1.7 1.7) (drill 1) (layers \"*.Cu\") (net \"A0\"))\n\
+              \t\t(pad \"2\" thru_hole circle (at 0 1.27) (size 1.7 1.7) (drill 1) (layers \"*.Cu\") (net \"GND\"))\n\
+              \t)\n";
+        for i in 0..22 {
+            let net = format!("A{}", i % 2);
+            let (r, a, b) = if i % 3 == 0 {
+                (format!("C{i}"), "VCC", "GND")
+            } else {
+                (format!("R{i}"), net.as_str(), "VCC")
+            };
+            s += &fp("Lib:R", &r, (150.0, 150.0), false, &[("1", a), ("2", b)]);
+        }
+        s.push_str(")\n");
+        s
+    }
+
+    #[test]
+    fn one_side_too_small_is_reported_before_the_search() {
+        let e = place(&crowded(), "crowd1", &quick())
+            .err()
+            .expect("too crowded")
+            .to_string();
+        assert!(e.contains("missing before any search"), "{e}");
+        assert!(e.contains("two_sided (front and back have"), "{e}");
+    }
+
+    #[test]
+    fn two_sided_puts_what_does_not_fit_on_the_back() {
+        let opts = PlaceOptions {
+            two_sided: true,
+            ..quick()
+        };
+        let p = place(&crowded(), "crowd2", &opts).unwrap();
+        let r = &p.report;
+        assert!(!r.back.is_empty() && r.back.len() < 22, "{:?}", r.back);
+        assert_eq!(r.back, r.flipped);
+        assert!(r.min_separation >= 0.0);
+        // the flipped parts are on the back in the file, the others on the front
+        let root = gummiband_kicad::sexpr::parse(&p.text).unwrap();
+        for fp in root.children("footprint") {
+            let reference = fp
+                .children("property")
+                .find(|x| x.args().first().and_then(|a| a.as_str()) == Some("Reference"))
+                .and_then(|x| x.args().get(1)?.as_str())
+                .unwrap()
+                .to_string();
+            let back = fp.child_str("layer") == Some("B.Cu");
+            assert_eq!(back, r.back.contains(&reference), "{reference}");
+            if back {
+                assert!(
+                    fp.children("pad")
+                        .all(|x| x.child("layers").unwrap().args()[0].as_str() == Some("B.Cu"))
+                );
+            }
+        }
+        // nothing on the through hole header on the front, nothing on its holes on the back
+        let j1 = R {
+            x0: 100.8,
+            y0: 102.0,
+            x1: 102.8,
+            y1: 108.0,
+        };
+        let hole = |y: f64| R {
+            x0: 101.8 - 1.1,
+            y0: y - 1.1,
+            x1: 101.8 + 1.1,
+            y1: y + 1.1,
+        };
+        for (name, x, y, _) in &r.poses {
+            let b = R {
+                x0: x - 1.0,
+                y0: y - 1.0,
+                x1: x + 1.0,
+                y1: y + 1.0,
+            };
+            if r.back.contains(name) {
+                for h in [hole(103.73), hole(106.27)] {
+                    assert_eq!(b.overlap(&h), 0.0, "{name} on a hole of J1");
+                }
+            } else {
+                assert_eq!(b.overlap(&j1), 0.0, "{name} on J1");
+            }
+        }
+    }
+
+    /// A 12 x 8 mm board under a locked radial capacitor (11 x 7 mm courtyard, two holes): the
+    /// back has room only under its body, between the holes.
+    #[test]
+    fn a_part_on_the_back_sits_under_a_through_hole_body() {
+        let mut s = String::from(
+            "(kicad_pcb (version 20240108) (generator test)\n\
+             \t(layers (0 \"F.Cu\" signal) (31 \"B.Cu\" signal) (44 \"Edge.Cuts\" user))\n\
+             \t(setup (pad_to_mask_clearance 0))\n\
+             \t(gr_rect (start 100 100) (end 112 108) (stroke (width 0.1) (type solid)) (fill none) \
+             (layer \"Edge.Cuts\"))\n\
+             \t(footprint \"Capacitor_THT:CP_Radial\" (locked yes) (layer \"F.Cu\") (at 106 104)\n\
+             \t\t(property \"Reference\" \"C9\" (at 0 0 0) (layer \"F.SilkS\"))\n\
+             \t\t(fp_rect (start -5.5 -3.5) (end 5.5 3.5) (layer \"F.CrtYd\"))\n\
+             \t\t(pad \"1\" thru_hole rect (at -3.5 0) (size 1.6 1.6) (drill 0.8) (layers \"*.Cu\") (net \"VCC\"))\n\
+             \t\t(pad \"2\" thru_hole circle (at 3.5 0) (size 1.6 1.6) (drill 0.8) (layers \"*.Cu\") (net \"GND\"))\n\
+             \t)\n",
+        );
+        s += &fp("Lib:R", "R1", (150.0, 150.0), false, &[("1", "VCC"), ("2", "GND")]);
+        s.push_str(")\n");
+        let opts = PlaceOptions {
+            two_sided: true,
+            ..quick()
+        };
+        let p = place(&s, "under_body", &opts).unwrap();
+        assert_eq!(p.report.back, vec!["R1".to_string()]);
+        let (x, y) = pose(&p.report, "R1");
+        // inside the body, clear of the holes (pad 0.8 + 0.25 around each, the gap beyond)
+        assert!((100.5..111.5).contains(&x) && (100.5..107.5).contains(&y), "{x} {y}");
+        let r1 = R {
+            x0: x - 1.0,
+            y0: y - 1.0,
+            x1: x + 1.0,
+            y1: y + 1.0,
+        }
+        .grow(opts.gap - 1e-6);
+        for hx in [102.5, 109.5] {
+            let hole = R {
+                x0: hx - 1.05,
+                y0: 104.0 - 1.05,
+                x1: hx + 1.05,
+                y1: 104.0 + 1.05,
+            };
+            assert_eq!(r1.overlap(&hole), 0.0, "R1 at {x} {y} on the hole at {hx}");
+        }
+    }
+
+    #[test]
+    fn a_part_goes_to_the_side_it_is_given() {
+        let opts = PlaceOptions {
+            two_sided: true,
+            on_back: vec!["C0".into(), "R1".into()],
+            on_front: vec!["R2".into()],
+            ..quick()
+        };
+        let p = place(&crowded(), "crowd3", &opts).unwrap();
+        assert!(p.report.back.contains(&"C0".to_string()));
+        assert!(p.report.back.contains(&"R1".to_string()));
+        assert!(!p.report.back.contains(&"R2".to_string()));
+        // a side needs two_sided
+        let opts = PlaceOptions {
+            on_back: vec!["C0".into()],
+            ..quick()
+        };
+        assert!(place(&crowded(), "crowd4", &opts).is_err());
+    }
+
+    #[test]
+    fn with_room_on_the_front_the_back_takes_what_saves_its_cost() {
+        let opts = |back_cost| PlaceOptions {
+            two_sided: true,
+            back_cost,
+            ..quick()
+        };
+        // a decoupling capacitor saves more than the default cost right under its IC
+        let p = place(&board(|_| (160.0, 160.0)), "roomy", &opts(BACK_COST)).unwrap();
+        assert!(p.report.back.iter().all(|r| r.starts_with('C')), "{:?}", p.report.back);
+        // with a high cost the back stays empty
+        let p = place(&board(|_| (160.0, 160.0)), "roomy2", &opts(50.0)).unwrap();
+        assert!(p.report.back.is_empty(), "{:?}", p.report.back);
+    }
+
+    #[test]
+    fn a_part_on_the_back_under_one_on_the_front_is_no_pile() {
+        // C1 locked on the back right under U1: neither is in a pile, nothing is released
+        let text = board(|_| (160.0, 160.0)).replacen(
+            "(footprint \"Lib:C\"  (layer \"F.Cu\") (at 160 160)",
+            "(footprint \"Lib:C\" (locked yes) (layer \"B.Cu\") (at 105 105)",
+            1,
+        );
+        assert!(text.contains("(layer \"B.Cu\") (at 105 105)"), "{text}");
+        let p = place(&text, "underneath", &quick()).unwrap();
+        assert!(
+            !p.report.warnings.iter().any(|w| w.contains("overlap")),
+            "{:?}",
+            p.report.warnings
+        );
     }
 
     #[test]

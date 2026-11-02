@@ -139,12 +139,26 @@ impl Field {
     }
 }
 
-/// Geometry of a movable unit for each of the four rotations, relative to the unit position.
+/// Geometry of a movable unit for each of the four rotations, relative to the unit position;
+/// a unit that may change sides has four more, mirrored as on the other side
+/// ([`Problem::two_sided`]): orientation `k` 4 to 7 is rotation `k - 4` flipped.
 pub struct UnitGeom {
-    pub rects: [Vec<R>; 4],
-    pub bbox: [R; 4],
-    pub pins: [Vec<Point>; 4],
+    pub rects: Vec<Vec<R>>,
+    pub bbox: Vec<R>,
+    pub pins: Vec<Vec<Point>>,
     pub pin_net: Vec<usize>,
+    /// Through hole pins: on both sides, a net that has one needs no via between the sides.
+    pub pin_through: Vec<bool>,
+    /// Side of orientations 0 to 3: 0 front, 1 back (where the unit sits in the input).
+    pub side0: u8,
+    /// A through hole part: on the other side it takes [`UnitGeom::under`].
+    pub through: bool,
+    /// Per orientation: what the unit takes on the other side, the hole pads of its through hole
+    /// members ([`crate::model::Part::under`]); empty for an SMD unit.
+    pub under: Vec<Vec<R>>,
+    pub under_bbox: Vec<R>,
+    /// Two sided: the side the caller chose for the unit (0 front, 1 back), else it may change.
+    pub side_lock: Option<u8>,
     /// Plane field of each pin, see [`Field`].
     pub pin_field: Vec<Option<usize>>,
     /// Escape field of each pin: where it is above 0 the pin has no room for its via, which
@@ -162,10 +176,24 @@ pub struct NetTerm {
     /// Spanning tree length instead of the half perimeter: for current paths, where every pin
     /// inside the box still costs copper.
     pub mst: bool,
+    /// Two sided: the net pays [`SIDE_VIA`] when it has pins on both sides and no through hole
+    /// pin (off: a plane, a group of the semantic placement).
+    pub via: bool,
+    /// Sides of the fixed pins: bit 0 front, bit 1 back, bit 2 a through hole pin.
+    pub fixed_sides: u8,
 }
+
+/// Two sided: cost of a net with pins on both sides and no through hole pin between them, per
+/// net weight, in mm of wire: about the detour of the via it needs.
+pub const SIDE_VIA: f64 = 1.5;
+/// Two sided: weight of the band of a corridor that a part on the other side of both its ends
+/// covers. The tracks of a bus run where their ends are, the back leaves them a layer.
+const CORRIDOR_OTHER_SIDE: f64 = 0.5;
 
 /// Nets with more pins than this keep the half perimeter even with `mst`.
 const MST_PINS: usize = 24;
+/// The legalization keeps the box of the other pins of a net with more pins than this.
+const BIG_NET: usize = 32;
 
 /// Decoupling term: pin of a unit to a pin of another unit (or a fixed point).
 pub struct Decap {
@@ -179,6 +207,9 @@ pub struct Decap {
 /// area it covers of the band, times `weight`.
 pub struct Corridor {
     pub ends: [Vec<Result<(usize, usize), Point>>; 2],
+    /// Sides of the ends that are fixed, as in [`NetTerm::fixed_sides`] (bit 0 front, bit 1
+    /// back); a movable end counts where it sits.
+    pub fixed_sides: [u8; 2],
     pub radius: f64,
     /// Units that may sit in the band: the two ends and the parts on the nets of the group.
     pub exempt: Vec<usize>,
@@ -192,7 +223,13 @@ pub struct Problem {
     pub units: Vec<UnitGeom>,
     pub nets: Vec<NetTerm>,
     pub decaps: Vec<Decap>,
+    /// Blocked cells, of the front when [`Problem::back`] is set.
     pub raster: Raster,
+    /// Two sided: the blocked cells of the back. A part takes the raster of its side, a through
+    /// hole part also the back's with its holes ([`UnitGeom::under`]).
+    pub back: Option<Raster>,
+    /// Two sided: what a part that may change sides pays on the back, in mm of wire.
+    pub back_cost: f64,
     pub half_gap: f64,
     pub swappable: Vec<usize>,
     pub fields: Vec<Field>,
@@ -221,37 +258,39 @@ impl Problem {
         // pad index map: (unit, member, pad) -> unit pin index
         let mut part_pins: Vec<Vec<(usize, usize)>> = vec![Vec::new(); d.parts.len()];
         for (ui, u) in units.iter().enumerate() {
-            let mut rects: [Vec<R>; 4] = Default::default();
-            let mut pins: [Vec<Point>; 4] = Default::default();
+            let (rects, pins, under) = orientations(d, u, false);
+            let under_bbox = under
+                .iter()
+                .map(|rs| rs.iter().fold(R::empty(), |a, r| a.union(r)))
+                .collect();
             let mut pin_net = Vec::new();
-            for k in 0..4 {
-                let mut t = u.clone();
-                t.pos = pt(0.0, 0.0);
-                t.rot = u.rot + 90.0 * k as f64;
-                for m in &t.members {
-                    let (pos, rot) = t.member_pose(m);
-                    let p = &d.parts[m.part];
-                    for r in &p.court {
-                        rects[k].push(r.transformed_bbox(pos, rot));
-                    }
-                    for pad in &p.pads {
-                        pins[k].push(pos + kicad_rot(pad.local, rot));
-                        if k == 0 {
-                            pin_net.push(pad.net.unwrap_or(usize::MAX));
-                            part_pins[m.part].push((ui, pins[0].len() - 1));
-                        }
-                    }
+            let mut pin_through = Vec::new();
+            for m in &u.members {
+                for pad in &d.parts[m.part].pads {
+                    pin_net.push(pad.net.unwrap_or(usize::MAX));
+                    pin_through.push(pad.through);
+                    part_pins[m.part].push((ui, pin_net.len() - 1));
                 }
             }
-            let bbox = [0, 1, 2, 3].map(|k| rects[k].iter().fold(R::empty(), |a, r| a.union(r)));
+            let bbox = rects
+                .iter()
+                .map(|rs| rs.iter().fold(R::empty(), |a, r| a.union(r)))
+                .collect();
             let area = rects[0].iter().map(|r| r.area()).sum();
             let pin_field = vec![None; pin_net.len()];
             let pin_escape = vec![None; pin_net.len()];
+            let first = &d.parts[u.members[0].part];
             geoms.push(UnitGeom {
                 rects,
                 bbox,
                 pins,
                 pin_net,
+                pin_through,
+                side0: first.bottom as u8,
+                through: u.members.iter().any(|m| d.parts[m.part].through),
+                under,
+                under_bbox,
+                side_lock: None,
                 pin_field,
                 pin_escape,
                 area,
@@ -265,6 +304,8 @@ impl Problem {
                 pins: Vec::new(),
                 fixed: Vec::new(),
                 mst: false,
+                via: false,
+                fixed_sides: 0,
             })
             .collect();
         for (ui, g) in geoms.iter().enumerate() {
@@ -330,6 +371,8 @@ impl Problem {
                 nets,
                 decaps,
                 raster,
+                back: None,
+                back_cost: 0.0,
                 half_gap: gap / 2.0,
                 swappable,
                 fields: Vec::new(),
@@ -341,6 +384,129 @@ impl Problem {
             part_pins,
         )
     }
+}
+
+impl Problem {
+    /// Place on both sides: `back` is the raster of the back, `flips[u]` whether unit `u` may
+    /// change sides (it gets the mirrored orientations 4 to 7), `locks[u]` the side it has to
+    /// take (0 front, 1 back; it needs `flips`), `fixed_pin_sides(net)` the sides of the fixed
+    /// pins of a net (bits as [`NetTerm::fixed_sides`]), `via(net)` whether the net pays for a
+    /// change of sides.
+    #[allow(clippy::too_many_arguments)]
+    pub fn two_sided(
+        &mut self,
+        d: &Design,
+        units: &[Unit],
+        back: Raster,
+        flips: &[bool],
+        locks: &[Option<u8>],
+        fixed_pin_sides: &dyn Fn(usize) -> u8,
+        via: &dyn Fn(usize) -> bool,
+    ) {
+        for (u, g) in self.units.iter_mut().enumerate() {
+            if !flips[u] || g.through {
+                continue;
+            }
+            g.side_lock = locks[u];
+            let (rects, pins, under) = orientations(d, &units[u], true);
+            g.bbox
+                .extend(rects.iter().map(|rs| rs.iter().fold(R::empty(), |a, r| a.union(r))));
+            g.rects.extend(rects);
+            g.pins.extend(pins);
+            g.under_bbox.extend(under.iter().map(|_| R::empty()));
+            g.under.extend(under);
+        }
+        for (n, t) in self.nets.iter_mut().enumerate() {
+            t.fixed_sides = fixed_pin_sides(n);
+            t.via = t.weight > 0.0 && via(n);
+        }
+        self.back = Some(back);
+    }
+
+    /// Orientations of unit `u`: 4, or 8 if it may change sides.
+    pub fn orientations(&self, u: usize) -> usize {
+        self.units[u].rects.len()
+    }
+
+    /// The orientations unit `u` may take: the four rotations on its side, all eight if it
+    /// may change sides.
+    pub fn allowed(&self, u: usize) -> std::ops::Range<usize> {
+        let g = &self.units[u];
+        match g.side_lock {
+            Some(side) if g.rects.len() == 8 => {
+                let k = 4 * (side ^ g.side0) as usize;
+                k..k + 4
+            }
+            _ => 0..g.rects.len(),
+        }
+    }
+
+    /// The side of unit `u` is free to change.
+    fn free_side(&self, u: usize) -> bool {
+        self.units[u].rects.len() == 8 && self.units[u].side_lock.is_none()
+    }
+
+    /// The orientation a unit starts in: rotation 0, on the front if it may change sides (so
+    /// that the side it has in the input does not matter), on its side if it has to take one.
+    pub fn start_k(&self, u: usize) -> usize {
+        let g = &self.units[u];
+        if g.rects.len() < 8 {
+            0
+        } else {
+            let side = g.side_lock.unwrap_or(0);
+            4 * (side ^ g.side0) as usize
+        }
+    }
+}
+
+/// Courtyard rectangles, pins and the rectangles on the other side ([`UnitGeom::under`]) of a
+/// unit for its four rotations, relative to its position; `mirror`: as on the other side of the
+/// board (KiCad's flip: the footprint frame mirrored at its x axis, then rotated).
+#[allow(clippy::type_complexity)]
+fn orientations(d: &Design, u: &Unit, mirror: bool) -> (Vec<Vec<R>>, Vec<Vec<Point>>, Vec<Vec<R>>) {
+    let mut rects = vec![Vec::new(); 4];
+    let mut pins = vec![Vec::new(); 4];
+    let mut under = vec![Vec::new(); 4];
+    let flip = |q: Point| if mirror { pt(q.x, -q.y) } else { q };
+    for k in 0..4 {
+        let mut t = u.clone();
+        t.pos = pt(0.0, 0.0);
+        t.rot = u.rot + 90.0 * k as f64;
+        for m in &t.members {
+            let (pos, rot) = t.member_pose(m);
+            let p = &d.parts[m.part];
+            for r in &p.under {
+                let r = if mirror {
+                    R {
+                        x0: r.x0,
+                        y0: -r.y1,
+                        x1: r.x1,
+                        y1: -r.y0,
+                    }
+                } else {
+                    *r
+                };
+                under[k].push(r.transformed_bbox(pos, rot));
+            }
+            for r in &p.court {
+                let r = if mirror {
+                    R {
+                        x0: r.x0,
+                        y0: -r.y1,
+                        x1: r.x1,
+                        y1: -r.y0,
+                    }
+                } else {
+                    *r
+                };
+                rects[k].push(r.transformed_bbox(pos, rot));
+            }
+            for pad in &p.pads {
+                pins[k].push(pos + kicad_rot(flip(pad.local), rot));
+            }
+        }
+    }
+    (rects, pins, under)
 }
 
 /// Length of the minimum spanning tree (Prim), Manhattan distances like the half perimeter.
@@ -404,6 +570,42 @@ impl<'a> Placer<'a> {
         self.s.pos[u] + self.p.units[u].pins[self.s.k[u]][i]
     }
 
+    /// Side of unit `u`: 0 front, 1 back.
+    pub fn side(&self, u: usize) -> u8 {
+        self.p.units[u].side0 ^ (self.s.k[u] >= 4) as u8
+    }
+
+    /// Sides unit `u` takes: bit 0 front, bit 1 back. One sided placement has one space.
+    fn sides(&self, u: usize) -> u8 {
+        if self.p.back.is_none() {
+            1
+        } else if self.p.units[u].through {
+            3
+        } else {
+            1 << self.side(u)
+        }
+    }
+
+    /// Two sided: the via a net needs between pins on both sides.
+    fn side_via(&self, t: &NetTerm) -> f64 {
+        if !t.via {
+            return 0.0;
+        }
+        let mut m = t.fixed_sides;
+        for &(u, i) in &t.pins {
+            m |= if self.p.units[u].pin_through[i] {
+                4
+            } else {
+                1 << self.side(u)
+            };
+        }
+        if m & 4 == 0 && m & 3 == 3 {
+            t.weight * SIDE_VIA
+        } else {
+            0.0
+        }
+    }
+
     fn hpwl(&self, n: usize) -> f64 {
         let t = &self.p.nets[n];
         if t.weight == 0.0 {
@@ -416,7 +618,7 @@ impl<'a> Placer<'a> {
                 q[k] = self.pin(u, i);
             }
             q[t.pins.len()..count].copy_from_slice(&t.fixed);
-            return t.weight * mst_len(&q[..count]);
+            return t.weight * mst_len(&q[..count]) + self.side_via(t);
         }
         let mut b = R::empty();
         let mut add = |q: Point| {
@@ -431,7 +633,7 @@ impl<'a> Placer<'a> {
         for &q in &t.fixed {
             add(q);
         }
-        t.weight * (b.w() + b.h())
+        t.weight * (b.w() + b.h()) + self.side_via(t)
     }
 
     fn decap(&self, di: usize) -> f64 {
@@ -452,7 +654,16 @@ impl<'a> Placer<'a> {
                 s += self.p.fields[*f].at(self.pin(u, i));
             }
         }
-        s * self.p.field_weight + self.leash_cost(u)
+        s * self.p.field_weight + self.leash_cost(u) + self.back_cost(u)
+    }
+
+    /// Two sided: a unit that may change sides pays for the back.
+    fn back_cost(&self, u: usize) -> f64 {
+        if self.p.free_side(u) && self.side(u) == 1 {
+            self.p.back_cost
+        } else {
+            0.0
+        }
     }
 
     /// A leashed unit pays for every mm beyond its leash, squared, so it stays close to home.
@@ -484,6 +695,32 @@ impl<'a> Placer<'a> {
     /// Area of the band of corridor `c` (line a, b) that the courtyards of unit `u` cover, about:
     /// per rectangle the depth it reaches into the band times its extent along the band.
     fn intrusion(&self, u: usize, c: &Corridor, a: Point, b: Point) -> f64 {
+        let factor = self.corridor_factor(u, c);
+        if factor == 0.0 {
+            return 0.0;
+        }
+        factor * self.intrusion_area(u, c, a, b)
+    }
+
+    /// Two sided: a part on the other side of both ends of a corridor covers half its band.
+    fn corridor_factor(&self, u: usize, c: &Corridor) -> f64 {
+        if self.p.back.is_none() {
+            return 1.0;
+        }
+        let end = |e: usize| -> u8 {
+            match c.ends[e].first() {
+                Some(Ok((v, _))) => self.sides(*v),
+                _ => c.fixed_sides[e],
+            }
+        };
+        if self.sides(u) & (end(0) | end(1)) != 0 {
+            1.0
+        } else {
+            CORRIDOR_OTHER_SIDE
+        }
+    }
+
+    fn intrusion_area(&self, u: usize, c: &Corridor, a: Point, b: Point) -> f64 {
         let ab = b - a;
         let len = ab.x.hypot(ab.y);
         if len < 1e-6 {
@@ -566,23 +803,60 @@ impl<'a> Placer<'a> {
         self.p.units[u].bbox[self.s.k[u]].shift(self.s.pos[u])
     }
 
-    pub fn pair_overlap(&self, u: usize, v: usize) -> f64 {
-        let g = self.p.half_gap;
-        if self.bbox(u).grow(g).overlap(&self.bbox(v).grow(g)) == 0.0 {
-            return 0.0;
+    /// What unit `u` takes on side `s` (1 front, 2 back), relative to its position, and its
+    /// box: the courtyard on its own side (or in the one room of a one sided placement), the
+    /// hole pads on the other.
+    fn shape(&self, u: usize, s: u8) -> (&[R], R) {
+        let g = &self.p.units[u];
+        let k = self.s.k[u];
+        if self.p.back.is_some() && s != 1 << self.side(u) {
+            (&g.under[k], g.under_bbox[k])
+        } else {
+            (&g.rects[k], g.bbox[k])
         }
+    }
+
+    pub fn pair_overlap(&self, u: usize, v: usize) -> f64 {
+        let common = self.sides(u) & self.sides(v);
+        let g = self.p.half_gap;
+        let (pu, pv) = (self.s.pos[u], self.s.pos[v]);
         let mut s = 0.0;
-        for a in self.rects(u) {
-            let a = a.grow(g);
-            for b in self.rects(v) {
-                s += a.overlap(&b.grow(g));
+        for side in [1u8, 2] {
+            if common & side == 0 {
+                continue;
+            }
+            let (ra, ba) = self.shape(u, side);
+            let (rb, bb) = self.shape(v, side);
+            if ba.shift(pu).grow(g).overlap(&bb.shift(pv).grow(g)) == 0.0 {
+                continue;
+            }
+            for a in ra {
+                let a = a.shift(pu).grow(g);
+                for b in rb {
+                    s += a.overlap(&b.shift(pv).grow(g));
+                }
             }
         }
         s
     }
 
     pub fn fixed_overlap(&self, u: usize) -> f64 {
-        self.rects(u).map(|r| self.p.raster.blocked(&r)).sum::<f64>() + self.escape_blocked(u)
+        let o = self.s.pos[u];
+        let on = |raster: &Raster, side: u8| {
+            self.shape(u, side)
+                .0
+                .iter()
+                .map(|r| raster.blocked(&r.shift(o)))
+                .sum::<f64>()
+        };
+        let fixed = match &self.p.back {
+            None => on(&self.p.raster, 1),
+            Some(back) => {
+                let m = self.sides(u);
+                (if m & 1 != 0 { on(&self.p.raster, 1) } else { 0.0 }) + if m & 2 != 0 { on(back, 2) } else { 0.0 }
+            }
+        };
+        fixed + self.escape_blocked(u)
     }
 
     /// Overlap for the pins of `u` that find no room for their via.
@@ -712,7 +986,14 @@ impl<'a> Placer<'a> {
                 self.s.pos[us[1]] = self.s.pos[us[1]] + (c0 - c1);
             } else if mv < 0.22 {
                 let c0 = self.bbox(u).center();
-                self.s.k[u] = (self.s.k[u] + 1 + rng.below(3)) % 4;
+                let k = self.s.k[u];
+                self.s.k[u] = k / 4 * 4 + (k % 4 + 1 + rng.below(3)) % 4;
+                let c1 = self.bbox(u).center();
+                self.s.pos[u] = self.s.pos[u] + (c0 - c1);
+            } else if mv < 0.28 && self.p.free_side(u) {
+                // to the other side, in place
+                let c0 = self.bbox(u).center();
+                self.s.k[u] = (self.s.k[u] + 4) % 8;
                 let c1 = self.bbox(u).center();
                 self.s.pos[u] = self.s.pos[u] + (c0 - c1);
             } else {
@@ -743,6 +1024,61 @@ impl<'a> Placer<'a> {
         }
     }
 
+    /// Net `n` without the pins of unit `u`: the box of the other pins and their sides (bits as
+    /// [`NetTerm::fixed_sides`]).
+    fn net_without(&self, n: usize, u: usize) -> (usize, R, u8) {
+        let t = &self.p.nets[n];
+        let mut b = R::empty();
+        let mut m = t.fixed_sides;
+        let mut add = |q: Point| {
+            b.x0 = b.x0.min(q.x);
+            b.y0 = b.y0.min(q.y);
+            b.x1 = b.x1.max(q.x);
+            b.y1 = b.y1.max(q.y);
+        };
+        for &(v, i) in t.pins.iter().filter(|p| p.0 != u) {
+            add(self.pin(v, i));
+            m |= if self.p.units[v].pin_through[i] {
+                4
+            } else {
+                1 << self.side(v)
+            };
+        }
+        for &q in &t.fixed {
+            add(q);
+        }
+        (n, b, m)
+    }
+
+    /// The half perimeter cost of a net from [`Self::net_without`] with the pins of `u` where
+    /// it sits now; the same as [`Self::hpwl`] for a net without the spanning tree.
+    fn hpwl_with(&self, u: usize, (n, rest, sides): &(usize, R, u8)) -> f64 {
+        let t = &self.p.nets[*n];
+        if t.weight == 0.0 {
+            return 0.0;
+        }
+        let mut b = *rest;
+        let mut m = *sides;
+        for &(v, i) in t.pins.iter().filter(|p| p.0 == u) {
+            let q = self.pin(v, i);
+            b.x0 = b.x0.min(q.x);
+            b.y0 = b.y0.min(q.y);
+            b.x1 = b.x1.max(q.x);
+            b.y1 = b.y1.max(q.y);
+            m |= if self.p.units[v].pin_through[i] {
+                4
+            } else {
+                1 << self.side(v)
+            };
+        }
+        let via = if t.via && m & 4 == 0 && m & 3 == 3 {
+            t.weight * SIDE_VIA
+        } else {
+            0.0
+        };
+        t.weight * (b.w() + b.h()) + via
+    }
+
     /// Overlap of `u` with the fixed parts and the units marked in `placed`.
     fn overlap_with(&self, u: usize, placed: &[bool]) -> f64 {
         let mut s = self.fixed_overlap(u);
@@ -770,6 +1106,13 @@ impl<'a> Placer<'a> {
                 continue;
             }
             let (nets, decs) = self.affected(&[u]);
+            // a net with many pins (a ground without plane): the box of its other pins once,
+            // each candidate adds its own
+            let (big, small): (Vec<usize>, Vec<usize>) = nets.iter().partition(|&&n| {
+                let t = &self.p.nets[n];
+                t.pins.len() > BIG_NET && !(t.mst && t.pins.len() + t.fixed.len() <= MST_PINS)
+            });
+            let rest: Vec<(usize, R, u8)> = big.iter().map(|&n| self.net_without(n, u)).collect();
             let home = self.s.pos[u];
             let home_k = self.s.k[u];
             let mut best: Option<(f64, Point, usize)> = None;
@@ -795,13 +1138,14 @@ impl<'a> Placer<'a> {
                     }
                 }
                 for c in cands {
-                    for k in 0..4 {
+                    for k in self.p.allowed(u) {
                         self.s.pos[u] = c;
                         self.s.k[u] = k;
                         if self.overlap_with(u, &placed) > 1e-9 {
                             continue;
                         }
-                        let w: f64 = nets.iter().map(|&n| self.hpwl(n)).sum::<f64>()
+                        let w: f64 = small.iter().map(|&n| self.hpwl(n)).sum::<f64>()
+                            + rest.iter().map(|x| self.hpwl_with(u, x)).sum::<f64>()
                             + decs.iter().map(|&d| self.decap(d)).sum::<f64>()
                             + self.field_cost(u)
                             + self.corridor_cost(&[u]);

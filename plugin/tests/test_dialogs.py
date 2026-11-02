@@ -47,7 +47,8 @@ class DialogTest(unittest.TestCase):
                                     placement_seed=5, pairs=True, via_pairs=True, air=0.05)
         self.assertEqual(dataclasses.replace(route, **self.build(fields.ROUTE_TABS, route).values()),
                          route)
-        place = runner.PlaceOptions(semantic=True, corridors=True, escape_halo=True, leash=1.5)
+        place = runner.PlaceOptions(semantic=True, corridors=True, escape_halo=True, leash=1.5,
+                                    two_sided=True, back_cost=2.5, back_max_pads=12)
         self.assertEqual(dataclasses.replace(place, **self.build(fields.PLACE_TABS, place).values()),
                          place)
 

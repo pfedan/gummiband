@@ -86,7 +86,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `part_info` | `board`, `reference` | value, position, rotation, locked, sheet, pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
 | `move_part` | `board`, `reference`, `x`, `y`, `rotation?`, `follow?` | id and path of the working copy with the footprint at its new position, `items_added`, `warnings` |
 | `track_corridors` | `board`, `fixed?` | groups of tracks between two parts (`a`, `b`, `nets`, `width_mm`, `length_mm`) with the movable parts `in_the_way` of each band, and all of them once; nothing moves |
-| `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?`, `corridors?`, `escape_halo?`, `leash?` | id and path of the working copy, the new poses, decoupling assignment, crossings, smallest courtyard distance, pins off their plane, pads without via room, released connectors, with `semantic` inductors, groups and ties, `warnings` |
+| `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?`, `corridors?`, `escape_halo?`, `leash?`, `two_sided?`, `back_max_pads?`, `back_cost?`, `on_front?`, `on_back?` | id and path of the working copy, the new poses (with `back` for a part on the back), decoupling assignment, crossings, smallest courtyard distance, pins off their plane, pads without via room, released connectors, with `semantic` inductors, groups and ties, with `two_sided` `flipped` and `free_mm2` per side, `warnings` |
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?`, `pad_connection?`, `thermal_spoke_width?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `width?`, `reset?` | the net's options and effective priority |
@@ -271,6 +271,20 @@ of where they sit, as `gummiband place --leash`: a local change instead of a new
 `only`, `corridors: true` and `leash: 1.5` it moves the parts that `track_corridors` lists out of
 a band while the ICs stay, which is what `route` with `clear_corridors` does for all of them.
 
+`two_sided` (default false: one room for both sides, every part keeps its side) places on both
+sides, as `gummiband place --two-sided`: each side gets its own room, and a through hole part takes
+only its holes on the other side, so small parts fit under its body. SMD parts with at most
+`back_max_pads` pads (default 8) may change sides and are flipped as KiCad flips them (mirrored,
+on the layers of the other side); `on_front` and `on_back` put named movable SMD parts on a side
+whatever their pads. A part on the back pays `back_cost` mm of wire (default 6) and a net that then
+needs a via between the sides pays for it, so the back takes what does not fit on the front or
+saves more wire there; 0 treats both sides alike. The result marks parts on the back with `back`
+in `placed`, lists the parts that changed sides in `flipped` and the free room of each side in
+`free_mm2`. Before searching, the tool checks the courtyard area against the free room of each
+side: when the parts cannot fit it fails at once, with the area missing, and a one sided call says
+when front and back together have the room. A failed two sided call says when the parts that keep
+the front are the problem (raise `back_max_pads` or name them in `on_back`).
+
 `semantic` (default false) uses the schematic beyond the netlist, as `gummiband place --semantic`
 does: sheets and clusters around an IC stay together, an inductor sits at the switch pins of its
 converter, decoupling capacitors prefer an IC of their own sheet, and current paths count their
@@ -283,6 +297,7 @@ on its output rail (an LDO to the MCU it feeds). The result then lists `coils` (
 ```json
 {"name": "place_parts", "arguments": {"board": "b1", "fixed": ["U1", "L1"], "seed": 2}}
 {"name": "place_parts", "arguments": {"board": "b1", "only": ["C12", "C13", "R4"]}}
+{"name": "place_parts", "arguments": {"board": "b1", "two_sided": true, "on_back": ["U6"]}}
 ```
 
 ### track_corridors
