@@ -1675,9 +1675,13 @@ fixed to place_parts and route). Keep the switch node of a converter \
 small and the input capacitor loop short. Place parts first if they are not placed (move_part for \
 connectors and power stages, place_parts with semantic true for the rest).
 
-4. Route: route the latest board id (keep_locked when you added locked copper). Use pairs for \
-differential pairs that need coupling. Read unrouted and blocked; fix with set_net_options \
-(priority, width) and route again, or finish single nets with keep_all, nets and reroute.
+4. Route: route the latest board id (keep_locked when you added locked copper). Use pair_pull or \
+pairs for differential pairs that need coupling. Read unrouted and blocked; fix with set_net_options \
+(priority, width) and route again, or finish single nets with keep_all, nets and reroute. Opt-in \
+hints are worth a try only against the plain run over the same 2 or 3 seeds: patterns groups (or \
+pairs,groups with many pairs) where several chips share buses, with track_corridors to see what sits \
+in their bands and clear_corridors or place_parts only + corridors + leash 1.5 to clear them; no \
+hints on a fixed placement that already routes cleanly. Keep what wins by the mean and the worst run.
 
 5. Check the copper: current_check on the routed file with from and to for every current path \
 of step 2. A FLAG names the neck with its position: widen the net (set_net_options width, then \

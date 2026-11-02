@@ -441,22 +441,33 @@ fn buses(board: &Board, rows: &[PinRow]) -> Vec<Bus> {
 /// The hints that `route --patterns` knows.
 pub const HINTS: [&str; 5] = ["shares", "decaps", "rows", "pairs", "groups"];
 
-/// Parse a comma separated list of hints: names of [`HINTS`], `all` or `none`.
+/// `groups` with another place for the blocks in the routing order (see
+/// [`crate::route::GroupOrder`]): `groups` alone is `long`, the longest block first.
+pub const GROUP_VARIANTS: [&str; 3] = ["groups-long", "groups-short", "groups-inline"];
+
+/// Parse a comma separated list of hints: names of [`HINTS`] or [`GROUP_VARIANTS`], `all` or
+/// `none`.
 pub fn hints(arg: &str) -> Result<Vec<&'static str>, String> {
     let mut out = Vec::new();
     for w in arg.split(',').map(str::trim).filter(|w| !w.is_empty()) {
         match w {
             "none" => {}
             "all" => out.extend(HINTS),
-            _ => match HINTS.iter().find(|&&a| a == w) {
+            _ => match HINTS.iter().chain(&GROUP_VARIANTS).find(|&&a| a == w) {
                 Some(&a) => out.push(a),
                 None => {
                     return Err(format!(
-                        "unknown hint {w:?} (shares, decaps, rows, pairs, groups, all, none)"
+                        "unknown hint {w:?} (shares, decaps, rows, pairs, groups, groups-long, \
+                         groups-short, groups-inline, all, none)"
                     ));
                 }
             },
         }
+    }
+    let mut variants: Vec<&str> = out.iter().copied().filter(|w| GROUP_VARIANTS.contains(w)).collect();
+    variants.dedup();
+    if variants.len() > 1 {
+        return Err(format!("one group order at a time, not {}", variants.join(" and ")));
     }
     Ok(out)
 }
@@ -636,6 +647,19 @@ mod tests {
     use super::*;
     use crate::board::{LayerSet, Net, NetClass, Pin};
     use crate::geom::pt;
+    use crate::route::{GroupOrder, RouterConfig};
+
+    #[test]
+    fn group_order_hints() {
+        let order = |arg: &str| RouterConfig::default().with_hints(&hints(arg).unwrap()).groups;
+        assert_eq!(order("none"), GroupOrder::Off);
+        assert_eq!(order("decaps"), GroupOrder::Off);
+        assert_eq!(order("groups-long"), GroupOrder::Long);
+        assert_eq!(order("pairs,groups-short"), GroupOrder::Short);
+        assert_eq!(order("all,groups-inline"), GroupOrder::Inline);
+        assert!(hints("groups-short,groups-inline").is_err());
+        assert!(hints("groups-sideways").is_err());
+    }
 
     fn pin(board: &mut Board, fp: &str, num: usize, net: NetId, x: f64, y: f64) {
         board.pins.push(Pin {

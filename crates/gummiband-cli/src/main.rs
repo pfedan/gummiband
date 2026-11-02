@@ -10,9 +10,6 @@ use gummiband_core::route::RouterConfig;
 use gummiband_core::topo::SubstrateConfig;
 use gummiband_kicad::{KeepCopper, ReadOptions, read_board, write};
 
-/// How far `route --clear-corridors` may move an IC or connector from where it sits (mm).
-const CLEAR_LEASH: f64 = 1.5;
-
 /// Track angles of a routed result.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum Angles {
@@ -96,8 +93,10 @@ enum Cmd {
         /// connected to its IC pin first, its via serves both), `rows` (the open end re-lays the
         /// connections of a pin row in pin order), `pairs` (differential pairs before the other
         /// signal connections, the longest first), `groups` (the connections between two parts
-        /// as one block in pin order; `GB_GROUP_ORDER` = long (default), short or inline places it), `all`
-        /// or `none`. `gummiband info` lists the patterns it finds.
+        /// as one block in pin order, the longest block first; `groups-short` puts the shortest
+        /// first, `groups-inline` leaves each block at the place of its connections), `all` or
+        /// `none`. `gummiband info` lists the patterns it finds. When to use which: see
+        /// docs/guide/options.md.
         #[arg(long, default_value = "none")]
         patterns: String,
         /// Factor on the via cost in the pass that routes connections with vias again and
@@ -703,7 +702,7 @@ fn main() -> Result<()> {
                             halo: env("GB_CC_HALO").unwrap_or(opts.halo),
                             escape_halo: env("GB_CC_ESCAPE").is_some_and(|v| v > 0.0),
                             semantic: env("GB_CC_SEMANTIC").is_some_and(|v| v > 0.0),
-                            leash: env("GB_CC_LEASH").unwrap_or(CLEAR_LEASH),
+                            leash: env("GB_CC_LEASH").unwrap_or(gummiband_place::auto::CLEAR_CORRIDORS_LEASH),
                             ..opts
                         },
                     )?;

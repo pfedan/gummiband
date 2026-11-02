@@ -85,11 +85,12 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `board_patterns` | `board` | local patterns of the board: pin rows (part, pins in order, pitch, the side tracks leave to), pad grids, decoupling capacitors with their IC pin, pins of a plane net that can share a fan-out via, buses between two parts; a summary line per kind |
 | `part_info` | `board`, `reference` | value, position, rotation, locked, sheet, pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
 | `move_part` | `board`, `reference`, `x`, `y`, `rotation?`, `follow?` | id and path of the working copy with the footprint at its new position, `items_added`, `warnings` |
-| `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?`, `corridors?`, `escape_halo?` | id and path of the working copy, the new poses, decoupling assignment, crossings, smallest courtyard distance, pins off their plane, pads without via room, released connectors, with `semantic` inductors, groups and ties, `warnings` |
+| `track_corridors` | `board`, `fixed?` | groups of tracks between two parts (`a`, `b`, `nets`, `width_mm`, `length_mm`) with the movable parts `in_the_way` of each band, and all of them once; nothing moves |
+| `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?`, `corridors?`, `escape_halo?`, `leash?` | id and path of the working copy, the new poses, decoupling assignment, crossings, smallest courtyard distance, pins off their plane, pads without via room, released connectors, with `semantic` inductors, groups and ties, `warnings` |
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?`, `pad_connection?`, `thermal_spoke_width?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `width?`, `reset?` | the net's options and effective priority |
-| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `move_parts?`, `fixed?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `patterns?`, `pair_pull?`, `pairs?`, `pair_all?`, `pair_breakouts?`, `pair_via_pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `via_pass?`, `open_end_seconds?`, `open_via_cost?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `tune_spacing?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
+| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `move_parts?`, `fixed?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `patterns?`, `clear_corridors?`, `pair_pull?`, `pairs?`, `pair_all?`, `pair_breakouts?`, `pair_via_pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `via_pass?`, `open_end_seconds?`, `open_via_cost?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `tune_spacing?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
 | `angles_45` | `path`, `output?`, `nets?` | path of the written `<input>.45.kicad_pcb`, runs of track looked at and changed, length before and after, pieces off the grid, sharp corners, Gummiband's violations before and after |
 | `power_plan` | `board`, `currents? [{net, amps, short_amps?}]`, `temp_rise?`, `apply?` | per power net the IPC-2221 width per layer, the track width to route with, vias per layer change, planes and zones, advice; board notes (GND plane, reference planes); the widths as `.kicad_dru` rules; with `apply` the widths stored as net options |
 | `current_check` | `path`, `paths? [{net, amps, short_amps?, from?, to?, name?}]`, `temp_rise?`, `refill?`, `max_segments?` | per current path the narrow segments, the narrowest single band and the total cross-section between the terminals (pours and vias included) with their position, vias against the current, verdict `ok` or `FLAG` |
@@ -187,7 +188,7 @@ The structure a person sees at a glance, found from the pins: rows of pins of on
 regular pitch, pad grids (BGA), two pin parts that decouple an IC pin, pins of a plane net close
 enough to share one fan-out via, and buses (runs of neighbouring pins whose nets each go to one
 pin of another row, with the flag whether the order is kept). `route` uses them as hints when
-`patterns` names them (`decaps`, `rows`, `shares`, `pairs`, `groups`, `all`), with the syntax of `gummiband route
+`patterns` names them (`decaps`, `rows`, `shares`, `pairs`, `groups`, `groups-short`, `groups-inline`, `all`), with the syntax of `gummiband route
 --patterns`.
 
 ```json
@@ -265,6 +266,11 @@ crossing count is no forecast of the routed result.
 between two parts and for the escape of each side of a part, as `gummiband place --corridors` and
 `--escape-halo` do.
 
+`leash` (default 0: free) keeps parts with 4 or more pads (ICs, connectors) within that many mm
+of where they sit, as `gummiband place --leash`: a local change instead of a new placement. With
+`only`, `corridors: true` and `leash: 1.5` it moves the parts that `track_corridors` lists out of
+a band while the ICs stay, which is what `route` with `clear_corridors` does for all of them.
+
 `semantic` (default false) uses the schematic beyond the netlist, as `gummiband place --semantic`
 does: sheets and clusters around an IC stay together, an inductor sits at the switch pins of its
 converter, decoupling capacitors prefer an IC of their own sheet, and current paths count their
@@ -277,6 +283,28 @@ on its output rail (an LDO to the MCU it feeds). The result then lists `coils` (
 ```json
 {"name": "place_parts", "arguments": {"board": "b1", "fixed": ["U1", "L1"], "seed": 2}}
 {"name": "place_parts", "arguments": {"board": "b1", "only": ["C12", "C13", "R4"]}}
+```
+
+### track_corridors
+
+Lists the groups of tracks between two parts, as `place --corridors` and `route
+--clear-corridors` see them: two parts with at least 4 pads on nets (ICs, connectors) that share
+at least two short signal nets (a bus, SPI, I2C, a parallel interface). For each group: the two
+parts `a` and `b`, the `nets`, the band it needs (`width_mm` from the tracks with their
+clearances, `length_mm` between the group's pads on the two parts), and the movable parts
+`in_the_way`: parts in the band that are not on its nets. Parts on the group's nets (series
+resistors, pull-ups), decoupling capacitors, locked and mechanical parts and the references in
+`fixed` are never listed. `in_the_way` at the top level has every listed part once. The tool
+reads the working copy if there is one and changes nothing.
+
+Use it to decide yourself what moves: a group of a bus that matters, a part in the way that you
+would rather keep (name it in `fixed`), then `place_parts` with `only` set to the parts you chose,
+`corridors: true` and `leash: 1.5`, and route with `patterns` `groups`. `route` with
+`clear_corridors` is the same step for every listed part at once.
+
+```json
+{"name": "track_corridors", "arguments": {"board": "b1"}}
+{"name": "place_parts", "arguments": {"board": "b1", "only": ["R13", "C40"], "corridors": true, "leash": 1.5}}
 ```
 
 ### add_zone
@@ -365,7 +393,12 @@ fewer vias, 0 = off), `open_end_seconds` 0 (off; a value keeps improving the res
 seconds after the normal search, like `--until-stop` with a time budget, and `open_via_cost`,
 default 20 mm, is what a via is worth when it judges its results), `air` 0 mm, `prefer_width` 0
 (off), `angles` `"any"` (`"45"` turns the result into conventional 45 degree routing as a last
-step, like `--angles 45`). `seed` picks the search seed
+step, like `--angles 45`), `patterns` none (routing order hints, see
+[Choosing opt-in options](#choosing-opt-in-options)), `clear_corridors` false (experimental:
+before routing, the parts that `track_corridors` lists are placed again around the bands into the
+working copy, ICs and connectors at most 1.5 mm from where they sit, as `route --clear-corridors`;
+`board` of the result is the working copy, `cleared_corridors` names the parts; not with
+`keep_all`). `seed` picks the search seed
 (default fixed): the same seed gives the same result, another one a different try. `keep_all`
 keeps every track and via of the input and adds to it, like `--keep-all` on the command line;
 with `nets` only those nets are routed and everything else stays. Add `reroute` to replace
@@ -388,7 +421,7 @@ mounting holes, buttons and test points stay, and so do the references in `fixed
 has the footprints at their new positions, and `moved` lists them with their shift in mm.
 `move_parts` does not go together with `shove`.
 
-Result fields: `board`, `moved`, `input`, `output`, `seconds`, `threads`, `connections`, `routed`,
+Result fields: `board`, `cleared_corridors`, `moved`, `input`, `output`, `seconds`, `threads`, `connections`, `routed`,
 `unrouted` (list of `net: pad -> pad`), `vias`, `length_mm`, `items_written`, `skipped_nets`,
 `violations_total`, `violations_by_kind`, `violations` (first `max_violations`, default 50:
 `what`, `x`, `y`, `actual_mm`, `required_mm`, `nets` [routed net, other net or null]; the kinds
@@ -416,6 +449,36 @@ because no 45 degree path fit, `sharp_corners` left unchamfered).
 ```json
 {"name": "route", "arguments": {"board": "b1", "runs": 2, "generations": 0}}
 ```
+
+### Choosing opt-in options
+
+Many options of `route` and `place_parts` are off by default because none of them wins on every
+board: each helps one kind of board and costs on another. The full table with the measurements is
+[Choosing the opt-in options](guide/options.md); this is what an agent needs to pick them.
+
+- **Seeds first.** Results scatter strongly from seed to seed (10 to 20 % in vias, 0 or 14
+  clearance errors on the same board). Judge an option over the same 2 or 3 seeds, by the mean
+  and the worst run, with `drc`. Placement seeds (`place_parts` `seed`) scatter even more than
+  route seeds and are often worth more than any hint.
+- **Look before choosing.** `board_patterns` shows rows, decaps, buses and pairs; `track_corridors`
+  shows the bands between chips and what sits in them; `load_board` lists the differential pairs.
+- **Several chips with buses** (MCU and PHY, SPI, parallel buses): `patterns` `groups`. On a tight
+  board add `clear_corridors`, or move the parts of `track_corridors` yourself with `place_parts`
+  (`only`, `corridors`, `leash` 1.5). Measured: up to 25 % fewer vias, 18 % on the tightest board
+  with the corridors cleared.
+- **FPGA or BGA with pairs and buses**: `patterns` `pairs,groups` (best on Arty).
+- **DDR fan-out**: `patterns` `groups-short`; for pairs that change layers `pairs` with
+  `pair_via_pairs`. Leave `pair_breakouts` off there.
+- **Placement fixed and the board already routes cleanly**: leave the hints off (they added
+  clearance errors on such a board); `decaps` at most. Spend the time on seeds and
+  `open_end_seconds` instead.
+- **Placement from scratch**: `place_parts` with `semantic`, `corridors` and `escape_halo`, two or
+  three seeds, route each without hints, keep the best.
+- **Differential pairs**: `pair_pull` 1 when they should run together and there is room; `pairs`
+  (one wide track) only for pairs with a rule or class of their own and room around them, it costs
+  connections on dense boards; `pair_all` for pairs in the default class.
+- `shares` usually costs vias; `rows` acts only in the open end (`open_end_seconds`).
+- Keep an option per board only when it beat the plain run; it is no default for the next board.
 
 ### angles_45
 
