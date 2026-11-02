@@ -5,6 +5,7 @@
 
 mod external;
 mod practice;
+mod reference;
 mod server;
 
 use anyhow::Result;

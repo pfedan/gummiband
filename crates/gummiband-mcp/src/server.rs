@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::external;
 use crate::practice;
+use crate::reference;
 
 const INSTRUCTIONS: &str = "Gummiband is a topological (any-angle, rubber band) autorouter for \
 KiCad boards. From a schematic only: create_board turns a KiCad netlist into a board (footprints, nets, outline, stackup, net classes). Typical loop: load_board (gives a board id) -> list_nets -> optionally \
@@ -33,7 +34,7 @@ copy. To change one net on a routed board: load the routed file -> route with ke
 reroute (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short; two_sided: true when the parts do not fit on one side), set_layer_type (power) and add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Good practice around routing (the prompt good_practice walks through a whole board): \
 power_plan before routing (currents -> widths, planes, vias; apply stores the widths), \
 current_check after routing (narrowest cross-section of every current path), ground_pour (GND \
-pours and stitching vias), then drc. Opt-in options (route patterns, clear_corridors, \
+pours and stitching vias), reference_check (signal tracks over gaps or splits of their reference plane), then drc. Opt-in options (route patterns, clear_corridors, \
 pairs, place_parts semantic, corridors, escape_halo, leash) are off because none wins on every board; \
 results scatter strongly between seeds, so compare a setting with the plain run over the same 2 or 3 \
 seeds (mean and worst, judged by drc). Rough guide: several chips with buses -> patterns groups, on a \
@@ -3199,6 +3200,49 @@ impl Gummiband {
                     flagged,
                     out.applied.len(),
                     out.board_notes.join("; ")
+                );
+                ok(s, &out)
+            }
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Check the return paths of a routed .kicad_pcb: walks every signal track over the zones of the copper layers next to its layer (its reference planes) and reports gaps (stretches with no copper underneath: a slot, the edge of a zone, merged antipads) and splits (the track passes from a zone of one net into a zone of another). Fast signals and differential pairs need unbroken copper under them. Refills zones with kicad-cli when needed. By default all nets except ground, plane nets and wide power classes; gaps shorter than min_gap (0.5 mm) are only counted.",
+        output_schema = schema_for_output::<reference::ReferenceCheckOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn reference_check(
+        &self,
+        Parameters(mut p): Parameters<reference::ReferenceCheckIn>,
+    ) -> Result<CallToolResult, ErrorData> {
+        p.path = abs_path(&p.path).display().to_string();
+        match blocking(move || reference::reference_check(&p)).await {
+            Ok(out) => {
+                let worst: Vec<String> = out
+                    .nets
+                    .iter()
+                    .take(5)
+                    .map(|n| {
+                        format!(
+                            "{} ({} splits, {} gaps, {:.1} mm over no copper)",
+                            n.net, n.splits, n.gaps, n.gap_mm
+                        )
+                    })
+                    .collect();
+                let s = format!(
+                    "Reference check of {}: {} nets, {:.0} mm of track, {} findings ({} short gaps only counted). {}{}",
+                    out.path,
+                    out.nets_checked,
+                    out.track_mm,
+                    out.findings,
+                    out.short_gaps,
+                    if worst.is_empty() {
+                        "No net crosses a gap or a split.".to_string()
+                    } else {
+                        format!("Worst: {}. ", worst.join("; "))
+                    },
+                    out.notes.join(" ")
                 );
                 ok(s, &out)
             }
