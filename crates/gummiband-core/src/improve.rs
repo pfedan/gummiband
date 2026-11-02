@@ -844,7 +844,10 @@ fn mutant_traced<'a>(
         tr.why = "split";
         return None;
     }
-    if ideas().prune && hopeless(s, &r, &conns, routed) {
+    // a side branch starts below its parent on purpose: its floor lies under what the parent
+    // routes, and a start that cannot beat the parent is what it is for
+    let start = floor < s.cand.stats.routed;
+    if ideas().prune && !(start && !ideas().prune_starts) && hopeless(s, &r, &conns, routed) {
         PRUNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tr.why = "pruned";
         return None;
@@ -1481,6 +1484,12 @@ pub(crate) fn run(
             let [starts] = first_through([pop], &mut |_| bold(&best, level, &mut moves), &|_, m, go_on| {
                 mutant(board, sub, &best, m, &local, generation, floor, go_on)
             });
+            if log {
+                let made = starts.iter().filter(|(_, s)| s.is_some()).count();
+                eprintln!(
+                    "open {generation}: side branch start at level {level}: {made} of {pop} moves came to a mutant"
+                );
+            }
             side = starts
                 .into_iter()
                 .filter_map(|(_, s)| s)
@@ -1687,8 +1696,13 @@ struct Ideas {
     /// [`aim_at_cost`]. A quarter by default; `GB_AIM_COST=0` switches it off.
     aim_cost: f64,
     /// `GB_PRUNE`: a mutant that cannot beat its parent is dropped before its relaxation, see
-    /// [`hopeless`]. On by default; `GB_PRUNE=0` switches it off.
+    /// [`hopeless`]. On by default; `GB_PRUNE=0` switches it off. The bold moves that start a
+    /// side branch are left out: they may start worse than their parent on purpose, and on a board
+    /// without clearance spots nearly every one of them looked hopeless, so no side branch started
+    /// and the level climbed by one per generation.
     prune: bool,
+    /// `GB_PRUNE_STARTS=1`: prune the starts of side branches too, as before.
+    prune_starts: bool,
     /// `GB_MERGE`: the mutants of a generation that beat their parent in places apart from each
     /// other all count, not only the best of them, see [`merge_wins`].
     merge: bool,
@@ -1715,6 +1729,7 @@ fn ideas() -> &'static Ideas {
         bandit: std::env::var("GB_BANDIT").map_or(true, |v| v != "0"),
         aim_cost: env("GB_AIM_COST", 0.25),
         prune: std::env::var("GB_PRUNE").map_or(true, |v| v != "0"),
+        prune_starts: std::env::var("GB_PRUNE_STARTS").is_ok_and(|v| v != "0"),
         merge: std::env::var("GB_MERGE").is_ok(),
         window: env("GB_WINDOW", 0.0),
         spot_fade: std::env::var("GB_SPOT_FADE").is_ok(),

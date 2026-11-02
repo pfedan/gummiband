@@ -446,7 +446,10 @@ of the moves aims at an expensive routed connection (`GB_AIM_COST`, the share); 
 cannot beat its parent is dropped before its relaxation (`GB_PRUNE`). Against the open end without
 them the cost after 20 minutes fell by 12 % on Lichtschnitzel and 15 % on Arty (median of 4 and 3
 seeds), with fewer vias and a little more length. `GB_BANDIT=0`, `GB_AIM_COST=0` and `GB_PRUNE=0`
-switch them off; runs without an open end are untouched by them.
+switch them off; runs without an open end are untouched by them. The bold moves that start a side
+branch are not pruned: they may start worse than their parent on purpose. Pruned as well, nearly every
+start on a board without clearance spots came to nothing, and the level climbed by one per
+generation up to "converged" (`GB_PRUNE_STARTS=1` prunes them again, as before 2026-11-02).
 
 The open end does not count violations but spots: all violations of one pair of nets within 2 mm
 are one spot (`check::spots`), because the check reports every short piece of track, so that one
@@ -512,6 +515,17 @@ hints on, all off by default (and then byte for byte the same as without them):
 - `rows`: a move of the open end (`improve::row_move`, 15 % of the moves) takes the connections
   of one pin row out and lays them again in the order of their pins, from one end, the other,
   the middle out or the ends in.
+- `pairs`: the connections of differential pairs (as two nets, or as the one wide net of
+  `--pairs`) go before the other signal connections of their priority, the longest first: a pair
+  has the fewest ways, and a wide track that comes late finds its corridor taken
+  (`Router::order_keys`).
+- `groups`: the connections between the same two parts (ICs or connectors, at least 4 pins on
+  nets: a bus, SPI, I2C; a pull-up on the way does not count) form a block of at least two, laid in pin
+  order across the block, from one side or the other by seed. Where the block goes is the
+  experiment `GB_GROUP_ORDER`: `long` (default) all blocks before the other signal connections
+  of their priority, the longest block first; `short` the same, the shortest first; `inline` each
+  block at the place of its shortest connection. The evolutionary search may still move single
+  connections out of a block.
 
 Pockets (a pad that can only be left through a via in it) are not a pattern: the tracks of its
 neighbours close the pocket, not the fixed copper, so the empty board does not show them (see

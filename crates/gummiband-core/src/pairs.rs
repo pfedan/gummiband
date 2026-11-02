@@ -45,6 +45,10 @@ struct Merged {
     pairs: Vec<MergedPair>,
     /// Pairs that stay two nets, and why.
     skipped: Vec<(String, String)>,
+    /// Pads of one net that the last pass joins on their own, short and at their part: the
+    /// second pad row of a USB-C socket to the pads where the wide track ends (see
+    /// [`second_row`]).
+    joins: Vec<(usize, usize)>,
     /// The wide tracks run on the 45 degree grid: the outer side of a corner of the two
     /// tracks is a corner as well, not an arc.
     miter: bool,
@@ -363,10 +367,72 @@ pub fn apply_zdiff(b: &mut Board, zdiff: f64) {
     }
 }
 
+/// A pair end at a second row of pins, its bridge, and the joins of the other pads to it.
+type Row = (PairEnd, Obstacle, Vec<(usize, usize)>);
+
+/// The end `e` of a pair at a second row of the same pins: if its part has one more pad of
+/// each net and nothing foreign lies within the hull of the four pads (the double row of a
+/// USB-C socket), the end on two of them that can be bridged, keeps the polarity towards the
+/// other end of the pair (`other`, seen along the straight line) and has its pads closest, its
+/// bridge, and the joins of the other two pads to it.
+fn second_row(b: &Board, e: PairEnd, other: PairEnd, carrier_clr: f64) -> Option<Row> {
+    let fp = &b.pins[e.p].footprint;
+    if fp.is_empty() || *fp != b.pins[e.n].footprint {
+        return None;
+    }
+    let (np, nn) = (b.pins[e.p].net, b.pins[e.n].net);
+    let more = |net: NetId, not: usize| -> Vec<usize> {
+        b.nets[net as usize]
+            .pins
+            .iter()
+            .copied()
+            .filter(|&x| x != not && b.pins[x].footprint == *fp)
+            .collect()
+    };
+    let (xp, xn) = (more(np, e.p), more(nn, e.n));
+    let (&[xp], &[xn]) = (&xp[..], &xn[..]) else {
+        return None;
+    };
+    let pads: Vec<Point> = [e.p, e.n, xp, xn]
+        .iter()
+        .flat_map(|&q| b.pins[q].obstacles.iter())
+        .flat_map(|&o| b.obstacles[o].shape.to_polygon(b.rules.max_error).pts)
+        .collect();
+    let row = Polygon::new(hull(pads));
+    // its neighbours may be as close to the row as its pads to each other
+    let foreign = b.obstacles.iter().any(|o| {
+        o.net.is_none_or(|x| x != np && x != nn)
+            && o.layers.intersects(b.pins[e.p].layers)
+            && !matches!(o.kind, ObstacleKind::Keepout { .. })
+            && o.shape.bbox().overlaps(&row.bbox())
+            && o.shape.to_polygon(b.rules.max_error).dist_to_poly(&row) <= 0.0
+    });
+    if foreign {
+        return None;
+    }
+    let mid = |e: &PairEnd| (b.pins[e.p].pos + b.pins[e.n].pos) * 0.5;
+    let twisted = |e: &PairEnd| {
+        let u = (mid(&other) - mid(e)).norm();
+        cross(u, b.pins[e.p].pos - b.pins[e.n].pos) * cross(u, b.pins[other.p].pos - b.pins[other.n].pos) < 0.0
+    };
+    let gap = |e: &PairEnd| b.pins[e.p].pos.dist(b.pins[e.n].pos);
+    let (keep, o) = [(e.p, e.n), (e.p, xn), (xp, e.n), (xp, xn)]
+        .into_iter()
+        .map(|(p, n)| PairEnd { p, n, out: None })
+        .filter_map(|c| bridge(b, c.p, c.n, carrier_clr).map(|o| (c, o)))
+        .min_by(|(x, _), (y, _)| twisted(x).cmp(&twisted(y)).then(gap(x).total_cmp(&gap(y))))?;
+    let (op, on) = (
+        if keep.p == e.p { xp } else { e.p },
+        if keep.n == e.n { xn } else { e.n },
+    );
+    Some((keep, o, vec![(op, keep.p), (on, keep.n)]))
+}
+
 fn merge(board: &Board, all: bool, breakouts: bool) -> Merged {
     let mut b = board.clone();
     let mut pairs = Vec::new();
     let mut skipped = Vec::new();
+    let mut all_joins = Vec::new();
     let coupled = board.coupled_pairs(all);
     for (p, n) in board.diff_pairs() {
         if !coupled.contains(&(p, n)) {
@@ -418,6 +484,27 @@ fn merge(board: &Board, all: bool, breakouts: bool) -> Merged {
             let first = ends.swap_remove(far.1);
             ends = vec![first, second];
         }
+        // an end at a second row of the same pins (a USB-C socket): the pads of the other row
+        // join it right at the part
+        let mut joins = Vec::new();
+        for i in 0..2 {
+            let other = ends[1 - i].0;
+            if let Some((e, o, j)) = second_row(&b, ends[i].0, other, class.clearance) {
+                ends[i] = (e, o);
+                joins.extend(j);
+            }
+        }
+        if std::env::var("GB_PAIR_LOG").is_ok() && !joins.is_empty() {
+            eprintln!(
+                "second row {}: joins {:?}",
+                name(p),
+                joins
+                    .iter()
+                    .map(|&(x, y): &(usize, usize)| format!("{}-{}", board.pins[x].name, board.pins[y].name))
+                    .collect::<Vec<_>>()
+            );
+        }
+        all_joins.extend(joins);
         if breakouts {
             let mids: Vec<Point> = ends
                 .iter()
@@ -530,6 +617,7 @@ fn merge(board: &Board, all: bool, breakouts: bool) -> Merged {
         board: b,
         pairs,
         skipped,
+        joins: all_joins,
         miter: false,
     }
 }
@@ -1564,6 +1652,62 @@ fn cut_nets(b: &mut Board, cuts: &[Cut], kept_from: usize) -> HashMap<NetId, Net
     map
 }
 
+/// Around the pads of a join, the copper of their net there belongs to the join (mm).
+const JOIN_REACH: f64 = 1.0;
+
+/// A join longer than this many times the distance of its pads, plus [`JOIN_SLACK`] mm, went a
+/// long way round: its pins join their net in the last pass instead.
+const JOIN_DETOUR: f64 = 3.0;
+const JOIN_SLACK: f64 = 6.0;
+
+/// In the board of the last pass every join (see [`Merged::joins`]) becomes a net of its own,
+/// from pad to pad with the copper of their net right at the pads, so that the search joins
+/// them there and does not ride the pair's other copper. A pad that is in a net of a cut or an
+/// earlier join already (from `first_new` on) brings the other pad into that net. Returns the
+/// real net of each new net.
+fn join_nets(b: &mut Board, joins: &[(usize, usize)], kept_from: usize, first_new: usize) -> HashMap<NetId, NetId> {
+    let mut map = HashMap::new();
+    let move_pin = |b: &mut Board, pin: usize, to: NetId| {
+        let from = b.pins[pin].net;
+        b.nets[from as usize].pins.retain(|&x| x != pin);
+        b.nets[to as usize].pins.push(pin);
+        b.pins[pin].net = to;
+        for o in b.pins[pin].obstacles.clone() {
+            b.obstacles[o].net = Some(to);
+        }
+    };
+    for (i, &(a, c)) in joins.iter().enumerate() {
+        let (na, nc) = (b.pins[a].net, b.pins[c].net);
+        if nc as usize >= first_new {
+            move_pin(b, a, nc);
+            continue;
+        }
+        if na as usize >= first_new {
+            move_pin(b, c, na);
+            continue;
+        }
+        let id = b.nets.len() as NetId;
+        map.insert(id, na);
+        b.nets.push(crate::board::Net {
+            name: format!("{}~join{i}", b.nets[na as usize].name),
+            class: b.nets[na as usize].class,
+            pins: Vec::new(),
+            planes: LayerSet::default(),
+            priority: 0,
+        });
+        for pin in [a, c] {
+            let at = b.pins[pin].pos;
+            move_pin(b, pin, id);
+            for o in b.obstacles[kept_from..].iter_mut() {
+                if o.net == Some(na) && o.shape.dist_to_point(at) < JOIN_REACH {
+                    o.net = Some(id);
+                }
+            }
+        }
+    }
+    map
+}
+
 /// Extra length of a bump of height h with 45 degree flanks.
 const BUMP_GAIN: f64 = 2.0 * (std::f64::consts::SQRT_2 - 1.0);
 
@@ -2195,11 +2339,27 @@ pub fn route_pairs(
     let mut failed_ends: Vec<(usize, bool)> = Vec::new();
     let mut keep: Vec<(usize, bool)> = Vec::new();
     let mut worse_tried: Vec<usize> = Vec::new();
+    // the joins of the pairs (see [`Merged::joins`]) but those that found no short way: the
+    // last pass connects their pins along with the rest of their nets
+    let mut joins_off: Vec<(usize, usize)> = Vec::new();
     let (geo_done, fin) = loop {
         let mut geo = split_geo.clone();
         let (repaired, cuts) = repair(&real, &mut geo, &paths, &given_up, &keep);
         let mut names = unfinished.clone();
         names.extend(repaired);
+        // a pair that is given up gets no joins: its single tracks need those pads
+        let gone: Vec<NetId> = given_up.iter().flat_map(|&pi| [paths[pi].p, paths[pi].n]).collect();
+        let joins: Vec<(usize, usize)> = merged
+            .joins
+            .iter()
+            .copied()
+            .filter(|&(a, c)| !joins_off.contains(&(a, c)) && !gone.contains(&real.pins[a].net))
+            .collect();
+        names.extend(
+            joins
+                .iter()
+                .map(|&(a, _)| real.nets[real.pins[a].net as usize].name.clone()),
+        );
         names.sort();
         names.dedup();
         if names.is_empty() {
@@ -2209,8 +2369,35 @@ pub fn route_pairs(
         let kept_from = b.obstacles.len();
         lock_geometry(&mut b, &geo);
         let first_cut = b.nets.len();
-        let cut_map = cut_nets(&mut b, &cuts, kept_from);
+        let mut cut_map = cut_nets(&mut b, &cuts, kept_from);
+        let first_join = b.nets.len();
+        let join_map = join_nets(&mut b, &joins, kept_from, first_cut);
         let (_, mut fin) = route_board(&b, sub_cfg, base, &finish);
+        // a join that finds no way, or only a long way round, is left to its net
+        let failed_joins: Vec<(usize, usize)> = (first_join..b.nets.len())
+            .filter(|&id| {
+                let nm = &b.nets[id].name;
+                let routed: f64 = fin
+                    .geometry
+                    .tracks
+                    .iter()
+                    .filter(|t| t.net == id as NetId)
+                    .map(track_len)
+                    .sum();
+                let (a, c) = (b.nets[id].pins[0], b.nets[id].pins[1]);
+                fin.stats.unrouted.iter().any(|u| u.starts_with(&format!("{nm} from ")))
+                    || routed > JOIN_DETOUR * b.pins[a].pos.dist(b.pins[c].pos) + JOIN_SLACK
+            })
+            .filter_map(|id| joins.iter().copied().find(|&(a, c)| b.nets[id].pins == [a, c]))
+            .collect();
+        if std::env::var("GB_PAIR_LOG").is_ok() && !failed_joins.is_empty() {
+            eprintln!("joins without a short way: {failed_joins:?}");
+        }
+        if !failed_joins.is_empty() {
+            joins_off.extend(failed_joins);
+            continue;
+        }
+        cut_map.extend(join_map);
         // a cut that found no way, or only a long way round (which would set the aim of its
         // length group), counts as failed
         let detour = |i: usize, c: &Cut| {
@@ -2684,6 +2871,124 @@ mod tests {
 
     fn polyline(pts: &[Point], net: NetId) -> Track {
         make_track(pts.windows(2).map(|w| Elem::Line(w[0], w[1])).collect(), 0.2, 0, net)
+    }
+
+    /// A USB 2.0 pair from the double pad row of a USB-C socket (B7 A6 A7 B6, between the
+    /// pads of two other nets) to the two pins of a controller. Returns the board and the pins
+    /// by name.
+    fn usb_board() -> (Board, HashMap<String, usize>) {
+        let mut b = pair_board();
+        b.obstacles.clear();
+        b.pins.clear();
+        b.nets.clear();
+        b.outline = vec![Polygon::new(vec![pt(0., 0.), pt(40., 0.), pt(40., 16.), pt(0., 16.)])];
+        let mut usb = b.classes[0].clone();
+        usb.name = "USB".into();
+        b.classes.push(usb);
+        let mut names = HashMap::new();
+        let mut pad = |b: &mut Board, name: &str, net: &str, at: Point, size: (f64, f64)| {
+            let ni = match b.net_id(net) {
+                Some(i) => i,
+                None => {
+                    b.nets.push(Net {
+                        name: net.to_string(),
+                        class: if net.starts_with("USB") { 1 } else { 0 },
+                        pins: Vec::new(),
+                        planes: LayerSet::default(),
+                        priority: 0,
+                    });
+                    (b.nets.len() - 1) as NetId
+                }
+            };
+            let (id, o) = (b.pins.len(), b.obstacles.len());
+            let (lo, hi) = (at - pt(size.0, size.1) * 0.5, at + pt(size.0, size.1) * 0.5);
+            b.obstacles.push(Obstacle {
+                shape: Shape::Polygon(Polygon::new(vec![lo, pt(hi.x, lo.y), hi, pt(lo.x, hi.y)])),
+                layers: LayerSet::single(0),
+                net: Some(ni),
+                kind: ObstacleKind::Pad,
+                hole: None,
+                clearance: 0.1,
+                pin: Some(id),
+                locked: false,
+            });
+            b.pins.push(Pin {
+                name: name.to_string(),
+                footprint: name.split('.').next().unwrap().to_string(),
+                net: ni,
+                pos: at,
+                layers: LayerSet::single(0),
+                obstacles: vec![o],
+                size: (size.1, size.0),
+            });
+            b.nets[ni as usize].pins.push(id);
+            names.insert(name.to_string(), id);
+        };
+        let row = (1.2, 0.3);
+        for (name, net, y) in [
+            ("J1.A5", "CC1", 6.75),
+            ("J1.B7", "USB_N", 7.25),
+            ("J1.A6", "USB_P", 7.75),
+            ("J1.A7", "USB_N", 8.25),
+            ("J1.B6", "USB_P", 8.75),
+            ("J1.A8", "SBU1", 9.25),
+        ] {
+            pad(&mut b, name, net, pt(3.0, y), row);
+        }
+        pad(&mut b, "U10.13", "USB_P", pt(34.0, 7.8), row);
+        pad(&mut b, "U10.14", "USB_N", pt(34.0, 8.6), row);
+        (b, names)
+    }
+
+    #[test]
+    fn the_second_row_of_a_usb_c_socket_joins_the_pair_at_the_socket() {
+        let (b, pin) = usb_board();
+        let m = merge(&b, true, false);
+        assert_eq!(m.pairs.len(), 1, "{:?}", m.skipped);
+        // the band ends on the pads of the row that keep its polarity towards the controller
+        let e = m.pairs[0].ends[0];
+        assert_eq!([e.p, e.n], [pin["J1.A6"], pin["J1.A7"]]);
+        let mut joins = m.joins.clone();
+        joins.sort_unstable();
+        let mut want = vec![(pin["J1.B6"], pin["J1.A6"]), (pin["J1.B7"], pin["J1.A7"])];
+        want.sort_unstable();
+        assert_eq!(joins, want);
+        let search = SearchConfig {
+            population: 2,
+            generations: 0,
+            geometry_generations: 0,
+            frames: false,
+            progress: None,
+            seed: None,
+            open_end: None,
+            air: 0.0,
+            prefer_width: 0.0,
+            open_via_cost: crate::DEFAULT_OPEN_VIA_COST,
+        };
+        let (_, res, rep) = route_pairs(
+            &b,
+            &SubstrateConfig::default(),
+            &RouterConfig::default(),
+            &search,
+            &PairConfig {
+                all: true,
+                ..PairConfig::default()
+            },
+        );
+        assert!(res.stats.unrouted.is_empty(), "{:?}", res.stats.unrouted);
+        assert_eq!(rep.len(), 1, "{rep:?}");
+        assert!(rep[0].wide, "{:?}", rep[0]);
+        let viol = crate::check::check(&b, &res.geometry);
+        assert!(viol.is_empty(), "{viol:?}");
+        // the joins stay at the socket: no single track of a pair net reaches far from it
+        for t in &res.geometry.tracks {
+            let at_socket = t.pts.iter().all(|q| q.x < 5.0);
+            let long = track_len(t) > 20.0;
+            assert!(at_socket || long, "{:?}", t.pts);
+        }
+        // coupled from the socket on: not split as crossed polarity (the other pairing of the
+        // row), which leaves the whole pair uncoupled
+        assert!(rep[0].width > 0.0 && rep[0].uncoupled < 10.0, "{:?}", rep[0]);
     }
 
     #[test]

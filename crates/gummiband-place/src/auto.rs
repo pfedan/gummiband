@@ -100,6 +100,16 @@ pub struct PlaceOptions {
     /// capacitors go to an IC of their own sheet, and current paths (wide nets, switch nodes)
     /// count their full length instead of a box, so a series chain stays in order.
     pub semantic: bool,
+    /// Keep a band free for each group of tracks between two parts (ICs, connectors with at least
+    /// 4 pads on nets that share at least two signal nets): other parts pay for the area of the
+    /// band they cover, see [`Corridor`](crate::anneal::Corridor).
+    pub corridors: bool,
+    /// Room for the escape per side of a part with five or more pads, from the pins on that
+    /// side: their tracks with clearance, shared by the routing layers, see [`escape_skirts`].
+    pub escape_halo: bool,
+    /// Movable parts with 4 or more pads (ICs, connectors) stay within this distance of their
+    /// current position (mm, 0: free), for a local change such as clearing a corridor.
+    pub leash: f64,
 }
 
 impl Default for PlaceOptions {
@@ -116,6 +126,9 @@ impl Default for PlaceOptions {
             halo: 0.3,
             plane_layers: Vec::new(),
             semantic: false,
+            corridors: false,
+            escape_halo: false,
+            leash: 0.0,
         }
     }
 }
@@ -201,8 +214,9 @@ fn court_overlap(a: &[R], b: &[R]) -> f64 {
 }
 
 /// Parts that are not placed yet in the input: off the board, or sitting on another part, which
-/// covers more than [`PILE_OVERLAP`] of its courtyard (the pile of a fresh import). A big part
-/// whose courtyard reaches over a pile is not in it.
+/// covers more than [`PILE_OVERLAP`] of its courtyard (the pile of a fresh import), or whose pad
+/// lies in its courtyard (a part moved onto it). A big part whose courtyard reaches over a pile
+/// or over the pads of a small part is not in it.
 fn unplaced_parts(d: &Design, outer: &Polygon) -> Vec<Option<Unplaced>> {
     let boxes = court_boxes(d);
     let all: Vec<R> = boxes
@@ -219,9 +233,20 @@ fn unplaced_parts(d: &Design, outer: &Polygon) -> Vec<Option<Unplaced>> {
                 return Some(Unplaced::Off);
             }
             let area: f64 = boxes[i].iter().map(|r| r.area()).sum();
+            let inside = |q: Point| {
+                boxes[i]
+                    .iter()
+                    .any(|r| r.x0 < q.x && q.x < r.x1 && r.y0 < q.y && q.y < r.y1)
+            };
             (0..d.parts.len())
                 .find(|&j| {
-                    j != i && all[i].overlap(&all[j]) > 0.0 && court_overlap(&boxes[i], &boxes[j]) > PILE_OVERLAP * area
+                    if j == i || all[i].overlap(&all[j]) <= 0.0 {
+                        return false;
+                    }
+                    // in the pile, or on a pad of a part at least as large: no place to keep
+                    court_overlap(&boxes[i], &boxes[j]) > PILE_OVERLAP * area
+                        || (area <= d.parts[j].court_area()
+                            && d.parts[j].pads.iter().any(|pd| inside(d.parts[j].pad_world(pd))))
                 })
                 .map(Unplaced::On)
         })
@@ -1058,6 +1083,349 @@ fn net_terms(d: &Design, board: &Board, board_area: f64) -> Nets {
     }
 }
 
+/// What a leashed part's courtyard gives up beyond its deficit, so that its place stays legal
+/// in the rounding of the grid (mm).
+const LEASH_SLACK: f64 = 0.02;
+/// Largest skirt of [`escape_skirts`] in mm.
+const SKIRT_MAX: f64 = 3.0;
+
+/// Skirts for the escape: each side of a part with five or more pads gets a strip in front of its
+/// pins, as deep as the tracks of its signal pins (width and clearance of their class) side by
+/// side, shared by the routing layers. Pins of a net with a plane leave through a via and do not
+/// count. The strips are courtyard: other parts keep out, so a full side of a QFN keeps its fan
+/// out and two chips with a bus between them keep the room for it.
+fn escape_skirts(d: &mut Design, board: &Board) {
+    let layers = board.routing_layers().iter().count().max(1) as f64;
+    let plane_net = |name: &str| {
+        board
+            .net_id(name)
+            .is_some_and(|id| board.planes.iter().any(|p| p.net == id))
+    };
+    for p in &mut d.parts {
+        if p.pads.len() < 5 {
+            continue;
+        }
+        let bb = p.court.iter().fold(R::empty(), |a, r| a.union(r));
+        // demand per side: left, right, top, bottom (footprint frame), and the extent of its pins
+        let mut need = [0.0f64; 4];
+        let mut span = [R::empty(); 4];
+        for pad in &p.pads {
+            let Some(n) = pad.net else { continue };
+            let Some(name) = d.nets.get(n) else { continue };
+            if plane_net(name) || name.starts_with("unconnected-") {
+                continue;
+            }
+            let q = pad.local;
+            let dist = [q.x - bb.x0, bb.x1 - q.x, q.y - bb.y0, bb.y1 - q.y];
+            let side = (0..4).min_by(|&a, &b| dist[a].total_cmp(&dist[b])).unwrap();
+            let c = board
+                .net_id(name)
+                .map(|id| board.class_of(id).clone())
+                .unwrap_or_default();
+            need[side] += (c.track_width + c.clearance) / layers;
+            let r = &mut span[side];
+            r.x0 = r.x0.min(q.x);
+            r.y0 = r.y0.min(q.y);
+            r.x1 = r.x1.max(q.x);
+            r.y1 = r.y1.max(q.y);
+        }
+        for side in 0..4 {
+            let e = need[side].min(SKIRT_MAX);
+            if e <= 0.0 {
+                continue;
+            }
+            let sp = span[side];
+            // a strip along the side, as long as the pins it serves plus the depth at both ends
+            let strip = match side {
+                0 => R {
+                    x0: bb.x0 - e,
+                    x1: bb.x0,
+                    y0: sp.y0 - e,
+                    y1: sp.y1 + e,
+                },
+                1 => R {
+                    x0: bb.x1,
+                    x1: bb.x1 + e,
+                    y0: sp.y0 - e,
+                    y1: sp.y1 + e,
+                },
+                2 => R {
+                    x0: sp.x0 - e,
+                    x1: sp.x1 + e,
+                    y0: bb.y0 - e,
+                    y1: bb.y0,
+                },
+                _ => R {
+                    x0: sp.x0 - e,
+                    x1: sp.x1 + e,
+                    y0: bb.y1,
+                    y1: bb.y1 + e,
+                },
+            };
+            p.court.push(strip);
+        }
+    }
+}
+
+/// Weight of the corridor area (per mm2 of band a foreign part covers), against wire length in mm.
+const CORRIDOR_WEIGHT: f64 = 2.0;
+
+/// Parts with at least this many pads on nets end a corridor: ICs and connectors, not passives.
+const CORRIDOR_PADS: usize = 4;
+
+/// A group of tracks between two parts: the parts, the nets and the half width of its band.
+struct TrackGroup {
+    a: usize,
+    b: usize,
+    nets: Vec<usize>,
+    radius: f64,
+    /// Parts on the nets of the group (the ends, series resistors, pull-ups).
+    on: Vec<usize>,
+}
+
+/// The groups of tracks between two parts: two parts with at least [`CORRIDOR_PADS`] pads on
+/// nets that share at least two signal nets of at most 4 pads (a pull-up on the way is part of
+/// the net). The band is as wide as the tracks of the group with their clearances.
+fn track_groups(d: &Design, board: &Board, real_nets: usize, terms: &Nets) -> Vec<TrackGroup> {
+    let net_pads = |p: &crate::model::Part| p.pads.iter().filter(|x| x.net.is_some_and(|n| n < real_nets)).count();
+    let ends: Vec<bool> = d.parts.iter().map(|p| net_pads(p) >= CORRIDOR_PADS).collect();
+    let mut on: Vec<Vec<usize>> = vec![Vec::new(); real_nets];
+    for (i, p) in d.parts.iter().enumerate() {
+        for pad in &p.pads {
+            if let Some(n) = pad.net.filter(|&n| n < real_nets)
+                && !on[n].contains(&i)
+            {
+                on[n].push(i);
+            }
+        }
+    }
+    let mut by_pair: std::collections::BTreeMap<(usize, usize), Vec<usize>> = Default::default();
+    for (n, parts) in on.iter().enumerate() {
+        let pads: usize = parts
+            .iter()
+            .map(|&i| d.parts[i].pads.iter().filter(|x| x.net == Some(n)).count())
+            .sum();
+        // signal nets only: no plane, no current path, no supply with many pins
+        if terms.weight[n] == 0.0 || !terms.partial[n].is_empty() || terms.power[n] || pads > 4 {
+            continue;
+        }
+        let big: Vec<usize> = parts.iter().copied().filter(|&i| ends[i]).collect();
+        for x in 0..big.len() {
+            for y in x + 1..big.len() {
+                by_pair
+                    .entry((big[x].min(big[y]), big[x].max(big[y])))
+                    .or_default()
+                    .push(n);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for ((a, b), nets) in by_pair {
+        if nets.len() < 2 {
+            continue;
+        }
+        let mut width = 0.0;
+        let mut clear: f64 = 0.0;
+        for &n in &nets {
+            let c = board
+                .net_id(&d.nets[n])
+                .map(|id| board.class_of(id).clone())
+                .unwrap_or_default();
+            width += c.track_width + c.clearance;
+            clear = clear.max(c.clearance);
+        }
+        let mut parts: Vec<usize> = nets.iter().flat_map(|&n| on[n].iter().copied()).collect();
+        parts.sort_unstable();
+        parts.dedup();
+        out.push(TrackGroup {
+            a,
+            b,
+            nets,
+            radius: (width + clear) / 2.0,
+            on: parts,
+        });
+    }
+    out
+}
+
+/// The track groups as corridors of the annealer.
+fn corridors(
+    d: &Design,
+    board: &Board,
+    real_nets: usize,
+    terms: &Nets,
+    fixed: &[bool],
+    part_pins: &[Vec<(usize, usize)>],
+) -> Vec<crate::anneal::Corridor> {
+    track_groups(d, board, real_nets, terms)
+        .into_iter()
+        .map(|g| {
+            let end = |i: usize| -> Vec<Result<(usize, usize), Point>> {
+                d.parts[i]
+                    .pads
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, x)| x.net.is_some_and(|n| g.nets.contains(&n)))
+                    .map(|(k, x)| {
+                        if fixed[i] {
+                            Err(d.parts[i].pad_world(x))
+                        } else {
+                            Ok(part_pins[i][k])
+                        }
+                    })
+                    .collect()
+            };
+            let mut exempt: Vec<usize> = Vec::new();
+            for &i in &g.on {
+                if !fixed[i]
+                    && let Some(&(u, _)) = part_pins[i].first()
+                    && !exempt.contains(&u)
+                {
+                    exempt.push(u);
+                }
+            }
+            crate::anneal::Corridor {
+                ends: [end(g.a), end(g.b)],
+                radius: g.radius,
+                exempt,
+                weight: CORRIDOR_WEIGHT,
+            }
+        })
+        .collect()
+}
+
+/// How far `route --clear-corridors` lets an IC or connector move from where it sits (mm), see
+/// [`PlaceOptions::leash`].
+pub const CLEAR_CORRIDORS_LEASH: f64 = 1.5;
+
+/// A group of tracks between two parts and the parts in its band, see [`corridor_groups`].
+#[derive(Debug, Clone)]
+pub struct CorridorGroup {
+    /// References of the two parts the group connects.
+    pub a: String,
+    pub b: String,
+    /// The signal nets of the group.
+    pub nets: Vec<String>,
+    /// Width of the band in mm: the tracks of the group with their clearances.
+    pub width: f64,
+    /// Length of the band in mm, between the centres of the group's pads on the two parts.
+    pub length: f64,
+    /// Parts that `place_board` would move and that sit in the band without being on its nets.
+    pub intruders: Vec<String>,
+}
+
+/// Parts that `place_board` would move (with `opts`) and that sit in the band of a track group
+/// whose nets they are not on: the parts a re-placement with [`PlaceOptions::corridors`] should
+/// take out of the way, before the routing. The ends of every group stay, and so do decoupling
+/// capacitors (a capacitor on a ground or a supply, or two pads both on supply nets): they belong
+/// at their IC pin.
+pub fn corridor_intruders(path: &Path, opts: &PlaceOptions) -> Result<Vec<String>> {
+    let mut out: Vec<String> = corridor_groups(path, opts)?
+        .into_iter()
+        .flat_map(|g| g.intruders)
+        .collect();
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// The groups of tracks between two parts (parts with 4 or more pads sharing 2 or more short
+/// signal nets: a bus, SPI, I2C) with the parts in their band, as [`corridor_intruders`] sees
+/// them. Nothing moves: for an agent or a front end that decides itself what to place again.
+pub fn corridor_groups(path: &Path, opts: &PlaceOptions) -> Result<Vec<CorridorGroup>> {
+    let kb = read_board(
+        path,
+        &ReadOptions {
+            move_parts: true,
+            fixed: opts.fixed.clone(),
+            plane_layers: opts.plane_layers.clone(),
+            ..Default::default()
+        },
+    )?;
+    let d = Design::from_root(&kb.root);
+    let outer = kb
+        .board
+        .outline
+        .iter()
+        .max_by(|a, b| a.signed_area().abs().total_cmp(&b.signed_area().abs()))
+        .context("the board has no outline")?;
+    let Fixing { fixed, .. } = fixed_parts(&d, &kb, opts, outer)?;
+    let terms = net_terms(&d, &kb.board, outer.signed_area().abs());
+    let groups = track_groups(&d, &kb.board, d.nets.len(), &terms);
+    // a rail: a plane, a current path, a ground or a net with many pads (a routed supply)
+    let mut pads_on = vec![0usize; d.nets.len()];
+    for x in d.parts.iter().flat_map(|p| &p.pads) {
+        if let Some(n) = x.net.filter(|&n| n < d.nets.len()) {
+            pads_on[n] += 1;
+        }
+    }
+    let supply = |n: usize| {
+        terms.weight[n] == 0.0
+            || !terms.partial[n].is_empty()
+            || terms.power[n]
+            || is_ground(&d.nets[n])
+            || pads_on[n] >= 8
+    };
+    let on = |x: &crate::model::Pad, f: &dyn Fn(usize) -> bool| x.net.is_some_and(|n| n < d.nets.len() && f(n));
+    // decoupling capacitors stay: they belong at their IC pin
+    let stays = |p: &crate::model::Part| {
+        let cap = p.reference.starts_with('C') && p.reference[1..].starts_with(|c: char| c.is_ascii_digit());
+        (p.pads.len() == 2 && p.pads.iter().all(|x| on(x, &supply))) || (cap && p.pads.iter().any(|x| on(x, &supply)))
+    };
+    let mut out: Vec<CorridorGroup> = Vec::new();
+    for g in &groups {
+        let centre = |i: usize| {
+            let pts: Vec<Point> = d.parts[i]
+                .pads
+                .iter()
+                .filter(|x| x.net.is_some_and(|n| g.nets.contains(&n)))
+                .map(|x| d.parts[i].pad_world(x))
+                .collect();
+            let n = pts.len().max(1) as f64;
+            let s = pts.iter().fold(pt(0.0, 0.0), |s, &p| s + p);
+            pt(s.x / n, s.y / n)
+        };
+        let (a, b) = (centre(g.a), centre(g.b));
+        let ab = b - a;
+        let len = ab.x.hypot(ab.y);
+        if len < 1e-6 {
+            continue;
+        }
+        let (dx, dy) = (ab.x / len, ab.y / len);
+        let mut intruders: Vec<String> = Vec::new();
+        for (i, p) in d.parts.iter().enumerate() {
+            if fixed[i] || g.on.contains(&i) || stays(p) {
+                continue;
+            }
+            let hit = p.court.iter().any(|r| {
+                let r = r.transformed_bbox(p.pos, p.rot);
+                let m = r.center();
+                let t = (m.x - a.x) * dx + (m.y - a.y) * dy;
+                let (hw, hh) = (r.w() / 2.0, r.h() / 2.0);
+                let along = hw * dx.abs() + hh * dy.abs();
+                let across = hw * dy.abs() + hh * dx.abs();
+                let off = ((m.x - a.x) * dy - (m.y - a.y) * dx).abs();
+                t > -along && t < len + along && off < g.radius + across
+            });
+            if hit {
+                intruders.push(p.reference.clone());
+            }
+        }
+        intruders.sort();
+        let mut nets: Vec<String> = g.nets.iter().map(|&n| d.nets[n].clone()).collect();
+        nets.sort();
+        out.push(CorridorGroup {
+            a: d.parts[g.a].reference.clone(),
+            b: d.parts[g.b].reference.clone(),
+            nets,
+            width: 2.0 * g.radius,
+            length: len,
+            intruders,
+        });
+    }
+    Ok(out)
+}
+
 /// Crossings between the spanning trees of the nets (pads in their final position).
 fn crossings(d: &Design, pose: &[(Point, f64)], weight: &[f64]) -> usize {
     let mut pins: Vec<Vec<Point>> = vec![Vec::new(); d.nets.len()];
@@ -1117,23 +1485,29 @@ fn unit_poses(d: &Design, units: &[Unit], s: &State) -> Vec<(Point, f64)> {
     pose
 }
 
-/// One annealing run from random positions; None if it finds no legal placement.
-fn run(p: &Problem, bbox: &R, seed: u64, iters: usize) -> Option<(State, f64)> {
+/// One annealing run from random positions; without a legal placement the units that found no
+/// spot, biggest first.
+fn run(p: &Problem, bbox: &R, seed: u64, iters: usize) -> Result<(State, f64), Vec<usize>> {
     let mut rng = Rng::new(seed);
     let n = p.units.len();
+    // a leashed unit starts at home, the others anywhere
     let pos = (0..n)
-        .map(|_| pt(bbox.x0 + rng.f() * bbox.w(), bbox.y0 + rng.f() * bbox.h()))
+        .map(|u| {
+            let r = pt(bbox.x0 + rng.f() * bbox.w(), bbox.y0 + rng.f() * bbox.h());
+            p.leash.get(u).copied().flatten().map_or(r, |(home, _)| home)
+        })
         .collect();
     let mut pl = Placer::new(p, State { pos, k: vec![0; n] });
     let size = bbox.w().max(bbox.h());
     pl.anneal(&mut rng, iters, 30.0, 0.05, 0.3, 400.0, size / 3.0, 0.2, false);
     // a crowded corner may have to give a small part to the other end of the board
-    if pl.legalize(0.25, size.max(40.0)) > 0 || pl.total_overlap() > 1e-6 {
-        return None;
+    let failed = pl.legalize(0.25, size.max(40.0));
+    if !failed.is_empty() || pl.total_overlap() > 1e-6 {
+        return Err(failed);
     }
     pl.anneal(&mut rng, iters / 3, 0.8, 0.01, 0.0, 0.0, 2.0, 0.1, true);
     let wire = pl.wire();
-    Some((pl.s, wire))
+    Ok((pl.s, wire))
 }
 
 fn zone_points(z: &Node) -> Vec<Point> {
@@ -1189,6 +1563,116 @@ fn keepout_owner(pts: &[Point], d: &Design, fixed: &[bool]) -> Option<usize> {
         .map(|x| x.0)
 }
 
+/// Legal runs (start, state, wire, crossings) and the units without a spot of each failed run.
+type Runs = (Vec<(usize, State, f64, usize)>, Vec<Vec<usize>>);
+
+/// What a failed placement tells the caller.
+struct NoFit {
+    /// The units without a spot in the run that came closest, biggest first.
+    names: Vec<String>,
+    /// Their courtyards (halo included), per unit.
+    missing: Vec<Vec<R>>,
+    /// Every movable courtyard (halo included) and whether it carries the halo.
+    movable: Vec<(R, bool)>,
+    free: f64,
+    gap: f64,
+    halo: f64,
+    /// Fixed parts with the board area their courtyards and gap take.
+    fixed: Vec<(String, f64)>,
+}
+
+/// Area a courtyard takes with half the gap on each side.
+fn with_gap(r: &R, gap: f64) -> f64 {
+    (r.w() + gap) * (r.h() + gap)
+}
+
+/// The parts that found no spot, how much room is missing and what would make it.
+fn no_fit_message(f: &NoFit) -> String {
+    let need = |g: f64| f.movable.iter().map(|(r, _)| with_gap(r, g)).sum::<f64>();
+    let need_now = need(f.gap);
+    let missing: f64 = f.missing.iter().flatten().map(|r| with_gap(r, f.gap)).sum();
+    let mut s = String::from("no legal placement: ");
+    if f.names.is_empty() {
+        s += "every part found a spot but some still overlap";
+    } else {
+        let shown: Vec<String> = f
+            .names
+            .iter()
+            .zip(&f.missing)
+            .take(5)
+            .map(|(n, rs)| {
+                let b = rs.iter().fold(R::empty(), |a, r| a.union(r));
+                format!("{n} ({:.1}x{:.1} mm)", b.w(), b.h())
+            })
+            .collect();
+        s += &format!("no spot for {}", shown.join(", "));
+        if f.names.len() > 5 {
+            s += &format!(" and {} more", f.names.len() - 5);
+        }
+        s += &format!(" (together {missing:.0} mm2 with gap)");
+    }
+    s += &format!(
+        "; movable courtyards need {need_now:.0} mm2 with gap {} mm and halo {} mm, {:.0} mm2 are free ({:.0} %). Options:",
+        f.gap,
+        f.halo,
+        f.free,
+        100.0 * need_now / f.free.max(1e-9)
+    );
+    let mut opts = Vec::new();
+    // the gap that saves as much as is missing
+    let target = need_now - missing.max(1.0);
+    if f.gap > 0.0 {
+        if need(0.0) <= target {
+            let (mut lo, mut hi) = (0.0, f.gap);
+            for _ in 0..40 {
+                let m = 0.5 * (lo + hi);
+                if need(m) <= target { lo = m } else { hi = m }
+            }
+            opts.push(format!("gap {:.2} mm or less", (lo * 100.0).floor() / 100.0));
+        } else {
+            opts.push(format!(
+                "a smaller gap alone is not enough (gap 0 frees {:.0} mm2)",
+                need_now - need(0.0)
+            ));
+        }
+    }
+    if f.halo > 0.0 {
+        let saved: f64 = f
+            .movable
+            .iter()
+            .filter(|(_, h)| *h)
+            .map(|(r, _)| with_gap(r, f.gap) - with_gap(&r.grow(-f.halo), f.gap))
+            .sum();
+        if saved >= 1.0 {
+            opts.push(format!("halo 0 frees {saved:.0} mm2"));
+        }
+    }
+    // at the fill the closest run reached, the missing parts take this much more board
+    let placed = need_now - missing;
+    let more = if placed > 0.0 {
+        f.free * missing / placed
+    } else {
+        missing
+    };
+    opts.push(format!(
+        "a board larger by about {:.0} mm2",
+        (more / 10.0).ceil() * 10.0
+    ));
+    if !f.fixed.is_empty() {
+        let mut fx = f.fixed.clone();
+        fx.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let total: f64 = fx.iter().map(|x| x.1).sum();
+        let top: Vec<String> = fx.iter().take(3).map(|(n, a)| format!("{n} {a:.0}")).collect();
+        opts.push(format!(
+            "fewer fixed parts ({} fixed take {total:.0} mm2, largest {})",
+            fx.len(),
+            top.join(", ")
+        ));
+    }
+    s += &format!(" {}", opts.join("; "));
+    s
+}
+
 /// Place the board in the file at `path`. The file text comes back with the footprints moved; the
 /// zones of the moved parts follow them, filled copper is left to KiCad's next refill.
 pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
@@ -1216,10 +1700,58 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
     } = fixed_parts(&d, &kb, opts, outer)?;
     // the courtyards as the file has them, before the halo, for the report
     let boxes = court_boxes(&d);
-    for p in &mut d.parts {
-        if p.pads.len() >= 5 {
+    // leashed parts (see PlaceOptions::leash) get no halo
+    let leashed: Vec<bool> = (0..d.parts.len())
+        .map(|i| opts.leash > 0.0 && !fixed[i] && d.parts[i].pads.len() >= CORRIDOR_PADS)
+        .collect();
+    for (i, p) in d.parts.iter_mut().enumerate() {
+        if p.pads.len() >= 5 && !leashed[i] {
             for r in &mut p.court {
                 *r = r.grow(opts.halo);
+            }
+        }
+    }
+    if opts.escape_halo {
+        escape_skirts(&mut d, &kb.board);
+    }
+    // a leashed part keeps the room it has: where its neighbours sit closer than the gap, its
+    // courtyard shrinks by the difference, so that its own place stays legal
+    if leashed.contains(&true) {
+        let quads = |i: usize| court_quads(&d.parts[i]);
+        let shrink: Vec<f64> = (0..d.parts.len())
+            .map(|i| {
+                if !leashed[i] {
+                    return 0.0;
+                }
+                let mut sep = f64::INFINITY;
+                for q in quads(i) {
+                    for j in (0..d.parts.len()).filter(|&j| j != i) {
+                        for o in quads(j) {
+                            if q.bbox().grow(opts.gap + 1.0).overlap(&o.bbox()) > 0.0 {
+                                sep = sep.min(q.separation(&o));
+                            }
+                        }
+                    }
+                }
+                (opts.gap - sep + LEASH_SLACK).max(0.0)
+            })
+            .collect();
+        for (p, s) in d.parts.iter_mut().zip(shrink) {
+            if s > 0.0 {
+                for r in &mut p.court {
+                    let g = r.grow(-s);
+                    let c = r.center();
+                    *r = if g.x1 > g.x0 && g.y1 > g.y0 {
+                        g
+                    } else {
+                        R {
+                            x0: c.x,
+                            y0: c.y,
+                            x1: c.x,
+                            y1: c.y,
+                        }
+                    };
+                }
             }
         }
     }
@@ -1432,34 +1964,118 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         }
     }
     prob.escape_overlap = ESCAPE_OVERLAP;
+    if opts.corridors {
+        prob.corridors = corridors(&d, &kb.board, real_nets, &terms, &fixed, &part_pins);
+    }
+    if opts.leash > 0.0 {
+        prob.leash = units
+            .iter()
+            .map(|u| {
+                let pads: usize = u.members.iter().map(|m| d.parts[m.part].pads.len()).sum();
+                (pads >= CORRIDOR_PADS).then_some((u.pos, opts.leash))
+            })
+            .collect();
+    }
 
     // ---- the starts, in parallel; the fewest crossings win, then the shortest wires
     let starts: Vec<usize> = (1..=opts.starts.max(1)).collect();
-    let attempt = |prob: &Problem| -> Vec<(usize, State, f64, usize)> {
-        starts
+    // the legal runs, and the units that found no spot in each of the others
+    let attempt = |prob: &Problem| -> Runs {
+        let all: Vec<_> = starts
             .par_iter()
-            .filter_map(|&start| {
+            .map(|&start| {
                 let seed = opts.seed.wrapping_sub(1).wrapping_mul(SEED_STEP) + start as u64;
                 let (s, wire) = run(prob, &bbox, seed, opts.iters)?;
                 let c = crossings(&d, &unit_poses(&d, &units, &s), &terms.weight);
-                Some((start, s, wire, c))
+                Ok((start, s, wire, c))
             })
-            .collect()
+            .collect();
+        let mut ok = Vec::new();
+        let mut failed = Vec::new();
+        for r in all {
+            match r {
+                Ok(x) => ok.push(x),
+                Err(f) => failed.push(f),
+            }
+        }
+        (ok, failed)
     };
-    let mut results = attempt(&prob);
+    let (mut results, mut failures) = attempt(&prob);
     let mut escape_soft = false;
     if results.is_empty() && escape_of.values().next().is_some() {
         // too tight to keep every via site free: the free sites only count as cost then
         prob.escape_overlap = 0.0;
         escape_soft = true;
-        results = attempt(&prob);
+        (results, failures) = attempt(&prob);
     }
     results.sort_by(|a, b| (a.3, a.2).partial_cmp(&(b.3, b.2)).unwrap());
     let starts: Vec<(usize, f64, usize)> = results.iter().map(|r| (r.0, r.2, r.3)).collect();
     let Some((start, state, wire, crossed)) = results.into_iter().next() else {
+        let units_of = |f: &Vec<usize>| -> Vec<Vec<R>> { f.iter().map(|&u| prob.units[u].rects[0].clone()).collect() };
+        // the run that came closest: the least courtyard area without a spot
+        let closest = failures.iter().map(|f| (f, units_of(f))).min_by(|a, b| {
+            let area = |rs: &Vec<Vec<R>>| rs.iter().flatten().map(|r| r.area()).sum::<f64>();
+            area(&a.1).partial_cmp(&area(&b.1)).unwrap()
+        });
+        let (names, missing): (Vec<String>, Vec<Vec<R>>) = match closest {
+            Some((f, rs)) => (
+                f.iter()
+                    .map(|&u| {
+                        let refs: Vec<&str> = units[u]
+                            .members
+                            .iter()
+                            .map(|m| d.parts[m.part].reference.as_str())
+                            .collect();
+                        refs.join("+")
+                    })
+                    .collect(),
+                rs,
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        let movable: Vec<(R, bool)> = units
+            .iter()
+            .flat_map(|u| &u.members)
+            .flat_map(|m| {
+                let p = &d.parts[m.part];
+                p.court.iter().map(move |r| (*r, p.pads.len() >= 5))
+            })
+            .collect();
+        let fixed_parts: Vec<(String, f64)> = d
+            .parts
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| fixed[*i])
+            .map(|(_, p)| {
+                let a = p
+                    .court
+                    .iter()
+                    .map(|r| {
+                        Quad {
+                            pos: p.pos,
+                            rot: p.rot,
+                            r: *r,
+                        }
+                        .bbox()
+                        .grow(opts.gap)
+                        .overlap(&bbox)
+                    })
+                    .sum::<f64>();
+                (p.reference.clone(), a)
+            })
+            .filter(|x| x.1 > 0.0)
+            .collect();
         bail!(
-            "no legal placement: movable courtyards {movable_area:.0} mm2 on {free_area:.0} mm2 free, \
-             try a smaller --gap or --halo"
+            "{}",
+            no_fit_message(&NoFit {
+                names,
+                missing,
+                movable,
+                free: free_area,
+                gap: opts.gap,
+                halo: opts.halo,
+                fixed: fixed_parts,
+            })
         );
     };
     let pose = unit_poses(&d, &units, &state);
@@ -1820,6 +2436,25 @@ mod tests {
     }
 
     #[test]
+    fn a_leashed_ic_stays_close() {
+        let spot = |i: usize| [(122.0, 110.0), (110.0, 115.0), (114.0, 115.0), (118.0, 115.0)][i];
+        let only = |leash| PlaceOptions {
+            scope: Scope::Only(vec!["U2".into()]),
+            leash,
+            ..quick()
+        };
+        let dist = |p: &Placed| {
+            let (x, y) = pose(&p.report, "U2");
+            ((x - 122.0).powi(2) + (y - 110.0).powi(2)).sqrt()
+        };
+        // free, U2 goes to U1, which it shares all its nets with
+        let free = place(&board(spot), "free", &only(0.0)).unwrap();
+        assert!(dist(&free) > 3.0, "{}", dist(&free));
+        let leashed = place(&board(spot), "leash", &only(1.5)).unwrap();
+        assert!(dist(&leashed) < 1.7, "{}", dist(&leashed));
+    }
+
+    #[test]
     fn outside_takes_the_parts_off_the_board() {
         let opts = PlaceOptions {
             scope: Scope::Outside,
@@ -1920,6 +2555,87 @@ mod tests {
         let p = place(&board(|_| (116.0, 110.0)), "placed", &quick()).unwrap();
         assert!(p.report.released.is_empty());
         assert!(p.report.fixed.contains(&"J1".to_string()));
+    }
+
+    /// A connector that a part moved onto, with a pad of that part under its courtyard, has no
+    /// place to keep: it is placed with a warning, even where the courtyards overlap only a little.
+    #[test]
+    fn a_connector_on_a_pad_of_another_part_is_placed() {
+        // J1 x 105.5..107.5 over U1 x 104..106: a quarter of its courtyard, and U1's pad at 105.6
+        let text = board(|_| (160.0, 160.0)).replace("(at 125.0 115.0)", "(at 106.5 105)");
+        let text = text.replace("(at 125 115)", "(at 106.5 105)");
+        let p = place(&text, "onpad", &quick()).unwrap();
+        assert_eq!(p.report.released, vec!["J1"], "{:?}", p.report.warnings);
+        // over the courtyard of U1 but off its pads it stays
+        let text = board(|_| (160.0, 160.0)).replace("(at 125.0 115.0)", "(at 106.8 105)");
+        let text = text.replace("(at 125 115)", "(at 106.8 105)");
+        let p = place(&text, "beside", &quick()).unwrap();
+        assert!(p.report.released.is_empty(), "{:?}", p.report.released);
+    }
+
+    /// A board too small for its parts: the error names the parts without a spot, the room they
+    /// miss and what would make it.
+    #[test]
+    fn a_failed_placement_names_the_parts_and_the_options() {
+        let text = board(|_| (160.0, 160.0)).replace("(end 130 120)", "(end 109 105)");
+        let opts = PlaceOptions { gap: 0.1, ..quick() };
+        let e = place(&text, "nofit", &opts).err().expect("no room").to_string();
+        assert!(e.starts_with("no legal placement: no spot for "), "{e}");
+        assert!(
+            ["C1", "C2", "R1", "U2", "J1"]
+                .iter()
+                .any(|r| e.contains(&format!("{r} (2.0x2.0 mm)"))),
+            "{e}"
+        );
+        assert!(e.contains(" mm2 with gap); movable courtyards need "), "{e}");
+        assert!(e.contains("with gap 0.1 mm and halo 0.3 mm"), "{e}");
+        assert!(e.contains("a smaller gap alone is not enough"), "{e}");
+        assert!(e.contains("a board larger by about "), "{e}");
+        assert!(e.contains("fewer fixed parts (1 fixed take"), "{e}");
+        assert!(e.contains("largest U1 "), "{e}");
+    }
+
+    #[test]
+    fn the_failure_message_sizes_the_options() {
+        let sq = |a: f64| R {
+            x0: 0.0,
+            y0: 0.0,
+            x1: a,
+            y1: a,
+        };
+        // 100 parts of 1 mm and one IC of 4 mm with halo, 2 mm small parts missing their spot
+        let mut movable: Vec<(R, bool)> = (0..100).map(|_| (sq(1.0), false)).collect();
+        movable.push((sq(4.0), true));
+        let f = NoFit {
+            names: (1..=7).map(|i| format!("C{i}")).collect(),
+            missing: (0..7).map(|_| vec![sq(1.0)]).collect(),
+            movable,
+            free: 150.0,
+            gap: 0.3,
+            halo: 0.3,
+            fixed: vec![("J1".into(), 20.0), ("H1".into(), 5.0)],
+        };
+        let e = no_fit_message(&f);
+        // 100 x 1.69 + 4.3^2 = 187.5 mm2 need, 7 x 1.69 = 11.8 mm2 missing
+        assert!(e.contains("no spot for C1 (1.0x1.0 mm), C2"), "{e}");
+        assert!(
+            e.contains("C5 (1.0x1.0 mm) and 2 more (together 12 mm2 with gap)"),
+            "{e}"
+        );
+        assert!(
+            e.contains("need 187 mm2 with gap 0.3 mm and halo 0.3 mm, 150 mm2 are free (125 %)"),
+            "{e}"
+        );
+        // need(g) = 100 (1+g)^2 + (4+g)^2 <= 187.5 - 11.8 up to g = 0.25
+        assert!(e.contains("gap 0.25 mm or less"), "{e}");
+        // 4.3^2 - 3.7^2
+        assert!(e.contains("halo 0 frees 5 mm2"), "{e}");
+        // 150 * 11.8 / 175.7 = 10.1, rounded up to 20
+        assert!(e.contains("a board larger by about 20 mm2"), "{e}");
+        assert!(
+            e.contains("fewer fixed parts (2 fixed take 25 mm2, largest J1 20, H1 5)"),
+            "{e}"
+        );
     }
 
     #[test]

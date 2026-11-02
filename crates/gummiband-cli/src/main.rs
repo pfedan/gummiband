@@ -91,8 +91,12 @@ enum Cmd {
         /// Hints from local patterns of the board, comma separated: `shares` (pins of a plane net
         /// next to each other share one fan-out via), `decaps` (a decoupling capacitor is
         /// connected to its IC pin first, its via serves both), `rows` (the open end re-lays the
-        /// connections of a pin row in pin order), `all` or `none`. `gummiband info` lists the
-        /// patterns it finds.
+        /// connections of a pin row in pin order), `pairs` (differential pairs before the other
+        /// signal connections, the longest first), `groups` (the connections between two parts
+        /// as one block in pin order, the longest block first; `groups-short` puts the shortest
+        /// first, `groups-inline` leaves each block at the place of its connections), `all` or
+        /// `none`. `gummiband info` lists the patterns it finds. When to use which: see
+        /// docs/guide/options.md.
         #[arg(long, default_value = "none")]
         patterns: String,
         /// Factor on the via cost in the pass that routes connections with vias again and
@@ -177,6 +181,12 @@ enum Cmd {
         /// First seed of --placements.
         #[arg(long, default_value_t = 1)]
         placement_seed: u64,
+        /// Before the routing, parts that sit in the band of a group of tracks between two parts
+        /// (ICs, connectors sharing at least two signal nets) and are not on its nets get new
+        /// positions with `place --corridors`; everything else stays. Pairs with `--patterns
+        /// groups`. Experimental.
+        #[arg(long)]
+        clear_corridors: bool,
         /// Track width per net from a JSON file {"net name": width_mm, ...} (e.g. the widths
         /// of an existing routing, see bench/net_widths.py).
         #[arg(long)]
@@ -280,6 +290,20 @@ enum Cmd {
         /// wide nets and switch nodes count their full length.
         #[arg(long)]
         semantic: bool,
+        /// Keep a band free for every group of tracks between two parts (ICs and connectors that
+        /// share at least two signal nets, a bus, SPI, I2C): other parts pay for the area of the
+        /// band they cover. Experimental.
+        #[arg(long)]
+        corridors: bool,
+        /// Room for the escape per side of a part with five or more pads, from its signal pins
+        /// on that side (their tracks with clearance, shared by the routing layers, at most 3
+        /// mm), instead of the same halo all round. Experimental.
+        #[arg(long)]
+        escape_halo: bool,
+        /// Parts with 4 or more pads (ICs, connectors) stay within this distance of where they
+        /// sit (mm, 0 = free): a local change instead of a new placement, e.g. with --only.
+        #[arg(long, default_value_t = 0.0)]
+        leash: f64,
         /// Write a machine readable JSON report.
         #[arg(long)]
         report: Option<PathBuf>,
@@ -523,6 +547,7 @@ fn main() -> Result<()> {
             fixed,
             placements,
             placement_seed,
+            clear_corridors,
             progress,
             until_stop,
             open_via_cost,
@@ -646,6 +671,58 @@ fn main() -> Result<()> {
                     gummiband_core::pairs::apply_zdiff(&mut kb.board, z);
                 }
                 Ok(kb)
+            };
+            // parts in the corridors of track groups move out of the way first
+            let cleared_dir = std::env::temp_dir().join(format!("gummiband-corridors-{}", std::process::id()));
+            let board = if clear_corridors {
+                use gummiband_place::auto::{PlaceOptions, Scope, corridor_intruders, place_board};
+                let opts = PlaceOptions {
+                    fixed: fixed.clone(),
+                    seed: placement_seed,
+                    plane_layers: cli.plane_layers.clone(),
+                    ..Default::default()
+                };
+                let intruders = corridor_intruders(&board, &opts)?;
+                if intruders.is_empty() {
+                    println!("corridors: no part in the way");
+                    board
+                } else {
+                    println!(
+                        "corridors: {} parts in the way get new positions: {}",
+                        intruders.len(),
+                        intruders.join(" ")
+                    );
+                    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
+                    let placed = place_board(
+                        &board,
+                        &PlaceOptions {
+                            scope: Scope::Only(intruders),
+                            corridors: true,
+                            gap: env("GB_CC_GAP").unwrap_or(opts.gap),
+                            halo: env("GB_CC_HALO").unwrap_or(opts.halo),
+                            escape_halo: env("GB_CC_ESCAPE").is_some_and(|v| v > 0.0),
+                            semantic: env("GB_CC_SEMANTIC").is_some_and(|v| v > 0.0),
+                            leash: env("GB_CC_LEASH").unwrap_or(gummiband_place::auto::CLEAR_CORRIDORS_LEASH),
+                            ..opts
+                        },
+                    )?;
+                    println!(
+                        "corridors: smallest courtyard distance {:.2} mm",
+                        placed.report.min_separation
+                    );
+                    std::fs::create_dir_all(&cleared_dir)?;
+                    let path = cleared_dir.join(board.file_name().unwrap_or_default());
+                    std::fs::write(&path, &placed.text)?;
+                    for ext in ["kicad_pro", "kicad_dru"] {
+                        let src = board.with_extension(ext);
+                        if src.exists() {
+                            std::fs::copy(&src, path.with_extension(ext))?;
+                        }
+                    }
+                    path
+                }
+            } else {
+                board
             };
             let input = board;
             let placed_dir = std::env::temp_dir().join(format!("gummiband-placements-{}", std::process::id()));
@@ -1197,6 +1274,9 @@ fn main() -> Result<()> {
             margin,
             halo,
             semantic,
+            corridors,
+            escape_halo,
+            leash,
             report,
         } => {
             use gummiband_place::auto::{PlaceOptions, Scope};
@@ -1221,6 +1301,9 @@ fn main() -> Result<()> {
                 halo,
                 plane_layers: cli.plane_layers.clone(),
                 semantic,
+                corridors,
+                escape_halo,
+                leash,
             };
             let placed = gummiband_place::auto::place_board(&board, &opts)?;
             let r = &placed.report;

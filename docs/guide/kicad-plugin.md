@@ -41,9 +41,28 @@ because they fit only one board. *Defaults* brings back the values below.
 | Via price while improving (mm of track) | 20 | With *Keep improving*: how much track a via is worth when the improvement judges its results (`--open-via-cost`). Lower gives more vias and shorter tracks, higher fewer vias and longer tracks. |
 | Preferred track width (mm) | 0 (off) | Tracks of the default net class push aside what can give way and grow up to this width where there is room, with a taper at every change of width. Other classes get a target of their own with a custom rule `track_width (opt ...)`, see [Wider tracks where there is room](concepts.md#wider-tracks-where-there-is-room). |
 | Let parts shift to open channels | on | The geometry generations may shift parts next to clearance problems and open connections (`--move-parts`), so at least one of them is needed; the routed tracks follow like rubber bands. A setting remembered from an earlier version stays as it was: tick it once. Finishing nets leaves the parts where they are. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay. The moved footprints arrive in the same undo step as the tracks, and the message box lists them. |
+| First placement seed | 1 | With *Placements to try*: the placements use this seed and the ones after it (`--placement-seed`). After every run it moves on by the number of placements, so the next run tries placements it has not seen; the message box names the seed that won. *New* draws another one. |
+| Search seed | 0 (fixed) | Seed of the routing search (`--seed`). The same seed gives the same result, another seed another attempt, often with quite different vias and violations. *New* draws one; try two or three before judging a setting. |
 | Parts that never move | | With the option above: references that stay in addition (`--fixed`). |
 | Open Edit Teardrops after routing | off | Opens KiCad's *Edit Teardrops* dialog after the run. Enable the teardrops there: the plugin cannot do it itself, see below. |
 | Save an animation of the generations | off | Writes one image per generation and an `evolution.gif` into `gummiband-evolution/` next to the project. Needs `rsvg-convert` and ImageMagick. |
+
+**Hints**
+
+Options that are off because none of them wins on every board. The tab says in a few lines which
+board wants which, and the tooltips give what each one did in the measurements. The full
+comparison is in [Choosing the opt-in options](options.md). Compare an option with a plain run
+over the same two or three search seeds: one run says little.
+
+| Option | Default | CLI | What it does |
+| --- | --- | --- | --- |
+| Route buses between parts as blocks | off | `--patterns groups` | The connections between two parts that share at least two nets are routed as one block in pin order. Fewer vias on boards with several chips; leave it off on a placement that already routes cleanly. |
+| Order of the blocks | Longest first | `groups-short`, `groups-inline` | *Shortest first* suited a DDR fan-out and hurt elsewhere; *In place* is for experiments. |
+| Differential pairs first | off | `--patterns pairs` | Pairs before the rest, longest first. With the blocks the best result on an FPGA board with many pairs. |
+| Decoupling capacitors first | off | `--patterns decaps` | A capacitor to its IC pin first, one via for both. Helps boards with many decaps. |
+| Lay pin rows again in pin order | off | `--patterns rows` | Only with *Keep improving*. |
+| Neighbouring plane pins share a via | off | `--patterns shares` | Rarely helps, for experiments. |
+| Move small parts out of the way of buses | off | `--clear-corridors` | Experimental: before routing, parts in the band of a bus that are not on its nets get new positions next to it; ICs and connectors move at most 1.5 mm, decoupling capacitors stay. For tight boards with several chips, together with the blocks. The moves arrive in the same undo step, and the message box lists them. |
 
 **Advanced**
 
@@ -62,7 +81,11 @@ because they fit only one board. *Defaults* brings back the values below.
 | Route pairs as one wide track | off | `--pairs` | Experimental: routes each differential pair as one wide track and splits it into two. Costs connections on dense boards. |
 | Length difference | 0.1 mm | `--pair-skew` | With pairs: length difference left within a pair. |
 | Differential impedance | 0 (off) | `--pair-zdiff` | With pairs: sets the track width per layer from the stackup. |
-| Pair pull | 0 | `--pair-pull` | How strongly the two nets of a pair attract each other while routing. |
+| Also pairs without a pair rule or class | off | `--pair-all` | With pairs: every pair recognised by name. |
+| Vias of a pair as one capsule | off | `--via-pairs` | Experimental, with pairs: two vias side by side turn with the pair as one capsule. Helps pairs that change layers often. |
+| Single tracks into the pads | off | `--breakouts` | Experimental, with pairs: the wide track ends just outside the pads. Helps at connector rows, not yet on DDR. |
+| Pair pull | 0 | `--pair-pull` | How strongly the two nets of a pair attract each other while routing; 1 is a good start. The gentle way to couple pairs on a board that is not dense. |
+| Extra air over the clearance | 0.03 mm | `--air` | With *Keep improving*: reserve on top of the clearances where there is room. |
 
 **Teardrops.** KiCad's plugin API has no setting for teardrops on vias and pads, so `--teardrops`
 cannot act on the open board. The check box opens KiCad's own dialog instead. The wedges at track
@@ -153,7 +176,12 @@ Locked footprints never move. *Also keep* takes references that should stay in a
 other fields are *Parallel runs* (independent placements, the one with the fewest crossings
 wins, 1 by default: the crossings hardly predict how well the board routes), *Courtyard spacing* (0.3 mm), *Room around ICs* (0.3 mm extra for parts with
 five or more pads) and *Seed* (1); placements differ a lot from seed to seed, so for another attempt
-change it. The *Advanced* tab has *Release* (parts that may move although they count as mechanical),
+press *New* next to it. The *Strategy* tab has the options of a placement from scratch, all off:
+*Use the schematic* (`--semantic`), *Keep bands free for buses* (`--corridors`), *Room for the
+escape per side* (`--escape-halo`) and *Leash for ICs and connectors* (`--leash`, mm, 0 = free).
+The first three together gave the cleanest placements of the Lichtschnitzel controller; the
+tooltips say what each does, and [Choosing the opt-in options](options.md) compares them. The
+*Advanced* tab has *Release* (parts that may move although they count as mechanical),
 *Distance to the outline* (0.5 mm), *Annealing moves per run* (3,000,000), *Worker threads* and
 *Plane layers*. They are the options of [`gummiband place`](cli.md#gummiband-place), and the dialog
 remembers its numbers like the routing dialog does.

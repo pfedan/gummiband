@@ -159,7 +159,8 @@ fn initialize_list_load_route() {
             "power_plan",
             "render",
             "route",
-            "set_net_options"
+            "set_net_options",
+            "track_corridors"
         ]
     );
     for t in tools["tools"].as_array().unwrap() {
@@ -233,8 +234,26 @@ fn initialize_list_load_route() {
     assert!(r["routed"].as_u64().unwrap() >= 1, "{r}");
     assert!(!r["nets"].as_array().unwrap().is_empty(), "{r}");
 
-    // keep_all adds to a routed board: net B joins, the tracks of A stay
+    // locked copper on a routed track of another net is a short: refused, nothing written
+    let text = std::fs::read_to_string(dir.join("tiny.routed.kicad_pcb")).unwrap();
+    let seg = &text[text.find("(segment").unwrap()..];
+    let num = |key: &str| -> (f64, f64) {
+        let at = &seg[seg.find(key).unwrap() + key.len()..];
+        let v: Vec<f64> = at.split([' ', ')']).filter_map(|t| t.parse().ok()).take(2).collect();
+        (v[0], v[1])
+    };
+    let ((ax, ay), (bx, by)) = (num("(start "), num("(end "));
     let routed = s.call("load_board", json!({"path": dir.join("tiny.routed.kicad_pcb")}));
+    let short = s.request(
+        "tools/call",
+        json!({"name": "add_locked_copper", "arguments": {"board": routed["board"],
+            "vias": [{"net": "B", "x": (ax + bx) / 2.0, "y": (ay + by) / 2.0}]}}),
+    );
+    assert_eq!(short["isError"], true, "{short}");
+    assert!(short.to_string().contains("touches A"), "{short}");
+    assert!(!dir.join("tiny.routed.prerouted.kicad_pcb").exists());
+
+    // keep_all adds to a routed board: net B joins, the tracks of A stay
     let keep_out = dir.join("tiny.kept.kicad_pcb");
     let r = s.call(
         "route",
@@ -579,5 +598,75 @@ fn create_board_from_a_netlist() {
     let text = std::fs::read_to_string(&pcb).unwrap();
     assert!(text.contains("(property \"LCSC\" \"C25804\""));
     assert!(text.contains("(path \"/1111\")"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn track_corridors_list_the_parts_in_the_way() {
+    let dir = std::env::temp_dir().join(format!("gummiband-mcp-corridors-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let bench = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/boards");
+    for ext in ["kicad_pcb", "kicad_pro", "kicad_dru"] {
+        std::fs::copy(bench.join(format!("parts_xhard.{ext}")), dir.join(format!("x.{ext}"))).unwrap();
+    }
+    let mut s = Server::start();
+    s.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}),
+    );
+    s.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    let pcb = dir.join("x.kicad_pcb");
+    let before = std::fs::read_to_string(&pcb).unwrap();
+    s.call("load_board", json!({"path": pcb.display().to_string()}));
+
+    let c = s.call("track_corridors", json!({"board": "b1"}));
+    let all: Vec<&str> = c["in_the_way"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    // the same parts as `gummiband route --clear-corridors` on this board
+    assert_eq!(
+        all,
+        [
+            "F10", "F11", "F12", "F14", "F2", "F32", "F33", "F37", "F38", "F39", "R13"
+        ],
+        "{c}"
+    );
+    let corridors = c["corridors"].as_array().unwrap();
+    assert!(!corridors.is_empty());
+    for g in corridors {
+        assert!(g["nets"].as_array().unwrap().len() >= 2, "{g}");
+        assert!(g["width_mm"].as_f64().unwrap() > 0.0, "{g}");
+        assert!(g["length_mm"].as_f64().unwrap() > 0.0, "{g}");
+    }
+    // only listed, nothing moved
+    assert_eq!(std::fs::read_to_string(&pcb).unwrap(), before);
+    assert!(!dir.join("x.prerouted.kicad_pcb").exists());
+
+    // a part named fixed is never in the way
+    let c = s.call("track_corridors", json!({"board": "b1", "fixed": ["R13"]}));
+    assert!(!c["in_the_way"].as_array().unwrap().iter().any(|v| v == "R13"), "{c}");
+
+    // the agent moves some of them itself, with a short leash
+    let placed = s.call(
+        "place_parts",
+        json!({"board": "b1", "only": ["F10", "F11"], "corridors": true, "leash": 1.5}),
+    );
+    let moved: Vec<&str> = placed["placed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["reference"].as_str().unwrap())
+        .collect();
+    assert_eq!(moved, ["F10", "F11"], "{placed}");
+
+    let err = s.call_err(
+        "route",
+        json!({"board": "b1", "clear_corridors": true, "keep_all": true}),
+    );
+    assert!(err.contains("not with keep_all"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -96,7 +96,7 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | `--no-tune` | off | Leave the lengths as routed. By default, when the `.kicad_dru` has `length` or `skew` rules, the routing first makes room next to the nets that are too short and then gets meanders that bring them into range, see [Length matching](concepts.md#length-matching). |
 | `--tune-amplitude MM` | 1 | Highest meander bump (centre line above the original line). |
 | `--tune-spacing W` | 2 | Air between neighbouring meander legs, in track widths (at least the clearance). |
-| `--patterns LIST` | none | Hints from local patterns of the board (`gummiband info` lists them), comma separated: `decaps` connects a decoupling capacitor to its IC pin before everything else, `rows` lets the open end lay the connections of a pin row again in pin order, `shares` lets pins of a plane net next to each other reach the plane through one via. `all` or `none`. Experimental, see [MILESTONES](../MILESTONES.md#local-patterns) for what they gave so far. |
+| `--patterns LIST` | none | Hints from local patterns of the board (`gummiband info` lists them), comma separated: `decaps` connects a decoupling capacitor to its IC pin before everything else, `rows` lets the open end lay the connections of a pin row again in pin order, `shares` lets pins of a plane net next to each other reach the plane through one via, `pairs` routes differential pairs before the other signal connections (the longest first), `groups` routes the connections between the same two parts (bus, SPI, I2C, connector) as one block in pin order, the longest block first (`groups-long` is the same, `groups-short` puts the shortest first, `groups-inline` leaves each block at the place of its connections; `GB_GROUP_ORDER` still sets the order of a plain `groups`). `all` or `none`. Experimental, none wins on every board: see [Choosing the opt-in options](options.md). |
 | `--layer-dirs W` | 0.5 | Weight of preferred directions per layer: the routing layers alternate horizontal and vertical, and running against the grain costs extra. A soft cost, used by every third run of the portfolio, so the search has candidates with and without it. 0 switches it off. |
 
 A good default for a real board with a few hundred connections is the plain `--keep-locked`: 14
@@ -112,6 +112,7 @@ when the progress reports `converged`.
 | `--fixed R1,U3` | none | More references that never move under `--move-parts` and `--placements`. |
 | `--placements N` | 0 | Place the board N times from the netlist (see [`gummiband place`](#gummiband-place), default scope), route each result with the settings of this command and keep the best: fewest open connections, then clearance violations, vias and length. Takes N + 1 routes, the last one writes the winner; `--until-stop` applies to that last one only. Not with `--keep-all`, `--nets` or `--pairs`. The JSON report gets a `placement` block with every try. |
 | `--placement-seed S` | 1 | First seed of `--placements`. |
+| `--clear-corridors` | off | Before the routing, parts that sit in the band of a group of tracks between two parts (ICs, connectors sharing at least two signal nets) and are not on its nets get new positions with `place --corridors`; everything else stays, and so do decoupling capacitors (a capacitor on a ground or supply). ICs and connectors in a band move at most 1.5 mm (`place --leash`, `GB_CC_LEASH` to change it). Pairs with `--patterns groups`. Experimental: `GB_CC_GAP`, `GB_CC_HALO` (mm), `GB_CC_ESCAPE=1` and `GB_CC_SEMANTIC=1` give the moved parts more room. When it pays: [options](options.md#room-for-track-groups). |
 | `--teardrops` | off | Switches on KiCad's teardrops for every via and connected pad in the output file, and the track end teardrops (the wedges where a track changes width, for example at a neck) in the output's project. KiCad builds the shapes itself: open the file and fill the zones once (B), then the teardrops appear. The plugin cannot set them through KiCad's API and opens *Edit Teardrops* instead. |
 | `--net-priorities prio.json` | none | Routing order per net from a JSON file `{"net name": priority, ...}`; lower numbers route first. Nets not in the file keep their net class priority. The MCP server does the same with `set_net_options`. |
 | `--net-widths widths.json` | none | Track width per net from a JSON file `{"net name": width_mm, ...}`, overriding the net class width. `bench/net_widths.py ORIGINAL.kicad_pcb --json widths.json` extracts the widths a designer used in an existing routing. |
@@ -243,6 +244,9 @@ gummiband route placed.kicad_pcb -o routed.kicad_pcb
 | `--margin MM` | 0.5 | distance of the courtyards from the outline |
 | `--halo MM` | 0.3 | extra room around parts with five or more pads, for their escape |
 | `--semantic` | off | use the schematic beyond the netlist, see below |
+| `--corridors` | off | experimental: keep a band free for each group of tracks between two parts, see below |
+| `--escape-halo` | off | experimental: room for the escape per side of a part, from its pins on that side, see below |
+| `--leash MM` | 0 (free) | parts with 4 or more pads (ICs, connectors) stay within this distance of where they sit: a local change instead of a new placement, e.g. with `--only`. A leashed part keeps the room it has where its neighbours sit closer than `--gap`, and gets no halo |
 | `--report FILE` | | JSON report: poses, decoupling assignment, crossings, every start, with `--semantic` inductors and groups |
 
 Without a scope option, all parts move except locked footprints, connectors, modules, mounting
@@ -277,6 +281,19 @@ default; without it the output is the same as before.
   box, at a weight that grows with the class width. A series chain such as connector, fuse,
   shunt, eFuse then stays in order, and a TVS or input capacitor stays on the path instead of
   anywhere inside its box.
+
+`--corridors` keeps room for groups of tracks: two parts with at least 4 pads on nets (ICs,
+connectors) that share at least two signal nets (a bus, SPI, I2C; a pull-up on the way does not
+count) get a band between the centres of their pins, as wide as the tracks of the group with
+their clearances. Another part pays 2 mm of wire per mm2 of the band it covers; parts on the nets
+of the group (series resistors, pull-ups) may sit there. It pairs with `route --patterns groups`,
+which routes such a group as one block.
+
+`--escape-halo` replaces the even halo of parts with five or more pads by a strip in front of each
+side, as deep as the tracks of the signal pins on that side with their clearances, shared by the
+routing layers (at most 3 mm; pins of a plane net leave through a via and do not count). A full
+side of a QFN keeps room for its fan-out, an empty side none, and two chips with a bus between
+them stay apart by what their pins need.
 
 The console lists the inductors and groups. Connectors and power stages that matter still belong
 in `--fixed`. On the Lichtschnitzel controller (only connectors fixed, four seeds) the routed

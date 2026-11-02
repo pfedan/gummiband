@@ -6,10 +6,11 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use gummiband_core::board::{Board, LayerId, NetId, ObstacleKind};
+use gummiband_core::board::{Board, LayerId, LayerSet, NetId, Obstacle, ObstacleKind};
 use gummiband_core::geom::{Point, Polygon, Shape};
 use gummiband_kicad::power::{self, ZoneFill};
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
+use rayon::prelude::*;
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 
@@ -685,6 +686,17 @@ pub struct PourOut {
     /// What the hull gave way to.
     pub cut_by: Vec<String>,
     pub outline: Vec<[f64; 2]>,
+    /// More zones of the pour, where one convex outline cannot reach a long narrow pad (the
+    /// strips of a DFN eFuse or power FET between their neighbours): the narrow stubs that leave
+    /// the pad along a long side or off an end, and the pours from there.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exits: Vec<Vec<[f64; 2]>>,
+}
+
+fn exits_of(x: &[(usize, power::Pour)]) -> Vec<Vec<[f64; 2]>> {
+    x.iter()
+        .map(|(_, p)| p.outline.iter().map(|q| [r3(q.x), r3(q.y)]).collect())
+        .collect()
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -809,9 +821,8 @@ pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
     let b = &kb.board;
     let zf = power::zones(&kb);
     let ref_layer = outer_ref(b);
-    let mut out = Vec::new();
-    let mut flagged = 0;
-    for q in &paths {
+    // the paths are independent: in parallel (a ground net with planes takes seconds each)
+    let check_path = |q: &PathIn| -> Result<PathOut> {
         let net = b.net_id(&q.net).with_context(|| format!("no net named {:?}", q.net))?;
         let c = b.class_of(net);
         // a short until the fuse or PTC trips heats the copper like a continuous current
@@ -989,9 +1000,6 @@ pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
             ),
             None => "ok".into(),
         };
-        if verdict.starts_with("FLAG") {
-            flagged += 1;
-        }
         if ((neck.is_some() && changes_layer) || (neck.is_none() && vias > 0)) && vias < per {
             pnotes.push(format!(
                 "{vias} vias on the net, {per} needed wherever the current changes layer{}",
@@ -1002,7 +1010,7 @@ pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
                 }
             ));
         }
-        out.push(PathOut {
+        Ok(PathOut {
             name: q.name.clone().unwrap_or_else(|| q.net.clone()),
             net: q.net.clone(),
             amps: q.amps,
@@ -1023,8 +1031,15 @@ pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
             vias_per_transition: per,
             verdict,
             notes: pnotes,
-        });
-    }
+        })
+    };
+    let out: Vec<PathOut> = paths
+        .par_iter()
+        .map(check_path)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<Result<_>>()?;
+    let flagged = out.iter().filter(|o| o.verdict.starts_with("FLAG")).count();
     if flagged > 0 {
         notes.push("fix a neck: reroute the net wider (set_net_options width, route with keep_all, nets and reroute), add a pour over the neck (add_zone) or locked copper, then check again".into());
     }
@@ -1082,7 +1097,47 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
     let mut pours: Vec<PourOut> = Vec::new();
     let mut zones: Vec<(NetId, LayerId, String, Vec<Point>)> = Vec::new();
     let mut vias: Vec<write::Item> = Vec::new();
+    // the copper of the paths done so far is in the way of the later ones (of other nets)
+    let mut work = b.clone();
+    let mut done = (0, 0);
     for q in &p.paths {
+        for (net, layer, _, outline) in &zones[done.0..] {
+            work.obstacles.push(Obstacle {
+                shape: Shape::Polygon(Polygon::new(outline.clone())),
+                layers: LayerSet::single(*layer),
+                net: Some(*net),
+                kind: ObstacleKind::Pour,
+                hole: None,
+                clearance: work.clearance(Some(*net), None),
+                pin: None,
+                locked: true,
+            });
+        }
+        for v in &vias[done.1..] {
+            if let write::Item::Via {
+                at,
+                diameter,
+                drill,
+                net,
+            } = v
+            {
+                work.obstacles.push(Obstacle {
+                    shape: Shape::Circle {
+                        c: *at,
+                        r: diameter / 2.0,
+                    },
+                    layers: work.all_layers(),
+                    net: Some(*net),
+                    kind: ObstacleKind::Via,
+                    hole: Some(drill / 2.0),
+                    clearance: work.clearance(Some(*net), None),
+                    pin: None,
+                    locked: true,
+                });
+            }
+        }
+        done = (zones.len(), vias.len());
+        let b = &work;
         let net = b
             .net_id(&q.net)
             .with_context(|| format!("no net named {:?} (power_copper takes exact names)", q.net))?;
@@ -1137,24 +1192,23 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
                 ));
                 continue;
             }
-            let terms = pad_polys(b, &all, layer);
-            let spine: Vec<(Point, Point)> = from
-                .iter()
-                .flat_map(|f| to.iter().map(move |t| (center(f), center(t))))
-                .collect();
-            let whole = power::pour_outline(b, net, layer, &terms, &spine, margin);
+            // terminal groups (from first) with the spine pairs between them
+            let join = |gs: &[&Vec<usize>], nf: usize| {
+                let groups: Vec<(Vec<Polygon>, Point)> =
+                    gs.iter().map(|g| (pad_polys(b, g, layer), center(g))).collect();
+                let pairs: Vec<(usize, usize)> = (0..nf).flat_map(|i| (nf..gs.len()).map(move |j| (i, j))).collect();
+                power::pour_joining(b, net, layer, &groups, &pairs, margin)
+            };
+            let whole = join(&from.iter().chain(to.iter()).collect::<Vec<_>>(), from.len());
             // terminals in parallel that one pour cannot join (the VBUS pin groups of a USB-C
             // receptacle with the signal pins between them): one pour from each to the sinks
             let split = from.len() > 1 && whole.as_ref().is_none_or(|w| !w.lost.is_empty());
-            let pieces: Vec<(Vec<Vec<usize>>, Option<power::Pour>)> = if split {
+            let pieces: Vec<(Vec<Vec<usize>>, Option<power::Joined>)> = if split {
                 from.iter()
                     .map(|f| {
-                        let grp: Vec<usize> = f.iter().chain(to.iter().flatten()).copied().collect();
-                        let terms = pad_polys(b, &grp, layer);
-                        let spine: Vec<(Point, Point)> = to.iter().map(|t| (center(f), center(t))).collect();
                         (
                             vec![f.clone()],
-                            power::pour_outline(b, net, layer, &terms, &spine, margin),
+                            join(&std::iter::once(f).chain(to.iter()).collect::<Vec<_>>(), 1),
                         )
                     })
                     .collect()
@@ -1194,6 +1248,12 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
                 } else {
                     format!("{}power {nname}", gummiband_kicad::read::GB_ZONE_PREFIX)
                 };
+                let mut cut_by: Vec<String> = Vec::new();
+                for x in pour.pieces().flat_map(|x| x.cut_by.iter()) {
+                    if !cut_by.contains(x) {
+                        cut_by.push(x.clone());
+                    }
+                }
                 pours.push(PourOut {
                     name: name.clone(),
                     net: nname.clone(),
@@ -1202,13 +1262,17 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
                     terminals: fg.iter().chain(to.iter()).map(|g| names(g)).collect(),
                     amps: if split { amps / from.len() as f64 } else { amps },
                     required_width_mm: r3(need),
-                    area_mm2: r3(area(&pour.outline)),
+                    area_mm2: r3(pour.pieces().map(|x| area(&x.outline)).sum()),
                     vias_needed: 0,
                     vias_added: 0,
-                    cut_by: pour.cut_by.clone(),
-                    outline: pour.outline.iter().map(|x| [r3(x.x), r3(x.y)]).collect(),
+                    cut_by,
+                    outline: pour.main.outline.iter().map(|x| [r3(x.x), r3(x.y)]).collect(),
+                    exits: exits_of(&pour.stubs),
                 });
-                zones.push((net, layer, name, pour.outline));
+                for (_, st) in &pour.stubs {
+                    zones.push((net, layer, format!("{name} exit"), st.outline.clone()));
+                }
+                zones.push((net, layer, name, pour.main.outline));
             }
             continue;
         }
@@ -1266,15 +1330,44 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
                     .map(|&s| gummiband_core::geom::circle_polygon(s, dia / 2.0, 0.01)),
             );
             let pour = power::pour_outline(b, net, layer, &terms, &[], 0.2);
-            if let Some(pour) = &pour {
-                // a via the cut left outside the pour and off the pad does not count
-                let lost: Vec<Point> = pour
+            let mut exits: Vec<(usize, power::Pour)> = Vec::new();
+            // the vias the pour misses (all off the pad without a pour)
+            let on_pad = |s: &Point| pad.iter().any(|x| x.dist_to_point(*s) <= dia / 2.0);
+            let mut lost: Vec<Point> = match &pour {
+                Some(pour) => pour
                     .lost
                     .iter()
                     .filter(|&&i| i >= pad.len())
                     .map(|&i| spots[i - pad.len()])
-                    .collect();
-                spots.retain(|s| !lost.contains(s) || pad.iter().any(|x| x.dist_to_point(*s) <= dia / 2.0));
+                    .collect(),
+                None => spots.iter().copied().filter(|s| !on_pad(s)).collect(),
+            };
+            // beside a strip pad the one pour is cut down to the strip: a via off its end or side
+            // gets a pour of its own that leaves the strip through an exit, or does not count
+            let strip = match pad.as_slice() {
+                [x] => power::Strip::of(x),
+                _ => None,
+            };
+            if let Some(st) = strip {
+                lost.retain(|&s| {
+                    let groups = [
+                        (pad.clone(), st.c),
+                        (vec![gummiband_core::geom::circle_polygon(s, dia / 2.0, 0.01)], s),
+                    ];
+                    let Some(j) =
+                        power::pour_joining(b, net, layer, &groups, &[(0, 1)], 0.2).filter(|j| j.lost.is_empty())
+                    else {
+                        return true;
+                    };
+                    exits.push((1, j.main));
+                    exits.extend(j.stubs);
+                    false
+                });
+                exits.dedup_by(|a, b| a.1.outline == b.1.outline);
+            }
+            if pour.is_some() || strip.is_some() {
+                // a via the cut left outside the pour and off the pad does not count
+                spots.retain(|s| !lost.contains(s) || on_pad(s));
             }
             if have.len() + spots.len() < count {
                 // would the vias fit if the plane reached there? then the zone is the problem
@@ -1310,6 +1403,9 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
             }
             let name = format!("{}vias {nname} {}", gummiband_kicad::read::GB_ZONE_PREFIX, names(g));
             let outline = pour.as_ref().map(|x| x.outline.clone()).unwrap_or_default();
+            for (_, x) in &exits {
+                zones.push((net, layer, format!("{name} exit"), x.outline.clone()));
+            }
             pours.push(PourOut {
                 name: name.clone(),
                 net: nname.clone(),
@@ -1318,11 +1414,12 @@ pub fn power_copper(kb: &KicadBoard, p: &PowerCopperIn) -> Result<(String, Power
                 terminals: vec![names(g)],
                 amps: r3(share),
                 required_width_mm: r3(power::ipc_width(share, cu, power::is_outer(b, layer), dt)),
-                area_mm2: r3(area(&outline)),
+                area_mm2: r3(area(&outline) + exits.iter().map(|x| area(&x.1.outline)).sum::<f64>()),
                 vias_needed: count,
                 vias_added: spots.len(),
                 cut_by: pour.as_ref().map(|x| x.cut_by.clone()).unwrap_or_default(),
                 outline: outline.iter().map(|x| [r3(x.x), r3(x.y)]).collect(),
+                exits: exits_of(&exits),
             });
             if !spots.is_empty() && outline.len() >= 3 {
                 zones.push((net, layer, name, outline));
@@ -1578,9 +1675,13 @@ fixed to place_parts and route). Keep the switch node of a converter \
 small and the input capacitor loop short. Place parts first if they are not placed (move_part for \
 connectors and power stages, place_parts with semantic true for the rest).
 
-4. Route: route the latest board id (keep_locked when you added locked copper). Use pairs for \
-differential pairs that need coupling. Read unrouted and blocked; fix with set_net_options \
-(priority, width) and route again, or finish single nets with keep_all, nets and reroute.
+4. Route: route the latest board id (keep_locked when you added locked copper). Use pair_pull or \
+pairs for differential pairs that need coupling. Read unrouted and blocked; fix with set_net_options \
+(priority, width) and route again, or finish single nets with keep_all, nets and reroute. Opt-in \
+hints are worth a try only against the plain run over the same 2 or 3 seeds: patterns groups (or \
+pairs,groups with many pairs) where several chips share buses, with track_corridors to see what sits \
+in their bands and clear_corridors or place_parts only + corridors + leash 1.5 to clear them; no \
+hints on a fixed placement that already routes cleanly. Keep what wins by the mean and the worst run.
 
 5. Check the copper: current_check on the routed file with from and to for every current path \
 of step 2. A FLAG names the neck with its position: widen the net (set_net_options width, then \
@@ -1607,6 +1708,213 @@ mod tests {
     fn rounding_up() {
         assert!((up05(0.69) - 0.7).abs() < 1e-9);
         assert!((up05(0.75) - 0.75).abs() < 1e-9);
+    }
+
+    fn smd(num: &str, x: f64, y: f64, w: f64, h: f64, net: &str) -> String {
+        format!("(pad \"{num}\" smd rect (at {x} {y}) (size {w} {h}) (layers \"F.Cu\" \"F.Mask\") (net \"{net}\"))")
+    }
+
+    fn part(refdes: &str, x: f64, y: f64, pads: &[String]) -> String {
+        format!(
+            "(footprint \"Test:{refdes}\" (layer \"F.Cu\") (at {x} {y}) \
+             (property \"Reference\" \"{refdes}\" (at 0 0) (layer \"F.Fab\")) (attr smd) {})",
+            pads.join(" ")
+        )
+    }
+
+    fn board(parts: &[String]) -> KicadBoard {
+        let text = format!(
+            "(kicad_pcb (version 20260206) (generator \"gummiband_test\") (generator_version \"10.0\")\n\
+             (general (thickness 1.6)) (paper \"A4\")\n\
+             (layers (0 \"F.Cu\" signal) (2 \"B.Cu\" signal) (1 \"F.Mask\" user) (3 \"B.Mask\" user) \
+             (25 \"Edge.Cuts\" user) (35 \"F.Fab\" user))\n\
+             (setup (pad_to_mask_clearance 0))\n{}\n\
+             (gr_rect (start 100 100) (end 120 115) (stroke (width 0.1) (type default)) (fill no) (layer \"Edge.Cuts\"))\n)\n",
+            parts.join("\n")
+        );
+        let pro = serde_json::json!({"net_settings": {"classes": [{"name": "Default", "clearance": 0.15,
+            "track_width": 0.2, "via_diameter": 0.6, "via_drill": 0.3}]}});
+        gummiband_kicad::read::parse_board(text, Some(&pro), &ReadOptions::default()).unwrap()
+    }
+
+    /// The pour's zones keep their clearance from the pads of other nets and hang together.
+    fn assert_clean(kb: &KicadBoard, o: &PowerCopperOut) {
+        let b = &kb.board;
+        let f = b.layer_id("F.Cu").unwrap();
+        for x in &o.pours {
+            let net = b.net_id(&x.net).unwrap();
+            let pieces: Vec<Polygon> = std::iter::once(&x.outline)
+                .chain(x.exits.iter())
+                .map(|o| Polygon::new(o.iter().map(|q| gummiband_core::geom::pt(q[0], q[1])).collect()))
+                .collect();
+            for (i, poly) in pieces.iter().enumerate() {
+                for ob in b.obstacles.iter().filter(|ob| ob.layers.has(f) && ob.net != Some(net)) {
+                    let d = poly.dist_to_poly(&ob.shape.to_polygon(0.01));
+                    assert!(
+                        d >= 0.15 - 2e-3,
+                        "{} piece {i} {d:.3} from {:?}",
+                        x.name,
+                        ob.shape.bbox()
+                    );
+                }
+                assert!(
+                    pieces
+                        .iter()
+                        .enumerate()
+                        .any(|(j, q)| j != i && q.dist_to_poly(poly) <= 0.0)
+                        || pieces.len() == 1,
+                    "{} piece {i} hangs alone",
+                    x.name
+                );
+                // nor do the pours of two paths touch
+                for y in o.pours.iter().filter(|y| y.net != x.net) {
+                    for q in std::iter::once(&y.outline).chain(y.exits.iter()) {
+                        let q = Polygon::new(q.iter().map(|q| gummiband_core::geom::pt(q[0], q[1])).collect());
+                        let d = poly.dist_to_poly(&q);
+                        assert!(d >= 0.15 - 2e-3, "{} piece {i} {d:.3} from {}", x.name, y.name);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The pads of a 2 x 2 mm eFuse (TPS25947, VQFN-HR): two 0.3 x 2.4 mm strips for IN and OUT,
+    /// 0.2 mm from each other and from the pin rows beside them.
+    fn efuse(x: f64, y: f64, inp: &str, out: &str) -> String {
+        let mut p = vec![smd("5", -0.25, 0.0, 0.3, 2.4, inp), smd("6", 0.25, 0.0, 0.3, 2.4, out)];
+        for (s, nums) in [(-1.0, ["1", "2", "3", "4"]), (1.0, ["10", "9", "8", "7"])] {
+            let n = |i: usize| format!("S{}", nums[i]);
+            p.push(smd(nums[0], s * 0.9, -0.7, 0.6, 0.3, &n(0)));
+            p.push(smd(nums[0], s * 0.725, -0.875, 0.25, 0.65, &n(0)));
+            p.push(smd(nums[1], s * 0.9, -0.225, 0.6, 0.25, &n(1)));
+            p.push(smd(nums[2], s * 0.9, 0.225, 0.6, 0.25, &n(2)));
+            p.push(smd(nums[3], s * 0.9, 0.7, 0.6, 0.3, &n(3)));
+            p.push(smd(nums[3], s * 0.725, 0.875, 0.25, 0.65, &n(3)));
+        }
+        part("U1", x, y, &p)
+    }
+
+    fn path(net: &str, from: &str, to: Option<&str>) -> PathIn {
+        PathIn {
+            net: net.into(),
+            amps: 5.0,
+            short_amps: None,
+            from: Some(vec![from.into()]),
+            to: to.map(|t| vec![t.into()]),
+            name: None,
+            layer: None,
+        }
+    }
+
+    fn copper_in(kb: &KicadBoard, paths: Vec<PathIn>) -> PowerCopperOut {
+        let p = PowerCopperIn {
+            board: "b1".into(),
+            paths,
+            temp_rise: None,
+            margin: None,
+            max_span: None,
+            via_diameter: None,
+            via_drill: None,
+            priority: None,
+        };
+        power_copper(kb, &p).unwrap().1
+    }
+
+    #[test]
+    fn power_copper_leaves_an_efuse_strip_off_its_end() {
+        // the shunt sits left of the eFuse, a little below its middle (lichtschnitzel R110/U6):
+        // the straight way into the IN strip runs through the pin row, so one convex pour has no
+        // room; the pour leaves the strip off an end, between the corner pins
+        let kb = board(&[
+            efuse(110.0, 107.0, "IN", "OUT"),
+            part(
+                "R1",
+                106.0,
+                107.56,
+                &[smd("1", -1.06, 0.0, 1.3, 1.6, "B"), smd("2", 1.06, 0.0, 1.3, 1.6, "IN")],
+            ),
+        ]);
+        let o = copper_in(&kb, vec![path("IN", "R1.2", Some("U1.5"))]);
+        assert_eq!(o.warnings, Vec::<String>::new(), "{o:?}");
+        assert_eq!(o.pours.len(), 1, "{o:?}");
+        assert_eq!(o.pours[0].exits.len(), 1, "{o:?}");
+        // the stub runs along the strip's axis beyond an end
+        let stub = &o.pours[0].exits[0];
+        assert!(stub.iter().all(|q| (q[0] - 109.75).abs() < 0.25), "{stub:?}");
+        assert!(stub.iter().any(|q| (q[1] - 107.0).abs() > 1.5), "{stub:?}");
+        assert_clean(&kb, &o);
+    }
+
+    #[test]
+    fn power_copper_leaves_a_strip_through_a_gap_in_its_long_side() {
+        // a strip with other copper close beyond both ends and along its right side, and on its
+        // left side pins near the ends only: the pour comes in through the middle of the left side
+        let mut u = vec![smd("1", 0.0, 0.0, 0.3, 2.4, "A")];
+        for (i, y) in [-1.0, -0.55, 0.55, 1.0].into_iter().enumerate() {
+            u.push(smd(&format!("{}", 10 + i), -0.65, y, 0.6, 0.3, &format!("L{i}")));
+        }
+        for (i, y) in [-1.0, -0.5, 0.0, 0.5, 1.0].into_iter().enumerate() {
+            u.push(smd(&format!("{}", 20 + i), 0.65, y, 0.6, 0.3, &format!("R{i}")));
+        }
+        u.push(smd("30", 0.0, -1.6, 1.6, 0.4, "E0"));
+        u.push(smd("31", 0.0, 1.6, 1.6, 0.4, "E1"));
+        let kb = board(&[
+            part("U1", 110.0, 107.0, &u),
+            part(
+                "R1",
+                106.0,
+                109.0,
+                &[smd("1", -1.06, 0.0, 1.3, 1.6, "B"), smd("2", 1.06, 0.0, 1.3, 1.6, "A")],
+            ),
+        ]);
+        let o = copper_in(&kb, vec![path("A", "R1.2", Some("U1.1"))]);
+        assert_eq!(o.warnings, Vec::<String>::new(), "{o:?}");
+        assert_eq!(o.pours[0].exits.len(), 1, "{o:?}");
+        // the stub leaves to the left between the pins L1 and L2
+        let stub = &o.pours[0].exits[0];
+        assert!(stub.iter().any(|q| q[0] < 109.0), "{stub:?}");
+        assert!(
+            stub.iter().filter(|q| q[0] < 109.7).all(|q| (q[1] - 107.0).abs() < 0.4),
+            "{stub:?}"
+        );
+        assert_clean(&kb, &o);
+    }
+
+    #[test]
+    fn power_copper_brings_vias_to_an_efuse_strip() {
+        // OUT goes into a plane on B.Cu: the vias sit off the ends of the strip, beside the
+        // pin rows, each joined by its own pour (one convex pour is the strip only); the pour
+        // of IN, laid out first, is in the way
+        let mut kb = board(&[
+            efuse(110.0, 107.0, "IN", "OUT"),
+            part(
+                "R1",
+                106.0,
+                107.56,
+                &[smd("1", -1.06, 0.0, 1.3, 1.6, "B"), smd("2", 1.06, 0.0, 1.3, 1.6, "IN")],
+            ),
+        ]);
+        let out = kb.board.net_id("OUT").unwrap();
+        let bl = kb.board.layer_id("B.Cu").unwrap();
+        kb.board.nets[out as usize].planes.insert(bl);
+        let mut plane = gummiband_core::board::Plane::new(
+            out,
+            bl,
+            Polygon::new(vec![
+                gummiband_core::geom::pt(100.0, 100.0),
+                gummiband_core::geom::pt(120.0, 100.0),
+                gummiband_core::geom::pt(120.0, 115.0),
+                gummiband_core::geom::pt(100.0, 115.0),
+            ]),
+        );
+        plane.priority = 0;
+        kb.board.planes.push(plane);
+        let o = copper_in(&kb, vec![path("IN", "R1.2", Some("U1.5")), path("OUT", "U1.6", None)]);
+        let x = &o.pours[1];
+        assert_eq!(x.kind, "via field", "{o:?}");
+        assert!(x.vias_added >= 2, "{o:?}");
+        assert!(!x.exits.is_empty(), "{o:?}");
+        assert_clean(&kb, &o);
     }
 
     #[test]
