@@ -476,6 +476,30 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
     93 % of the saving is in after 10 minutes.
   - ULX3S, 40 minutes: main and A both 655/796, A with 305 instead of 370 vias. The open connections
     are no search problem: the original routes signals on In2.
+- Levels of the open end, cloud, 2026-11-01 and 02: 4 cores, one thread per run, 45 or 80 minutes,
+  Gummiband's own check (no `kicad-cli` for KiCad 10 boards there), cost as in the night series.
+  - `GB_PRUNE` dropped the starts of side branches too. With clearance spots on the board every
+    start came to a mutant (51 of 51), without spots nearly none did (4 of 151): a mutant counts
+    as hopeless when it adds vias away from every spot. The level then climbed by one per
+    generation, since stale is not reset by a failed start: Arty, seed 1, level 1 at generation
+    228 and 12 ("converged") at 274, on to 23; on a71bdaa Arty seed 2 went from 1 to 4 in four
+    generations. Since 2026-11-02 the starts are not pruned (`GB_PRUNE_STARTS=1` prunes them
+    again). Cost after 45 minutes against pruned starts, on bcca477: Lichtschnitzel +1.7 %,
+    -0.8 %, +1.9 %, Arty -0.4 %, +0.9 %, +0.7 % (seeds 1 to 3); on a71bdaa: Lichtschnitzel the
+    same bytes on seeds 1 and 2, Arty the same on seed 1 and +0.9 % on seed 2. With an open
+    connection it helped once: Lichtschnitzel, open end alone with short branches
+    (`GB_BRANCH_AFTER=8 GB_BRANCH_LIFE=8`), seed 1, found the last connection after 4393 s
+    through a side branch, without it not in 80 minutes.
+  - Measured and not taken (bcca477): `--geometry-generations 0` before the open end,
+    Lichtschnitzel -9 %, -12 %, +7 %, +4 %, Arty +11 %, -1 %, +8 %, -1 % (seeds 1 to 4), Corne
+    480 instead of 481 of 482 (seed 1, 2 threads, 95 minutes); the share of aimed moves following
+    how often they came to a mutant (at least a fifth), Lichtschnitzel open end alone: the last
+    connection after 2553, 3564, 1011, 1689 s against 4181, 1890, 2789, 567 s, cost at the end
+    higher on 3 of 4 seeds, Corne 479 instead of 481 of 482. A longer ladder while a connection is
+    open (16 levels, the areas growing on beyond a quarter) gave the same boards, but the pruned
+    starts hid it: above level 12 no start came to a mutant (0 of 117), all on boards without
+    spots. With the starts unpruned they did (30 of 30, up to level 26), so the ladder is still
+    open to measure.
 
 ## Local patterns
 

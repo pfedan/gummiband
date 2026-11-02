@@ -332,7 +332,7 @@ fn main() -> Result<()> {
         pl.total_overlap(),
         t.elapsed().as_secs_f64()
     );
-    let failed = pl.legalize(0.25, 40.0);
+    let failed = pl.legalize(0.25, 40.0).len();
     println!(
         "legalize: wire {:.0}, overlap {:.3} mm2, {} units without a spot",
         pl.wire(),
