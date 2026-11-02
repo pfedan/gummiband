@@ -440,7 +440,10 @@ of the moves aims at an expensive routed connection (`GB_AIM_COST`, the share); 
 cannot beat its parent is dropped before its relaxation (`GB_PRUNE`). Against the open end without
 them the cost after 20 minutes fell by 12 % on Lichtschnitzel and 15 % on Arty (median of 4 and 3
 seeds), with fewer vias and a little more length. `GB_BANDIT=0`, `GB_AIM_COST=0` and `GB_PRUNE=0`
-switch them off; runs without an open end are untouched by them.
+switch them off; runs without an open end are untouched by them. The bold moves that start a side
+branch are not pruned: they may start worse than their parent on purpose. Pruned as well, nearly every
+start on a board without clearance spots came to nothing, and the level climbed by one per
+generation up to "converged" (`GB_PRUNE_STARTS=1` prunes them again, as before 2026-11-02).
 
 The open end does not count violations but spots: all violations of one pair of nets within 2 mm
 are one spot (`check::spots`), because the check reports every short piece of track, so that one
