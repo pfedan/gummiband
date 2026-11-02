@@ -278,7 +278,12 @@ pub fn make_room_judged(
     }
     let spots = judge;
     let count = |s: &[crate::check::Spot]| (s.len(), s.iter().filter(|s| s.short).count());
-    let before = count(&spots(geo));
+    let first = spots(geo);
+    let balls: Vec<(Point, f64)> = crate::patterns::grids(board)
+        .iter()
+        .flat_map(|g| g.pins.iter().map(|&p| (board.pins[p].pos, g.pitch)))
+        .collect();
+    let before = count(&first);
     // all nets at once; where that leaves a new spot, each half on its own on top of what
     // the other half got, down to single nets, within a budget of pushes
     let mut nets: Vec<NetId> = extra.keys().copied().collect();
@@ -294,11 +299,12 @@ pub fn make_room_judged(
         budget -= 1;
         let part: HashMap<NetId, f64> = set.iter().map(|n| (*n, extra[n])).collect();
         let g = push_aside(board, sub, &cur, &part);
-        let after = count(&spots(&g));
+        let got = spots(&g);
+        let after = count(&got);
         if std::env::var("GB_TUNE_LOG").is_ok() {
             eprintln!("room: {} nets, spots {before:?} before, {after:?} after", set.len());
         }
-        if after.0 <= before.0 && after.1 <= before.1 {
+        if after.0 <= before.0 && after.1 <= before.1 && !new_spots(&first, &got, &balls) {
             cur = g;
             made = true;
         } else if set.len() > 1 {
@@ -308,6 +314,21 @@ pub fn make_room_judged(
         }
     }
     made.then_some(cur)
+}
+
+/// Whether `after` has a spot inside a ball field (within a pitch of a ball) that `before` does
+/// not: another pair of nets, or the same pair more than 2 mm away. Fewer spots elsewhere do not
+/// pay for it: between the balls and the dog-bone vias there is room for one track per channel,
+/// and the tuner cannot repair a squeeze there later.
+fn new_spots(before: &[crate::check::Spot], after: &[crate::check::Spot], balls: &[(Point, f64)]) -> bool {
+    let key = |s: &crate::check::Spot| {
+        let k = s.nets.1.unwrap_or(u32::MAX);
+        (s.nets.0.min(k), s.nets.0.max(k))
+    };
+    after
+        .iter()
+        .filter(|a| balls.iter().any(|&(b, pitch)| b.dist(a.at) < pitch))
+        .any(|a| !before.iter().any(|b| key(a) == key(b) && a.at.dist(b.at) < 2.0))
 }
 
 fn push_aside(board: &Board, sub: &crate::topo::Substrate, geo: &Geometry, extra: &HashMap<NetId, f64>) -> Geometry {
