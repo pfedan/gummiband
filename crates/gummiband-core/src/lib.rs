@@ -931,9 +931,7 @@ fn place_and_route(
 /// Cost of a relaxed candidate. A short is much worse than a clearance a little too small: it
 /// weighs six violations.
 fn full_cost(c: &Candidate) -> f64 {
-    c.stats.cost()
-        + c.stats.violations.unwrap_or(0) as f64 * 1000.0
-        + c.stats.shorts.unwrap_or(0) as f64 * 5000.0
+    c.stats.cost() + c.stats.violations.unwrap_or(0) as f64 * 1000.0 + c.stats.shorts.unwrap_or(0) as f64 * 5000.0
 }
 
 /// One full search on a fixed placement ([`route_fixed`]). A negotiation is a second search next
