@@ -1289,7 +1289,8 @@ fn corridors(
 
 /// Parts that `place_board` would move (with `opts`) and that sit in the band of a track group
 /// whose nets they are not on: the parts a re-placement with [`PlaceOptions::corridors`] should
-/// take out of the way, before the routing. The ends of every group stay.
+/// take out of the way, before the routing. The ends of every group stay, and so do decoupling
+/// capacitors (two pads, both on a plane or supply net): they belong at their IC pin.
 pub fn corridor_intruders(path: &Path, opts: &PlaceOptions) -> Result<Vec<String>> {
     let kb = read_board(
         path,
@@ -1310,6 +1311,13 @@ pub fn corridor_intruders(path: &Path, opts: &PlaceOptions) -> Result<Vec<String
     let Fixing { fixed, .. } = fixed_parts(&d, &kb, opts, outer)?;
     let terms = net_terms(&d, &kb.board, outer.signed_area().abs());
     let groups = track_groups(&d, &kb.board, d.nets.len(), &terms);
+    let supply = |n: usize| terms.weight[n] == 0.0 || !terms.partial[n].is_empty() || terms.power[n];
+    let decap = |p: &crate::model::Part| {
+        p.pads.len() == 2
+            && p.pads
+                .iter()
+                .all(|x| x.net.is_some_and(|n| n < d.nets.len() && supply(n)))
+    };
     let mut out: Vec<String> = Vec::new();
     for g in &groups {
         let centre = |i: usize| {
@@ -1331,7 +1339,7 @@ pub fn corridor_intruders(path: &Path, opts: &PlaceOptions) -> Result<Vec<String
         }
         let (dx, dy) = (ab.x / len, ab.y / len);
         for (i, p) in d.parts.iter().enumerate() {
-            if fixed[i] || g.on.contains(&i) || out.contains(&p.reference) {
+            if fixed[i] || g.on.contains(&i) || decap(p) || out.contains(&p.reference) {
                 continue;
             }
             let hit = p.court.iter().any(|r| {
