@@ -1,10 +1,10 @@
 # Placing and routing in KiCad
 
-The plugin adds three actions to the PCB editor's plugin toolbar: *Route with Gummiband*, *Finish
-selected nets with Gummiband* and *Place with Gummiband*. Each exports a copy of the open board
+The plugin adds four actions to the PCB editor's plugin toolbar: *Route with Gummiband*, *Finish
+selected nets with Gummiband*, *45 degree tracks with Gummiband* and *Place with Gummiband*. Each exports a copy of the open board
 with its project to a temp folder, runs the `gummiband` binary on the copy and imports the result
 into the open board as **one undo step**. Your file on disk is only changed when you save. This
-chapter describes the routing action first, then the two newer ones.
+chapter describes the routing action first, then the newer ones.
 
 Setup is in [Installation](installation.md).
 
@@ -26,6 +26,8 @@ The dialog has two tabs, and every field explains itself in a tooltip. It can be
 fields grow with its width, and a tab scrolls when the dialog is lower than its fields. It remembers its last values
 in the plugin's `settings.json`; references, layer names and net files start empty every time,
 because they fit only one board. *Defaults* brings back the values below.
+
+![The Basic tab of the routing dialog with a tooltip on the search seed](img/plugin-route-dialog.png)
 
 **Basic**
 
@@ -97,6 +99,8 @@ polish), the generation, the routed connections, vias, track length and the rema
 of the best candidate so far, and how they went over time. *Cancel* stops the router and leaves
 the board as it was.
 
+![The progress window in the open end: the numbers of the best result so far, a chart of vias, length and violations, and the advice to accept](img/plugin-progress.png)
+
 With *Keep improving* on, the result gets better for as long as you let it: fewer vias, fewer
 violations, sometimes the last connections. *Accept current result* takes the best result so far
 at any time after the first geometry generation, and it takes a moment to finish it. Once the
@@ -125,6 +129,8 @@ vias, length, violations) and the connections it could not route, if any.
 
 The second toolbar button, **Finish selected nets with Gummiband**, completes the nets you point
 at instead of rerouting the board:
+
+![A track started by hand is continued by the router, and an unlocked track of another net gives way](img/finish-net.svg)
 
 1. Start a track by hand if you like, or just select any track, via or pad of the nets you want
    finished (several nets at once are fine).
@@ -158,6 +164,8 @@ any-angle routing and decided the reviewer wants 45 degrees after all:
 4. Everything arrives as one undo step, and a message gives the removed and created items and
    the length before and after.
 
+![A part of the Lichtschnitzel controller before and after the 45 degree step](img/angles45-before-after.png)
+
 This is the plugin's form of `gummiband angles45`. The same step can run at the end of routing
 with *45 degree tracks* under *Advanced*; see
 [Conventional 45 degree tracks](concepts.md#conventional-45-degree-tracks).
@@ -181,6 +189,8 @@ press *New* next to it. The *Strategy* tab has the options of a placement from s
 escape per side* (`--escape-halo`), *Leash for ICs and connectors* (`--leash`, mm, 0 = free) and
 *Place on both sides* (`--two-sided`) with *Cost of a part on the back* (`--back-cost`, 6 mm) and
 *Largest part for the back* (`--back-max-pads`, 8 pads).
+![Two of the strategy options: a band kept free for a bus, and room per side for the escaping tracks](img/placement-terms.svg)
+
 The first three together gave the cleanest placements of the Lichtschnitzel controller; the
 tooltips say what each does, and [Choosing the opt-in options](options.md) compares them. The
 *Advanced* tab has *Release* (parts that may move although they count as mechanical),
@@ -201,6 +211,8 @@ The button is new and not yet tested live in KiCad. The placer knows no datashee
 a power stage or a crystal by hand, lock it, and let the button do the rest around it. Without
 *Place on both sides* the parts of both sides share the same space, so a two sided board comes out
 less dense than it could be.
+
+![A two sided placement of a module carrier: the large ICs keep the front, small parts fill the back](img/two-sided-som.png)
 
 ## Without a dialog
 

@@ -6,6 +6,8 @@ plan into geometry: tight any-angle tracks with real arcs, pulled taut around th
 rubber bands between the pins. The router is written in Rust, uses every core of your machine and
 comes as a KiCad plugin, a command line tool and an MCP server for AI agents.
 
+![A board routed by Gummiband: any-angle tracks with arcs on both outer layers](docs/guide/img/routed-lichtschnitzel.png)
+
 What you keep is yours: everything you lock in KiCad (power lanes, a converter layout from the
 datasheet, critical pairs) stays untouched and the router works around it.
 
@@ -38,7 +40,7 @@ Then pick how you want to use it:
   [installation guide](docs/guide/installation.md).
 - **Command line**: use `target/release/gummiband` directly, see below.
 - **AI agents**: `cargo build --release -p gummiband-mcp` builds the MCP server, see
-  [docs/MCP.md](docs/MCP.md).
+  [Working with an AI agent](docs/guide/ai-agents.md) and the reference in [docs/MCP.md](docs/MCP.md).
 
 ## Quickstart
 
@@ -81,10 +83,13 @@ automatically. Copy them next to the output before running the DRC on it.
 
 The user guide lives in [docs/guide](docs/guide/README.md):
 
+- [A tour of the features](docs/guide/tour.md): what Gummiband does, one picture per feature.
 - [Installation](docs/guide/installation.md): binary, plugin, optional tools, troubleshooting.
 - [Placing and routing in KiCad](docs/guide/kicad-plugin.md): the plugin dialogs and what each
   option does.
 - [Command line](docs/guide/cli.md): every command and option, the output and the JSON report.
+- [Working with an AI agent](docs/guide/ai-agents.md): setup of the MCP server and a session
+  from netlist to DRC, with the power and reference plane checks.
 - [Workflows](docs/guide/workflows.md): locking power lanes, routing by priority, judging results,
   placing parts, movable parts, placement variants, animations.
 - [How Gummiband routes](docs/guide/concepts.md): what the router respects, how it decides, and

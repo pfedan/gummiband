@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="250" viewBox="0 0 860 250" font-family="DejaVu Sans, Helvetica, Arial, sans-serif">
+<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#5f6368"/></marker><marker id="arr-s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#5f6368"/></marker></defs>
+<rect x="0.5" y="0.5" width="859" height="249" rx="10" fill="#ffffff" stroke="#dadce0"/>
+<rect x="18.0" y="60.0" width="122.0" height="92.0" rx="8" fill="#fbe9e9" stroke="#c4c7c5" stroke-width="1"/>
+<text x="79.0" y="85.0" font-size="13" fill="#202124" text-anchor="middle" font-weight="bold">Portfolio</text>
+<text x="79.0" y="108.0" font-size="11" fill="#5f6368" text-anchor="middle" font-weight="normal">14 runs, each with</text>
+<text x="79.0" y="124.0" font-size="11" fill="#5f6368" text-anchor="middle" font-weight="normal">its own order</text>
+<rect x="158.0" y="60.0" width="122.0" height="92.0" rx="8" fill="#fbe9e9" stroke="#c4c7c5" stroke-width="1"/>
+<text x="219.0" y="85.0" font-size="13" fill="#202124" text-anchor="middle" font-weight="bold">Generations</text>
+<text x="219.0" y="108.0" font-size="11" fill="#5f6368" text-anchor="middle" font-weight="normal">mutate the best</text>
+<text x="219.0" y="124.0" font-size="11" fill="#5f6368" text-anchor="middle" font-weight="normal">order, judged by topology</text>
+<line x1="142.0" y1="106.0" x2="155.0" y2="106.0" stroke="#5f6368" stroke-width="1.2" marker-end="url(#arr)"/>
+<rect x="298.0" y="60.0" width="122.0" height="92.0" rx="8" fill="#e8f0fb" stroke="#c4c7c5" stroke-width="1"/>
+<text x="359.0" y="85.0" font-size="13" fill="#202124" text-anchor="middle" font-weight="bold">Geometry</text>
+<text x="359.0" y="108.0" font-size="11" fill="#5f6368" text-anchor="middle" font-weight="normal">pull taut, arcs,</text>
+<text x="359.0" y="124.0" font-size="11" fill="#5f6368" text-anchor="middle" font-weight="normal">clearance check</text>
+<line x1="282.0" y1="106.0" x2="295.0" y2="106.0" stroke="#5f6368" stroke-width="1.2" marker-end="url(#arr)"/>
+<rect x="438.0" y="60.0" width="122.0" height="92.0" rx="8" fill="#e8f0fb" stroke="#c4c7c5" stroke-width="1"/>
+<text x="499.0" y="85.0" font-size="13" fill="#202124" text-anchor="middle" font-weight="bold">Geometry gens.</text>
+<text x="499.0" y="108.0" font-size="11" fill="#5f6368" text-anchor="middle" font-weight="normal">search judged by</text>
+<text x="499.0" y="124.0" font-size="11" fill="#5f6368" text-anchor="middle" font-weight="normal">the drawn tracks</text>
+<line x1="422.0" y1="106.0" x2="435.0" y2="106.0" stroke="#5f6368" stroke-width="1.2" marker-end="url(#arr)"/>
+<rect x="578.0" y="60.0" width="122.0" height="92.0" rx="8" fill="#e6f4ee" stroke="#c4c7c5" stroke-width="1"/>
+<text x="639.0" y="85.0" font-size="13" fill="#202124" text-anchor="middle" font-weight="bold">Keep improving</text>
+<text x="639.0" y="108.0" font-size="11" fill="#5f6368" text-anchor="middle" font-weight="normal">optional open end</text>
+<text x="639.0" y="124.0" font-size="11" fill="#5f6368" text-anchor="middle" font-weight="normal">until you accept</text>
+<line x1="562.0" y1="106.0" x2="575.0" y2="106.0" stroke="#5f6368" stroke-width="1.2" marker-end="url(#arr)"/>
+<rect x="718.0" y="60.0" width="122.0" height="92.0" rx="8" fill="#e6f4ee" stroke="#c4c7c5" stroke-width="1"/>
+<text x="779.0" y="85.0" font-size="13" fill="#202124" text-anchor="middle" font-weight="bold">Finishing</text>
+<text x="779.0" y="108.0" font-size="11" fill="#5f6368" text-anchor="middle" font-weight="normal">widen, 45 degrees,</text>
+<text x="779.0" y="124.0" font-size="11" fill="#5f6368" text-anchor="middle" font-weight="normal">length tuning</text>
+<line x1="702.0" y1="106.0" x2="715.0" y2="106.0" stroke="#5f6368" stroke-width="1.2" marker-end="url(#arr)"/>
+<text x="18.0" y="32.0" font-size="14" fill="#202124" text-anchor="start" font-weight="bold">From netlist to tracks: the phases you see in the progress window</text>
+<text x="140.0" y="180.0" font-size="12" fill="#c8373a" text-anchor="middle" font-weight="bold">topology</text>
+<line x1="18.0" y1="168.0" x2="280.0" y2="168.0" stroke="#c8373a" stroke-width="2" stroke-linecap="round"/>
+<text x="429.0" y="180.0" font-size="12" fill="#3f72c0" text-anchor="middle" font-weight="bold">geometry</text>
+<line x1="298.0" y1="168.0" x2="560.0" y2="168.0" stroke="#3f72c0" stroke-width="2" stroke-linecap="round"/>
+<text x="709.0" y="180.0" font-size="12" fill="#1a9a6c" text-anchor="middle" font-weight="bold">after the search</text>
+<line x1="578.0" y1="168.0" x2="840.0" y2="168.0" stroke="#1a9a6c" stroke-width="2" stroke-linecap="round"/>
+<text x="18.0" y="220.0" font-size="12" fill="#5f6368" text-anchor="start" font-weight="normal">Best candidate: fewest open connections, then fewest violations, then fewest vias and the shortest length.</text>
+</svg>

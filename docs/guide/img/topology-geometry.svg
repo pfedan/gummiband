@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="330" viewBox="0 0 820 330" font-family="DejaVu Sans, Helvetica, Arial, sans-serif">
+<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#5f6368"/></marker><marker id="arr-s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#5f6368"/></marker></defs>
+<rect x="0.5" y="0.5" width="819" height="329" rx="10" fill="#ffffff" stroke="#dadce0"/>
+<text x="20.0" y="30.0" font-size="14" fill="#202124" text-anchor="start" font-weight="bold">1  Topology: which side of each obstacle</text>
+<text x="430.0" y="30.0" font-size="14" fill="#202124" text-anchor="start" font-weight="bold">2  Geometry: pulled taut like a rubber band</text>
+<line x1="135.0" y1="175.0" x2="225.0" y2="110.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="135.0" y1="175.0" x2="234.0" y2="240.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="225.0" y1="110.0" x2="234.0" y2="240.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="225.0" y1="110.0" x2="306.0" y2="170.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="234.0" y1="240.0" x2="306.0" y2="170.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="36.0" y1="200.0" x2="135.0" y2="175.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="36.0" y1="200.0" x2="36.0" y2="70.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="36.0" y1="200.0" x2="36.0" y2="300.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="135.0" y1="175.0" x2="36.0" y2="70.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="135.0" y1="175.0" x2="180.0" y2="300.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="135.0" y1="175.0" x2="36.0" y2="300.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="36.0" y1="300.0" x2="180.0" y2="300.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="234.0" y1="240.0" x2="180.0" y2="300.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="180.0" y1="60.0" x2="36.0" y2="70.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="180.0" y1="60.0" x2="225.0" y2="110.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="135.0" y1="175.0" x2="180.0" y2="60.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="225.0" y1="110.0" x2="297.0" y2="60.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="297.0" y1="60.0" x2="180.0" y2="60.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="297.0" y1="60.0" x2="306.0" y2="170.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="306.0" y1="170.0" x2="378.0" y2="140.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="378.0" y1="140.0" x2="378.0" y2="70.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="297.0" y1="60.0" x2="378.0" y2="70.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="306.0" y1="170.0" x2="378.0" y2="70.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="306.0" y1="170.0" x2="297.0" y2="300.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="234.0" y1="240.0" x2="297.0" y2="300.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="297.0" y1="300.0" x2="378.0" y2="300.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="378.0" y1="140.0" x2="378.0" y2="300.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="306.0" y1="170.0" x2="378.0" y2="300.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="180.0" y1="300.0" x2="297.0" y2="300.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<line x1="234.0" y1="240.0" x2="36.0" y2="300.0" stroke="#9aa0a6" stroke-width="1" stroke-linecap="round" stroke-dasharray="4 3"/>
+<circle cx="135.0" cy="175.0" r="16.0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<circle cx="225.0" cy="110.0" r="16.0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<circle cx="234.0" cy="240.0" r="16.0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<circle cx="306.0" cy="170.0" r="16.0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<rect x="27.0" y="191.0" width="18.0" height="18.0" rx="0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<rect x="369.0" y="131.0" width="18.0" height="18.0" rx="0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<path d="M 36.0 200.0 L 85.5 150.0 L 135.0 140.0 L 180.0 175.0 L 229.5 175.0 L 270.0 140.0 L 378.0 140.0" stroke="#c8373a" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="7 5"/>
+<circle cx="85.5" cy="150.0" r="4.5" fill="#ffffff" stroke="#c8373a" stroke-width="2"/>
+<circle cx="135.0" cy="140.0" r="4.5" fill="#ffffff" stroke="#c8373a" stroke-width="2"/>
+<circle cx="180.0" cy="175.0" r="4.5" fill="#ffffff" stroke="#c8373a" stroke-width="2"/>
+<circle cx="229.5" cy="175.0" r="4.5" fill="#ffffff" stroke="#c8373a" stroke-width="2"/>
+<circle cx="270.0" cy="140.0" r="4.5" fill="#ffffff" stroke="#c8373a" stroke-width="2"/>
+<text x="20.0" y="318.0" font-size="12" fill="#5f6368" text-anchor="start" font-weight="normal">Obstacles are triangulated; a route is a list of edge crossings.</text>
+<circle cx="545.0" cy="175.0" r="30.0" fill="none" stroke="#9aa0a6" stroke-width="1" stroke-dasharray="3 3"/>
+<circle cx="545.0" cy="175.0" r="16.0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<circle cx="635.0" cy="110.0" r="30.0" fill="none" stroke="#9aa0a6" stroke-width="1" stroke-dasharray="3 3"/>
+<circle cx="635.0" cy="110.0" r="16.0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<circle cx="644.0" cy="240.0" r="30.0" fill="none" stroke="#9aa0a6" stroke-width="1" stroke-dasharray="3 3"/>
+<circle cx="644.0" cy="240.0" r="16.0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<circle cx="716.0" cy="170.0" r="30.0" fill="none" stroke="#9aa0a6" stroke-width="1" stroke-dasharray="3 3"/>
+<circle cx="716.0" cy="170.0" r="16.0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<rect x="437.0" y="191.0" width="18.0" height="18.0" rx="0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<rect x="779.0" y="131.0" width="18.0" height="18.0" rx="0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<path d="M 446.0 200.0 L 529.4 149.4 A 30.0 30.0 0 0 1 544.1 145.0 L 715.1 140.0 A 30.0 30.0 0 0 1 716.0 140.0 L 788.0 140.0" stroke="#c8373a" stroke-width="7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="430.0" y="318.0" font-size="12" fill="#5f6368" text-anchor="start" font-weight="normal">Straight where free, arcs at the clearance around obstacles.</text>
+<text x="515.0" y="222.0" font-size="11" fill="#5f6368" text-anchor="start" font-weight="normal">clearance</text>
+</svg>

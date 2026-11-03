@@ -7,10 +7,14 @@ examples below assume it is on your `PATH`.
 ```text
 gummiband [--threads N] [--plane-layers L1,L2] <command>
 
-Commands:
-  info   Print a summary of a board
-  route  Route a board and write the result
-  strip  Remove tracks, vias and outer copper zones (benchmark preparation)
+Commands (shortened):
+  info       Print a summary of a board
+  route      Route a board and write the result
+  place      Place parts from the netlist
+  angles45   Turn the unlocked tracks of a routed board into 45 degree tracks
+  move-part  Move a part on a routed board and let the tracks around it follow
+  lengths    Measure a routed board as KiCad's DRC does
+  strip      Remove tracks, vias and outer copper zones (benchmark preparation)
 ```
 
 `gummiband <command> --help` prints the options of a command.
@@ -128,6 +132,8 @@ when the progress reports `converged`.
 | `--frames DIR` | One SVG (and PNG, if `rsvg-convert` is available) of the best candidate per generation into `DIR`, and `DIR/evolution.gif` if ImageMagick's `magick` is available. |
 
 ### Reading the console output
+
+![The phases of a run as the console and the progress window report them](img/search-pipeline.svg)
 
 ```text
 substrate: 1012 vertices, 2012 triangles, 2402 via sites

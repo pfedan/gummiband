@@ -52,6 +52,8 @@ they existed.
 
 ## Room for track groups
 
+![Two placement terms: a band kept free for the bus between two ICs, and room per side of an IC for the tracks that leave it](img/placement-terms.svg)
+
 | Option | What it does | Use it when |
 | --- | --- | --- |
 | `route --clear-corridors` | Before routing, the movable parts that sit in the band of a track group (see `groups`) without being on its nets are placed again around it. ICs and connectors in a band move at most 1.5 mm (`GB_CC_LEASH`), decoupling capacitors stay at their IC. | A tight board with several chips, together with `--patterns groups`: parts_xhard 18 % fewer vias and 8 % less length. Not on a board whose placement you have settled: it moves parts. |
@@ -61,9 +63,20 @@ they existed.
 | `place --semantic` | Uses the schematic: sheets and IC clusters stay together, inductors at their converter, decaps at an IC of their sheet. | Placement from scratch of a board with power stages: the cleanest results on Lichtschnitzel together with the two options above. |
 | `place --leash MM` | Parts with 4 or more pads stay within MM of where they sit. | A local change instead of a new placement, typically with `--only`. |
 
+What `--clear-corridors` did on the tightest synthetic board, together with `--patterns groups`:
+
+![parts_xhard routed with --patterns groups, and with --clear-corridors added: 87 instead of 99 vias, 1254 instead of 1412 mm](img/clear-corridors-before-after.png)
+
+And what `--semantic` does to a placement from scratch: the parts of a sheet stay together, the
+inductors at their converter, so the supply paths get short.
+
+![Four placements of the Lichtschnitzel controller, seeds 1 and 4, without and with --semantic](img/semantic-placement.png)
+
 ## One side or two
 
 Off by default: without it every part keeps its side and both sides share one room.
+
+![A two sided placement of a module carrier: 63 parts on the front, 106 on the back](img/two-sided-som.png)
 
 | Option | What it does | Use it when |
 | --- | --- | --- |
@@ -73,6 +86,8 @@ Off by default: without it every part keeps its side and both sides share one ro
 | `place --on-front`, `--on-back` | These parts go on that side, whatever their pads. | A large IC on the back under a module, a part that has to stay on top. |
 
 ## Differential pairs
+
+![How --pairs routes a pair: one wide track, split in two at the pair gap, with single tracks into the pads under --breakouts](img/pairs.svg)
 
 | Option | What it does | Use it when |
 | --- | --- | --- |

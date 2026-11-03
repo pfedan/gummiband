@@ -19,6 +19,8 @@ two questions:
    vias move with their tracks. Corners become the largest arcs that still keep clearance. The
    result has real KiCad arcs and any angle.
 
+![Topology first: a route is a list of edge crossings in a triangulation of the obstacles. Geometry second: the route is pulled taut around the obstacles at their clearance.](img/topology-geometry.svg)
+
 This is why the tracks look the way they do: they hug the pads and each other with exactly the
 clearance, run straight where nothing is in the way, and bend around obstacles in arcs rather
 than 45 degree stairs.
@@ -97,6 +99,8 @@ pitch minus the clearance, at most 0.4 mm, and never below the board's minimum t
 a custom minimum width rule allows. The neck covers the pin area (the courtyard when a rule exempts
 one), so a whole fan-out narrows alike.
 
+![Necking at fine pitch pins inside the courtyard, and a short taper where a wide track passes a tight spot](img/necking.svg)
+
 Necks stay narrow only where they must. After the geometry is drawn, every narrow piece is
 widened step by step (0.05 mm) to the widest width that still keeps all clearances to pads, vias
 and other tracks, up to the class width; a net that would gain a violation keeps its old taper.
@@ -157,6 +161,8 @@ plugin *Preferred track width*) gives the default class a target of W when it ha
 own. Other classes without an `opt` keep their width, and differential pairs always do, because
 their width is their impedance.
 
+![A track at its target width narrows to the class width in a gap between two pads, with a taper at each change; a pad nearby was pushed aside first](img/prefer-width.svg)
+
 Growing is the last step: the routing does not see it, so it costs no connections. Tracks first
 push their neighbours and vias aside as far as those can go, then they grow, with a taper at
 every change of width. A track never gets narrower than its class width this way, and a spot
@@ -170,6 +176,8 @@ but many reviewers and company guidelines expect 45 degrees, and KiCad's push an
 are made for them. `--angles 45` (in the plugin *45 degree tracks* under *Advanced*, in the MCP
 `route` with `angles: "45"`) turns the finished result into conventional routing as the very last
 step:
+
+![The same connection any-angle with an arc, and after the 45 degree step with chamfered corners](img/angles45.svg)
 
 - Every track is walked from its start. From where it stands it reaches as far along its old
   path as one or two straight legs in the eight directions of the 45 degree grid allow (or three,
@@ -201,6 +209,8 @@ Expect tracks about 4 to 5 % longer and a few percent of the length left off the
 boards (see [benchmarks](benchmarks.md#conventional-45-degree-tracks)). The step takes a second
 or less.
 
+![A part of the Lichtschnitzel controller before and after --angles 45](img/angles45-before-after.png)
+
 ## Length matching
 
 The `length`, `skew`, `diff_pair_uncoupled` and `diff_pair_gap` rules of the `.kicad_dru` are read
@@ -211,6 +221,13 @@ within-pair skew rule of its own; Gummiband then keeps the pair's skew below `--
 Lengths are measured as the KiCad DRC measures them: tracks (joined into runs, what lies inside a
 via or a pad straightened), each via over the layers it really connects (the stackup distance),
 and the pad-to-die length of the pads. `gummiband lengths` prints this for any routed board.
+
+The search already pays attention to skew: for every `skew` rule it adds to the cost of a
+candidate what tuning would have to add, the millimetres each net lacks to the longest net of the
+group beyond the allowed skew (weight 0.5, `GB_SKEW_WEIGHT` sets another one). So it prefers
+routes of similar length within a group, and a single net routed the long way round no longer
+forces the whole group to meander up to it. On the DDR5 testbed this cut the skew errors by a
+third.
 
 When such rules exist, the routing first makes room for the meanders, then gets them as a last
 step (after `--angles 45`):
@@ -227,6 +244,8 @@ step (after `--angles 45`):
 - Aims: a net below the `min` of its `length` rule goes into the window (to `opt`, else the
   middle); in a `skew` group every net more than `max` below the longest one goes to a quarter of
   `max` below it. Nets are only made longer, never shorter.
+![A meander: bumps on the straight part of a track, with their height and the air between the legs](img/meander.svg)
+
 - A meander is a row of bumps on a straight line of the track, round (semicircles, as KiCad's
   round tuning patterns) or with 45 degree corners with `--angles 45`. Each bump goes to the side
   with more room and as high as its clearance allows (up to `--tune-amplitude`); then all bumps
@@ -245,6 +264,8 @@ In a tight bundle the room step cannot always push the neighbours aside without 
 a net stays short; the output names every net that did not reach its length (see
 [benchmarks](benchmarks.md#length-matching)).
 
+![The synthetic matching board without and with length matching: the meanders bring two more nets into their windows, the clock among them](img/length-matching-before-after.png)
+
 ## Vias
 
 Vias are placed on a grid of candidate positions (`--via-pitch`, 0.5 mm by default) wherever
@@ -252,6 +273,22 @@ they fit with their clearance, and may move during the geometry step. Through-ho
 layer changes for their net. A via in a pad is a last resort for nets with big enough pads when a
 fan-out has no other way out. The via cost (`--via-cost`, in millimetres of track) decides how
 eagerly the router changes layers; the search also tries values around it.
+
+### Dog-bone sites in ball fields
+
+In a BGA the regular via raster hardly ever lines up with the balls: a via lands wherever the
+raster has a site, often off the diagonal, and a track to it closes the channel of the ball next
+to it. Gummiband therefore finds ball fields from the lattice of SMD pads (also fields of short
+rows, like the two blocks of three columns of a DDR package) and adds a via site in the middle
+between every four balls and half a pitch outside the outer ones: the classic dog-bone fan-out.
+The raster stays as well, so the search can still use other spots. Nothing has to be switched on.
+
+![A ball grid with the plain via raster, and the same grid with a dog-bone site between every four balls and half a pitch outside](img/dogbone.svg)
+
+On the synthetic `bga_dense` board this left no connection open instead of eight, in 12 instead
+of 304 seconds:
+
+![bga_dense routed with raster sites only and with dog-bone sites, the whole board and the ball field enlarged](img/dogbone-bga-before-after.png)
 
 ## Priorities and order
 
@@ -264,6 +301,8 @@ the next search round moves it forward in the order. Many attempts with differen
 parallel (the portfolio), then an evolutionary search mutates the best order for a few
 generations. The best candidate wins: fewest unrouted connections, then fewest violations (after
 the geometry step), then fewest vias and shortest length.
+
+![The phases of a run: portfolio, generations, geometry, geometry generations, keep improving, finishing](img/search-pipeline.svg)
 
 Results are deterministic for the same input, options and seed, on any machine and with any
 thread count: the portfolio size is a constant (14 runs), and threads only change the run time.
@@ -301,8 +340,8 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
 - **Automatic placement is new.** `gummiband place`, the plugin button and the MCP tool
   `place_parts` place parts from the netlist, the outline, the planes and the fixed parts; the
   router is not involved. The placer knows no datasheet layouts, so place and lock a power stage
-  yourself; parts on both sides share the same space; tracks and vias do not follow, so place
-  before you route; and the seeds differ a lot, so try a few. The button is not yet tested live
+  yourself; without `--two-sided` parts on both sides share the same space; tracks and vias do
+  not follow, so place before you route; and the seeds differ a lot, so try a few. The button is not yet tested live
   in KiCad. Measured on one board only, see [benchmarks](benchmarks.md#placement-from-the-netlist).
 - **Blocks and pre-routing tools are new.** Groups that move as blocks under `--move-parts` and
   the MCP tools `part_info` and `add_locked_copper` exist but have not been tried on a real
@@ -336,5 +375,6 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
   position, footprint or layer.
 - **Clean DRC on dense boards.** Expect a few clearance items and the occasional crossing in
   BGA fan-outs; the geometry generations reduce them, hand finishing removes the rest.
-- **Plugin features.** Moving parts and per net options are command line and MCP features; the
-  plugin dialog covers keep locked, runs, via cost, geometry generations and the animation.
+- **Plugin features.** Per net priorities, widths and skips are command line and MCP features;
+  the plugin dialog covers the search, the hints, the pair options, moving and placing parts and
+  the animation.

@@ -5,7 +5,9 @@ steps, the plugin is installed ([Installation](installation.md)).
 
 ## Route a board for the first time
 
-1. Finish the placement. The router moves nothing unless you ask for it.
+1. Finish the placement, or let [Gummiband place the parts](#place-the-parts). While routing,
+   the router only shifts unlocked parts a little to open channels (see
+   [Let parts move](#let-parts-move)); lock the footprints that must stay.
 2. Set up net classes in *Board Setup > Net Classes*: track width, clearance, via size. Assign
    nets to classes. Give the classes that matter most (clocks, high current, USB) a lower
    priority number so they are routed first, see [Route by priority](#route-by-priority).
@@ -23,6 +25,8 @@ steps, the plugin is installed ([Installation](installation.md)).
    (`--until-stop`, or more `--geometry-generations`).
 
 ## Finish a partly routed board (experimental)
+
+![A track started by hand is continued by the router, and an unlocked track of another net gives way](img/finish-net.svg)
 
 ```bash
 gummiband route board.kicad_pcb -o out.kicad_pcb --keep-all --nets /SDA,/SCL
@@ -103,6 +107,13 @@ the pair is routed as two single nets.
 
 This is new. It costs connections on dense boards and can leave clearance errors or shorts next
 to pads and vias, so compare the KiCad DRC with and without `--pairs` before you keep the result.
+
+![How --pairs routes a pair: one wide track, split into two at the pair gap, optionally with single tracks into the pads](img/pairs.svg)
+
+At connector rows `--breakouts` ends the wide track just outside the pads and runs two short
+tracks in, which avoids the shorts the split can leave right at the pads:
+
+![A connector row with --pairs, without and with --breakouts](img/pair-breakouts-before-after.png)
 
 ## Judge a result
 
@@ -189,6 +200,8 @@ open frames/evolution.gif
 *Save an animation of the generations*; the images go to `gummiband-evolution/` next to the
 project.
 
+![What the window and the console report, phase by phase](img/search-pipeline.svg)
+
 `--svg out.svg` draws the final result with its violations, `--svg-tris` adds the triangulation
 the router plans on. Both open in any browser.
 
@@ -205,9 +218,12 @@ Before routing, in KiCad with the *Place with Gummiband* button, or on the comma
 
 Two things to know: the placer has no datasheet knowledge, so the layout of a converter or a
 crystal is yours to make and lock first, and the seeds differ a lot, so `--seed 2`, `--seed 3`
-and a look at the routed results is worth the minutes (the plugin button always uses seed 1).
-Both sides of the board share the same space, so a two sided board comes out less dense than it
-could be.
+and a look at the routed results is worth the minutes (the plugin dialog has a *Seed* field with
+a *New* button). For a placement from scratch start with `--semantic --corridors --escape-halo`;
+`--two-sided` gives each side of the board its own room when the parts do not fit on one. See
+[Choosing the opt-in options](options.md#room-for-track-groups).
+
+![Four placements of the Lichtschnitzel controller: seeds 1 and 4, each without and with --semantic. With the schematic the input chain (red) and the switch nodes (purple) stay short.](img/semantic-placement.png)
 
 An agent does the same over MCP: `move_part` for the parts it has a plan for, `place_parts` with
 `fixed` or `only` for the rest, then `route`.
@@ -226,15 +242,16 @@ same design. It is specific to that board's part roles today; the scripts and pa
 
 ## Drive the router from an AI agent
 
-The MCP server exposes `create_board` (a board from a KiCad netlist), `load_board`,
-`list_nets`, `set_net_options`, `part_info`, `move_part`, `add_zone`, `add_locked_copper`,
-`route` (with the search options of the CLI, including `seed` and `keep_all`), `drc` and
-`render` to Claude Code, Claude Desktop and other MCP clients. An agent can load a board, give the critical nets priority, route, read the
-violations with positions and the nets that block each unrouted connection, look at a PNG of the
-region, nudge a part or add a plane in a working copy, and iterate. On a finished board it can
-re-lay single nets: `route` with `keep_all`, `nets` and `reroute` removes the unlocked copper of
-those nets and routes them anew while everything else stays. There is no shove over MCP yet, so
-this can fail where the kept tracks leave no room.
+The MCP server lets Claude Code, Claude Desktop and other MCP clients drive the whole sequence:
+`create_board` or `load_board`, `set_layer_type` and `add_zone` for the planes, `power_plan` and
+`power_copper` for the current paths, `place_parts`, `route` (with the search options of the CLI,
+including `seed` and `keep_all`), then `current_check`, `ground_pour`, `reference_check`, `drc`
+and `render`. An agent can give the critical nets priority, route, read the violations with
+positions and the nets that block each unrouted connection, look at a PNG of the region, nudge a
+part and iterate. On a finished board it can re-lay single nets: `route` with `keep_all`, `nets`
+and `reroute` removes the unlocked copper of those nets and routes them anew while everything
+else stays, and unlocked tracks of other nets shift aside where needed. The chapter
+[Working with an AI agent](ai-agents.md) walks through a session.
 
 New and preliminary: datasheet guided pre-routing. The agent asks `part_info` for the pads,
 courtyard and neighbours of a critical part, places the copper the datasheet recommends with

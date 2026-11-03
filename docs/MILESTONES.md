@@ -765,3 +765,7 @@ Lichtschnitzel (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
   and ImageMagick for animations), the KiCad plugin dialog, the CLI with all options, the MCP
   server for AI agents, and typical workflows (pre-routing and locking power lanes, routing by
   priority, judging results with the KiCad DRC, placement variants).
+- Pictures for the guide (done, 2026-11-03): a feature tour (`docs/guide/tour.md`), a chapter on
+  working with an AI agent (`docs/guide/ai-agents.md`), result images from the benchmark boards and
+  drawings of the principles in every chapter; the drawings come from
+  `docs/guide/img/src/schematics.py`.
