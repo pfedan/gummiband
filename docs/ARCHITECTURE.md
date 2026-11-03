@@ -59,7 +59,7 @@ negotiated congestion), not any existing product's code.
 | --- | --- |
 | `gummiband-core` | geometry, board model, triangulation substrate, topological router, realization, checks. No I/O. |
 | `gummiband-kicad` | KiCad 9/10 s-expression reader and writer, net class and rule import from `.kicad_pro`. |
-| `gummiband-place` | placement: `auto` places any board from its netlist (`gummiband place`, MCP `place_parts`), the `gummiband-place` program makes the Lichtschnitzel outline variants. |
+| `gummiband-place` | placement: `auto` places any board from its netlist (`gummiband place`, MCP `place_parts`), the `gummiband-place` program makes the LED controller outline variants. |
 | `gummiband-cli` | `gummiband` binary: `info`, `place`, `route`, `svg`. The plugin calls this. |
 | `plugin/` | KiCad action plugin (Python, KiCad IPC API): exports the board, runs the CLI, imports the result. |
 
@@ -180,7 +180,7 @@ rounds of negotiation, and the better result counts as above. Later placement ro
 whose best result came from it negotiate right away, without a plain search first. A search that
 completes the board does not negotiate, so such a board keeps its result byte for byte. That is
 why the decision waits for the geometry generations: they often find the last connection on their
-own, and a negotiation taken up after the order generations left Lichtschnitzel (seed 3)
+own, and a negotiation taken up after the order generations left LED controller (seed 3)
 complete as well, but with 328 instead of 265 vias. More than 15 % open means more connections
 than room on the layers (ULX3S, whose original routes signals on In2), and no price settles that.
 An open ended run does not negotiate on its own: there the open end works on what is open. Nor
@@ -457,7 +457,7 @@ Three ideas of the night series of 2026-11-01 run by default, combination A (`im
 result and is drawn by what has won on this board so far (`GB_BANDIT`, Thompson sampling); a quarter
 of the moves aims at an expensive routed connection (`GB_AIM_COST`, the share); and a mutant that
 cannot beat its parent is dropped before its relaxation (`GB_PRUNE`). Against the open end without
-them the cost after 20 minutes fell by 12 % on Lichtschnitzel and 15 % on Arty (median of 4 and 3
+them the cost after 20 minutes fell by 12 % on the LED controller and 15 % on Arty (median of 4 and 3
 seeds), with fewer vias and a little more length. `GB_BANDIT=0`, `GB_AIM_COST=0` and `GB_PRUNE=0`
 switch them off; runs without an open end are untouched by them. The bold moves that start a side
 branch are not pruned: they may start worse than their parent on purpose. Pruned as well, nearly every
@@ -571,8 +571,8 @@ the via in a pad experiments in `MILESTONES.md`).
 
 - Unit tests for geometry, triangulation substrate, chord planarity and the funnel.
 - Small synthetic boards in `testdata/` with expected completion.
-- Real board: the Lichtschnitzel controller (4 layers, signals on F.Cu and B.Cu, inner planes).
+- Real board: the LED controller (4 layers, signals on F.Cu and B.Cu, inner planes).
   The benchmark routes it completely: all tracks and vias are removed first, including the
   locked scripted copper and the outer layer pours; placement, outline, keepouts and the inner
   planes stay. Metrics: completion, vias, length, runtime, `kicad-cli pcb drc` result, compared
-  with the Freerouting pipeline of the Lichtschnitzel repo.
+  with the Freerouting pipeline of the LED controller repo.

@@ -6,7 +6,7 @@ plan into geometry: tight any-angle tracks with real arcs, pulled taut around th
 rubber bands between the pins. The router is written in Rust, uses every core of your machine and
 comes as a KiCad plugin, a command line tool and an MCP server for AI agents.
 
-![A board routed by Gummiband: any-angle tracks with arcs on both outer layers](docs/guide/img/routed-lichtschnitzel.png)
+![A board routed by Gummiband: any-angle tracks with arcs on both outer layers](docs/guide/img/routed-ledctl.png)
 
 What you keep is yours: everything you lock in KiCad (power lanes, a converter layout from the
 datasheet, critical pairs) stays untouched and the router works around it.

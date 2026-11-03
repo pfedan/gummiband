@@ -5,7 +5,7 @@ pulled taut afterwards. This guide is for people who want to route their boards 
 [main README](../../README.md) has the short setup and quickstart; the chapters here go into
 detail.
 
-![The Lichtschnitzel controller routed by Gummiband](img/routed-lichtschnitzel.png)
+![The LED controller routed by Gummiband](img/routed-ledctl.png)
 
 | Chapter | Read it when |
 | --- | --- |

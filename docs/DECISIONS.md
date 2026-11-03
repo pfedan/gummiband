@@ -12,7 +12,7 @@ Standing decisions of the project owner, kept here so that they survive any sess
 
 ## Benchmarks
 
-- The Lichtschnitzel controller is routed completely by Gummiband: all tracks, vias and outer
+- the LED controller is routed completely by Gummiband: all tracks, vias and outer
   pours stripped, also locked ones. Placement, outline, keepouts and inner planes stay.
   Support for locked copper stays as a feature for manual pre-routing.
 - Avoid overfitting: judge every change across all boards with `bench/compare.py`, with the
@@ -51,7 +51,7 @@ Standing decisions of the project owner, kept here so that they survive any sess
 - The open end runs combination A by default (2026-11-01): the via price of a move drawn by a
   bandit, a quarter of the moves aimed at expensive connections, hopeless mutants dropped before
   their relaxation. The night series measured 12 % and 15 % less cost after 20 minutes on
-  Lichtschnitzel and Arty, KiCad DRC clean in 5 of 7 runs against 3 of 7. Each part keeps a switch
+  LED controller and Arty, KiCad DRC clean in 5 of 7 runs against 3 of 7. Each part keeps a switch
   to turn it off; the other ideas of that night stay off.
 - The algorithms use the freedoms a board leaves them by default, a switch only turns one off
   (Daniel, 2026-11-01). Everything that is not locked may give way within the rules. First step:
@@ -99,7 +99,7 @@ Standing decisions of the project owner, kept here so that they survive any sess
 
 - All repository content is in English.
 - Outside this repository, read or write only with the owner's permission. Known exceptions:
-  the Lichtschnitzel KiCad folder (benchmark source), the KiCad plugin folder, toolchain paths,
+  the LED controller KiCad folder (benchmark source), the KiCad plugin folder, toolchain paths,
   scratch folders. Ask for paths instead of searching other folders.
 - Order of work: converge the current state, then the roadmap at bird's eye level
   (`docs/MILESTONES.md`), then targeted new benchmarks. Micro-optimisation runs independently,

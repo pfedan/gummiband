@@ -388,7 +388,7 @@ pub struct Neck {
 /// tracks, vias and the zones of the net on the layers with a non-zero factor, vias and plated
 /// holes joining the layers. Terminal pads and via pads are not eroded and a band may end
 /// within half its width of them (copper attached to a pad end), at most `end_reach` away.
-/// Port of the Lichtschnitzel `layout/necks.py`.
+/// Port of the `layout/necks.py` of the LED controller project.
 pub fn neck(
     kb: &KicadBoard,
     zf: &[ZoneFill],
@@ -1971,14 +1971,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ipc_matches_the_lichtschnitzel_table() {
+    fn ipc_matches_the_ledctl_table() {
         // current-paths.md: 4.1 A outer 2 oz 0.69 mm, inner 1 oz 3.59 mm, 8 A outer 1.74 mm
         assert!((ipc_width(4.1, 0.07, true, 20.0) - 0.69).abs() < 0.01);
         assert!((ipc_width(4.1, 0.035, false, 20.0) - 3.59).abs() < 0.02);
         assert!((ipc_width(8.0, 0.07, true, 20.0) - 1.74).abs() < 0.01);
         let w = ipc_width(3.0, 0.035, true, 10.0);
         assert!((ipc_amps(w, 0.035, true, 10.0) - 3.0).abs() < 1e-9);
-        // a 0.3 mm via carries a bit more than the 1 A the Lichtschnitzel layout assumes
+        // a 0.3 mm via carries a bit more than the 1 A the LED controller layout assumes
         let v = via_amps(0.3, 20.0);
         assert!(v > 1.0 && v < 1.5, "{v}");
     }

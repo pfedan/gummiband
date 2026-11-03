@@ -88,7 +88,7 @@ A GND plane next to every layer with fast signals or differential pairs is the r
 
 ### 3. Plan the power copper
 
-![Buck converter A of the Lichtschnitzel controller, routed without power_copper on the left and with it on the right: a pour joins the switch node pins to the inductor, and a via field takes the output into its plane](img/power-copper-buck.png)
+![Buck converter A of the LED controller, routed without power_copper on the left and with it on the right: a pour joins the switch node pins to the inductor, and a via field takes the output into its plane](img/power-copper-buck.png)
 
 - `power_plan` takes the currents per power net (globs allowed, a short term current where a fuse
   limits a short) and gives per net the IPC-2221 width per layer, the vias per layer change and
@@ -103,7 +103,7 @@ A GND plane next to every layer with fast signals or differential pairs is the r
 
 The pour is the hull of the pads, grown by a margin and cut back wherever copper of another net
 comes closer than its clearance; the vias sit on rings just off the pad and count only where they
-land in the plane of their own net. On the Lichtschnitzel controller this turned a single via into
+land in the plane of their own net. On the LED controller this turned a single via into
 seven and left no clearance violation near the converter.
 
 - `add_locked_copper` places the copper a datasheet asks for (tracks as polylines, vias) as

@@ -223,7 +223,7 @@ a *New* button). For a placement from scratch start with `--semantic --corridors
 `--two-sided` gives each side of the board its own room when the parts do not fit on one. See
 [Choosing the opt-in options](options.md#room-for-track-groups).
 
-![Four placements of the Lichtschnitzel controller: seeds 1 and 4, each without and with --semantic. With the schematic the input chain (red) and the switch nodes (purple) stay short.](img/semantic-placement.png)
+![Four placements of the LED controller: seeds 1 and 4, each without and with --semantic. With the schematic the input chain (red) and the switch nodes (purple) stay short.](img/semantic-placement.png)
 
 An agent does the same over MCP: `move_part` for the parts it has a plan for, `place_parts` with
 `fixed` or `only` for the rest, then `route`.
@@ -234,7 +234,7 @@ dialog. An agent loops over `place_parts` and `route` itself.
 
 ## Try placement variants
 
-`gummiband-place` (`cargo build --release -p gummiband-place`) rebuilds the Lichtschnitzel
+`gummiband-place` (`cargo build --release -p gummiband-place`) rebuilds the LED controller
 controller in another outline (smaller rectangle, square, circle) with the connectors and the
 module fixed and the inner planes regenerated, so the router can be tried on alternatives of the
 same design. It is specific to that board's part roles today; the scripts and parameters are in

@@ -1,7 +1,7 @@
 # Milestones
 
-Status as of 2026-10-29 (night 1). Benchmark: Lichtschnitzel controller, all tracks, vias and
-outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.sh`).
+Status as of 2026-10-29 (night 1). Benchmark: LED controller, all tracks, vias and
+outer pours removed, routed completely by Gummiband (`bench/run-ledctl.sh`).
 
 ## M0: Foundation (done)
 
@@ -55,7 +55,7 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   from net classes and custom rules per layer, skew tuning inside a pair, impedance estimate and
   `--pair-zdiff`. Measured on 2026-10-30: `diff_pairs` 99% coupled and clean in the KiCad DRC, Jetson
   93% coupled instead of 30%, but 81 instead of 51 connections open and 1954 instead of 493
-  violations, Lichtschnitzel 347/348 instead of 348/348. Open: the KiCad DRC is not clean yet (`diff_pairs` 1 short at a via, Lichtschnitzel near J1), the
+  violations, LED controller 347/348 instead of 348/348. Open: the KiCad DRC is not clean yet (`diff_pairs` 1 short at a via, LED controller near J1), the
   lost connections on dense boards, more than one wide track per pair
   (branches, USB-C with both connector rows), necks for fine pitch, a crossover without a via,
   the router knowing about polarity. Since 2026-11-01 pairs are coupled only where a
@@ -72,13 +72,13 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   (2026-11-01): with `--pairs --angles 45` the wide track goes onto the grid before the split,
   so both tracks stay parallel; a pair end whose repair finds no way gives up the pair (single
   tracks) before it keeps crossed tracks. `diff_pairs` 8 instead of 13 KiCad errors (pair gap 1
-  instead of 11, 99 % instead of 95 % coupled), Lichtschnitzel 0 instead of 12 errors and 1
+  instead of 11, 99 % instead of 95 % coupled), LED controller 0 instead of 12 errors and 1
   instead of 3 open, but its USB pair then runs as single tracks. Breakout zones
   (2026-11-01): with `--pairs` the wide track ends just outside the pads, the pads block it and
   the room for the two short tracks to them stays free; which track takes which side is chosen
   so that they do not cross. `diff_pairs` without clearance errors and shorts on all seeds
   (before 3 of 6 runs with them), seed 0 2 instead of 6 KiCad errors (45 degrees 3 instead of
-  8), `matching` 7 instead of 13, Lichtschnitzel unchanged (its USB-C end stays at the pads).
+  8), `matching` 7 instead of 13, LED controller unchanged (its USB-C end stays at the pads).
   On DDR5 they were worse over 6 seeds (more pair gap and length errors, a pair whose repair
   breaks it into single nets gets meandered as two nets), so they are opt-in (`--breakouts`)
   until that is understood; ends between the pads of a part (BGA) stay at their pads. A repair
@@ -97,16 +97,16 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   polarity asks for it (before: every joint where the band turned back). With `--pairs` over
   seeds 1 to 3 (DDR5 1 to 4) KiCad errors `diff_pairs` 10 instead of 16 (no clearance errors or
   shorts left), `matching` 28 instead of 53, DDR5 151 instead of 206 (clearance and shorts 8
-  instead of 44, lengths out of range 48 instead of 52), Lichtschnitzel unchanged.
+  instead of 44, lengths out of range 48 instead of 52), LED controller unchanged.
   Skew bumps without a flat top (2026-11-02): most remaining pair gap errors on DDR5 were the
   tops of the bumps, which KiCad takes as coupled at a gap of up to 0.66 mm. As points the
   bumps gain as much and only count as uncoupled length: DDR5 107 instead of 151 KiCad errors
   over seeds 1 to 4 (pair gap 21 instead of 65), `diff_pairs` 5 instead of 10, `matching`
   unchanged.
-  USB-C pins without partner (2026-11-02): with breakout zones Lichtschnitzel's USB pair is
+  USB-C pins without partner (2026-11-02): with breakout zones the LED controller's USB pair is
   routed as a pair, but the last pass joined the second pads of the socket (B6/B7) with a 70 mm
   track along the pair and onto its partner (502 KiCad errors). Such a pair now gives up its
-  wide track: Lichtschnitzel `--pairs --breakouts` 3 instead of 502 KiCad errors; DDR5,
+  wide track: LED controller `--pairs --breakouts` 3 instead of 502 KiCad errors; DDR5,
   `diff_pairs` and `matching` unchanged (byte for byte). The pair itself still needs a way for
   those pins next to the socket.
   Pads at the pair's gap and crossed pairs (2026-11-02): where the pads lie farther apart than
@@ -120,7 +120,7 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   gap 29 instead of 51); CLK coupled in most seeds with 4.5 to 8 mm uncoupled. `diff_pairs` and
   `matching` unchanged in KiCad errors. A wide track repaired at both ends no longer looks
   joined in the last pass when the tracks of its pins without partner join among themselves
-  (Lichtschnitzel with `--pairs --breakouts`: the USB-C pair kept its wide track with the second
+  (LED controller with `--pairs --breakouts`: the USB-C pair kept its wide track with the second
   pad row open, 2 unconnected); that copper is now a pin of its net there.
   Open: room in the router itself, phase matching near the source, carrying the pair to its
   end, the open end with pairs.
@@ -164,12 +164,12 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
 - Benchmarks against Freerouting on the controller and the injector board.
 - Profiling: incremental capacity checks, cheaper relaxation.
 - Micro-optimisation and an open end that keeps the cores busy, 2026-10-31, on 556edbd, 4 cores in
-  the cloud. Without an open end the results stay byte for byte the same: default run Lichtschnitzel
+  the cloud. Without an open end the results stay byte for byte the same: default run LED controller
   100 s instead of 133 s, Arty 88 s instead of 112 s. The open end makes 549 instead of 211 real
-  mutants per minute on Lichtschnitzel and 474 instead of 263 on Arty: every core takes the next
+  mutants per minute on the LED controller and 474 instead of 263 on Arty: every core takes the next
   move until the generation has its 14 mutants, and the relaxation of a mutant takes about half the
   time. Stopped after 270 s, seeds 1 and 2, open end cost (2 per via, 0.05 per mm, plus the flaw):
-  Lichtschnitzel 968 and 961 instead of 991 and 1007 (246 and 246 vias instead of 258 and 271), Arty
+  LED controller 968 and 961 instead of 991 and 1007 (246 and 246 vias instead of 258 and 271), Arty
   365 and 405 instead of 371 and 448 (111 and 128 vias instead of 114 and 151). Generations of 4
   mutants were not better (986, 976, 396, 400).
 - Board caches, 2026-11-01, results byte for byte the same: every via site keeps its distance to the
@@ -177,13 +177,13 @@ outer pours removed, routed completely by Gummiband (`bench/run-lichtschnitzel.s
   built once per board instead of in every relaxation. Corne has an edge of 449 pieces in 74
   outlines: completing the two open connections of a finished run (`--keep-all --nets`, one thread)
   takes 283 s instead of more than 1200 s; in the open end (Mac, seed 1, 4 threads) generation 90
-  instead of 7 after 20 minutes, 480/482 after 705 s instead of 1909 s. Lichtschnitzel and Arty: no
+  instead of 7 after 20 minutes, 480/482 after 705 s instead of 1909 s. LED controller and Arty: no
   measurable change (the grids were 0.2 % of a run).
 
 ## Open: fine pitch fan-out (Corne)
 
 Measured on 2026-10-30, none of these solved it: straight pin stubs (twice: worse on
-`fine_pitch_mixed`, arty, Lichtschnitzel), a larger router margin, extra gap outside the fine
+`fine_pitch_mixed`, arty, LED controller), a larger router margin, extra gap outside the fine
 pitch parts. A router margin of 0.06 mm brings Corne to 14 violations but only 392/482 routed:
 the violations are the price of the last connections through the pin rows. Original widths
 (0.2032 mm) did not change it either; the original design is clean under the same rules.
@@ -202,7 +202,7 @@ with kicad-cli 10.0.7 and test boards:
 - A shape on a mask layer is a bridge only with two nets in it. For the check it reaches as far as
   the board's margin beyond its edge, whatever the margin of its footprint; a pad without copper
   does not reach beyond its shape. A zone on a mask layer gave no bridge.
-- Vias are tented on Corne and Lichtschnitzel, so only their copper counts, like a track.
+- Vias are tented on Corne and LED controller, so only their copper counts, like a track.
 
 On Corne an opening is only that: pads with `pad_to_mask_clearance` 0.2 mm, seven footprints with a
 margin of their own (0.09 to 0.19 mm), no shapes on the mask layers. The clearance is 0.19 mm, so a
@@ -228,7 +228,7 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   nearly twice the shorts of main; 0.005 mm has the open connections of 0.01 with 78 spots. The
   search is too chaotic for more than that from five seeds. Bridges stay at 10 to 13 per run in
   all three.
-- Lichtschnitzel has a margin of 0: byte-identical (`50c4f3cfb765`).
+- LED controller has a margin of 0: byte-identical (`50c4f3cfb765`).
 - A synthetic board with shapes, text and a pad without copper in the way: 12 bridges before, 0
   after, all connected.
 
@@ -236,7 +236,7 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
 
 - Open end: `route --until-stop` (see ARCHITECTURE). Single runs on 2026-10-30, 150 s in all,
   against the order mutation it replaced, which re-routed the whole board for every mutant:
-  Lichtschnitzel seeds 24301, 1, 2 reach 219 to 224 vias against 272 and 293 of that mutation (DRC:
+  LED controller seeds 24301, 1, 2 reach 219 to 224 vias against 272 and 293 of that mutation (DRC:
   0 open, 3 to 10 clearance errors against 3). Arty 323/323 and 126 vias against 322/323 and 214.
   The original Arty has 147 vias, 3073 mm, tracks of 0.182 and 0.2 mm, and 217 mm on inner layers;
   we route it with 0.15 mm in 2884 mm on two layers. With the original widths as a hard rule: 321/323,
@@ -248,7 +248,7 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   322/323 in others. The box is a little larger than the letters.
 - Spots instead of pieces in the open end, 2026-10-30. Arty, 180 s with `--prefer-width 0.25`:
   323/323, 123 vias, 2952 mm, 73 % at 0.25 mm, KiCad DRC clean but for the 4 errors of the empty
-  board. Lichtschnitzel, 180 s: 348/348, 236 vias, 2591 mm, 1 spot, 2 DRC errors.
+  board. LED controller, 180 s: 348/348, 236 vias, 2591 mm, 1 spot, 2 DRC errors.
 - Corne with tracks on the middle of their fine pitch pads and solder mask openings as obstacles,
   `--geometry-generations 1`, 45 minutes, not converged: 477/482, 371 vias, 8106 mm, against 452
   vias and 8352 mm of the complete original. DRC: no clearance errors, shorts or crossings, the 4
@@ -263,7 +263,7 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   shorts, 1 edge error, the 4 mask bridges of the unrouted board, stopped at 90 minutes at level
   10 of 12. The original has 452 vias and 8352 mm. Arty `--geometry-generations 3 --prefer-width 0.25`:
   323/323, 106 vias, 2927 mm, 69 % at 0.25 mm, DRC clean but for the 4 errors of the empty board,
-  converged in 9 minutes. The original has 147 vias and 3073 mm. Lichtschnitzel
+  converged in 9 minutes. The original has 147 vias and 3073 mm. LED controller
   `--geometry-generations 3`: 348/348, 200 vias, 2523 mm, converged in 9 minutes, 2 clearance hits at
   one spot. The original has 294 vias and 2633 mm. Each also leaves results that differ in vias and
   length to choose from.
@@ -271,9 +271,9 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   0.25 mm preferred, no routing errors in the DRC in all three: without them 106 vias, 2927 mm; with
   them at 40 mm per via 71 vias, 3203 mm; at 20 mm per via 80 vias, 3083 mm. Same-net tracks next to
   each other went from 176 to 24 mm (measured on the 40 mm run), mostly plane fan-outs of GND.
-  Lichtschnitzel: 200 vias, 2523 mm; 122 vias, 2864 mm; 123 vias, 2848 mm, one spot in each. Single
+  LED controller: 200 vias, 2523 mm; 122 vias, 2864 mm; 123 vias, 2848 mm, one spot in each. Single
   runs. Fewer vias cost length: the results on offer reach 125 vias with 2945 mm on Arty and 236
-  vias with 2460 mm on Lichtschnitzel.
+  vias with 2460 mm on the LED controller.
 - KiCad's DRC stops at 199 or 499 hits per type, so those are limits and not results.
 - Idea to keep: a strict convergence, where every gain in vias or length starts the boldness over
   as well. Arty then still lost a via every few minutes after 18 minutes and never converged, but
@@ -298,10 +298,10 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   - Arty seed 1: 322, 137, 0 and 323, 117, 0 (one build before the last fixes). Seed 2: 322, 123,
     0 (150 s, all cores) and 323, 119, 0. KiCad: 0 unconnected instead of 1, the 4 hole clearance
     errors of the empty board stay.
-  - Lichtschnitzel seed 1: 348, 201, 1 and 348, 209, 2. Seed 2: 348, 191, 1 and 348, 176, 0, DRC
+  - LED controller seed 1: 348, 201, 1 and 348, 209, 2. Seed 2: 348, 191, 1 and 348, 176, 0, DRC
     clean instead of 10 errors.
   - Generations per second on Corne 0.25 to 0.41 instead of 0.42 to 0.46, because more mutants get
-    as far as the relaxation; Arty and Lichtschnitzel unchanged within the noise.
+    as far as the relaxation; Arty and LED controller unchanged within the noise.
   - Not proven, single seeds: the cheaper via (without it Corne seeds 1, 2: 482 and 480, with 433
     vias, against 479 and 481 with about 400 vias) and the chain of `clear_ways` (without it
     481 and 481). A run without the immediate side branch reached 480 on seed 2, but 846 s into
@@ -343,7 +343,7 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   2026-10-30 with `--runs 14 --generations 1 --negotiate 20`, KiCad DRC against the plain run:
   `fine_pitch_mixed` 0 open and 0 errors instead of 8 and 7, `four_signal_layers` 0 open instead
   of 4, `bga_dense` 8 instead of 12, Arty 2 open and 2 errors instead of 3 and 11, Corne 1 open
-  instead of 12 and 669 errors instead of 702 (own check 1269 instead of 2289). Lichtschnitzel
+  instead of 12 and 669 errors instead of 702 (own check 1269 instead of 2289). LED controller
   `--geometry-generations 3`: 348/348, 287 vias and DRC clean instead of 294 vias and 4 errors.
   The other synthetic boards stay clean. The run takes both searches, about twice as long. Open:
   ULX3S does not converge (the original also routes on In2): 160 open instead of 162, own check
@@ -357,7 +357,7 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   route) failed on 2026-10-30: at most 65% of the length stays near the old way, and vias grow
   from 278 to 755 at high weight. Done instead: `route --keep-all --nets ... --shove` imports the
   tracks into the topology (`gummiband-core::import`, see ARCHITECTURE), the new connection
-  threads in and relaxation pushes aside only what it touches. On the Lichtschnitzel follow-me
+  threads in and relaxation pushes aside only what it touches. On the LED controller follow-me
   test LED_D3 goes from 0/1 to 1/1 with 0 clearance errors, 18 tracks moved by at most 0.32 mm,
   the other copper unchanged in the file. 11 of 12 other nets, stripped and finished one by one,
   are clean as well. Open: in the tightest spots the relaxation can still pull a track over a
@@ -369,7 +369,7 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   switch them off). Give is a fallback: every circle is a try, and the try with the fewest open
   connections, then violations wins, the earlier one on a tie. A circle that takes in no new net
   is not routed again. Night series data (one net stripped and laid again on the main result of
-  seed 1, 2 threads): plain left LED_D0, LED_D3 and BUCK_EN open on Lichtschnitzel and UART_EN on
+  seed 1, 2 threads): plain left LED_D0, LED_D3 and BUCK_EN open on the LED controller and UART_EN on
   Arty, shove laid all 16 nets, near the old length, three to four times faster on Arty. Give
   alone within 3 mm completed three of the four but broke four connections around BUCK_EN; the
   new rule keeps the try before in such a case. With the new defaults all 16 nets give the same
@@ -384,7 +384,7 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   on Arty). Night series data (the 16 nets above, 30 generations of open end, 2 threads, KiCad
   DRC with zones refilled): today's open end, which keeps the other copper where it is, leaves
   LED_D0, LED_D3, BUCK_EN and UART_EN half open (12 of 16 complete); open ended with shove all 16
-  are complete, KiCad 0 unconnected everywhere, Lichtschnitzel 0 errors and Arty only the 66 the
+  are complete, KiCad 0 unconnected everywhere, LED controller 0 errors and Arty only the 66 the
   board brings along, the alternatives as well. Against finishing without the open end: 22
   instead of 25 vias on the nets laid, 596 instead of 576 mm (BTN_BOOT trades two vias for 22 mm,
   OUT1_DATA one for 4 mm, five nets get shorter), 218 instead of 189 tracks of other nets moved.
@@ -394,12 +394,12 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   shorts in three, which the own check could not see, as it reads the geometry. Now the place
   decides what is written again (`import::rest_in_place`), and an alternative gets its own list
   of what moved. With that, a resting track that the taper narrowed is written as well: VBUS_IN
-  at R61 on Lichtschnitzel kept KiCad's three errors of 1.5 µm in every finished file, also
+  at R61 on the LED controller kept KiCad's three errors of 1.5 µm in every finished file, also
   without the open end, now 0. The files of finishing without the open end change only there;
   Arty stays byte for byte.
 - Tapering at tight spots is on by default (2026-11-01, `improve::taper_spots`, `GB_TAPER=0`
   switches it off): a line or arc that misses its clearance by at most 50 µm gets narrower, never
-  below the minimum width of its class and never wider anywhere. Lichtschnitzel is the only bench
+  below the minimum width of its class and never wider anywhere. LED controller is the only bench
   board with minimum width rules (USB pair, input and output paths); seeds 1 to 4 on the main of
   that morning (before parts moved by default), own check: plain runs 10 instead of 20
   violations, the open end with 60 generations 0 instead of 10 (seed 3 had nothing to taper). The
@@ -419,7 +419,7 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   such a way gets as many vias as carry its current (`relax::stitch_vias`, `GB_STITCH=0` switches
   it off): in a row on the straight end of a track, or around the via with a piece of copper on
   each layer. The router counts those vias in the price of the layer change. Nets of a
-  differential pair are left out: their width is a matter of impedance. Lichtschnitzel, seeds 1
+  differential pair are left out: their width is a matter of impedance. LED controller, seeds 1
   to 4 plain and 1, 2, 4 with the open end (60 generations), the main before PR #45 against the
   same main with tapering and these changes, KiCad DRC with zones refilled: 2 errors instead of
   15, no unconnected item in either series. Main: the VBUS_P neck at U6 pad 10 in one run (10
@@ -443,9 +443,9 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   and 576 (clearance at KiCad's limit of 499, 15 shorts, 4 crossings, 32 hole clearances). The
   Corne figure comes from the negotiated search alone (`--negotiate 20`, `GB_NEG_ONLY=1`), which is
   the one the default keeps there. A search that completes the board does not negotiate: the ten
-  other synthetic boards, Arty and Lichtschnitzel seeds 1 to 4 give the same files byte for byte.
+  other synthetic boards, Arty and LED controller seeds 1 to 4 give the same files byte for byte.
   The first version negotiated as soon as the order generations left a connection open, before the
-  geometry generations, and took the negotiated generations from there; Lichtschnitzel seed 3 then
+  geometry generations, and took the negotiated generations from there; LED controller seed 3 then
   came out complete with 328 instead of 265 vias, because the geometry generations of the plain
   search find the last connection themselves. Open: ULX3S and other boards with more than 15 %
   open, an open ended run (the open end works on what is open), and Corne's clearance errors at its
@@ -455,9 +455,9 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   `GB_PLANE_HOLD=0` switches it off). `place_new_vias` moved such a via along its track past a
   sleeping track and out of the plane; the connection still counted as made through the plane, KiCad
   found it open and the via dangling. In 4 of 49 finished runs of the night series without the hold
-  that reported every connection, on Lichtschnitzel (J10 pad 2, `+5V_A`) and Arty (U2 pad 24,
+  that reported every connection, on the LED controller (J10 pad 2, `+5V_A`) and Arty (U2 pad 24,
   `/FTDI_3V3`), also with the settings of main. With the hold: 0 of 5; the cost after 20 minutes
-  against A without it, seed by seed: Lichtschnitzel +0.9 %; Arty +3.5 %, +3.1 %, +3.8 %; on Arty at
+  against A without it, seed by seed: LED controller +0.9 %; Arty +3.5 %, +3.1 %, +3.8 %; on Arty at
   the same generation of the open end (700): -0.8 %, +0.5 %, +4.3 %, so part of the price is speed
   (the runs reached 0.61 to 0.79 generations per second). Open: count a plane connection as made
   only when its via lies in the plane, checked in the judgement of every mutant and at the end of a
@@ -468,23 +468,23 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
   Combination A is on by default since then (`GB_BANDIT=0`, `GB_AIM_COST=0`, `GB_PRUNE=0` switch
   it off); the other switches stay off (`improve::Ideas`).
   - Combination A (`GB_BANDIT=1 GB_AIM_COST=0.25 GB_PRUNE=1`) against main, median over the seeds:
-    Lichtschnitzel -12 % (4 and 4 seeds), Arty -15 % (3 and 3); fewer vias, a little more length;
-    KiCad DRC clean in 5 of 7 runs against 3 of 7. Seed by seed: Lichtschnitzel -13.3 %, -11.5 %,
+    LED controller -12 % (4 and 4 seeds), Arty -15 % (3 and 3); fewer vias, a little more length;
+    KiCad DRC clean in 5 of 7 runs against 3 of 7. Seed by seed: LED controller -13.3 %, -11.5 %,
     -5.1 %, -13.8 %; Arty -9.7 %, -17.6 %, -15.5 %.
-  - A without geometry generations (`--geometry-generations 0`) against A: Lichtschnitzel -4.9 %,
+  - A without geometry generations (`--geometry-generations 0`) against A: LED controller -4.9 %,
     -6.1 %, -3.5 %; Arty -4.2 %, +3.3 %, +0.2 %; the open end starts at about 17 s instead of 42 s.
-  - B (A plus `GB_MERGE`, `GB_SPOT_FADE`, `GB_TAPER`) against A: Lichtschnitzel -1.7 %, -3.9 %; Arty
+  - B (A plus `GB_MERGE`, `GB_SPOT_FADE`, `GB_TAPER`) against A: LED controller -1.7 %, -3.9 %; Arty
     +1.0 %, -0.3 %.
-  - Single ideas against main, seed 1, `GB_VIA_PRICE`: Lichtschnitzel -7.5 %, Arty -2.5 %;
-    `GB_BANDIT`: Lichtschnitzel -7.9 %, Arty -6.3 %; `GB_AIM_COST=0.25`: Lichtschnitzel -8.7 %, Arty
-    +7.5 %; `GB_PRUNE`: Lichtschnitzel +2.9 %, Arty -1.5 %; `GB_MERGE`: Lichtschnitzel +1.5 %, Arty
-    +3.7 %; `GB_SPOT_FADE`: Lichtschnitzel -1.9 %; `GB_TAPER`: Lichtschnitzel 0.0 % (KiCad DRC clean
+  - Single ideas against main, seed 1, `GB_VIA_PRICE`: LED controller -7.5 %, Arty -2.5 %;
+    `GB_BANDIT`: LED controller -7.9 %, Arty -6.3 %; `GB_AIM_COST=0.25`: LED controller -8.7 %, Arty
+    +7.5 %; `GB_PRUNE`: LED controller +2.9 %, Arty -1.5 %; `GB_MERGE`: LED controller +1.5 %, Arty
+    +3.7 %; `GB_SPOT_FADE`: LED controller -1.9 %; `GB_TAPER`: LED controller 0.0 % (KiCad DRC clean
     against 3 errors: the spot at R61 is gone).
-  - `--via-cost 10` on main: Lichtschnitzel -6.5 %, -16.8 %; Arty +2.5 %, -11.6 %; on top of A:
-    Lichtschnitzel 0.0 %; Arty +5.4 %.
-  - 12 threads in one run (Lichtschnitzel, main, seed 1): cost 468.7 after 20 minutes with 1.6 times
+  - `--via-cost 10` on main: LED controller -6.5 %, -16.8 %; Arty +2.5 %, -11.6 %; on top of A:
+    LED controller 0.0 %; Arty +5.4 %.
+  - 12 threads in one run (LED controller, main, seed 1): cost 468.7 after 20 minutes with 1.6 times
     the generations of 4 threads; the best of three seeds with 4 threads: 454.0.
-  - Mutant trace of A (Lichtschnitzel, seed 1, `GB_MUTANT_LOG`): moves at random places bring 78 %
+  - Mutant trace of A (LED controller, seed 1, `GB_MUTANT_LOG`): moves at random places bring 78 %
     of the saved cost in 63 % of the time; moves at clearance spots mostly remove the flaw penalty;
     93 % of the saving is in after 10 minutes.
   - ULX3S, 40 minutes: main and A both 655/796, A with 305 instead of 370 vias. The open connections
@@ -497,16 +497,16 @@ Corne, `--geometry-generations 1`, default seed and seeds 1 to 4 (`main` is the 
     generation, since stale is not reset by a failed start: Arty, seed 1, level 1 at generation
     228 and 12 ("converged") at 274, on to 23; on a71bdaa Arty seed 2 went from 1 to 4 in four
     generations. Since 2026-11-02 the starts are not pruned (`GB_PRUNE_STARTS=1` prunes them
-    again). Cost after 45 minutes against pruned starts, on bcca477: Lichtschnitzel +1.7 %,
-    -0.8 %, +1.9 %, Arty -0.4 %, +0.9 %, +0.7 % (seeds 1 to 3); on a71bdaa: Lichtschnitzel the
+    again). Cost after 45 minutes against pruned starts, on bcca477: LED controller +1.7 %,
+    -0.8 %, +1.9 %, Arty -0.4 %, +0.9 %, +0.7 % (seeds 1 to 3); on a71bdaa: LED controller the
     same bytes on seeds 1 and 2, Arty the same on seed 1 and +0.9 % on seed 2. With an open
-    connection it helped once: Lichtschnitzel, open end alone with short branches
+    connection it helped once: LED controller, open end alone with short branches
     (`GB_BRANCH_AFTER=8 GB_BRANCH_LIFE=8`), seed 1, found the last connection after 4393 s
     through a side branch, without it not in 80 minutes.
   - Measured and not taken (bcca477): `--geometry-generations 0` before the open end,
-    Lichtschnitzel -9 %, -12 %, +7 %, +4 %, Arty +11 %, -1 %, +8 %, -1 % (seeds 1 to 4), Corne
+    LED controller -9 %, -12 %, +7 %, +4 %, Arty +11 %, -1 %, +8 %, -1 % (seeds 1 to 4), Corne
     480 instead of 481 of 482 (seed 1, 2 threads, 95 minutes); the share of aimed moves following
-    how often they came to a mutant (at least a fifth), Lichtschnitzel open end alone: the last
+    how often they came to a mutant (at least a fifth), LED controller open end alone: the last
     connection after 2553, 3564, 1011, 1689 s against 4181, 1890, 2789, 567 s, cost at the end
     higher on 3 of 4 seeds, Corne 479 instead of 481 of 482. A longer ladder while a connection is
     open (16 levels, the areas growing on beyond a quarter) gave the same boards, but the pruned
@@ -521,7 +521,7 @@ pins of a plane net that could share a via, and buses, and `route --patterns` tu
 into hints, all off by default. Measured on 2026-11-01 in the cloud on 4 cores, on main before
 PR #38 (no `--move-parts`), with Gummiband's own clearance check (no `kicad-cli` there): cost as
 in the open end, 2 per via, 0.05 per mm, 10000 per open connection. Detection on the boards:
-Lichtschnitzel 11 rows in 6 parts, 14 decaps, 8 groups that share a via; Arty 38 rows, 41 decaps,
+LED controller 11 rows in 6 parts, 14 decaps, 8 groups that share a via; Arty 38 rows, 41 decaps,
 16 groups; Corne 20 rows, 10 decaps, no planes; ULX3S a 20 x 20 grid at 0.8 mm with 379 pins;
 `bus` one kept bus of 16 nets, `crossing` one of 16 nets in reversed order.
 
@@ -529,13 +529,13 @@ Normal search (default settings, seeds 1 to 3), mean:
 
 | Board | none | `decaps` | `shares` | `shares,decaps` |
 | --- | --- | --- | --- | --- |
-| Lichtschnitzel | 288 vias, 2610 mm, 1.3 spots, cost 707 | 267 vias, 2524 mm, 2.0 spots, cost 660 | 289 vias, 2565 mm, 2.7 spots, cost 706 | 269 vias, 2562 mm, 3.0 spots, cost 667 |
+| LED controller | 288 vias, 2610 mm, 1.3 spots, cost 707 | 267 vias, 2524 mm, 2.0 spots, cost 660 | 289 vias, 2565 mm, 2.7 spots, cost 706 | 269 vias, 2562 mm, 3.0 spots, cost 667 |
 | Arty | 0.67 open, 181 vias, 2934 mm | 0.33 open, 185 vias, 3033 mm | 0.33 open, 256 vias, 3205 mm | 0.67 open, 228 vias, 3218 mm |
 | Corne (seed 1) | 6 open, 385 vias, 8190 mm, 82 spots | 6 open, 529 vias, 8538 mm, 119 spots | | |
 | `qfn_fanout` | 46 vias | 46 vias | 47 vias | 47 vias |
 | `bga_dense` | 10.7 open | same | same | same |
 
-- `decaps` is the only one that gains on Lichtschnitzel (-7 %), at a spot more; on Arty it is
+- `decaps` is the only one that gains on the LED controller (-7 %), at a spot more; on Arty it is
   even, on Corne much worse in the one seed measured. Not a default.
 - `shares` costs Arty 70 vias, mostly on signal nets near the bridged pins: it is the bridges
   between neighbouring pins of one part (`GB_SHARE_KIND=neighbours`: 251, 247, 245 vias), not the
@@ -546,13 +546,13 @@ Normal search (default settings, seeds 1 to 3), mean:
 - Pockets were left out: the via in a pad experiments above show that the empty board does not
   show them.
 
-Open end with and without `rows` (`--until-stop`, `GB_OPEN_GENERATIONS` 300 on Lichtschnitzel, 150
+Open end with and without `rows` (`--until-stop`, `GB_OPEN_GENERATIONS` 300 on the LED controller, 150
 on Corne with `--geometry-generations 1`), same work per run:
 
 | Board, seed | none | `rows` |
 | --- | --- | --- |
-| Lichtschnitzel, 1 | 166 vias, 3089 mm, 1 spot, cost 486.5 | 160 vias, 3067 mm, 1 spot, cost 473.4 |
-| Lichtschnitzel, 2 | 177 vias, 2976 mm, 1 spot, cost 502.8 | 177 vias, 2932 mm, 1 spot, cost 500.6 |
+| LED controller, 1 | 166 vias, 3089 mm, 1 spot, cost 486.5 | 160 vias, 3067 mm, 1 spot, cost 473.4 |
+| LED controller, 2 | 177 vias, 2976 mm, 1 spot, cost 502.8 | 177 vias, 2932 mm, 1 spot, cost 500.6 |
 | Corne, 1 | 481/482, 365 vias, 8590 mm, 4 spots | 482/482, 347 vias, 8704 mm, 5 spots |
 
 A small gain on every run, Corne complete; three runs are not proof, the search is chaotic. Next:
@@ -642,13 +642,13 @@ KiCad DRC on the Mac, seeds 1 to 3, means (2026-11-02, 210 runs):
 | matching | 28.0 vias, 2.7 errors | 5.3 vias, 11.0 length and skew errors | same | |
 | pair_traffic | 2.0 vias, 581 mm, 4.0 mm uncoupled | | | 6.7 vias, 503 mm, 2.2 mm uncoupled |
 | diff_pairs | 1.7 errors, 43 mm uncoupled | | | 5.3 errors, 21 mm uncoupled |
-| Lichtschnitzel | 0 clearance | 0.3 clearance | 5.3 clearance | 0 clearance, 61 % coupled (42) |
+| LED controller | 0 clearance | 0.3 clearance | 5.3 clearance | 0 clearance, 61 % coupled (42) |
 | Arty | 161.3 vias | 165.0 vias | 175.3 vias | 159.7 vias; `pairs,groups` 141.0 |
 | DDR5 | 23.3 errors | 20.7 errors | 19.0 errors, 145 vias (125) | 24.3 errors |
 | Corne (seed 1) | 181 errors | 171 errors | | `pairs,groups` 323 errors |
 
 - `groups long` is the best order on boards with several chips: fewer vias, a few percent more
-  length. `short` hurts Lichtschnitzel, `inline` is the weakest overall. The small boards stay
+  length. `short` hurts LED controller, `inline` is the weakest overall. The small boards stay
   neutral (plus or minus one via).
 - `pairs` shortens and couples the pairs better, but costs vias and DRC errors on diff_pairs.
 - No hint wins everywhere, so both stay opt-in.
@@ -694,7 +694,7 @@ no DRC (cloud):
   at their IC; a capacitor between a ground and a supply (a plane, a power class, or a net with 8
   or more pads) now stays, and so does any capacitor with a pad on a ground or supply.
 
-Lichtschnitzel (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-02):
+LED controller (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-02):
 
 | Variant | Vias | mm | Clearance errors |
 | --- | --- | --- | --- |
@@ -707,7 +707,7 @@ Lichtschnitzel (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
 
 - D is the cleanest: no clearance error and no short in 9 runs, 12 % shorter than A. It is a new
   placement though (only connectors and mechanics stay), the power stages sit elsewhere.
-- With the placement fixed the hints do not help on Lichtschnitzel.
+- With the placement fixed the hints do not help on the LED controller.
 - B moved the power stage U5 21 mm: its place next to its neighbours is tighter than the gap and
   halo of the placement, so the legalisation found no room for it at home. More gap and halo made
   it worse; `--air` 0.03 or 0.05 removed only the smallest deficits.
@@ -727,7 +727,7 @@ Lichtschnitzel (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
 - Opt-in: `--features gpu` at build time and `GB_GPU=1` at run time, Metal through wgpu. Without
   them nothing changes, the default run stays byte-identical. Sleeping copper and vias of one layer
   stay on the CPU.
-- Share of the relaxation in the work (core seconds, 4 threads, 2026-10-30): Lichtschnitzel 31 %,
+- Share of the relaxation in the work (core seconds, 4 threads, 2026-10-30): LED controller 31 %,
   with `--geometry-generations 3 --move-parts` 63 %, Arty 43 %. Corne, ULX3S and bga_dense 1 to 5 %
   (measured before the counters of PR #8 were removed, which only lowers these). On the hard
   boards topological A* decides the run time, and it does not fit a shader.
@@ -735,13 +735,13 @@ Lichtschnitzel (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
   runs ten rounds at a time, from one resampling to the next, and the vias take one step of ten
   times the size per batch. In one round per way the GPU only reaches the speed of 4 CPU cores.
 - With everything on the GPU more violations stay. So the last quarter (clearances only) stays on
-  the CPU. One relaxation of Lichtschnitzel on 4 threads: 0.73 instead of 1.8 core seconds, 0.40
+  the CPU. One relaxation of the LED controller on 4 threads: 0.73 instead of 1.8 core seconds, 0.40
   instead of 0.66 s, with more violations on average.
-- Lichtschnitzel `--geometry-generations 3 --move-parts`, seeds 1 to 4, 4 threads: 996 core
+- LED controller `--geometry-generations 3 --move-parts`, seeds 1 to 4, 4 threads: 996 core
   seconds on the CPU, 593 with the GPU, all 348/348; violations 15, 4, 0, 2 against 5, 0, 0, 11.
 - The same on all 14 cores, alone on the machine: 110 s on the CPU, 71 s with the GPU (1175 and 669
   core seconds), same violations. One relaxation: 0.52 s against 0.38 s, six in parallel 1.17 s
-  against 0.57 s, with 15 % more violations on Lichtschnitzel and 0.4 % more length. Default run
+  against 0.57 s, with 15 % more violations on the LED controller and 0.4 % more length. Default run
   7.3 s against 6.0 s. The search takes different paths, so the seeds do not compare one to one.
   On the CPU the serial piece grids take 0.49 ms of a round of about 1 ms: the next cheap gain.
 - Atomic counters that all threads touch per point made the relaxation three times slower
@@ -752,7 +752,7 @@ Lichtschnitzel (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
   driver can give another result: this path breaks the rule that results do not depend on the
   machine, which is why it stays opt-in.
 - Tried and dropped, 2026-10-30: taking the best of several slightly different relaxations
-  (margins 1e-7 mm apart). Eight tries of the polish step: Lichtschnitzel seeds 15, 4, 0, 2 become
+  (margins 1e-7 mm apart). Eight tries of the polish step: LED controller seeds 15, 4, 0, 2 become
   12, 4, 0, 2. Eight tries of the full relaxation per finalist: 9, 4, 0, 9 at up to four times the
   core seconds, and fine_pitch_mixed gets worse (25 instead of 19). The violations that remain are
   mostly real bottlenecks, more relaxation does not remove them. They need another topology.

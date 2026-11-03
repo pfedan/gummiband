@@ -223,7 +223,7 @@ pub enum Shape {
     Circle { d: f64 },
 }
 
-/// The fixed mechanical parts of the Lichtschnitzel controller.
+/// The fixed mechanical parts of the LED controller.
 pub struct FixedSet {
     pub usb: usize,
     pub module: usize,

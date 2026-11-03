@@ -209,7 +209,7 @@ Expect tracks about 4 to 5 % longer and a few percent of the length left off the
 boards (see [benchmarks](benchmarks.md#conventional-45-degree-tracks)). The step takes a second
 or less.
 
-![A part of the Lichtschnitzel controller before and after --angles 45](img/angles45-before-after.png)
+![A part of the LED controller before and after --angles 45](img/angles45-before-after.png)
 
 ## Length matching
 

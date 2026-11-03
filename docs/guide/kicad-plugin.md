@@ -164,7 +164,7 @@ any-angle routing and decided the reviewer wants 45 degrees after all:
 4. Everything arrives as one undo step, and a message gives the removed and created items and
    the length before and after.
 
-![A part of the Lichtschnitzel controller before and after the 45 degree step](img/angles45-before-after.png)
+![A part of the LED controller before and after the 45 degree step](img/angles45-before-after.png)
 
 This is the plugin's form of `gummiband angles45`. The same step can run at the end of routing
 with *45 degree tracks* under *Advanced*; see
@@ -191,7 +191,7 @@ escape per side* (`--escape-halo`), *Leash for ICs and connectors* (`--leash`, m
 *Largest part for the back* (`--back-max-pads`, 8 pads).
 ![Two of the strategy options: a band kept free for a bus, and room per side for the escaping tracks](img/placement-terms.svg)
 
-The first three together gave the cleanest placements of the Lichtschnitzel controller; the
+The first three together gave the cleanest placements of the LED controller; the
 tooltips say what each does, and [Choosing the opt-in options](options.md) compares them. The
 *Advanced* tab has *Release* (parts that may move although they count as mechanical),
 *Distance to the outline* (0.5 mm), *Annealing moves per run* (3,000,000), *Worker threads* and

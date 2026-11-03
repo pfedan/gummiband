@@ -27,7 +27,7 @@ about an option.
 | FPGA or BGA board with differential pairs and buses (Arty) | `--patterns pairs,groups` | `shares` |
 | DDR memory fan-out | `--patterns groups-short`; `--pairs --via-pairs` for the strobes and clocks | `--breakouts` |
 | Fine pitch keyboard style board, no planes (Corne) | nothing; `rows` in the open end | `decaps`, `pairs,groups` |
-| Fixed placement that already routes cleanly (Lichtschnitzel controller) | nothing, or `decaps`; spend the time on seeds and the open end | `groups`, `pairs,groups`, `--clear-corridors` |
+| Fixed placement that already routes cleanly (LED controller) | nothing, or `decaps`; spend the time on seeds and the open end | `groups`, `pairs,groups`, `--clear-corridors` |
 | Placement from scratch | `place --semantic --corridors --escape-halo`, several placement seeds, then route without hints | `--starts` above 1 instead of seeds |
 | Parts that do not fit on one side | `place --two-sided`; `--back-max-pads` or `--on-back` when the ICs that keep the front are the problem | `--back-cost 0` unless the back is meant to be full |
 | Differential pairs that must couple, board not dense | `--pair-pull 1`; `--pairs` if the pairs have their own rule or class | `--pairs` on dense boards |
@@ -40,11 +40,11 @@ they existed.
 
 | Hint | What it does | Helped | Hurt |
 | --- | --- | --- | --- |
-| `groups` (= `groups-long`) | The connections between two parts with 4 or more pins that share at least 2 nets (a bus, SPI, I2C, a connector) are routed as one block in pin order, so they do not cross each other; the longest block goes first. | Boards with several chips: parts_hard 56 to 49 vias, parts_multi_feed 127 to 98, crossing 26 to 15. | A board whose placement is fixed and already clean (Lichtschnitzel: 0 to 0.3 clearance errors); a few percent more length. |
-| `groups-short` | As `groups`, the shortest block first. | DDR5 (fewest DRC errors of all orders). | Most other boards: Lichtschnitzel 5 clearance errors, parts_multi 84 instead of 59 vias. |
+| `groups` (= `groups-long`) | The connections between two parts with 4 or more pins that share at least 2 nets (a bus, SPI, I2C, a connector) are routed as one block in pin order, so they do not cross each other; the longest block goes first. | Boards with several chips: parts_hard 56 to 49 vias, parts_multi_feed 127 to 98, crossing 26 to 15. | A board whose placement is fixed and already clean (LED controller: 0 to 0.3 clearance errors); a few percent more length. |
+| `groups-short` | As `groups`, the shortest block first. | DDR5 (fewest DRC errors of all orders). | Most other boards: LED controller 5 clearance errors, parts_multi 84 instead of 59 vias. |
 | `groups-inline` | Members of a block together, but each block at the place of its connections in the normal order. | Weakest order overall; for experiments. | |
 | `pairs` | Differential pairs first, the longest first, both nets next to each other. | Shorter, better coupled pairs (pair_traffic 581 to 503 mm, uncoupled 4.0 to 2.2 mm); with `groups` the best result on Arty (161 to 141 vias). | Costs vias and DRC errors when the pairs are the minority (diff_pairs). |
-| `decaps` | A decoupling capacitor is connected to its IC pin first; the via serves both. | Lichtschnitzel about 7 % lower cost. | Corne much worse; Arty even. |
+| `decaps` | A decoupling capacitor is connected to its IC pin first; the via serves both. | LED controller about 7 % lower cost. | Corne much worse; Arty even. |
 | `rows` | The open end lays the connections of a pin row again in pin order. Acts only with `--until-stop`. | Small gain on every run measured, Corne complete. | Three runs are no proof yet. |
 | `shares` | Pins of a plane net next to each other reach the plane through one via. | Rarely: the router shares close vias anyway. | Arty 70 vias more. |
 
@@ -60,7 +60,7 @@ they existed.
 | MCP `track_corridors` | Lists the track groups, their bands and the parts in the way, and moves nothing. | An agent that wants to decide part by part: move some of the listed parts with `place_parts` (`only`, `corridors: true`, `leash: 1.5`) and leave the rest. |
 | `place --corridors` | The annealer keeps a band free for every track group; parts in it pay. | Placement from scratch on a board with buses: fewer vias. |
 | `place --escape-halo` | Each side of a part with 5 or more pads gets room for the tracks that leave it, instead of the same halo all round. | Placement from scratch: no more missed connections at tightly packed ICs, about 15 % more length. |
-| `place --semantic` | Uses the schematic: sheets and IC clusters stay together, inductors at their converter, decaps at an IC of their sheet. | Placement from scratch of a board with power stages: the cleanest results on Lichtschnitzel together with the two options above. |
+| `place --semantic` | Uses the schematic: sheets and IC clusters stay together, inductors at their converter, decaps at an IC of their sheet. | Placement from scratch of a board with power stages: the cleanest results on the LED controller together with the two options above. |
 | `place --leash MM` | Parts with 4 or more pads stay within MM of where they sit. | A local change instead of a new placement, typically with `--only`. |
 
 What `--clear-corridors` did on the tightest synthetic board, together with `--patterns groups`:
@@ -70,7 +70,7 @@ What `--clear-corridors` did on the tightest synthetic board, together with `--p
 And what `--semantic` does to a placement from scratch: the parts of a sheet stay together, the
 inductors at their converter, so the supply paths get short.
 
-![Four placements of the Lichtschnitzel controller, seeds 1 and 4, without and with --semantic](img/semantic-placement.png)
+![Four placements of the LED controller, seeds 1 and 4, without and with --semantic](img/semantic-placement.png)
 
 ## One side or two
 

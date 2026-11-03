@@ -2011,7 +2011,7 @@ mod tests {
 
     #[test]
     fn power_copper_leaves_an_efuse_strip_off_its_end() {
-        // the shunt sits left of the eFuse, a little below its middle (lichtschnitzel R110/U6):
+        // the shunt sits left of the eFuse, a little below its middle (ledctl R110/U6):
         // the straight way into the IN strip runs through the pin row, so one convex pour has no
         // room; the pour leaves the strip off an end, between the corner pins
         let kb = board(&[

@@ -2,14 +2,14 @@
 
 This page shows what Gummiband does, one picture per feature, and points to the chapter that
 explains how to use it. The result images come from the boards of the
-[benchmarks](benchmarks.md): the Lichtschnitzel LED controller (a real four layer board), the
+[benchmarks](benchmarks.md): an LED controller (a real four layer board), the
 synthetic test boards and a DDR5 testbed. The drawings explain a principle and are not to scale.
 
 Top layer copper is red, bottom layer copper is blue in all pictures.
 
-![The Lichtschnitzel controller routed by Gummiband: any-angle tracks with arcs on both outer layers](img/routed-lichtschnitzel.png)
+![The LED controller routed by Gummiband: any-angle tracks with arcs on both outer layers](img/routed-ledctl.png)
 
-*The Lichtschnitzel controller as Gummiband routes it: every connection made, tracks with any
+*The LED controller as Gummiband routes it: every connection made, tracks with any
 angle and real arcs. The inner layers are planes and not shown.*
 
 ## Rubber band routing
@@ -59,7 +59,7 @@ button for a finished board) turns the result into straight legs in eight direct
 chamfered corners. Vias and track ends stay where they are, and no new clearance violation is
 allowed.
 
-![A part of the Lichtschnitzel controller before and after --angles 45](img/angles45-before-after.png)
+![A part of the LED controller before and after --angles 45](img/angles45-before-after.png)
 
 See [Conventional 45 degree tracks](concepts.md#conventional-45-degree-tracks).
 
@@ -110,7 +110,7 @@ locked. Opt-in terms use the schematic (`--semantic`), keep bands free for buses
 (`--corridors`), give each side of an IC the room its tracks need (`--escape-halo`) and place on
 both sides (`--two-sided`).
 
-![Four placements of the Lichtschnitzel controller, seeds 1 and 4, without and with --semantic: the input chain and the switch nodes get much shorter](img/semantic-placement.png)
+![Four placements of the LED controller, seeds 1 and 4, without and with --semantic: the input chain and the switch nodes get much shorter](img/semantic-placement.png)
 
 ![A two sided placement of a module carrier: 63 parts on the front, 106 on the back](img/two-sided-som.png)
 
@@ -134,7 +134,7 @@ See [Finish a partly routed board](workflows.md#finish-a-partly-routed-board-exp
 
 ## Good practice for power and signals (MCP)
 
-![Buck converter A of the Lichtschnitzel controller, routed without and with power_copper](img/power-copper-buck.png)
+![Buck converter A of the LED controller, routed without and with power_copper](img/power-copper-buck.png)
 
 ![A signal track over its reference plane: a gap at a slot and a split between two zones](img/reference-check.svg)
 
