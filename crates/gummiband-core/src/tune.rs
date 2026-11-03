@@ -1355,6 +1355,45 @@ mod tests {
     }
 
     #[test]
+    fn skew_need_is_what_the_short_nets_lack_beyond_the_tolerance() {
+        let (mut b, mut geo) = board(["A", "B"], 4.0);
+        // B runs 4 mm further than A (26 instead of 22 mm)
+        let t = &mut geo.tracks[1];
+        let y = t.pts[0].y;
+        t.elems = vec![
+            Elem::Line(pt(4.0, y), pt(26.0, y)),
+            Elem::Line(pt(26.0, y), pt(26.0, y + 2.0)),
+            Elem::Line(pt(26.0, y + 2.0), pt(24.0, y + 2.0)),
+        ];
+        t.pts = flatten(&t.elems);
+        assert_eq!(crate::skew_need(&b, &geo), 0.0, "no rules, no need");
+        length_rule(&mut b, vec![0, 1], 0.0, 1.0);
+        assert_eq!(crate::skew_need(&b, &geo), 0.0, "length rules do not count");
+        let skew = |b: &mut Board, within_pairs: bool| {
+            b.match_rules.push(MatchRule {
+                name: "skew".into(),
+                kind: MatchKind::Skew,
+                value: MinOptMax {
+                    min: None,
+                    opt: None,
+                    max: Some(1.0),
+                },
+                within_pairs,
+                nets: vec![0, 1],
+            })
+        };
+        skew(&mut b, true);
+        assert_eq!(crate::skew_need(&b, &geo), 0.0, "skew within pairs does not count");
+        skew(&mut b, false);
+        // A lacks 4 mm, 1 mm of that is allowed
+        assert!(
+            (crate::skew_need(&b, &geo) - 3.0).abs() < 1e-9,
+            "{}",
+            crate::skew_need(&b, &geo)
+        );
+    }
+
+    #[test]
     fn a_net_gets_into_its_length_window_with_clean_meanders() {
         for style in [Style::Round, Style::Chamfer] {
             let (mut b, mut geo) = board(["A", "B"], 4.0);

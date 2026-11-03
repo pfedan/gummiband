@@ -2530,6 +2530,7 @@ pub fn route_pairs(
     res.stats.routed = res.stats.conns - unrouted.len();
     res.stats.unrouted = unrouted;
     res.stats.vias = geo.vias.len();
+    res.stats.skew_need = crate::skew_need(&real, &geo);
     res.stats.length = geo
         .tracks
         .iter()
