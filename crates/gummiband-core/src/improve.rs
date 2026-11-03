@@ -1116,7 +1116,8 @@ fn roomier(board: &Board, air: f64) -> Board {
     b
 }
 
-fn measure_length(c: &mut Candidate) {
+fn measure_length(board: &Board, c: &mut Candidate) {
+    c.stats.skew_need = crate::skew_need(board, &c.geo);
     c.stats.length = c
         .geo
         .tracks
@@ -1131,7 +1132,7 @@ fn relax_all(board: &Board, sub: &Substrate, c: &mut Candidate, cfg: &relax::Rel
     c.geo.tracks.iter_mut().for_each(|t| t.resting = t.origin.is_some());
     c.geo.vias.iter_mut().for_each(|v| v.resting = v.origin.is_some());
     relax::relax(board, sub, &mut c.geo, cfg);
-    measure_length(c);
+    measure_length(board, c);
     judge(board, c);
 }
 
@@ -1157,7 +1158,7 @@ fn settle(board: &Board, sub: &Substrate, c: &mut Candidate, best: &Candidate, c
             .iter_mut()
             .for_each(|v| v.resting = v.origin.is_some() || !bad.contains(&v.net));
         relax::relax(board, sub, &mut c.geo, &cfg);
-        measure_length(c);
+        measure_length(board, c);
         judge(board, c);
     }
 }
@@ -1198,7 +1199,7 @@ fn clean_spots(board: &Board, sub: &Substrate, best: &Candidate, log: bool) -> O
             .iter_mut()
             .for_each(|v| v.resting = v.origin.is_some() || !bad.contains(&v.net));
         relax::relax(board, sub, &mut c.geo, &cfg);
-        measure_length(&mut c);
+        measure_length(board, &mut c);
         judge(board, &mut c);
         if log {
             eprintln!(
