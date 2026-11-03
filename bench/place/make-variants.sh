@@ -1,20 +1,20 @@
 #!/bin/sh
-# Generate the placement variants of the Lichtschnitzel controller from the prepared benchmark
-# board (bench/prepare-lichtschnitzel.sh) into bench/place/<variant>/, one after another.
+# Generate the placement variants of the LED controller from the prepared benchmark
+# board (bench/prepare-ledctl.sh) into bench/place/<variant>/, one after another.
 set -eu
 export PATH=/opt/homebrew/opt/rustup/bin:$PATH
 export RAYON_NUM_THREADS=${RAYON_NUM_THREADS:-4}
 HERE=$(cd "$(dirname "$0")" && pwd)
-IN="$HERE/../work/lichtschnitzel/lichtschnitzel.kicad_pcb"
+IN="$HERE/../work/ledctl/ledctl.kicad_pcb"
 (cd "$HERE/../.." && cargo build --release -q -p gummiband-place)
 BIN="$HERE/../../target/release/gummiband-place"
 make() { # name args...
     name=$1
     shift
     mkdir -p "$HERE/$name"
-    "$BIN" "$IN" -o "$HERE/$name/lichtschnitzel.kicad_pcb" "$@" > "$HERE/$name/place.log" 2>&1 \
+    "$BIN" "$IN" -o "$HERE/$name/ledctl.kicad_pcb" "$@" > "$HERE/$name/place.log" 2>&1 \
         || { echo "$name failed:"; tail -3 "$HERE/$name/place.log"; return 0; }
-    (cd "$HERE/$name" && kicad-cli pcb drc --refill-zones --format json -o drc-placed.json lichtschnitzel.kicad_pcb >/dev/null)
+    (cd "$HERE/$name" && kicad-cli pcb drc --refill-zones --format json -o drc-placed.json ledctl.kicad_pcb >/dev/null)
     python3 - "$name" "$HERE/$name/drc-placed.json" <<'PY'
 import json, collections, sys
 d = json.load(open(sys.argv[2]))

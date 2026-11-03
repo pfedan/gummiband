@@ -7,10 +7,14 @@ examples below assume it is on your `PATH`.
 ```text
 gummiband [--threads N] [--plane-layers L1,L2] <command>
 
-Commands:
-  info   Print a summary of a board
-  route  Route a board and write the result
-  strip  Remove tracks, vias and outer copper zones (benchmark preparation)
+Commands (shortened):
+  info       Print a summary of a board
+  route      Route a board and write the result
+  place      Place parts from the netlist
+  angles45   Turn the unlocked tracks of a routed board into 45 degree tracks
+  move-part  Move a part on a routed board and let the tracks around it follow
+  lengths    Measure a routed board as KiCad's DRC does
+  strip      Remove tracks, vias and outer copper zones (benchmark preparation)
 ```
 
 `gummiband <command> --help` prints the options of a command.
@@ -76,8 +80,8 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | --- | --- | --- |
 | `--runs N` | 14 | Portfolio size: routing attempts with different connection orders (and via costs) in every phase, spread over the worker threads. A constant by design, so results do not depend on the machine. |
 | `--generations N` | 3 | Rounds of the evolutionary order search after the portfolio. Each round mutates the best order (failed connections move forward, a few random moves) and tries `--runs` mutants. 0 means portfolio only. The search stops early when everything is routed. |
-| `--geometry-generations N` | 3 | Rounds that are judged after the tracks were drawn, by the clearance check. Each round draws and checks every candidate, so 3 rounds take about 2 to 3 times as long as 0, and leave far fewer violations (Arty 32 to 1, ULX3S 54 to 4, Lichtschnitzel 18 to 4). 0 is the quick draft. The plugin and the MCP server use 3 as well. |
-| `--seed N` | `GB_EVO_SEED`, then fixed | Seed of the search. The same board, options and seed give the same result; another seed gives another attempt, often with a quite different violation count (Arty 32 or 1, Lichtschnitzel 18 or 14 at `--geometry-generations 0`). |
+| `--geometry-generations N` | 3 | Rounds that are judged after the tracks were drawn, by the clearance check. Each round draws and checks every candidate, so 3 rounds take about 2 to 3 times as long as 0, and leave far fewer violations (Arty 32 to 1, ULX3S 54 to 4, LED controller 18 to 4). 0 is the quick draft. The plugin and the MCP server use 3 as well. |
+| `--seed N` | `GB_EVO_SEED`, then fixed | Seed of the search. The same board, options and seed give the same result; another seed gives another attempt, often with a quite different violation count (Arty 32 or 1, LED controller 18 or 14 at `--geometry-generations 0`). |
 | `--negotiate N` | 0 (when needed) | Negotiated routing: connections may overfill channels and cross for a price that rises from round to round, until they have settled who goes where. Finds the last connections on dense boards, where the order alone does not. Without the option the search takes it up on its own: when the plain search leaves a few connections open (at most 15 %), a second one negotiates with 20 rounds and the better result counts, so such a board takes the time of both; `GB_AUTO_NEGOTIATE=0` switches that off. With N a negotiated search runs from the start, next to a plain one, and the better result counts, so a run takes about twice as long. 16 to 20 rounds work well; fewer leave conflicts that cost connections. |
 | `--until-stop` | off | Keeps improving the result after the search until a line arrives on stdin or stdin closes, then finishes the best result. A generation takes a few connections around one spot out (a violation, or a connection with vias or a long way) and lays them again, everything else stays; the longer nothing helps, the more it takes out, and side branches try bolder changes that may first make the result worse. It never gives up a connection, and it counts a problem as one spot, however many pieces of track it touches. Results that are as complete and clean but differ in vias and length are written next to the output as `.alt1.kicad_pcb`, `.alt2.kicad_pcb`, each with an `alternative:` line in the summary. The same seed stopped at the same generation gives the same result. Finishing nets (`--keep-all --nets`), the tracks of other nets shift aside and give way as without it (see `--shove` and `--give`), and the open end goes on from the try kept. Other limits: no placement rounds with `--move-parts`, no plain search next to `--negotiate`, and it does not go with `--pairs`. |
 | `--air MM` | 0, with `--until-stop` 0.03 | Reserve on top of the clearances that the finished copper gets where there is room. A rubber band lies right at the limit, this pushes it off and evens out the gaps in tight bundles. The result stays only if it brings no new violations. Finishing nets (`--keep-all --nets`) it stays 0 with `--until-stop` too, as it would move the tracks of other nets that the new ones do not touch (on Arty 270 of them); give it explicitly to have it there. |
@@ -87,7 +91,7 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | `--via-pitch MM` | 0.5 | Grid pitch of the candidate via positions. Finer grids allow more via places and cost memory and time. |
 | `--via-cost MM` | 3.0 | Cost of a via in millimetres of track. Lower gives more vias and shorter tracks; the search varies the value around what you give. |
 | `--pair-pull W` | 0 (off) | Experimental. Differential pairs are recognised by net name as KiCad pairs them (`_P`/`_N`, `DP`/`DN`, `+`/`-`). With a weight above 0 the first net of a pair is routed normally and the second gets a cost bonus for staying next to its way on the same layer; afterwards the tracks close up to the pair's gap (width and gap from the class) wherever they run within 1.5 mm of each other and the move keeps all clearances. The output then reports how much of the pair length runs coupled (same layer, at most 1 mm apart). Limits: breakouts to the pins and places with copper between stay apart, there is no impedance control and no length matching, and on small boards the pull can cost many clearance violations. Try 1 on boards with real pairs and compare the DRC. |
-| `--pairs` | off | Experimental. Route each differential pair as one wide track and split it into two parallel tracks. A pair is coupled only if a `diff_pair_gap` rule or a net class of its own (not `Default`) marks it as one; a `MOTOR_P`/`MOTOR_N` in the default class without such a rule stays two nets (`--pair-all` couples it anyway). Width and gap come from `diff_pair_gap` and `track_width` rules in the `.kicad_dru` (also per `(layer inner)` or `(layer outer)`), then from the net class. Output and `--report` list every pair. Keeps pairs together, but costs connections on dense boards and can leave clearance errors and shorts next to pads and vias (seen on Lichtschnitzel at J1, on Jetson 81 instead of 51 open connections): always check the result with the KiCad DRC. |
+| `--pairs` | off | Experimental. Route each differential pair as one wide track and split it into two parallel tracks. A pair is coupled only if a `diff_pair_gap` rule or a net class of its own (not `Default`) marks it as one; a `MOTOR_P`/`MOTOR_N` in the default class without such a rule stays two nets (`--pair-all` couples it anyway). Width and gap come from `diff_pair_gap` and `track_width` rules in the `.kicad_dru` (also per `(layer inner)` or `(layer outer)`), then from the net class. Output and `--report` list every pair. Keeps pairs together, but costs connections on dense boards and can leave clearance errors and shorts next to pads and vias (seen on the LED controller at J1, on Jetson 81 instead of 51 open connections): always check the result with the KiCad DRC. |
 | `--pair-all` | off | With `--pairs`: couple every pair recognised by name, also without a pair rule or net class. |
 | `--via-pairs` | off | Experimental, with `--pairs`: two vias side by side are one via pair, a capsule that turns with the wide track in the relaxation, instead of the circle around both that leaves room for vias in line as well. A 0.2 mm track of another net may pass the middle of its long side at 0.5 instead of 0.95 mm (0.6 mm vias, 0.3 mm via gap, 0.1 mm clearance). On DDR5 over 4 seeds 185 instead of 206 KiCad errors. |
 | `--breakouts` | off | Experimental, with `--pairs`: end the wide track at a point just outside the pads, with two short single tracks into them and the room for them kept free of other nets. Helps at connector rows (`diff_pairs`, `matching`), but on DDR5 it is still worse than without (more pair gap errors and length errors over 6 seeds). Ends between the pads of a part (BGA) stay at their pads. |
@@ -128,6 +132,8 @@ when the progress reports `converged`.
 | `--frames DIR` | One SVG (and PNG, if `rsvg-convert` is available) of the best candidate per generation into `DIR`, and `DIR/evolution.gif` if ImageMagick's `magick` is available. |
 
 ### Reading the console output
+
+![The phases of a run as the console and the progress window report them](img/search-pipeline.svg)
 
 ```text
 substrate: 1012 vertices, 2012 triangles, 2402 via sites
@@ -238,7 +244,7 @@ gummiband route placed.kicad_pcb -o routed.kicad_pcb
 | `--fixed U1,U2` | | these stay in any case |
 | `--free TP1` | | move these on top of the above (a test point, a button) |
 | `--seed N` | 1 | another seed gives another set of starts, none shared with a neighbouring seed |
-| `--starts N` | 1 | independent runs in parallel, the one with the fewest crossings is kept. The crossings hardly predict the routed result (correlation about 0 over 12 seeds on Lichtschnitzel), so for another attempt change `--seed`, or let `route --placements N` route several placements |
+| `--starts N` | 1 | independent runs in parallel, the one with the fewest crossings is kept. The crossings hardly predict the routed result (correlation about 0 over 12 seeds on the LED controller), so for another attempt change `--seed`, or let `route --placements N` route several placements |
 | `--iters N` | 3000000 | annealing moves per run |
 | `--gap MM` | 0.3 | spacing between courtyards |
 | `--margin MM` | 0.5 | distance of the courtyards from the outline |
@@ -325,7 +331,7 @@ vias of a BGA fan-out under parts on the back. The console prints the free room 
 many parts went to the back.
 
 The console lists the inductors and groups. Connectors and power stages that matter still belong
-in `--fixed`. On the Lichtschnitzel controller (only connectors fixed, four seeds) the routed
+in `--fixed`. On the LED controller (only connectors fixed, four seeds) the routed
 VBUS_F came out at 18 to 26 mm instead of 58 to 78 mm and every inductor sat 3.2 mm from its switch
 pins, at about the same via count and track length.
 
@@ -418,7 +424,7 @@ with default net classes.
 | --- | --- |
 | `RAYON_NUM_THREADS` | Default for `--threads`. |
 | `GB_EVO_SEED` | Seed of the evolutionary search when `route --seed` is not given (default fixed). Same board, same options, same seed give the same result; another seed gives another attempt. |
-| `GB_GPU=1` | Experimental, macOS only. Runs most of the track relaxation as a compute shader on the GPU (Metal). Needs a binary built with `cargo build --release -p gummiband-cli --features gpu`; without the variable such a binary behaves exactly like the normal one, and a binary without the feature prints a warning and stays on the CPU. Only the relaxation moves to the GPU, so the gain is bounded by its share of the work: about 30 percent of the core seconds in a default run on boards like the Lichtschnitzel controller, about 60 percent with `--geometry-generations 3 --move-parts`, and 1 to 5 percent on boards where the search dominates (Corne, ULX3S, dense BGAs), where the GPU gains nothing. In the quality run on Lichtschnitzel (4 seeds, 4 threads) it needed about 40 percent fewer core seconds than the CPU; when all cores are already busy the gain shrinks. Completion is the same; violation counts are comparable but vary more from seed to seed. Results repeat on one machine but not across GPUs or drivers, so for a final run use the CPU or try several seeds. |
+| `GB_GPU=1` | Experimental, macOS only. Runs most of the track relaxation as a compute shader on the GPU (Metal). Needs a binary built with `cargo build --release -p gummiband-cli --features gpu`; without the variable such a binary behaves exactly like the normal one, and a binary without the feature prints a warning and stays on the CPU. Only the relaxation moves to the GPU, so the gain is bounded by its share of the work: about 30 percent of the core seconds in a default run on boards like the LED controller, about 60 percent with `--geometry-generations 3 --move-parts`, and 1 to 5 percent on boards where the search dominates (Corne, ULX3S, dense BGAs), where the GPU gains nothing. In the quality run on the LED controller (4 seeds, 4 threads) it needed about 40 percent fewer core seconds than the CPU; when all cores are already busy the gain shrinks. Completion is the same; violation counts are comparable but vary more from seed to seed. Results repeat on one machine but not across GPUs or drivers, so for a final run use the CPU or try several seeds. |
 
 ## Exit status
 

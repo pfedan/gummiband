@@ -11,7 +11,7 @@ can be added while the series runs. A job:
 
 - `commit` is built once into QUEUE_DIR/bin/<commit> from a clone of the repository in
   QUEUE_DIR/src (fetched from origin); `bin` instead names a binary that exists.
-- `board`: arty, corne, ulx3s or lichtschnitzel (prepared under bench/work of `--repo`), or a
+- `board`: arty, corne, ulx3s or ledctl (prepared under bench/work of `--repo`), or a
   path to a .kicad_pcb.
 - The run is `route --until-stop --progress --seed SEED ARGS` with RAYON_NUM_THREADS=threads and
   GB_OPEN_LOG=1. It is stopped after `limit` seconds of wall time, or when it reports
@@ -43,8 +43,8 @@ def log(msg):
 def board_path(repo, board):
     if board.endswith(".kicad_pcb"):
         return board
-    if board == "lichtschnitzel":
-        return os.path.join(repo, "bench", "work", "lichtschnitzel", "lichtschnitzel.kicad_pcb")
+    if board == "ledctl":
+        return os.path.join(repo, "bench", "work", "ledctl", "ledctl.kicad_pcb")
     return os.path.join(repo, "bench", "work", "ext", board, board + ".kicad_pcb")
 
 

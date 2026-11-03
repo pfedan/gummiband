@@ -155,7 +155,7 @@ ROUTE_TABS: Tuple = (
             check("hint_decaps", "Decoupling capacitors first (decaps)",
                   "A decoupling capacitor is connected to its IC pin before everything else, and "
                   "the via serves both.\n\n"
-                  "Helps boards with many capacitors at their ICs (7 % on the Lichtschnitzel "
+                  "Helps boards with many capacitors at their ICs (7 % on the LED controller "
                   "controller).\nHurts fine pitch boards without planes.\n\n" + COMPARE),
             check("hint_rows", "Lay pin rows again in pin order (rows)",
                   "While improving after the search, the connections of a pin row are laid "
@@ -282,7 +282,7 @@ PLACE_TABS: Tuple = (
               "inductor sits at the switch pins of its converter, decoupling capacitors prefer "
               "an IC of their own sheet, current paths count their full length.\n\n"
               "Helps boards with power stages and several sheets: with the two options below "
-              "the cleanest placements of the Lichtschnitzel controller (no clearance error in 9 "
+              "the cleanest placements of the LED controller (no clearance error in 9 "
               "runs, 12 % shorter)."),
         check("corridors", "Keep bands free for buses (experimental)",
               "Two parts with 4 or more pads that share at least two signal nets (a bus, SPI, "

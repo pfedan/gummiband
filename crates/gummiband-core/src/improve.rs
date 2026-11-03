@@ -2082,7 +2082,7 @@ fn relax_window(
 ///
 /// The width goes to whole elements, the way the file writes them (an arc has one width), and
 /// only to the element that gets narrower: a zone around the spot would also reach a neighbour
-/// that is narrower still, a neck, and make it as wide as the taper (on Lichtschnitzel a neck of
+/// that is narrower still, a neck, and make it as wide as the taper (on the LED controller a neck of
 /// 0.25 mm at the USB chip became 0.72 mm, and KiCad found it 0.15 mm too close to a pin).
 pub(crate) fn taper_spots(board: &Board, geo: &Geometry) -> Option<Geometry> {
     let before = check::check(board, geo);

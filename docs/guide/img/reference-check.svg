@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="300" viewBox="0 0 820 300" font-family="DejaVu Sans, Helvetica, Arial, sans-serif">
+<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#5f6368"/></marker><marker id="arr-s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#5f6368"/></marker></defs>
+<rect x="0.5" y="0.5" width="819" height="299" rx="10" fill="#ffffff" stroke="#dadce0"/>
+<text x="20.0" y="30.0" font-size="14" fill="#202124" text-anchor="start" font-weight="bold">reference_check: what lies under a fast signal</text>
+<rect x="40.0" y="60.0" width="360.0" height="200.0" rx="0" fill="#dfe8f6" stroke="#9fb6db" stroke-width="1"/>
+<rect x="400.0" y="60.0" width="380.0" height="200.0" rx="0" fill="#e6f1e3" stroke="#a9c9a0" stroke-width="1"/>
+<text x="60.0" y="80.0" font-size="11" fill="#5f6368" text-anchor="start" font-weight="normal">In2.Cu zone +5V_A</text>
+<text x="760.0" y="80.0" font-size="11" fill="#5f6368" text-anchor="end" font-weight="normal">In2.Cu zone +5V_B</text>
+<rect x="190.0" y="120.0" width="18.0" height="120.0" rx="0" fill="#ffffff" stroke="#9fb6db" stroke-width="1"/>
+<text x="199.0" y="255.0" font-size="11" fill="#5f6368" text-anchor="middle" font-weight="normal">slot</text>
+<path d="M 40.0 170.0 L 760.0 170.0" stroke="#c8373a" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="600.0" y="162.0" font-size="11" fill="#5f6368" text-anchor="start" font-weight="normal">signal track on B.Cu</text>
+<circle cx="199.0" cy="170.0" r="16.0" fill="none" stroke="#e8710a" stroke-width="2.5"/>
+<text x="199.0" y="112.0" font-size="12" fill="#e8710a" text-anchor="middle" font-weight="bold">gap</text>
+<circle cx="400.0" cy="170.0" r="16.0" fill="none" stroke="#e8710a" stroke-width="2.5"/>
+<text x="400.0" y="112.0" font-size="12" fill="#e8710a" text-anchor="middle" font-weight="bold">split</text>
+<path d="M 150 196 C 175 250, 225 250, 248 196" stroke="#5f6368" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="4 3"/>
+<text x="20.0" y="288.0" font-size="12" fill="#5f6368" text-anchor="start" font-weight="normal">The return current flows under the track; at a gap or a split it detours. The tool reports both with position.</text>
+</svg>

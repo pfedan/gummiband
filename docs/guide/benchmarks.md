@@ -1,7 +1,7 @@
 # Benchmarks
 
 The `bench/` folder holds boards and scripts to measure the router: a synthetic suite of small
-boards of increasing difficulty, the Lichtschnitzel controller as a real four layer board, and
+boards of increasing difficulty, the LED controller as a real four layer board, and
 four open hardware boards as external real world cases, and a DDR5 board for length matching. Every benchmark routes a board that was
 stripped of all its tracks and vias and judges the result with the KiCad DRC. Details of the
 scripts are in [bench/README.md](../../bench/README.md).
@@ -46,15 +46,15 @@ per board in `bench/boards/out/<board>.route.log`.
 `bench/gen_boards.py` regenerates the boards deterministically; commit the boards together with
 a change to the generator.
 
-## Lichtschnitzel controller
+## LED controller
 
 The real reference board: 100 x 60 mm, four layers with signals on the outer layers and GND and
-power planes inside, about 350 connections, custom rules. It needs the Lichtschnitzel repository
-next to this one (`LICHTSCHNITZEL=/path/to/repo` otherwise).
+power planes inside, about 350 connections, custom rules. Its KiCad project is not
+public; point `LEDCTL_PCB` at the `.kicad_pcb` if you have it.
 
 ```bash
-bench/prepare-lichtschnitzel.sh   # copies the project and strips all copper into bench/work/lichtschnitzel/
-bench/run-lichtschnitzel.sh [route args]   # routes it, writes bench/work/routed/, prints the DRC summary
+LEDCTL_PCB=/path/to/board.kicad_pcb bench/prepare-ledctl.sh   # copies the project and strips all copper into bench/work/ledctl/
+bench/run-ledctl.sh [route args]   # routes it, writes bench/work/routed/, prints the DRC summary
 ```
 
 The stripped board keeps placement, outline, keepouts and the inner planes; everything else,
@@ -104,7 +104,7 @@ stays as the reference has it). "Meanders only" is the routing with meanders in 
 | DDR5 testbed | 24 of 29: byte lane 3 of 12, command/address 1 of 14, 22 skew errors in the KiCad DRC | 16 of 29: byte lane 7 of 12, command/address 5 of 14, uncoupled 1 of 3; 7 of 22 tuned nets reached their length | 10 of 29: byte lane 8 of 12, command/address 9 of 14, uncoupled 2 of 3; 14 of 23 tuned nets reached their length | 261 of 263 routed, 0 clearance, 9 skew (14), 6 pair gap (22), 1 uncoupled (3), 0 sliver (1) |
 
 In `bench/compare.py` against main (default arguments, so without `--pairs` and with moving
-parts) every board has the same KiCad DRC result; the Lichtschnitzel file is byte-identical
+parts) every board has the same KiCad DRC result; the LED controller file is byte-identical
 (the step only runs with length rules). On `matching` it makes room for 6 nets but the meanders
 reach the same lengths as before there.
 
@@ -125,7 +125,7 @@ as they are). KiCad DRC counts without the types that the unrouted board already
 
 | Board | Length | Off the grid | Vias | KiCad DRC any-angle | KiCad DRC 45 degrees | Time of the step |
 | --- | --- | --- | --- | --- | --- | --- |
-| Lichtschnitzel | 2387 to 2493 mm (+4.4 %) | 127 mm (5 %) | 278, same | 16 clearance | 16 clearance | 0.8 s |
+| LED controller | 2387 to 2493 mm (+4.4 %) | 127 mm (5 %) | 278, same | 16 clearance | 16 clearance | 0.8 s |
 | Arty | 2813 to 2932 mm (+4.2 %) | 148 mm (5 %) | 136, same | 4 hole clearance, 1 edge, 1 sliver | 4 hole clearance, 1 edge | 0.4 s |
 | Corne | 7719 to 8082 mm (+4.7 %) | 328 mm (4 %) | 374, same | 499 clearance, 1 crossing, 1 short, 1 hole, 5 slivers | 499 clearance, 1 hole | 1.3 s |
 
@@ -139,7 +139,7 @@ little from the step inside `route`.
 
 | Board | Length | Off the grid | Runs changed | Vias | KiCad DRC any-angle | KiCad DRC afterwards | Time |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Lichtschnitzel | 2348 to 2446 mm (+4.2 %) | 60 mm (2.5 %) | 606 of 626 | same | 16 clearance | 16 clearance | 1.1 s |
+| LED controller | 2348 to 2446 mm (+4.2 %) | 60 mm (2.5 %) | 606 of 626 | same | 16 clearance | 16 clearance | 1.1 s |
 | Arty | 2818 to 2934 mm (+4.1 %) | 148 mm (5 %) | 431 of 444 | same | 4 hole clearance, 1 edge, 1 sliver | 4 hole clearance, 1 edge | 2.0 s |
 | Corne | 7846 to 8086 mm (+3.1 %) | 308 mm (4 %) | 2511 of 3139 | same | 499 clearance, 1 crossing, 1 short, 1 hole, 5 slivers | 499 clearance, 1 hole | 2.8 s |
 
@@ -149,7 +149,7 @@ little from the step inside `route`.
 bench/compare.py OLD_BIN NEW_BIN [--boards a,b,...] [--args "route args"] [--out DIR]
 ```
 
-Routes every board of the suite, the prepared external boards and the Lichtschnitzel board with
+Routes every board of the suite, the prepared external boards and the LED controller board with
 each binary in turn, alone on the machine, then runs the KiCad DRC. Violations the unrouted board
 already has (courtyards, padstacks) are subtracted per type. The table shows completion, routing
 caused DRC errors and time per board, then the totals. A change should win in sum and lose
@@ -179,7 +179,7 @@ the distributions. Compare core seconds rather than wall time when other jobs ru
 
 ## Placement from the netlist
 
-`gummiband place` on the Lichtschnitzel controller with the connectors, the module, holes, buttons
+`gummiband place` on the LED controller with the connectors, the module, holes, buttons
 and test points fixed, 133 parts from nothing, original outline and inner planes. Routed with
 `--geometry-generations 3 --move-parts`, judged with the KiCad DRC (measured on 2026-10-30):
 
@@ -207,6 +207,6 @@ at all (-0.01). So `--placements` judges with the settings of the route itself.
 
 ## Placement variants
 
-`bench/place/make-variants.sh` and `route-variants.sh` build and route the Lichtschnitzel
+`bench/place/make-variants.sh` and `route-variants.sh` build and route the LED controller
 controller in a smaller rectangle, a square and a circle with `gummiband-place`, as extra
 boards for the search. See [bench/place/README.md](../../bench/place/README.md).

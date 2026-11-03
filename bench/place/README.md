@@ -1,7 +1,7 @@
-# Placement variants of the Lichtschnitzel controller
+# Placement variants of the LED controller
 
 Extra boards for the router portfolio: the prepared benchmark board
-(`bench/work/lichtschnitzel`, see `bench/prepare-lichtschnitzel.sh`) with a new outline and a new
+(`bench/work/ledctl`, see `bench/prepare-ledctl.sh`) with a new outline and a new
 placement, made by `gummiband-place` (`crates/gummiband-place`).
 
 ```sh
@@ -15,7 +15,7 @@ bench/place/route-variants.sh     # route each variant (--runs 4 --generations 1
 | `square-76` | 76 x 76 mm | `--shape square --width 76 --gap 0.6` |
 | `round-84` | circle, 84 mm | `--shape circle --diameter 84 --gap 0.6` |
 
-Each folder: `lichtschnitzel.kicad_pcb` (+ `.kicad_pro`, `.kicad_dru`), `place.log`,
+Each folder: `ledctl.kicad_pcb` (+ `.kicad_pro`, `.kicad_dru`), `place.log`,
 `drc-placed.json`, `placement.png`, `routed/` (routed board, `route.log`, `drc.json`) and
 `routed.png`.
 

@@ -184,8 +184,8 @@ it (the result carries the board id).
   made the libraries. An existing output is only replaced with `overwrite: true`.
 
 ```json
-{"name": "create_board", "arguments": {"netlist": "hw/lichtschnitzel.net",
-  "output": "hw/lichtschnitzel.kicad_pcb", "width": 74, "height": 60, "layers": 4,
+{"name": "create_board", "arguments": {"netlist": "hw/ledctl.net",
+  "output": "hw/ledctl.kicad_pcb", "width": 74, "height": 60, "layers": 4,
   "plane_layers": ["In1.Cu", "In2.Cu"], "mounting_holes": {"diameter": 3.2, "inset": 4},
   "rules": {"min_clearance": 0.127, "min_copper_edge_clearance": 0.3},
   "net_classes": [{"name": "Default", "clearance": 0.15, "track_width": 0.2},
@@ -206,7 +206,7 @@ their class. They are routed as two independent nets unless `route` gets `pair_p
 the summary says so.
 
 ```json
-{"name": "load_board", "arguments": {"path": "bench/work/lichtschnitzel/lichtschnitzel.kicad_pcb"}}
+{"name": "load_board", "arguments": {"path": "bench/work/ledctl/ledctl.kicad_pcb"}}
 ```
 
 ### list_nets
@@ -427,7 +427,7 @@ out of routing (its pads stay obstacles; its old tracks are not kept, since the 
 all unlocked copper). `width` (mm) gives the net its own track width, which is also its minimum
 width: it does not neck below it, except inside the courtyards of the parts whose pads are
 narrower than the width (fine pitch pins); `width: 0` clears it. Known gap: the router still
-lets such a net neck in places outside those courtyards (VBUS_F on the Lichtschnitzel benchmark
+lets such a net neck in places outside those courtyards (VBUS_F on the LED controller benchmark
 kept 0.25 to 0.6 mm pieces); `current_check` finds them. `power_plan` with `apply` sets
 the widths of the power nets this way. `reset: true` drops the net's options before applying the
 others.
@@ -557,7 +557,7 @@ nets. The output goes to `<input>.45.kicad_pcb` by default, with the `.kicad_pro
 `.kicad_dru` copied next to it for `drc`.
 
 ```json
-{"name": "angles_45", "arguments": {"path": "/abs/path/lichtschnitzel.routed.kicad_pcb"}}
+{"name": "angles_45", "arguments": {"path": "/abs/path/ledctl.routed.kicad_pcb"}}
 ```
 
 ### Good practice: power_plan, power_copper, current_check, reference_check, ground_pour
@@ -585,7 +585,7 @@ Per net: the required width per copper layer, `track_width_mm` (outer layers, ro
 widen the net, to keep it off thin inner layers, to give each pin into a plane enough vias, or to
 draw a pour instead of a track: above 2.5 mm, or above 1 mm into pins narrower than half the
 width (a 1.75 mm switch node track into 0.3 mm converter pins blocks the router around them; on
-the Lichtschnitzel benchmark it turned 36 clearance violations into 2541). Nets that already
+The LED controller benchmark it turned 36 clearance violations into 2541). Nets that already
 have a plane or a pour on a routing layer are left to `current_check`. `board_notes` cover the
 ground plane (missing, or on which layer), plane layers without a zone and, on boards with
 differential pairs, routing layers whose nearest plane is not ground. `dru_rules` holds the
@@ -681,7 +681,7 @@ pins to the inductor, a big pad that reaches its plane through one via. For each
   paths) next, with `keep_all`, `nets` and `reroute`: those nets are routed anew, everything
   else stays. Locked copper is never removed. Before this option the tool saw only locked
   copper and put vias on the routed tracks of other nets without a warning; a reroute from there
-  ended on the Lichtschnitzel with 175 shorts.
+  ended on the LED controller with 175 shorts.
 
 Courtyards count by their outline where the courtyard lines close (an L or T shaped module
 courtyard leaves the room beside its stem free), by their box otherwise. The same holds for the
@@ -700,7 +700,7 @@ neither runs a track across the pour nor routes the joined pads again. The tool 
 working copy `<input>.prerouted.kicad_pcb` (like `add_locked_copper`); route the returned board.
 It ends with a `current_check` of the pour paths (the zone outline counts until KiCad fills it).
 
-On the Lichtschnitzel benchmark, buck A: the switch node pour (U4.5 to U4.9 into L1.1, 8 A)
+On the LED controller benchmark, buck A: the switch node pour (U4.5 to U4.9 into L1.1, 8 A)
 gives way to U4.10 and the exposed GND pad and measures 3.5 mm cross-section against 1.74 mm
 required; L1.2 gets 7 vias of 0.3 mm into the `+5V_A` plane instead of one. Routed afterwards:
 all connections, 19 instead of 36 Gummiband clearance violations, none near the converter.
@@ -727,7 +727,7 @@ has copper) is put on a 0.05 mm raster, and two numbers are measured between the
 - `width_mm`: the narrowest single band, the largest width whose band still joins every source
   terminal to the sinks (the copper eroded by half the width; terminal and via pads are not
   eroded, and a band may end up to 0.3 mm from them). Inner layers count with their width
-  divided by the factor IPC-2221 asks for there. This is the measure of the Lichtschnitzel
+  divided by the factor IPC-2221 asks for there. This is the measure of the LED controller
   `layout/necks.py` and gives its numbers for the VBUS paths of that board (0.70, 0.70,
   0.28 mm). necks.py lets a band end up to half its width from a pad, so where two terminals are
   closer than the width it bridges the gap without copper and reports its search limit (3.99 mm
@@ -749,11 +749,11 @@ outline counts, which is optimistic, and a note says so. IPC-2221 describes long
 neck of a few tenths of a millimetre right at a pad runs cooler than it says, so judge a short
 flag by its length.
 
-On the finished Lichtschnitzel board the check finds the known 0.28 mm neck of `VBUS_IN` and
+On the finished LED controller board the check finds the known 0.28 mm neck of `VBUS_IN` and
 shows that `VBUS_F` and `VBUS_IN` each pass a single 0.4 mm via (about 1.6 A) on their 4.1 A path.
 
 ```json
-{"name": "current_check", "arguments": {"path": "/abs/lichtschnitzel.routed.kicad_pcb", "paths": [
+{"name": "current_check", "arguments": {"path": "/abs/ledctl.routed.kicad_pcb", "paths": [
   {"name": "USB-C to fuse", "net": "/Power/VBUS_RAW", "amps": 4.1,
    "from": ["J1.A4+J1.B9", "J1.A9+J1.B4"], "to": ["F1.1"]},
   {"name": "fuse to shunt", "net": "VBUS_F", "amps": 4.1, "from": ["F1.2"], "to": ["R110.*"]},
@@ -770,7 +770,7 @@ check. For a pour or via field from `power_copper` there are two ways:
   again. Without `clear` the new copper gives way to the routed tracks and often finds no room.
 - On the unrouted board before the next full route: `power_copper`, then `route` with
   `keep_locked`. Next to fine pitch pins a via field before routing can wall in the neighbours:
-  at the eFuse U6 of the Lichtschnitzel the VBUS_P vias in front of pins 7 to 10 left 6
+  at the eFuse U6 of the LED controller the VBUS_P vias in front of pins 7 to 10 left 6
   connections open in every run. Compare such a run with one without the via field over the same
   seeds before keeping it.
 
@@ -800,7 +800,7 @@ with kicad-cli first; without kicad-cli their outline counts, which hides the an
 says so). The result lists the findings (splits first, then gaps longest first), the nets with
 findings worst first, and per routing layer the reference layers with their zone nets.
 
-On the Lichtschnitzel board (fills as saved): F.Cu over the GND plane on In1.Cu has no finding;
+On the LED controller board (fills as saved): F.Cu over the GND plane on In1.Cu has no finding;
 B.Cu runs over In2.Cu with the zones of +5V_A, +5V_B, VBUS_P and VBUS_IN, and 11 nets cross a
 border there (the LED data lines at y 130 between +5V_B and +5V_A, USB_DN between VBUS_P and
 +5V_A). Fix a split by routing the track over one zone or on the layer next to ground, or with a
@@ -808,7 +808,7 @@ stitching capacitor between the two nets next to the crossing; a gap by moving t
 moving vias apart so their antipads do not merge, or by closing the slot.
 
 ```json
-{"name": "reference_check", "arguments": {"path": "/abs/lichtschnitzel.routed.kicad_pcb",
+{"name": "reference_check", "arguments": {"path": "/abs/ledctl.routed.kicad_pcb",
   "nets": ["USB_D?", "LED_D*"]}}
 ```
 
@@ -832,7 +832,7 @@ that fails), so `render` and KiCad show the pours right away. A via the fill doe
 up in `drc` as dangling, unless an inner plane of the net holds it.
 
 ```json
-{"name": "ground_pour", "arguments": {"path": "/abs/lichtschnitzel.routed.kicad_pcb"}}
+{"name": "ground_pour", "arguments": {"path": "/abs/ledctl.routed.kicad_pcb"}}
 ```
 
 #### The prompt good_practice
@@ -860,7 +860,7 @@ Result: `counts` per violation type without silkscreen (`silk*`) and library (`l
 deficit and the items with positions.
 
 ```json
-{"name": "drc", "arguments": {"path": "/abs/path/lichtschnitzel.routed.kicad_pcb", "max_items": 5}}
+{"name": "drc", "arguments": {"path": "/abs/path/ledctl.routed.kicad_pcb", "max_items": 5}}
 ```
 
 ### render
@@ -874,7 +874,7 @@ region. The PNG goes to the server's temp folder unless `output` is given. Zones
 in a temp copy first (`refill`, kicad-cli 9 or newer); the file itself is not changed.
 
 ```json
-{"name": "render", "arguments": {"path": "/abs/path/lichtschnitzel.routed.kicad_pcb",
+{"name": "render", "arguments": {"path": "/abs/path/ledctl.routed.kicad_pcb",
   "region": {"x0": 140, "y0": 120, "x1": 160, "y1": 140}, "width_px": 800}}
 ```
 
@@ -888,24 +888,24 @@ RAYON_NUM_THREADS=4 target/release/gummiband-mcp <<'EOF'
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"shell","version":"0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list"}
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"load_board","arguments":{"path":"bench/work/lichtschnitzel/lichtschnitzel.kicad_pcb"}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"load_board","arguments":{"path":"bench/work/ledctl/ledctl.kicad_pcb"}}}
 EOF
 ```
 
-Shortened session on the Lichtschnitzel benchmark (4 threads):
+Shortened session on the LED controller benchmark (4 threads):
 
 ```text
 >> initialize {"protocolVersion":"2025-06-18",...}
 << {"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"gummiband-mcp",...},"instructions":"..."}
->> tools/call load_board {"path":".../lichtschnitzel.kicad_pcb"}
-<< Loaded lichtschnitzel.kicad_pcb as board b1: 100.0 x 60.0 mm, 4 copper layers (F.Cu, In1.Cu plane,
+>> tools/call load_board {"path":".../ledctl.kicad_pcb"}
+<< Loaded ledctl.kicad_pcb as board b1: 100.0 x 60.0 mm, 4 copper layers (F.Cu, In1.Cu plane,
    In2.Cu plane, B.Cu), 525 pins, 111 nets (92 to route, 414 connections), 11 net classes, 10 custom rules.
 >> tools/call list_nets {"board":"b1","filter":"gnd"}
 << {"count":1,"nets":[{"class":"GND","name":"GND","pins":150,"plane":true,"priority":4,"skip":false}]}
->> tools/call route {"board":"b1","runs":2,"generations":0,"output":".../lichtschnitzel.routed.kicad_pcb"}
+>> tools/call route {"board":"b1","runs":2,"generations":0,"output":".../ledctl.routed.kicad_pcb"}
 << Routed 346/348 connections (2 unrouted), 338 vias, 2458 mm of track, 29 clearance violations
-   (Gummiband check), 44.7 s on 4 threads. Wrote 3306 items to .../lichtschnitzel.routed.kicad_pcb.
->> tools/call drc {"path":".../lichtschnitzel.routed.kicad_pcb"}
+   (Gummiband check), 44.7 s on 4 threads. Wrote 3306 items to .../ledctl.routed.kicad_pcb.
+>> tools/call drc {"path":".../ledctl.routed.kicad_pcb"}
 << KiCad DRC: 2 unconnected, 23 violations {"clearance": 18, "copper_sliver": 1, "items_not_allowed": 1,
    "shorting_items": 1, "tracks_crossing": 2} (428 silk/lib findings ignored).
    Clearance deficits <2um/<10um/<30um/<100um/more: [4, 2, 10, 2, 0].

@@ -1,4 +1,4 @@
-//! `gummiband-place`: alternative placements of the Lichtschnitzel controller (new outline, fixed
+//! `gummiband-place`: alternative placements of the LED controller (new outline, fixed
 //! mechanical parts on the edge, the rest placed by simulated annealing, inner planes regenerated).
 
 use std::collections::HashMap;
@@ -26,7 +26,7 @@ enum ShapeArg {
 #[derive(Parser)]
 #[command(
     name = "gummiband-place",
-    about = "Alternative placements of the Lichtschnitzel controller"
+    about = "Alternative placements of the LED controller"
 )]
 struct Cli {
     /// Input board (placed, unrouted).

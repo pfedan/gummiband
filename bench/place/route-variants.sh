@@ -24,17 +24,17 @@ PY
 [ $# -gt 0 ] || set -- $(cd "$HERE" && ls -d */ | tr -d /)
 for v in "$@"; do
     D="$HERE/$v"
-    [ -f "$D/lichtschnitzel.kicad_pcb" ] || continue
+    [ -f "$D/ledctl.kicad_pcb" ] || continue
     echo "== $v"
-    render "$D/lichtschnitzel.kicad_pcb" "$D/placement.png"
+    render "$D/ledctl.kicad_pcb" "$D/placement.png"
     mkdir -p "$D/routed"
-    cp "$D/lichtschnitzel.kicad_pro" "$D/lichtschnitzel.kicad_dru" "$D/routed/"
+    cp "$D/ledctl.kicad_pro" "$D/ledctl.kicad_dru" "$D/routed/"
     start=$(date +%s)
-    "$BIN" route "$D/lichtschnitzel.kicad_pcb" -o "$D/routed/lichtschnitzel.kicad_pcb" --runs 4 --generations 1 \
+    "$BIN" route "$D/ledctl.kicad_pcb" -o "$D/routed/ledctl.kicad_pcb" --runs 4 --generations 1 \
         > "$D/routed/route.log" 2>&1 || { echo "router failed:"; tail -5 "$D/routed/route.log"; continue; }
     echo "route time $(( $(date +%s) - start )) s"
     tail -4 "$D/routed/route.log"
-    (cd "$D/routed" && kicad-cli pcb drc --refill-zones --format json -o drc.json lichtschnitzel.kicad_pcb >/dev/null)
+    (cd "$D/routed" && kicad-cli pcb drc --refill-zones --format json -o drc.json ledctl.kicad_pcb >/dev/null)
     summary "$D/routed/drc.json"
-    render "$D/routed/lichtschnitzel.kicad_pcb" "$D/routed.png"
+    render "$D/routed/ledctl.kicad_pcb" "$D/routed.png"
 done

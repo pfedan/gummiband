@@ -67,10 +67,10 @@ With `--iters 1000000`, one start, seed 1:
 
 `check_sides.py` finds no problem on any of them.
 
-## Lichtschnitzel
+## LED controller
 
-`prepare-lichtschnitzel.sh` strips the real Lichtschnitzel controller board,
-`run-lichtschnitzel.sh` routes it and prints the KiCad DRC summary; `drc_report.py` summarizes a
+`prepare-ledctl.sh` strips the real LED controller board,
+`run-ledctl.sh` routes it and prints the KiCad DRC summary; `drc_report.py` summarizes a
 DRC JSON report in more detail.
 
 ## Relaxation on the CPU and the GPU

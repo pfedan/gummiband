@@ -495,7 +495,7 @@ pub fn edge_circle(p: &mut Patch, c: Point, r: f64) -> String {
     )
 }
 
-/// A copper zone of `net` on `layer` with the given outline, settings like the Lichtschnitzel
+/// A copper zone of `net` on `layer` with the given outline, settings like the LED controller
 /// planes (unfilled; KiCad fills it).
 pub fn plane_zone(p: &mut Patch, net: &str, layer: &str, name: &str, outline: &[Point], clearance: f64) -> String {
     format!(

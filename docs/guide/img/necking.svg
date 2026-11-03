@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="300" viewBox="0 0 820 300" font-family="DejaVu Sans, Helvetica, Arial, sans-serif">
+<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#5f6368"/></marker><marker id="arr-s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#5f6368"/></marker></defs>
+<rect x="0.5" y="0.5" width="819" height="299" rx="10" fill="#ffffff" stroke="#dadce0"/>
+<text x="20.0" y="30.0" font-size="14" fill="#202124" text-anchor="start" font-weight="bold">Necking at fine pitch pins, and the taper at a tight spot</text>
+<rect x="40.0" y="70.0" width="210.0" height="190.0" rx="0" fill="none" stroke="#9aa0a6" stroke-width="1.2" stroke-dasharray="6 4"/>
+<text x="48.0" y="88.0" font-size="11" fill="#5f6368" text-anchor="start" font-weight="normal">courtyard</text>
+<rect x="200.0" y="100.0" width="40.0" height="12.0" rx="0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<rect x="200.0" y="126.0" width="40.0" height="12.0" rx="0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<rect x="200.0" y="152.0" width="40.0" height="12.0" rx="0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<rect x="200.0" y="178.0" width="40.0" height="12.0" rx="0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<rect x="200.0" y="204.0" width="40.0" height="12.0" rx="0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<rect x="200.0" y="230.0" width="40.0" height="12.0" rx="0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<rect x="70.0" y="110.0" width="110.0" height="130.0" rx="0" fill="#d0d3d6" stroke="none" stroke-width="0"/>
+<text x="125.0" y="180.0" font-size="12" fill="#5f6368" text-anchor="middle" font-weight="normal">QFN</text>
+<path d="M 240.0 106.0 L 250.0 106.0" stroke="#c8373a" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 240.0 132.0 L 250.0 132.0" stroke="#c8373a" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 240.0 158.0 L 250.0 158.0" stroke="#c8373a" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 236.0 106.0 L 262.0 106.0" stroke="#c8373a" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 262.0 106.0 L 300.0 95.2 L 430.0 70.0" stroke="#c8373a" stroke-width="11" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 262.0 106.0 L 300.0 95.2" stroke="#c8373a" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 236.0 132.0 L 262.0 132.0" stroke="#c8373a" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 262.0 132.0 L 300.0 131.4 L 430.0 130.0" stroke="#c8373a" stroke-width="11" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 262.0 132.0 L 300.0 131.4" stroke="#c8373a" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 236.0 158.0 L 262.0 158.0" stroke="#c8373a" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 262.0 158.0 L 300.0 167.6 L 430.0 190.0" stroke="#c8373a" stroke-width="11" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 262.0 158.0 L 300.0 167.6" stroke="#c8373a" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 236.0 184.0 L 262.0 184.0" stroke="#c8373a" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 262.0 184.0 L 300.0 203.8 L 430.0 250.0" stroke="#c8373a" stroke-width="11" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 262.0 184.0 L 300.0 203.8" stroke="#c8373a" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<line x1="300.0" y1="272.0" x2="262.0" y2="194.0" stroke="#5f6368" stroke-width="1.2" marker-end="url(#arr)"/>
+<text x="270.0" y="288.0" font-size="12" fill="#5f6368" text-anchor="start" font-weight="normal">neck inside the courtyard</text>
+<text x="330.0" y="52.0" font-size="12" fill="#5f6368" text-anchor="start" font-weight="normal">class width</text>
+<line x1="370.0" y1="56.0" x2="400.0" y2="70.0" stroke="#5f6368" stroke-width="1.2" marker-end="url(#arr)"/>
+<circle cx="620.0" cy="110.0" r="30.0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<circle cx="620.0" cy="230.0" r="30.0" fill="#c8373a" stroke="none" stroke-width="0"/>
+<circle cx="620.0" cy="110.0" r="52.0" fill="none" stroke="#9aa0a6" stroke-width="1" stroke-dasharray="3 3"/>
+<circle cx="620.0" cy="230.0" r="52.0" fill="none" stroke="#9aa0a6" stroke-width="1" stroke-dasharray="3 3"/>
+<path d="M 480 162 L 580 162 L 600 167 L 640 167 L 660 162 L 790 162 L 790 178 L 660 178 L 640 173 L 600 173 L 580 178 L 480 178 Z" fill="#c8373a"/>
+<text x="490.0" y="205.0" font-size="12" fill="#5f6368" text-anchor="start" font-weight="normal">wide track</text>
+<text x="630.0" y="288.0" font-size="12" fill="#5f6368" text-anchor="middle" font-weight="normal">a few micrometres narrower where the clearance is short</text>
+<text x="800.0" y="60.0" font-size="11" fill="#5f6368" text-anchor="end" font-weight="normal">never below the</text>
+<text x="800.0" y="74.0" font-size="11" fill="#5f6368" text-anchor="end" font-weight="normal">track_width (min ...) rule</text>
+</svg>
