@@ -539,10 +539,36 @@ pub struct BoardStatic {
     layer_cells: Vec<CellLists>,
     near_obs: Vec<NearObstacle>,
     near_edge: Vec<bool>,
-    /// Per cell the board outlines whose box comes within the reach of the edge clearance of
-    /// a track as wide as the widest (ascending): the others neither contain a point of the
-    /// cell nor push it. A board of many outlines (a panel with mouse bites) has hundreds.
+    /// The board edge by cells, for a board of many outlines or outlines of many edges (a
+    /// panel with mouse bites has hundreds). `edge_segs` are the edges of all outlines, outline
+    /// by outline, each with its outline; `edge_cells` holds per cell the edges whose box comes
+    /// within the reach of the edge clearance of a track as wide as the widest (ascending):
+    /// the nearest point of an outline that is near enough to push is on one of them.
+    edge_segs: Vec<(u32, Point, Point)>,
     edge_cells: CellLists,
+    /// Per row of cells the edges (as the even-odd test takes them) that reach into the row:
+    /// only they can cross the line of a point in the row, so they alone decide whether the
+    /// point is on the board.
+    row_start: Vec<u32>,
+    row_edges: Vec<(Point, Point)>,
+}
+
+impl BoardStatic {
+    /// `Board::inside` for a point in row `row` of the cells: the same answer from the edges
+    /// that can tell (the parity of all outlines is the parity of all their crossings).
+    #[inline]
+    fn inside(&self, row: usize, p: Point) -> bool {
+        let mut inside = false;
+        for &(a, b) in &self.row_edges[self.row_start[row] as usize..self.row_start[row + 1] as usize] {
+            if (a.y > p.y) != (b.y > p.y) {
+                let x = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y);
+                if p.x < x {
+                    inside = !inside;
+                }
+            }
+        }
+        inside
+    }
 }
 
 /// The board-static part of a relaxation, from the cache of `sub` or built (and kept) now. It
@@ -631,16 +657,53 @@ fn build_board_static(
             d < board.rules.edge_clearance + max_w / 2.0 + margin + half + 0.01 || !board.inside(mid)
         })
         .collect();
-    let outline_boxes: Vec<Rect> = board.outline.iter().map(|o| o.bbox()).collect();
+    let edge_segs: Vec<(u32, Point, Point)> = board
+        .outline
+        .iter()
+        .enumerate()
+        .flat_map(|(oi, o)| o.edges().map(move |(a, b)| (oi as u32, a, b)))
+        .collect();
+    let edge_boxes: Vec<Rect> = edge_segs
+        .iter()
+        .map(|&(_, a, b)| {
+            let mut r = Rect::empty();
+            r.add(a);
+            r.add(b);
+            r
+        })
+        .collect();
     let edge_reach = board.rules.edge_clearance + max_w / 2.0 + margin + 0.01;
-    let edge_cells = CellLists::new(bounds, 0.5, &outline_boxes, edge_reach, |_| true);
+    let edge_cells = CellLists::new(bounds, 0.5, &edge_boxes, edge_reach, |_| true);
+    // the rows of the even-odd test, with a little room at the borders of a row
+    let row = |y: f64| axis_cell(y, cells.origin.y, cells.inv, cells.ny);
+    let mut rows: Vec<Vec<(Point, Point)>> = vec![Vec::new(); cells.ny];
+    for o in &board.outline {
+        let n = o.pts.len();
+        let mut j = n - 1;
+        for i in 0..n {
+            let (a, b) = (o.pts[i], o.pts[j]);
+            for r in &mut rows[row(a.y.min(b.y) - 1e-6)..=row(a.y.max(b.y) + 1e-6)] {
+                r.push((a, b));
+            }
+            j = i;
+        }
+    }
+    let mut row_start = vec![0u32];
+    let mut row_edges = Vec::new();
+    for r in rows {
+        row_edges.extend(r);
+        row_start.push(row_edges.len() as u32);
+    }
     BoardStatic {
         bounds,
         cells,
         layer_cells,
         near_obs,
         near_edge,
+        edge_segs,
         edge_cells,
+        row_start,
+        row_edges,
     }
 }
 
@@ -756,9 +819,10 @@ pub fn relax_while(
         layer_cells,
         near_obs,
         near_edge,
+        edge_segs,
         edge_cells,
+        ..
     } = &*st;
-    let all_outlines: Vec<u32> = (0..board.outline.len() as u32).collect();
     let bounds = *bounds;
     // vias as static obstacles: (centre, radius, net, clearance)
     let mut vias: Vec<(Point, f64, u32, f64)> = geo
@@ -1304,31 +1368,47 @@ pub fn relax_while(
                                 push = push + dir * (need - d);
                             }
                         }
-                        // board edge (only near it): an outline far from the cell neither
-                        // contains the point nor pushes it, unless the point is off the board
-                        let near_outlines: &[u32] = if near_edge[cell] { edge_cells.get(cell) } else { &[] };
-                        let inside_board = !near_edge[cell]
-                            || near_outlines
-                                .iter()
-                                .filter(|&&o| board.outline[o as usize].contains(p))
-                                .count()
-                                % 2
-                                == 1;
-                        let pushing: &[u32] = if !near_edge[cell] {
-                            &[]
-                        } else if inside_board && w <= max_w {
-                            near_outlines
-                        } else {
-                            &all_outlines
-                        };
-                        for o in pushing.iter().map(|&o| &board.outline[o as usize]) {
-                            let (d, q) = nearest_on_poly(o, p);
-                            let need = edge_clr + w / 2.0 + cfg.margin;
-                            // a point outside the board always goes back in
-                            if d < need || !inside_board {
-                                let dir = if inside_board { (p - q).norm() } else { (q - p).norm() };
-                                let d = if inside_board { d } else { -d };
-                                push = push + dir * (need - d);
+                        // board edge (only near it)
+                        let inside_board = !near_edge[cell] || st.inside(cell / cells.nx, p);
+                        let need = edge_clr + w / 2.0 + cfg.margin;
+                        if near_edge[cell] && inside_board && w <= max_w {
+                            // the nearest point of each outline from the edges near the cell:
+                            // an outline without such an edge is too far to push
+                            let near = edge_cells.get(cell);
+                            let mut k = 0;
+                            while k < near.len() {
+                                let o = edge_segs[near[k] as usize].0;
+                                let mut best = (f64::INFINITY, p);
+                                while k < near.len() && edge_segs[near[k] as usize].0 == o {
+                                    let (_, a, b) = edge_segs[near[k] as usize];
+                                    let ab = b - a;
+                                    let l2 = ab.len2();
+                                    let t = if l2 > 0.0 {
+                                        ((p - a).dot(ab) / l2).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    let q = a + ab * t;
+                                    let d2 = (p - q).len2();
+                                    if d2 < best.0 {
+                                        best = (d2, q);
+                                    }
+                                    k += 1;
+                                }
+                                let (d, q) = (best.0.sqrt(), best.1);
+                                if d < need {
+                                    push = push + (p - q).norm() * (need - d);
+                                }
+                            }
+                        } else if near_edge[cell] {
+                            for o in &board.outline {
+                                let (d, q) = nearest_on_poly(o, p);
+                                // a point outside the board always goes back in
+                                if d < need || !inside_board {
+                                    let dir = if inside_board { (p - q).norm() } else { (q - p).norm() };
+                                    let d = if inside_board { d } else { -d };
+                                    push = push + dir * (need - d);
+                                }
                             }
                         }
                         // vias of other nets
