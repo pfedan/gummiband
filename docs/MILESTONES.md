@@ -192,9 +192,9 @@ outer pours removed, routed completely by Gummiband (`bench/run-ledctl.sh`).
   | fine_pitch_mixed | 37.2 s | 28.1 s |
   | four_signal_layers | 18.8 s | 12.4 s |
 
-  - A failing search walked every state it could reach before it gave up: on ULX3S 58 000 of 204 000
-    searches took 93 % of all expansions (35 000 each against 1 000 for a successful one), on the
-    LED controller 51 %. After 1000 expansions a search now walks from its goal (`route/shut.rs`):
+  - A failing search walked every state it could reach before it gave up: in a short run on ULX3S
+    58 000 of 204 000 searches took 93 % of all expansions (35 000 each against 1 000 for a
+    successful one), on the LED controller 51 %. After 1000 expansions a search now walks from its goal (`route/shut.rs`):
     gaps between the crossings of an edge that have room with the loosest sides, via vertices and
     sites where the search may place a via, pads and holes of the net, joined where a track would
     not cross the chord of another net. Whatever the search can reach is reached there too, so a
