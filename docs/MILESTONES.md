@@ -179,6 +179,61 @@ outer pours removed, routed completely by Gummiband (`bench/run-ledctl.sh`).
   takes 283 s instead of more than 1200 s; in the open end (Mac, seed 1, 4 threads) generation 90
   instead of 7 after 20 minutes, 480/482 after 705 s instead of 1909 s. LED controller and Arty: no
   measurable change (the grids were 0.2 % of a run).
+- Profiling and a proof that a search fails, 2026-11-04, on 9634088, Mac M4 Pro, 14 threads,
+  default `route`. Results byte for byte the same on all 21 synthetic boards, the LED controller,
+  Arty, Corne and ULX3S (SHA-1 of the routed file):
+
+  | Board | before | first round | second round |
+  | --- | --- | --- | --- |
+  | LED controller | 53.6 s | 36.0 s | 18.8 s |
+  | Arty | 36.3 s | 36.0 s | 31.8 s |
+  | Corne | 581 s | 322 s | 304 s |
+  | ULX3S | 366 s | 67 s | 39 s |
+  | fine_pitch_mixed | 37.2 s | 28.1 s | 24.2 s |
+  | four_signal_layers | 18.8 s | 12.4 s | 11.4 s |
+
+  - A failing search walked every state it could reach before it gave up: in a short run on ULX3S
+    58 000 of 204 000 searches took 93 % of all expansions (35 000 each against 1 000 for a
+    successful one), on the LED controller 51 %. After 1000 expansions a search now walks from its goal (`route/shut.rs`):
+    gaps between the crossings of an edge that have room with the loosest sides, via vertices and
+    sites where the search may place a via, pads and holes of the net, joined where a track would
+    not cross the chord of another net. Whatever the search can reach is reached there too, so a
+    goal side without a start proves the failure. A goal shut in took 78 places in the middle, the
+    largest of 108 000 on ULX3S 19 000 (budget 1000 places). A walk without chords proved almost
+    nothing, one without the search's own via checks 14 % of the failures on the LED controller:
+    the tracks and the vias that do not fit are what shut a goal in.
+  - Corne: the relaxation and the clearance check looked at all 449 edges of its 74 outlines for
+    every point and piece near the board edge (28 % of the run). Now per cell the edges in reach,
+    per row of cells the edges of the even-odd test, a grid of the edges in the check.
+  - Smaller: a four-ary heap of integer keys for the open list and stale flags instead of a map
+    lookup per pop, vias from the sweep of the relaxation, the sweep list in key order, polish and
+    via pass side by side.
+  - Tried and dropped: only the points near what moved in the tension rounds (exact, but about
+    65 % of the points creep by 1e-9 to 1e-3 mm every round, only 4 % by more than 1 um, so it was
+    slower); tension across the band only (the creep stays); the route of the via pass ahead,
+    next to the last geometry generation (the last generation finds a new winner in three of
+    four searches); small changes in the search (u64 keys of the edge views, side lookups): not
+    measurable.
+  - Second round (review by three skeptics, four finders; all byte for byte the same again):
+    a geometry candidate with fewer connections than the most of its generation never wins, so
+    its relaxation is skipped or stopped (LED controller 36 to 20 s; its portfolio entry has no
+    violation numbers); the router keeps every pin's pitch that `Board::pin_room` scanned all
+    pins for in every search (ULX3S 18 % of the busy time); sweep buffers from a pool per thread;
+    a goal found shut in is asked about at once in the next search of that connection; the via
+    pass of a winner from the geometry generations is the end of a run on a copy of its router.
+    The review found two cases where the proof could have been too strict (pad obstacles on a
+    layer the pin does not name, via sites in a triangle of another net's mask opening); both are
+    closed.
+  - Dropped in the second round: relaxing equal geometries once (Arty had none); running the
+    next geometry generation ahead on free cores as if the best stayed (the same files, Corne
+    304 to 277-293 s, but ULX3S 39 to 44 s unless gated by rules fitted to these boards).
+  - Where the time goes now: Corne 77 % of the busy time in negotiated searches of the second
+    search the run starts on its own, whose geometry generations (about 80-100 s each) never
+    produce a candidate as complete as the best; the LED controller mostly relaxation.
+  - Experiment `GB_GEO_SCREEN=k`: a geometry generation relaxes all candidates with a quarter of
+    the rounds and only the best k fully. With k = 4 the same file in all six runs (LED controller,
+    Arty, Corne, seeds 1 and 2), LED controller and Arty about 12 % faster, Corne not. Off by
+    default until more boards agree.
 
 ## Open: fine pitch fan-out (Corne)
 
