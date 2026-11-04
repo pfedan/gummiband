@@ -9,7 +9,7 @@
 
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::board::{Board, NetId, ObstacleKind};
 use crate::geom::{Point, Rect, Shape, orient, point_seg_dist, pt, segs_intersect};
@@ -352,6 +352,8 @@ struct Node {
     block_len: u8,
     /// Nearest ancestor that is a via, for the hole spacing within one connection.
     via_up: u32,
+    /// A later push reached the same state for less: the node is skipped when it comes up.
+    stale: bool,
 }
 
 /// Two bits of the filter for a triangle.
@@ -370,13 +372,14 @@ const OVER_TOL: f64 = 1e-6;
 /// A negotiation ends after this many rounds without fewer conflicts.
 const MAX_STALE: usize = 5;
 
-type Best = FastMap<(u8, u32, u32), f64>;
+/// Per search state the least cost so far and the node that holds it.
+type Best = FastMap<(u8, u32, u32), (f64, u32)>;
 
 #[derive(Default)]
 struct SearchBuf {
     nodes: Vec<Node>,
     best: Best,
-    open: BinaryHeap<Open>,
+    open: OpenHeap,
 }
 
 /// A copy of a router starts with empty buffers: every search clears them first, and copying
@@ -387,17 +390,71 @@ impl Clone for SearchBuf {
     }
 }
 
-#[derive(PartialEq, Clone)]
-struct Open(f64, u32);
-impl Eq for Open {}
-impl PartialOrd for Open {
-    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
-        Some(self.cmp(o))
+/// The open list of a search: nodes by `f`, ties by node index, both ascending. One `u128` per
+/// entry, `f` in its total order (as `f64::total_cmp`) above the index, in a four-ary heap: the
+/// order is total, so the nodes come out in the same order as from any other exact queue, and a
+/// pop compares integers and touches fewer cache lines than a binary heap of `(f64, u32)`.
+#[derive(Default)]
+struct OpenHeap(Vec<u128>);
+
+impl OpenHeap {
+    #[inline]
+    fn entry(f: f64, idx: u32) -> u128 {
+        let b = f.to_bits();
+        let k = if b >> 63 == 1 { !b } else { b | 1 << 63 };
+        (k as u128) << 32 | idx as u128
     }
-}
-impl Ord for Open {
-    fn cmp(&self, o: &Self) -> Ordering {
-        o.0.total_cmp(&self.0).then(o.1.cmp(&self.1))
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    #[inline]
+    fn push(&mut self, f: f64, idx: u32) {
+        let x = Self::entry(f, idx);
+        let h = &mut self.0;
+        let mut i = h.len();
+        h.push(x);
+        while i > 0 {
+            let up = (i - 1) / 4;
+            if h[up] <= x {
+                break;
+            }
+            h[i] = h[up];
+            i = up;
+        }
+        h[i] = x;
+    }
+
+    /// The node index with the least `f`.
+    #[inline]
+    fn pop(&mut self) -> Option<u32> {
+        let h = &mut self.0;
+        let top = *h.first()?;
+        let last = h.pop().unwrap();
+        let n = h.len();
+        if n > 0 {
+            let mut i = 0;
+            loop {
+                let c = 4 * i + 1;
+                if c >= n {
+                    break;
+                }
+                let mut m = c;
+                for j in c + 1..(c + 4).min(n) {
+                    if h[j] < h[m] {
+                        m = j;
+                    }
+                }
+                if h[m] >= last {
+                    break;
+                }
+                h[i] = h[m];
+                i = m;
+            }
+            h[i] = last;
+        }
+        Some(top as u32)
     }
 }
 
@@ -2111,58 +2168,59 @@ impl<'a> Router<'a> {
         buf.nodes.clear();
         buf.open.clear();
         let SearchBuf { nodes, best, open } = buf;
-        let push = |best: &mut Best,
-                    nodes: &mut Vec<Node>,
-                    open: &mut BinaryHeap<Open>,
-                    kind: NK,
-                    pos: Point,
-                    g: f64,
-                    parent: u32| {
-            match best.entry(key(&kind)) {
-                Entry::Occupied(mut b) => {
-                    if *b.get() <= g + 1e-9 {
-                        return;
+        let push =
+            |best: &mut Best, nodes: &mut Vec<Node>, open: &mut OpenHeap, kind: NK, pos: Point, g: f64, parent: u32| {
+                // a node that a cheaper one replaces is stale: every later push that gets through
+                // here is cheaper by more than 1e-9 than any node of its state before
+                let at = nodes.len() as u32;
+                match best.entry(key(&kind)) {
+                    Entry::Occupied(mut b) => {
+                        let (old, old_at) = *b.get();
+                        if old <= g + 1e-9 {
+                            return;
+                        }
+                        b.insert((g, at));
+                        nodes[old_at as usize].stale = true;
                     }
-                    b.insert(g);
+                    Entry::Vacant(b) => {
+                        b.insert((g, at));
+                    }
                 }
-                Entry::Vacant(b) => {
-                    b.insert(g);
-                }
-            }
-            let (seen, block_up, block_len) = match (kind, nodes.get(parent as usize)) {
-                (NK::Tri { t, li, .. }, Some(n)) if n.block_len == BLOCK => (tri_bit(t, li), parent, 1),
-                (NK::Tri { t, li, .. }, Some(n)) if n.block_len > 0 => {
-                    (n.seen | tri_bit(t, li), n.block_up, n.block_len + 1)
-                }
-                (NK::Tri { t, li, .. }, _) => (tri_bit(t, li), u32::MAX, 1),
-                _ => (0, u32::MAX, 0),
+                let (seen, block_up, block_len) = match (kind, nodes.get(parent as usize)) {
+                    (NK::Tri { t, li, .. }, Some(n)) if n.block_len == BLOCK => (tri_bit(t, li), parent, 1),
+                    (NK::Tri { t, li, .. }, Some(n)) if n.block_len > 0 => {
+                        (n.seen | tri_bit(t, li), n.block_up, n.block_len + 1)
+                    }
+                    (NK::Tri { t, li, .. }, _) => (tri_bit(t, li), u32::MAX, 1),
+                    _ => (0, u32::MAX, 0),
+                };
+                let via_up = match nodes.get(parent as usize) {
+                    Some(Node {
+                        kind: NK::Site { .. } | NK::Vert { .. },
+                        ..
+                    }) => parent,
+                    Some(n) => n.via_up,
+                    None => u32::MAX,
+                };
+                nodes.push(Node {
+                    kind,
+                    pos,
+                    g,
+                    parent,
+                    seen,
+                    block_up,
+                    block_len,
+                    via_up,
+                    stale: false,
+                });
+                // a way to the net right here: the pins of the goal say nothing about it
+                let f = if matches!(kind, NK::GoalTap { .. }) {
+                    g
+                } else {
+                    g + h(pos)
+                };
+                open.push(f, (nodes.len() - 1) as u32);
             };
-            let via_up = match nodes.get(parent as usize) {
-                Some(Node {
-                    kind: NK::Site { .. } | NK::Vert { .. },
-                    ..
-                }) => parent,
-                Some(n) => n.via_up,
-                None => u32::MAX,
-            };
-            nodes.push(Node {
-                kind,
-                pos,
-                g,
-                parent,
-                seen,
-                block_up,
-                block_len,
-                via_up,
-            });
-            // a way to the net right here: the pins of the goal say nothing about it
-            let f = if matches!(kind, NK::GoalTap { .. }) {
-                g
-            } else {
-                g + h(pos)
-            };
-            open.push(Open(f, (nodes.len() - 1) as u32));
-        };
 
         for (li, m) in self.sub.m.iter().enumerate() {
             if !src.layers.has(m.layer) {
@@ -2208,7 +2266,7 @@ impl<'a> Router<'a> {
         #[allow(clippy::too_many_arguments)]
         let mut cross_out = |best: &mut Best,
                              nodes: &mut Vec<Node>,
-                             open: &mut BinaryHeap<Open>,
+                             open: &mut OpenHeap,
                              t: u32,
                              lu: usize,
                              k: u8,
@@ -2399,9 +2457,9 @@ impl<'a> Router<'a> {
         let mut vertex_ok: FastMap<u32, Option<bool>> = FastMap::default();
         let mut via_fits: FastMap<u32, bool> = FastMap::default();
         let mut expansions = 0;
-        while let Some(Open(_, idx)) = open.pop() {
+        while let Some(idx) = open.pop() {
             let node = nodes[idx as usize];
-            if best.get(&key(&node.kind)).is_some_and(|&b| b < node.g - 1e-9) {
+            if node.stale {
                 continue;
             }
             expansions += 1;
@@ -4250,6 +4308,45 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(planned_nets(&b, pairs), ["L_P", "L_N", "E", "F", "C", "A", "D", "B"]);
+    }
+
+    /// The open list hands out the nodes by f, ties by index, also with pushes between pops,
+    /// negative values and equal f.
+    #[test]
+    fn the_open_list_pops_in_total_order() {
+        let mut h = OpenHeap::default();
+        let mut reference: Vec<(f64, u32)> = Vec::new();
+        let mut x: u64 = 12345;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut out = Vec::new();
+        let mut want = Vec::new();
+        for idx in 0..5000u32 {
+            let r = next();
+            let f = match r % 5 {
+                0 => 1.0,
+                1 => -((r % 1000) as f64) * 0.25,
+                _ => (r % 997) as f64 * 0.125,
+            };
+            h.push(f, idx);
+            reference.push((f, idx));
+            if next() % 3 == 0 {
+                reference.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
+                want.push(reference.pop().unwrap().1);
+                out.push(h.pop().unwrap());
+            }
+        }
+        reference.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
+        while let Some(i) = h.pop() {
+            out.push(i);
+            want.push(reference.pop().unwrap().1);
+        }
+        assert_eq!(out, want);
+        assert!(reference.is_empty());
     }
 
     #[test]

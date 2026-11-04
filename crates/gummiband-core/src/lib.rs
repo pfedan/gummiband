@@ -1432,26 +1432,41 @@ fn search_fixed(
             }
         }
     }
-    // polish: a few clearance spots are often left that more rounds without tension resolve
-    if best.stats.violations.unwrap_or(0) > 0 && std::env::var("GB_NO_POLISH").is_err() {
-        let polish = relax::RelaxConfig {
-            tension: 0.0,
-            ..full_relax.clone()
-        };
-        let c = geo_eval_with(best.clone(), &polish);
+    // polish: a few clearance spots are often left that more rounds without tension resolve.
+    // The via pass routes the winner again in its order and configuration, which the polish
+    // does not change: both run side by side, and the via pass is judged against the polished
+    // winner as before.
+    let do_polish = best.stats.violations.unwrap_or(0) > 0 && std::env::var("GB_NO_POLISH").is_err();
+    let do_via_pass = base.via_pass > 0.0 && best.stats.vias > 0;
+    let (polished, via_passed) = rayon::join(
+        || {
+            do_polish.then(|| {
+                let polish = relax::RelaxConfig {
+                    tension: 0.0,
+                    ..full_relax.clone()
+                };
+                geo_eval_with(best.clone(), &polish)
+            })
+        },
+        || {
+            do_via_pass.then(|| {
+                let identity: Genome = best.order.iter().enumerate().map(|(i, &k)| (k, i as f64)).collect();
+                let cfg = RouterConfig {
+                    via_pass: base.via_pass,
+                    ..best.cfg.clone()
+                };
+                geo_eval(evaluate(board, &sub, cfg, Some(&identity), best.stats.generation))
+            })
+        },
+    );
+    if let Some(c) = polished {
         if full_cost(&c) < full_cost(&best) {
             best = c;
         }
         search.report("polish", &best.stats);
     }
     // the winner again with the via pass: it stays only if nothing else gets worse
-    if base.via_pass > 0.0 && best.stats.vias > 0 {
-        let identity: Genome = best.order.iter().enumerate().map(|(i, &k)| (k, i as f64)).collect();
-        let cfg = RouterConfig {
-            via_pass: base.via_pass,
-            ..best.cfg.clone()
-        };
-        let c = geo_eval(evaluate(board, &sub, cfg, Some(&identity), best.stats.generation));
+    if let Some(c) = via_passed {
         let fewer = c.stats.routed >= best.stats.routed
             && c.stats.violations <= best.stats.violations
             && c.stats.shorts <= best.stats.shorts

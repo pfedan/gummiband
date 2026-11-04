@@ -582,11 +582,18 @@ impl Mesh {
     }
 
     /// Local index (0..3) of edge e in triangle t.
+    #[inline]
     pub fn local_edge(&self, t: u32, e: u32) -> usize {
-        self.tri_edges[t as usize]
-            .iter()
-            .position(|&x| x == e)
-            .expect("edge not in triangle")
+        let te = &self.tri_edges[t as usize];
+        if te[0] == e {
+            0
+        } else if te[1] == e {
+            1
+        } else if te[2] == e {
+            2
+        } else {
+            panic!("edge not in triangle")
+        }
     }
 
     pub fn check_orientation(&self) -> usize {

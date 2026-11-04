@@ -24,10 +24,7 @@ enum ShapeArg {
 }
 
 #[derive(Parser)]
-#[command(
-    name = "gummiband-place",
-    about = "Alternative placements of the LED controller"
-)]
+#[command(name = "gummiband-place", about = "Alternative placements of the LED controller")]
 struct Cli {
     /// Input board (placed, unrouted).
     board: PathBuf,

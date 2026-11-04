@@ -389,10 +389,11 @@ const SWEEP_SKIN: f64 = 0.4;
 
 /// Scratch of the point loop.
 struct Sweep {
-    /// Pieces within the skin of `anchor`, and the candidates of the current point (pieces by
-    /// their order keys, vias by id).
+    /// Pieces and vias of other nets within the skin of `anchor`, and the candidates of the
+    /// current point (pieces by their order keys, vias by id).
     anchor: Point,
     list: Vec<Swept>,
+    via_list: Vec<SweptVia>,
     near: Vec<u64>,
     vias: Vec<u32>,
 }
@@ -402,10 +403,21 @@ impl Default for Sweep {
         Sweep {
             anchor: pt(f64::INFINITY, f64::INFINITY),
             list: Vec::new(),
+            via_list: Vec::new(),
             near: Vec::new(),
             vias: Vec::new(),
         }
     }
+}
+
+/// A via in the sweep of a track: its centre, the radius and clearance the point filter needs,
+/// and its id.
+#[derive(Clone, Copy)]
+struct SweptVia {
+    at: Point,
+    /// Radius plus the larger of its clearance and the track's; the custom rules come on top.
+    reach: f64,
+    id: u32,
 }
 
 /// A piece in the sweep of a track: what the point filter needs, and the order key.
@@ -1294,21 +1306,36 @@ pub fn relax_while(
                         let Sweep {
                             anchor,
                             list,
+                            via_list,
                             near,
                             vias: hits,
                         } = sweep;
+                        // the pieces and vias near one point serve the next points along the
+                        // track too: within the skin of the anchor every candidate of a point is
+                        // in the lists, and the filters below pick exactly those of the point
+                        let sweep_again = (p - *anchor).len2() >= SWEEP_SKIN * SWEEP_SKIN;
+                        if sweep_again {
+                            via_list.clear();
+                            let radius = half_w(t) + max_clr + max_vr + cfg.margin + 0.01 + SWEEP_SKIN;
+                            via_grid.for_each_near(p, radius, |vi| {
+                                let (vc, vr, vn, vclr) = vias[vi as usize];
+                                if vn != net && via_layer[vi as usize].is_none_or(|l| l == t.layer) {
+                                    via_list.push(SweptVia {
+                                        at: vc,
+                                        reach: vr + max_of(max_of(vclr, c), item_max),
+                                        id: vi,
+                                    });
+                                }
+                            });
+                        }
                         hits.clear();
-                        via_grid.for_each_near(p, w / 2.0 + max_clr + max_vr + cfg.margin + 0.01, |vi| {
-                            let (vc, vr, vn, vclr) = vias[vi as usize];
-                            let dv = p - vc;
-                            let reach = vr + max_of(max_of(vclr, c), item_max) + w / 2.0 + cfg.margin;
-                            if vn != net
-                                && !surely_outside(dv.x, dv.y, reach)
-                                && via_layer[vi as usize].is_none_or(|l| l == t.layer)
-                            {
-                                hits.push(vi);
+                        let wm = w / 2.0 + cfg.margin;
+                        for v in via_list.iter() {
+                            let dv = p - v.at;
+                            if !surely_outside(dv.x, dv.y, v.reach + wm) {
+                                hits.push(v.id);
                             }
-                        });
+                        }
                         hits.sort_unstable();
                         for &vi in hits.iter() {
                             let (vc, vr, vn, vclr) = vias[vi as usize];
@@ -1330,8 +1357,7 @@ pub fn relax_while(
                             }
                         }
                         // other tracks (they push back from their side, so take half)
-                        // the pieces near one point serve the next points along the track too
-                        if (p - *anchor).len2() >= SWEEP_SKIN * SWEEP_SKIN {
+                        if sweep_again {
                             *anchor = p;
                             list.clear();
                             let base = half_w(t) + cfg.margin + SWEEP_SKIN + 1e-6;
