@@ -90,16 +90,16 @@ impl Router<'_> {
         };
         // the pads of a group of pins and the places of a via in them
         let in_groups = |groups: &[u32]| -> Vec<usize> {
+            let groups: HashSet<u32> = groups.iter().copied().collect();
             (0..self.board.pins.len())
                 .filter(|&q| groups.contains(&self.pin_group[q]))
                 .collect()
         };
         let pads = |q: usize, out: &mut Vec<Place>| {
             let pin = &self.board.pins[q];
+            // every layer: an obstacle of the pin can reach a layer the pin itself does not
+            // name (the merged ends of a pair), and the search ends there as well
             for (l, m) in self.sub.m.iter().enumerate() {
-                if !pin.layers.has(m.layer) {
-                    continue;
-                }
                 for &o in &pin.obstacles {
                     for &t in m.obs_tris.get(&(o as u32)).map(|v| v.as_slice()).unwrap_or(&[]) {
                         out.push(Place::Pad { l: l as u8, t });
@@ -133,6 +133,10 @@ impl Router<'_> {
         let mut seeds = Vec::new();
         for q in in_groups(&groups) {
             pads(q, &mut seeds);
+        }
+        // a goal as large as the budget (all other pins of a large net) cannot be shut in here
+        if seeds.len() > budget {
+            return false;
         }
         let mut seen: HashSet<Place> = HashSet::new();
         let mut queue = Vec::new();
@@ -294,14 +298,17 @@ impl Router<'_> {
     /// places of t that a track from `from` (a boundary position, or an interior point) reaches
     /// without crossing a chord of another net.
     fn walk_enter(&self, w: &mut Walk, l: usize, t: u32, from: Result<Pos, Point>, next: &mut Vec<Place>) {
-        if !self.walk_ok(w, l, t) {
+        let m = self.m(l);
+        if t == NONE || !Substrate::passable(self.board, m.status[t as usize], w.net) {
             return;
         }
-        let m = self.m(l);
         if m.status[t as usize] != NONE {
             next.push(Place::Pad { l: l as u8, t });
             return;
         }
+        // a triangle in the mask opening of another net: the search never enters it across an
+        // edge, but a via placed on one of its sites leaves it across its edges
+        let closed = m.closed(t, w.net);
         let net = w.net;
         let mut coords = std::mem::take(&mut w.coords);
         let mut points = std::mem::take(&mut w.points);
@@ -312,6 +319,11 @@ impl Router<'_> {
             Err(p) => !points.iter().any(|&(c, d)| segs_intersect(p, to.at, c, d)),
         };
         for k in 0..3u8 {
+            // a gap toward a triangle the search cannot enter is no state of the search
+            let t2 = m.tri_nbrs[t as usize][k as usize];
+            if (closed && from.is_ok()) || !self.walk_ok(w, l, t2) {
+                continue;
+            }
             let e = m.tri_edges[t as usize][k as usize];
             for (j, &fits) in self.walk_gaps(w, l, e).iter().enumerate() {
                 if !fits {
@@ -336,7 +348,7 @@ impl Router<'_> {
                 coord: i as f64,
                 at: m.verts[v as usize],
             };
-            if reaches(to) && self.walk_vertex(w, l, v) {
+            if !closed && reaches(to) && self.walk_vertex(w, l, v) {
                 next.push(Place::Vertex { l: l as u8, v });
             }
         }

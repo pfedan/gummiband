@@ -1260,6 +1260,24 @@ fn search_fixed(
         c
     };
     let geo_eval = |c: Candidate| geo_eval_with(c, &full_relax);
+    // the same, as long as `go_on` says so before each round; a candidate whose relaxation
+    // was stopped keeps its unrelaxed geometry and no violation numbers
+    let geo_eval_while = |mut c: Candidate, go_on: &dyn Fn() -> bool| -> Candidate {
+        let mut geo = c.geo.clone();
+        if !relax::relax_while(board, &sub, &mut geo, &full_relax, go_on) {
+            return c;
+        }
+        let v = prof::time(prof::Slot::Check, || check::check(board, &geo));
+        let mut nets: Vec<NetId> = v.iter().flat_map(|x| [Some(x.nets.0), x.nets.1]).flatten().collect();
+        nets.sort_unstable();
+        nets.dedup();
+        c.geo = geo;
+        c.stats.violations = Some(v.len());
+        c.stats.shorts = Some(v.iter().filter(|x| x.actual <= 0.0).count());
+        c.bad_nets = nets;
+        c.hot = v.iter().map(|x| x.at).collect();
+        c
+    };
     // successive halving: the topology cost predicts the finished geometry only weakly, so
     // many finalists get a short relaxation first and only the best quarter the full one
     let top = finalists[0].stats.routed;
@@ -1356,38 +1374,61 @@ fn search_fixed(
             };
             evaluate(board, &sub, cfg, Some(g), search.generations + generation)
         };
-        let next: Vec<Candidate> = match geo_screen.filter(|&k| k < variants.len()) {
+        // completion first: a candidate with fewer connections than the most of this generation
+        // (or the best so far) never wins, whatever its violations, so only those with the most
+        // are relaxed; a relaxation stops once another candidate has routed more
+        let floor = std::sync::atomic::AtomicUsize::new(best.stats.routed);
+        let relaxed = std::sync::atomic::Ordering::Relaxed;
+        let mut next: Vec<Candidate> = match geo_screen.filter(|&k| k < variants.len()) {
             // experiment: a short relaxation for all, the full one for the best few
             Some(k) => {
                 let screen = relax::RelaxConfig {
                     iterations: (full_relax.iterations / 4).max(40),
                     ..full_relax.clone()
                 };
-                let mut screened: Vec<(Candidate, Geometry)> = variants
-                    .par_iter()
-                    .map(|v| {
-                        let c = route_variant(v);
+                let routed: Vec<Candidate> = variants.par_iter().map(route_variant).collect();
+                let top = routed
+                    .iter()
+                    .map(|c| c.stats.routed)
+                    .fold(best.stats.routed, usize::max);
+                let (contenders, rest): (Vec<Candidate>, Vec<Candidate>) =
+                    routed.into_iter().partition(|c| c.stats.routed == top);
+                let mut screened: Vec<(Candidate, Geometry)> = contenders
+                    .into_par_iter()
+                    .map(|c| {
                         let geo = c.geo.clone();
                         (geo_eval_with(c, &screen), geo)
                     })
                     .collect();
-                screened.sort_by(|a, b| {
-                    b.0.stats
-                        .routed
-                        .cmp(&a.0.stats.routed)
-                        .then(full_cost(&a.0).total_cmp(&full_cost(&b.0)))
-                });
+                screened.sort_by(|a, b| full_cost(&a.0).total_cmp(&full_cost(&b.0)));
                 screened.truncate(k);
-                screened
+                let mut out: Vec<Candidate> = screened
                     .into_par_iter()
                     .map(|(mut c, geo)| {
                         c.geo = geo;
                         geo_eval(c)
                     })
-                    .collect()
+                    .collect();
+                out.extend(rest);
+                out
             }
-            None => variants.par_iter().map(|v| geo_eval(route_variant(v))).collect(),
+            None => variants
+                .par_iter()
+                .map(|v| {
+                    let c = route_variant(v);
+                    let r = c.stats.routed;
+                    if floor.fetch_max(r, relaxed) > r {
+                        return c;
+                    }
+                    geo_eval_while(c, &|| floor.load(relaxed) <= r)
+                })
+                .collect(),
         };
+        let top = next.iter().map(|c| c.stats.routed).fold(best.stats.routed, usize::max);
+        for c in next.iter_mut().filter(|c| c.stats.routed < top) {
+            c.stats.violations = None;
+            c.stats.shorts = None;
+        }
         for c in next {
             portfolio.push(c.stats.clone());
             // completion first: a generation never trades a connection for cleaner geometry

@@ -303,6 +303,9 @@ pub struct Router<'a> {
     search_buf: SearchBuf,
     /// Debugging: positions expanded by the last search of a traced connection.
     pub trace: std::sync::Arc<std::sync::Mutex<Option<Vec<(Point, u8)>>>>,
+    /// Per pin the distance to the nearest pin of its part on another net, see
+    /// [`Board::pin_room`]: every search asks for it at its pins.
+    pin_pitch: std::sync::Arc<Vec<f64>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -375,9 +378,10 @@ const BLOCK: u8 = 12;
 const GOAL_CHECK_AT: usize = 1000;
 const GOAL_CHECK_BUDGET: usize = 1000;
 
+#[cfg(test)]
 thread_local! {
     /// After how many expansions a search of this thread asks (0: never), and how many goals
-    /// it found shut in, for tests.
+    /// it found shut in. Only searches on the calling thread see them (`Router::run` is serial).
     static GOAL_CHECK_TEST: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static GOAL_SHUT_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -386,13 +390,15 @@ thread_local! {
 /// `GB_GOAL_CHECK=0` switches the check off, for comparisons: the results are the same.
 fn goal_check_at() -> usize {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    GOAL_CHECK_TEST.with(|c| c.get()).unwrap_or_else(|| {
-        if *ON.get_or_init(|| std::env::var("GB_GOAL_CHECK").map_or(true, |v| v != "0")) {
-            GOAL_CHECK_AT
-        } else {
-            0
-        }
-    })
+    #[cfg(test)]
+    if let Some(at) = GOAL_CHECK_TEST.with(|c| c.get()) {
+        return at;
+    }
+    if *ON.get_or_init(|| std::env::var("GB_GOAL_CHECK").map_or(true, |v| v != "0")) {
+        GOAL_CHECK_AT
+    } else {
+        0
+    }
 }
 
 /// An edge counts as over capacity from this overflow in mm on.
@@ -636,6 +642,7 @@ impl<'a> Router<'a> {
             conn_vias: Vec::new(),
             search_buf: Default::default(),
             trace: Default::default(),
+            pin_pitch: std::sync::Arc::new(Self::pin_pitches(board)),
             pin_group,
             plane_groups,
             partner,
@@ -876,7 +883,7 @@ impl<'a> Router<'a> {
         let clr = cls.clearance.max(self.board.rules.min_clearance);
         let pad_w = pins
             .iter()
-            .map(|&p| self.board.pin_room(p, clr).min(0.4))
+            .map(|&p| self.pin_room(p, clr).min(0.4))
             .fold(f64::INFINITY, f64::min);
         let neck_w = self.board.rules.min_track_width.max(pad_w).min(cls.track_width);
         if neck_w >= cls.track_width - 1e-9 {
@@ -1637,6 +1644,45 @@ impl<'a> Router<'a> {
         )
     }
 
+    /// The pitch of every pin as [`Board::pin_room`] folds it: the nearest pin of the same part
+    /// on another net, `INFINITY` without one.
+    fn pin_pitches(board: &Board) -> Vec<f64> {
+        let mut parts: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, p) in board.pins.iter().enumerate() {
+            parts.entry(p.footprint.as_str()).or_default().push(i);
+        }
+        let mut pitch = vec![f64::INFINITY; board.pins.len()];
+        for part in parts.values() {
+            for &i in part {
+                let pin = &board.pins[i];
+                pitch[i] = part
+                    .iter()
+                    .map(|&q| &board.pins[q])
+                    .filter(|q| q.net != pin.net)
+                    .map(|q| q.pos.dist(pin.pos))
+                    .fold(f64::INFINITY, f64::min);
+            }
+        }
+        pitch
+    }
+
+    /// [`Board::pin_room`] from the pitches of the router.
+    fn pin_room(&self, p: usize, clr: f64) -> f64 {
+        let pin = &self.board.pins[p];
+        pin.size.0.min(pin.size.1).min(self.pin_pitch[p] - clr - 0.02)
+    }
+
+    /// [`Board::narrow_pin`] from the pitches of the router.
+    fn narrow_pin(&self, p: usize) -> bool {
+        let cls = self.board.class_of(self.board.pins[p].net);
+        match cls.min_width {
+            Some(min) if !cls.neck_refs.is_empty() => {
+                self.pin_room(p, cls.clearance.max(self.board.rules.min_clearance)) < min - 1e-9
+            }
+            _ => false,
+        }
+    }
+
     /// How many vias a layer change of connection ci takes: one, or on a current path (between
     /// two pins that take the minimum width of their class, [`Board::current_min`]) as many as
     /// carry what that width carries ([`Board::vias_for`]).
@@ -1646,7 +1692,7 @@ impl<'a> Router<'a> {
             return 1.0;
         };
         match &c.goal {
-            Goal::Pins(goal) if !self.board.narrow_pin(c.from) && goal.iter().any(|&p| !self.board.narrow_pin(p)) => {
+            Goal::Pins(goal) if !self.narrow_pin(c.from) && goal.iter().any(|&p| !self.narrow_pin(p)) => {
                 self.board.vias_for(min, self.via_size(c.net).1) as f64
             }
             _ => 1.0,
@@ -2491,7 +2537,8 @@ impl<'a> Router<'a> {
         let mut vertex_ok: FastMap<u32, Option<bool>> = FastMap::default();
         let mut via_fits: FastMap<u32, bool> = FastMap::default();
         let mut expansions = 0;
-        let check_at = goal_check_at();
+        // a traced search (GB_WHY) shows where it went: all of it
+        let check_at = if tracing { 0 } else { goal_check_at() };
         while let Some(idx) = open.pop() {
             let node = nodes[idx as usize];
             if node.stale {
@@ -2506,6 +2553,7 @@ impl<'a> Router<'a> {
                 crate::prof::add(crate::prof::Slot::GoalChecks, 1);
                 if self.goal_shut_in(ci, item, &necks, neck_w, &tappable, via_in_pad, GOAL_CHECK_BUDGET) {
                     crate::prof::add(crate::prof::Slot::GoalShut, 1);
+                    #[cfg(test)]
                     GOAL_SHUT_TEST.with(|c| c.set(c.get() + 1));
                     return None;
                 }
@@ -4352,6 +4400,29 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(planned_nets(&b, pairs), ["L_P", "L_N", "E", "F", "C", "A", "D", "B"]);
+    }
+
+    /// The pitches of the router give the room of `Board::pin_room` to the bit.
+    #[test]
+    fn the_pin_pitches_give_the_room_of_the_board() {
+        let pins = [
+            ("U1", "A", 3.0, 3.0),
+            ("U1", "B", 3.5, 3.0),
+            ("U1", "A", 4.0, 3.0),
+            ("U1", "C", 3.0, 4.1),
+            ("U2", "A", 10.0, 10.0),
+            ("U2", "A", 10.4, 10.0),
+            ("U3", "B", 15.0, 15.0),
+        ];
+        let b = pad_board(&pins);
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let r = Router::new(&b, &sub, RouterConfig::default());
+        for p in 0..b.pins.len() {
+            for clr in [0.0, 0.1, 0.2, 0.127] {
+                assert_eq!(r.pin_room(p, clr).to_bits(), b.pin_room(p, clr).to_bits(), "pin {p}");
+            }
+            assert_eq!(r.narrow_pin(p), b.narrow_pin(p));
+        }
     }
 
     /// A search whose goal is shut in ends at once, with the same result: a dense board routed
