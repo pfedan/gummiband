@@ -1305,10 +1305,7 @@ fn search_fixed(
         frames.push((label(&best, "geometry"), best.geo.clone(), true));
     }
     let open = search.open_end.is_some();
-    // the via pass routes the winner again in its order and configuration. That route depends
-    // on the winner alone and runs on one core: it runs ahead, next to the last geometry
-    // generation, for the winner before it, and if that stays the winner it is ready (and the
-    // same). Its relaxation waits for the end, where it has all cores.
+    // the via pass routes the winner again in its order and configuration
     let via_route = |best: &Candidate| -> Option<Candidate> {
         (base.via_pass > 0.0 && best.stats.vias > 0).then(|| {
             let identity: Genome = best.order.iter().enumerate().map(|(i, &k)| (k, i as f64)).collect();
@@ -1319,8 +1316,6 @@ fn search_fixed(
             evaluate(board, &sub, cfg, Some(&identity), best.stats.generation)
         })
     };
-    // the via pass route computed ahead, valid while the winner stays the same
-    let mut ahead: Option<Option<Candidate>> = None;
     let mut hotspots: Vec<(geom::Point, f64)> = Vec::new();
     let geo_screen: Option<usize> = std::env::var("GB_GEO_SCREEN").ok().and_then(|v| v.parse().ok());
     let mut done = 0;
@@ -1349,7 +1344,6 @@ fn search_fixed(
                 }
             })
             .collect();
-        let last = generation == search.geometry_generations && !open;
         let route_variant = |(g, scale): &(Genome, f64)| {
             let cfg = RouterConfig {
                 seed: 0,
@@ -1362,42 +1356,38 @@ fn search_fixed(
             };
             evaluate(board, &sub, cfg, Some(g), search.generations + generation)
         };
-        let (next, early): (Vec<Candidate>, _) = rayon::join(
-            || match geo_screen.filter(|&k| k < variants.len()) {
-                // experiment: a short relaxation for all, the full one for the best few
-                Some(k) => {
-                    let screen = relax::RelaxConfig {
-                        iterations: (full_relax.iterations / 4).max(40),
-                        ..full_relax.clone()
-                    };
-                    let mut screened: Vec<(Candidate, Geometry)> = variants
-                        .par_iter()
-                        .map(|v| {
-                            let c = route_variant(v);
-                            let geo = c.geo.clone();
-                            (geo_eval_with(c, &screen), geo)
-                        })
-                        .collect();
-                    screened.sort_by(|a, b| {
-                        b.0.stats
-                            .routed
-                            .cmp(&a.0.stats.routed)
-                            .then(full_cost(&a.0).total_cmp(&full_cost(&b.0)))
-                    });
-                    screened.truncate(k);
-                    screened
-                        .into_par_iter()
-                        .map(|(mut c, geo)| {
-                            c.geo = geo;
-                            geo_eval(c)
-                        })
-                        .collect()
-                }
-                None => variants.par_iter().map(|v| geo_eval(route_variant(v))).collect(),
-            },
-            || last.then(|| via_route(&best)),
-        );
-        let mut changed = false;
+        let next: Vec<Candidate> = match geo_screen.filter(|&k| k < variants.len()) {
+            // experiment: a short relaxation for all, the full one for the best few
+            Some(k) => {
+                let screen = relax::RelaxConfig {
+                    iterations: (full_relax.iterations / 4).max(40),
+                    ..full_relax.clone()
+                };
+                let mut screened: Vec<(Candidate, Geometry)> = variants
+                    .par_iter()
+                    .map(|v| {
+                        let c = route_variant(v);
+                        let geo = c.geo.clone();
+                        (geo_eval_with(c, &screen), geo)
+                    })
+                    .collect();
+                screened.sort_by(|a, b| {
+                    b.0.stats
+                        .routed
+                        .cmp(&a.0.stats.routed)
+                        .then(full_cost(&a.0).total_cmp(&full_cost(&b.0)))
+                });
+                screened.truncate(k);
+                screened
+                    .into_par_iter()
+                    .map(|(mut c, geo)| {
+                        c.geo = geo;
+                        geo_eval(c)
+                    })
+                    .collect()
+            }
+            None => variants.par_iter().map(|v| geo_eval(route_variant(v))).collect(),
+        };
         for c in next {
             portfolio.push(c.stats.clone());
             // completion first: a generation never trades a connection for cleaner geometry
@@ -1405,12 +1395,7 @@ fn search_fixed(
                 || (c.stats.routed == best.stats.routed && full_cost(&c) < full_cost(&best));
             if better {
                 best = c;
-                changed = true;
             }
-        }
-        ahead = if changed { None } else { early };
-        if last && std::env::var("GB_TIMING").is_ok() {
-            eprintln!("via pass ahead: {}", if ahead.is_some() { "used" } else { "lost" });
         }
         search.report_at(
             &format!("geometry generation {generation}"),
@@ -1484,16 +1469,14 @@ fn search_fixed(
             );
             if better {
                 best = c;
-                ahead = None;
                 search.report("via in pad retry", &best.stats);
             }
         }
     }
     // polish: a few clearance spots are often left that more rounds without tension resolve.
     // It does not change the order and configuration of the winner, so the via pass is the
-    // same after it: both relax side by side, and the via pass is judged against the polished
-    // winner as before.
-    let via_routed = ahead.take().unwrap_or_else(|| via_route(&best));
+    // same after it: both run side by side (the route of the via pass takes one core), and the
+    // via pass is judged against the polished winner as before.
     let do_polish = best.stats.violations.unwrap_or(0) > 0 && std::env::var("GB_NO_POLISH").is_err();
     let (polished, via_passed) = rayon::join(
         || {
@@ -1505,7 +1488,7 @@ fn search_fixed(
                 geo_eval_with(best.clone(), &polish)
             })
         },
-        || via_routed.map(geo_eval),
+        || via_route(&best).map(geo_eval),
     );
     if let Some(c) = polished {
         if full_cost(&c) < full_cost(&best) {
