@@ -777,6 +777,53 @@ LED controller (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
   1 clearance errors. So the leash, not a fixed IC, is the right default; a switching regulator
   with its power nets may need a shorter one.
 
+## Buses as bundles
+
+`--patterns buses` (experimental, not in `all`) routes the lines of a part to part block as a
+bundle (`crate::bus`, ARCHITECTURE "Local patterns"). It implies `groups`; blocks without a bus
+are ordered exactly as with `groups`.
+
+- Bus: a run of at least 3 lines (one pin on each of the two parts, no differential pair) that
+  are neighbours at both parts on the same side, along a row of pins, at most one pin left out
+  between two of them. A swap, reversed order (crossing lines), lines between the pairs of a
+  pair connector and the rows of a pad grid end a run.
+- Order: the block starts on the inside of its bend; a ground in the rows of a bus goes after it.
+- Pull towards the routed neighbours (`GB_BUS_PULL`, 1) and a price for missing room beside the
+  way for the members still to come (`GB_BUS_ROOM`, 2 per mm and mm), not within 2 mm of the
+  pins of the bus.
+- Tried and dropped: a higher escape cost for the pins of the bus still to come (kept other
+  nets out of the connector rows but cost vias everywhere else), pull without the planarity
+  check (parts_multi 66 to 107 vias: a bus with swaps was pulled across itself), every fourth
+  run of the portfolio without the pull (no gain).
+- New synthetic boards: `bus_cross` (two 12 bit buses that must cross), `bus_gap` (16 bit bus
+  through a wall with a narrow and a wide gap), `bus_memory` (MCU to parallel SRAM, 4 layers).
+  `bench/bus_metrics.py` measures vias and cohesion per bus, `bench/bus_series.py` runs series.
+
+`bench/bus_series.py --kicad-drc` on the Mac, `--runs 4 --generations 1 --geometry-generations
+0`, seeds 1 and 2, means (2026-11-04, 144 runs, every run complete). Vias (bus vias, cohesion over
+the buses of `bus_metrics.py`: nets named like D0..D15 with at least 4 members), then the KiCad DRC
+errors (silk and library types left out):
+
+| Board | none | `groups` | `buses` |
+| --- | --- | --- | --- |
+| bus | 34 vias (bus 32, cohesion 0.46), 0 DRC | 32 (26, 0.67), 0 | 5 (3, 0.89), 0 |
+| bus_gap | 12 (12, 0.83), 0 | 11 (4, 0.83), 0 | 0 (0, 0.91), 0; 1105 instead of 982 mm |
+| bus_cross | 21 (19, 0.63), 0 | 26 (24, 0.81), 0 | 26 (24, 0.88), 0 |
+| bus_memory | 35 (14, 0.17), 0 | 39 (16, 0.23), 0 | 40 (16, 0.36), 5 (tracks crossing) |
+| matching | 18, 7 (length rules) | 8, 11 | 4, 11 |
+| parts_hard | 73.5, 1 | 59, 0 | 44.5, 4 (tracks crossing) |
+| parts_multi | 71.5, 0 | 66.5, 0 | 65, 0 |
+| parts_multi_feed | 96, 0 | 98.5, 0.5 | 109, 0 |
+| parts_xhard | 105, 1 | 123, 2 | 130, 9 (tracks crossing, 1.5 shorts, pair gap) |
+| diff_pairs | 68, 11 | 7, 44 | 7, 44 (as `groups`) |
+
+All other boards of the suite route the same with `buses` as with `groups`, with the same DRC.
+The errors with `buses` are the spots of the own check before any geometry generation; with the
+default geometry generations parts_hard and bus_memory are clean (seed 1: 47 and 37 vias, 0
+violations of the own check). Open: the crowded boards (parts_multi_feed, parts_xhard), where a
+bundle takes room the scattered parts need, and the shorts on parts_xhard without geometry
+generations; diff_pairs gains DRC errors with `groups` already.
+
 ## M4b: GPU experiment
 
 - Opt-in: `--features gpu` at build time and `GB_GPU=1` at run time, Metal through wgpu. Without

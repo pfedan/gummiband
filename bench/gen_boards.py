@@ -23,6 +23,9 @@ Boards, roughly by difficulty:
   parts_multi         4 layers (planes), MCU and PHY with a 12 net bus, peripherals, shared I2C, 3 pairs, debug header
   parts_multi_feed    the same with 40 scattered 0603 parts (chicken feed), half of them with a plane via
   parts_xhard         parts_multi_feed on a board 25 % smaller in each direction
+  bus_cross           2 layers, two 12 bit buses that cross each other
+  bus_gap             2 layers, 16 bit bus through a wall with a narrow and a wide gap
+  bus_memory          4 layers (planes), QFN-64 MCU to a parallel SRAM: address, data, strobes
 """
 import json
 import math
@@ -181,6 +184,22 @@ def wall(ref, offsets, value="NC"):
     pads = [Pad(str(i + 1), "thru_hole", "circle", (x, 0), (1.7, 1.7), THT, drill=1.0) for i, x in enumerate(offsets)]
     return Footprint(f"Bench:Wall_{len(offsets)}", ref, value, pads,
                      (min(offsets) - 1.0, -1.0, max(offsets) + 1.0, 1.0), tht=True)
+
+
+def tsop(ref, n, pitch=0.8, row=5.3, pad=(1.5, 0.45), value="SRAM"):
+    """TSOP-II style package: n pins at `pitch`, pin 1 top left, counter-clockwise, the pad rows
+    at +-row."""
+    half = n // 2
+    pads = []
+    for i in range(half):
+        y = (i - (half - 1) / 2) * pitch
+        pads.append(Pad(str(i + 1), "smd", "roundrect", (-row, y), pad, SMD, rratio=0.25))
+    for i in range(half):
+        y = ((half - 1) / 2 - i) * pitch
+        pads.append(Pad(str(half + i + 1), "smd", "roundrect", (row, y), pad, SMD, rratio=0.25))
+    h = half * pitch / 2 + 0.6
+    e = row + pad[0] / 2 + 0.3
+    return Footprint(f"Bench:TSOP-II-{n}", ref, value, pads, (-e, -h, e, h))
 
 
 def radial_cap(ref, value="470u"):
@@ -1225,11 +1244,128 @@ def scatter(b, rng, prefix, n, keep_out=(), tries=4000):
     return placed
 
 
+def bus_ends(ja, jb, first, count, names, key_a, key_b, reverse=False):
+    """Bus between connector pads first..first+count-1 of two parts, matched in order of the keys."""
+    sa = [(ja, ja.pad(n)) for n in range(first, first + count)]
+    sb = [(jb, jb.pad(n)) for n in range(first, first + count)]
+    match_sorted(sa, sb, key_a, key_b, names, reverse=reverse)
+
+
+def board_bus_cross():
+    """Two 12 bit buses between edge connectors cross in the middle of a 2 layer board: one of
+    them has to change layers as a whole (24 vias at least), each net on its own makes a mess of
+    vias where the buses meet."""
+    b = Board("bus_cross", 50, 42, title="2 layers, two 12 bit buses that cross each other")
+    j1 = b.add(fpc("J1", 14, 0.5), 3.5, 21, 90)  # left edge, faces right
+    j2 = b.add(fpc("J2", 14, 0.5), 46.5, 21, 270)  # right edge, faces left
+    j3 = b.add(fpc("J3", 14, 0.5), 25, 3.5, 0)  # top edge, faces down
+    j4 = b.add(fpc("J4", 14, 0.5), 25, 38.5, 180)  # bottom edge, faces up
+    bus_ends(j1, j2, 2, 12, [f"A{i}" for i in range(12)], lambda it: j1.world(it[1])[1],
+             lambda it: j2.world(it[1])[1])
+    bus_ends(j3, j4, 2, 12, [f"B{i}" for i in range(12)], lambda it: j3.world(it[1])[0],
+             lambda it: j4.world(it[1])[0])
+    for j in (j1, j2, j3, j4):
+        j.pad(1).net = j.pad(14).net = "GND"
+    # a few parts with local nets in the corners
+    for i, (x, y, r) in enumerate(((10, 8, 0), (40, 8, 90), (10, 34, 90), (40, 34, 0))):
+        res = b.add(two_terminal("R", f"R{i + 1}"), x, y, r)
+        res.pad(1).net = f"L{i // 2}"
+        res.pad(2).net = "GND"
+    return b
+
+
+def board_bus_gap():
+    """A 16 bit bus between two connectors across a wall of THT posts. The gap on the straight
+    line takes 6 tracks per layer, a gap off the line the whole bus: the bus either stays
+    together through the wide gap or splits. Two short nets want the narrow gap as well."""
+    b = Board("bus_gap", 56, 38, title="2 layers, 16 bit bus through a wall with a narrow and a wide gap")
+    j1 = b.add(fpc("J1", 18, 0.5), 3.5, 21, 90)
+    j2 = b.add(fpc("J2", 18, 0.5), 52.5, 21, 270)
+    bus_ends(j1, j2, 2, 16, [f"D{i}" for i in range(16)], lambda it: j1.world(it[1])[1],
+             lambda it: j2.world(it[1])[1])
+    for j in (j1, j2):
+        j.pad(1).net = j.pad(18).net = "GND"
+    # the wall at x = 28, closed from edge to edge (posts about 2 mm apart leave less than a
+    # track) but for a narrow gap (2.4 mm of copper room) around y = 21 on the straight line and a
+    # wide one (7.6 mm) around y = 8
+    fixed = [1.3, 8 - 3.8 - 0.85, 8 + 3.8 + 0.85, 21 - 1.2 - 0.85, 21 + 1.2 + 0.85, 36.7]
+    gaps = {1, 3}  # the wide and the narrow gap follow fixed[1] and fixed[3]
+    posts = []
+    for i in range(len(fixed) - 1):
+        lo, hi = fixed[i], fixed[i + 1]
+        if i in gaps:
+            posts.append(lo)
+            continue
+        n = math.ceil((hi - lo) / 2.1 - 1e-9)
+        posts += [lo + (hi - lo) * k / n for k in range(n)]
+    posts.append(fixed[-1])
+    w = wall("W1", [round(v - posts[0], 4) for v in posts])
+    b.add(w, 28, posts[0], 270)
+    # two short nets across the wall below the bus line, which also like the narrow gap
+    for i, y in enumerate((27, 29)):
+        ra = b.add(two_terminal("R", f"R{2 * i + 1}"), 20, y)
+        rb = b.add(two_terminal("R", f"R{2 * i + 2}"), 36, y - 6)
+        ra.pad(2).net = rb.pad(1).net = f"S{i}"
+        ra.pad(1).net = rb.pad(2).net = "GND"
+    return b
+
+
+def board_bus_memory():
+    """A parallel SRAM on a 4 layer board (GND and 3V3 planes inside): QFN-64 MCU with 16
+    address and 8 data lines plus the strobes to a TSOP-II-44. The data lines and most of the
+    address face each other, three address lines go round the bottom and seven over the top to
+    the far side of the SRAM; one pair of address lines is swapped. Decoupling, pull-ups on
+    the strobes and a debug header with local nets."""
+    b = Board("bus_memory", 52, 40, inner="power",
+              title="4 layers, QFN-64 MCU to a parallel SRAM (A0-A15, D0-D7, strobes)")
+    b.net_class("Power", 0.3, 0.15, 0.6, 0.3, ["GND", "+3V3"])
+    b.zones = [("GND", "In1.Cu"), ("+3V3", "In2.Cu")]
+    gnd, vcc = "GND", "+3V3"
+    u1 = b.add(qfn("U1", 16, 0.5, 4.4375, 0.875, 0.25, 6.0), 14, 20)
+    u2 = b.add(tsop("U2", 44), 37, 20)
+    u1.pad(65).net = gnd
+    # SRAM pinout: left side (1..22 top to bottom), right side (23..44 bottom to top)
+    left = ["A4", "A3", "A2", "A1", "A0", "CE", "D0", "D1", "D2", "D3", vcc, gnd, "D4", "D5", "D6",
+            "D7", "WE", "A15", "A14", "A13", "A12", None]
+    right = [None, "A11", "A10", "A9", "A8", None, None, None, vcc, gnd, None, None, None, None, "OE",
+             "A7", "A6", "A5", None, None, None, None]
+    for i, n in enumerate(left + right):
+        u2.pad(i + 1).net = n
+    # MCU right side, pins 33..48 bottom to top: A4 at the top ... A15 at the bottom, A1/A2 swapped
+    order = ["A4", "A3", "A1", "A2", "A0", "CE", "D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "WE", "A15"]
+    for k, n in enumerate(order):
+        u1.pad(48 - k).net = n
+    # bottom side (17..32 left to right): A12..A14 at the right end, round the bottom
+    for pin, n in zip((30, 31, 32), ("A12", "A13", "A14")):
+        u1.pad(pin).net = n
+    # top side (49..64 right to left): A5.. over the top to the far side of the SRAM
+    for k, n in enumerate(("A5", "A6", "A7", "OE", "A8", "A9", "A10", "A11")):
+        u1.pad(49 + k).net = n
+    for pin in (9, 25):
+        u1.pad(pin).net = vcc
+    for pin in (10, 26):
+        u1.pad(pin).net = gnd
+    # decoupling next to the supply pins
+    for i, (x, y, r) in enumerate(((6.5, 20, 90), (14, 27.5, 0), (37, 31, 0), (37, 9, 0))):
+        c = b.add(two_terminal("C", f"C{i + 1}", "100n"), x, y, r)
+        c.pad(1).net, c.pad(2).net = vcc, gnd
+    # pull-ups on the strobes, between the chips and on the far side
+    for i, (n, x, y) in enumerate((("CE", 25, 6.5), ("WE", 25, 33.5), ("OE", 46, 33))):
+        r = b.add(two_terminal("R", f"R{i + 1}", "10k"), x, y, 0)
+        r.pad(1).net, r.pad(2).net = vcc, n
+    # debug header at the left edge with local nets to the MCU's left side
+    j1 = b.add(header("J1", 6), 2.5, 13.65, 270)
+    for k, pin in enumerate((3, 5, 7, 12)):
+        wire(u1, pin, j1, k + 1, f"DBG{k}")
+    j1.pad(5).net, j1.pad(6).net = vcc, gnd
+    return b
+
+
 BOARDS = [board_easy, board_medium, board_bus, board_power_mix, board_crossing, board_qfn_fanout,
           board_four_signal_layers, board_bga_escape, board_bga_dense, board_fine_pitch, board_fine_pitch_mixed,
           board_diff_pairs, board_matching, board_pair_wall, board_pair_traffic, board_parts_easy,
           board_parts_medium, board_parts_hard, board_parts_multi,
-          board_parts_multi_feed, board_parts_xhard]
+          board_parts_multi_feed, board_parts_xhard, board_bus_cross, board_bus_gap, board_bus_memory]
 
 
 def main():

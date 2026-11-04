@@ -13,6 +13,9 @@ only unconnected items.
 | `easy` | 2 | a few 2 pin connections between 0603 parts |
 | `medium` | 2 | SOIC-14, SOT-23 and 0603 parts, random local netlist, an 8 pin GND net |
 | `bus` | 2 | 16 bit bus between two 0.5 mm FPC connectors with a 90 degree turn, GND across the bus, 45 degree parts in the bend |
+| `bus_cross` | 2 | two 12 bit buses between four edge connectors that cross in the middle: one of them has to change layers as a whole (24 vias at least) |
+| `bus_gap` | 2 | 16 bit bus between two connectors across a wall of THT posts: the gap on the straight line takes 6 tracks per layer, a gap off the line the whole bus; two short nets want the narrow gap as well |
+| `bus_memory` | 4 (planes) | parallel SRAM: QFN-64 MCU with 16 address and 8 data lines plus strobes to a TSOP-II-44, part of the address round the SRAM, one swapped pair, decoupling, pull-ups, debug header |
 | `power_mix` | 2 | 1 mm (VIN, GND) and 0.75 mm (VOUT) nets with 0.2 mm signals through a 3.5 mm channel between two THT walls |
 | `crossing` | 2 | two 1 mm pitch SMD connectors with reversed pin order |
 | `qfn_fanout` | 4 (In1 GND, In2 3V3 planes) | QFN-48 at 0.5 mm to a ring of 40 pull resistors, plane fan-out vias |
@@ -41,6 +44,21 @@ check, and the KiCad DRC counts (unconnected, clearance, shorts, crossings, othe
 types ignored). A crash or timeout on one board is reported in the table and the notes and does
 not stop the suite. The table is also written to `boards/out/results.txt`; the router output of
 each board is in `boards/out/<board>.route.log`.
+
+## Buses
+
+`bus_metrics.py ROUTED.kicad_pcb [--json]` measures the buses of a routed board: nets named
+`<prefix><number>` with the same prefix (D0..D15, A0..A11), at least 3, give one bus; per bus it
+prints the vias of its lines and the cohesion, the share of their track length that runs next to
+another line of the same bus on the same layer (centre to centre within 1.6 track pitches,
+`--pitch`, default 0.35 mm), leaving out the 2 mm at the pads where the lines fan out.
+
+`bus_series.py OUTDIR [--boards a,b] [--seeds 1,2] [--variant name=args ...]` routes boards with
+several variants of route arguments and seeds (default `base` and `--patterns buses`, each with
+`--runs 4 --generations 1 --geometry-generations 0`) and prints the means per board and variant:
+open connections, vias, length, clearance spots of Gummiband's own check, wall time, vias of the
+buses and their cohesion. `--kicad-drc` adds the KiCad DRC per run. The runs go to
+`OUTDIR/results.jsonl`; a second call skips the runs already there.
 
 ## Two sided placement
 

@@ -224,7 +224,7 @@ The structure a person sees at a glance, found from the pins: rows of pins of on
 regular pitch, pad grids (BGA), two pin parts that decouple an IC pin, pins of a plane net close
 enough to share one fan-out via, and buses (runs of neighbouring pins whose nets each go to one
 pin of another row, with the flag whether the order is kept). `route` uses them as hints when
-`patterns` names them (`decaps`, `rows`, `shares`, `pairs`, `groups`, `groups-short`, `groups-inline`, `all`), with the syntax of `gummiband route
+`patterns` names them (`decaps`, `rows`, `shares`, `pairs`, `groups`, `groups-short`, `groups-inline`, `buses`, `all`), with the syntax of `gummiband route
 --patterns`.
 
 ```json
