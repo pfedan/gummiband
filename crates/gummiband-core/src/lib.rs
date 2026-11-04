@@ -1305,6 +1305,22 @@ fn search_fixed(
         frames.push((label(&best, "geometry"), best.geo.clone(), true));
     }
     let open = search.open_end.is_some();
+    // the via pass routes the winner again in its order and configuration. That route depends
+    // on the winner alone and runs on one core: it runs ahead, next to the last geometry
+    // generation, for the winner before it, and if that stays the winner it is ready (and the
+    // same). Its relaxation waits for the end, where it has all cores.
+    let via_route = |best: &Candidate| -> Option<Candidate> {
+        (base.via_pass > 0.0 && best.stats.vias > 0).then(|| {
+            let identity: Genome = best.order.iter().enumerate().map(|(i, &k)| (k, i as f64)).collect();
+            let cfg = RouterConfig {
+                via_pass: base.via_pass,
+                ..best.cfg.clone()
+            };
+            evaluate(board, &sub, cfg, Some(&identity), best.stats.generation)
+        })
+    };
+    // the via pass route computed ahead, valid while the winner stays the same
+    let mut ahead: Option<Option<Candidate>> = None;
     let mut hotspots: Vec<(geom::Point, f64)> = Vec::new();
     let mut done = 0;
     for generation in 1..=search.geometry_generations {
@@ -1332,21 +1348,28 @@ fn search_fixed(
                 }
             })
             .collect();
-        let next: Vec<Candidate> = variants
-            .par_iter()
-            .map(|(g, scale)| {
-                let cfg = RouterConfig {
-                    seed: 0,
-                    fanout_first: best.stats.fanout_first,
-                    via_cost: best.stats.via_cost,
-                    layer_dirs: best.stats.layer_dirs,
-                    via_pass: 0.0,
-                    hotspots: std::sync::Arc::new(hotspots.iter().map(|&(p, x)| (p, x * scale)).collect()),
-                    ..base.clone()
-                };
-                geo_eval(evaluate(board, &sub, cfg, Some(g), search.generations + generation))
-            })
-            .collect();
+        let last = generation == search.geometry_generations && !open;
+        let (next, early): (Vec<Candidate>, _) = rayon::join(
+            || {
+                variants
+                    .par_iter()
+                    .map(|(g, scale)| {
+                        let cfg = RouterConfig {
+                            seed: 0,
+                            fanout_first: best.stats.fanout_first,
+                            via_cost: best.stats.via_cost,
+                            layer_dirs: best.stats.layer_dirs,
+                            via_pass: 0.0,
+                            hotspots: std::sync::Arc::new(hotspots.iter().map(|&(p, x)| (p, x * scale)).collect()),
+                            ..base.clone()
+                        };
+                        geo_eval(evaluate(board, &sub, cfg, Some(g), search.generations + generation))
+                    })
+                    .collect()
+            },
+            || last.then(|| via_route(&best)),
+        );
+        let mut changed = false;
         for c in next {
             portfolio.push(c.stats.clone());
             // completion first: a generation never trades a connection for cleaner geometry
@@ -1354,7 +1377,12 @@ fn search_fixed(
                 || (c.stats.routed == best.stats.routed && full_cost(&c) < full_cost(&best));
             if better {
                 best = c;
+                changed = true;
             }
+        }
+        ahead = if changed { None } else { early };
+        if last && std::env::var("GB_TIMING").is_ok() {
+            eprintln!("via pass ahead: {}", if ahead.is_some() { "used" } else { "lost" });
         }
         search.report_at(
             &format!("geometry generation {generation}"),
@@ -1428,16 +1456,17 @@ fn search_fixed(
             );
             if better {
                 best = c;
+                ahead = None;
                 search.report("via in pad retry", &best.stats);
             }
         }
     }
     // polish: a few clearance spots are often left that more rounds without tension resolve.
-    // The via pass routes the winner again in its order and configuration, which the polish
-    // does not change: both run side by side, and the via pass is judged against the polished
+    // It does not change the order and configuration of the winner, so the via pass is the
+    // same after it: both relax side by side, and the via pass is judged against the polished
     // winner as before.
+    let via_routed = ahead.take().unwrap_or_else(|| via_route(&best));
     let do_polish = best.stats.violations.unwrap_or(0) > 0 && std::env::var("GB_NO_POLISH").is_err();
-    let do_via_pass = base.via_pass > 0.0 && best.stats.vias > 0;
     let (polished, via_passed) = rayon::join(
         || {
             do_polish.then(|| {
@@ -1448,16 +1477,7 @@ fn search_fixed(
                 geo_eval_with(best.clone(), &polish)
             })
         },
-        || {
-            do_via_pass.then(|| {
-                let identity: Genome = best.order.iter().enumerate().map(|(i, &k)| (k, i as f64)).collect();
-                let cfg = RouterConfig {
-                    via_pass: base.via_pass,
-                    ..best.cfg.clone()
-                };
-                geo_eval(evaluate(board, &sub, cfg, Some(&identity), best.stats.generation))
-            })
-        },
+        || via_routed.map(geo_eval),
     );
     if let Some(c) = polished {
         if full_cost(&c) < full_cost(&best) {
