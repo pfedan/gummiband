@@ -387,7 +387,8 @@ impl Tier {
 /// How far a point may lie from the point of the last grid sweep and reuse its result.
 const SWEEP_SKIN: f64 = 0.4;
 
-/// Scratch of the point loop.
+/// Scratch of the point loop. Its buffers come from a pool of the thread and go back to it:
+/// a relaxation makes a few for every track in every round.
 struct Sweep {
     /// Pieces and vias of other nets within the skin of `anchor`, and the candidates of the
     /// current point (pieces by their order keys, vias by id).
@@ -401,16 +402,55 @@ struct Sweep {
     vias: Vec<u32>,
 }
 
+/// The buffers of a `Sweep`, kept for the next one.
+#[derive(Default)]
+struct SweepBufs {
+    list: Vec<Swept>,
+    merge: Vec<Swept>,
+    via_list: Vec<SweptVia>,
+    near: Vec<u64>,
+    vias: Vec<u32>,
+}
+
+thread_local! {
+    static SWEEP_POOL: std::cell::RefCell<Vec<SweepBufs>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl Default for Sweep {
     fn default() -> Sweep {
+        let mut b = SWEEP_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
+        b.list.clear();
+        b.merge.clear();
+        b.via_list.clear();
+        b.near.clear();
+        b.vias.clear();
         Sweep {
             anchor: pt(f64::INFINITY, f64::INFINITY),
-            list: Vec::new(),
-            merge: Vec::new(),
-            via_list: Vec::new(),
-            near: Vec::new(),
-            vias: Vec::new(),
+            list: b.list,
+            merge: b.merge,
+            via_list: b.via_list,
+            near: b.near,
+            vias: b.vias,
         }
+    }
+}
+
+impl Drop for Sweep {
+    fn drop(&mut self) {
+        let b = SweepBufs {
+            list: std::mem::take(&mut self.list),
+            merge: std::mem::take(&mut self.merge),
+            via_list: std::mem::take(&mut self.via_list),
+            near: std::mem::take(&mut self.near),
+            vias: std::mem::take(&mut self.vias),
+        };
+        // a thread holds few sweeps at a time (nested jobs); more would only keep memory
+        let _ = SWEEP_POOL.try_with(|p| {
+            let mut p = p.borrow_mut();
+            if p.len() < 16 {
+                p.push(b);
+            }
+        });
     }
 }
 

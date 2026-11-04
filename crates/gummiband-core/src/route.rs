@@ -415,6 +415,9 @@ struct SearchBuf {
     nodes: Vec<Node>,
     best: Best,
     open: OpenHeap,
+    /// Searches (connection, goal, via in pad) whose goal was found shut in: the next search
+    /// of the same asks right away (the answer is the same either way, only sooner).
+    shut: std::collections::HashSet<u64, std::hash::BuildHasherDefault<crate::index::FastHasher>>,
 }
 
 /// A copy of a router starts with empty buffers: every search clears them first, and copying
@@ -2247,7 +2250,22 @@ impl<'a> Router<'a> {
         buf.best.clear();
         buf.nodes.clear();
         buf.open.clear();
-        let SearchBuf { nodes, best, open } = buf;
+        let shut_key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = crate::index::FastHasher::default();
+            (ci, conn.from, via_in_pad).hash(&mut h);
+            if let Goal::Pins(p) = &conn.goal {
+                p.hash(&mut h);
+            }
+            h.finish()
+        };
+        let SearchBuf {
+            nodes,
+            best,
+            open,
+            shut,
+        } = buf;
+        let shut_before = shut.contains(&shut_key);
         let push =
             |best: &mut Best, nodes: &mut Vec<Node>, open: &mut OpenHeap, kind: NK, pos: Point, g: f64, parent: u32| {
                 // a node that a cheaper one replaces is stale: every later push that gets through
@@ -2549,14 +2567,16 @@ impl<'a> Router<'a> {
                 return None;
             }
             // a long search: is the goal shut in? Then it can only fail (see `shut`)
-            if expansions == check_at {
+            if expansions == check_at || (shut_before && check_at != 0 && expansions == 1) {
                 crate::prof::add(crate::prof::Slot::GoalChecks, 1);
                 if self.goal_shut_in(ci, item, &necks, neck_w, &tappable, via_in_pad, GOAL_CHECK_BUDGET) {
                     crate::prof::add(crate::prof::Slot::GoalShut, 1);
                     #[cfg(test)]
                     GOAL_SHUT_TEST.with(|c| c.set(c.get() + 1));
+                    shut.insert(shut_key);
                     return None;
                 }
+                shut.remove(&shut_key);
             }
             if tracing && let Some(t) = self.trace.lock().unwrap().as_mut() {
                 let li = match node.kind {
