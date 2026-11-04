@@ -16,6 +16,8 @@ use crate::geom::{Point, Rect, Shape, orient, point_seg_dist, pt, segs_intersect
 use crate::index::FastMap;
 use crate::topo::{Mesh, NONE, OUTSIDE, PAD_SITE, STEINER, Substrate};
 
+mod shut;
+
 #[derive(Debug, Clone)]
 pub struct RouterConfig {
     /// Cost of a via in mm of track.
@@ -365,6 +367,33 @@ fn tri_bit(t: u32, li: u8) -> u64 {
 /// Short blocks keep the filters sparse: with two bits per triangle, a full block of 24 set
 /// almost half of the 64 and sent every fourth test through a whole block for nothing.
 const BLOCK: u8 = 12;
+
+/// A search that has expanded this many nodes asks whether its goal is shut in, looking at no
+/// more than this many places from the goal side (see `shut`). A goal shut in on the boards
+/// measured took 78 places in the middle and rarely more than 400; a successful search takes
+/// about 1000 expansions in the middle, a failing one 24000 to 35000.
+const GOAL_CHECK_AT: usize = 1000;
+const GOAL_CHECK_BUDGET: usize = 1000;
+
+thread_local! {
+    /// After how many expansions a search of this thread asks (0: never), and how many goals
+    /// it found shut in, for tests.
+    static GOAL_CHECK_TEST: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static GOAL_SHUT_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// After how many expansions a search asks whether its goal is shut in; 0 never.
+/// `GB_GOAL_CHECK=0` switches the check off, for comparisons: the results are the same.
+fn goal_check_at() -> usize {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    GOAL_CHECK_TEST.with(|c| c.get()).unwrap_or_else(|| {
+        if *ON.get_or_init(|| std::env::var("GB_GOAL_CHECK").map_or(true, |v| v != "0")) {
+            GOAL_CHECK_AT
+        } else {
+            0
+        }
+    })
+}
 
 /// An edge counts as over capacity from this overflow in mm on.
 const OVER_TOL: f64 = 1e-6;
@@ -2462,6 +2491,7 @@ impl<'a> Router<'a> {
         let mut vertex_ok: FastMap<u32, Option<bool>> = FastMap::default();
         let mut via_fits: FastMap<u32, bool> = FastMap::default();
         let mut expansions = 0;
+        let check_at = goal_check_at();
         while let Some(idx) = open.pop() {
             let node = nodes[idx as usize];
             if node.stale {
@@ -2470,6 +2500,15 @@ impl<'a> Router<'a> {
             expansions += 1;
             if expansions > self.cfg.max_expansions {
                 return None;
+            }
+            // a long search: is the goal shut in? Then it can only fail (see `shut`)
+            if expansions == check_at {
+                crate::prof::add(crate::prof::Slot::GoalChecks, 1);
+                if self.goal_shut_in(ci, item, &necks, neck_w, &tappable, via_in_pad, GOAL_CHECK_BUDGET) {
+                    crate::prof::add(crate::prof::Slot::GoalShut, 1);
+                    GOAL_SHUT_TEST.with(|c| c.set(c.get() + 1));
+                    return None;
+                }
             }
             if tracing && let Some(t) = self.trace.lock().unwrap().as_mut() {
                 let li = match node.kind {
@@ -4313,6 +4352,46 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(planned_nets(&b, pairs), ["L_P", "L_N", "E", "F", "C", "A", "D", "B"]);
+    }
+
+    /// A search whose goal is shut in ends at once, with the same result: a dense board routed
+    /// with the check at the first expansion of every search, and without it.
+    #[test]
+    fn a_goal_shut_in_ends_the_search_with_the_same_result() {
+        let mut pins = Vec::new();
+        let mut x: u64 = 7;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % 1000) as f64 / 1000.0
+        };
+        // 40 nets of two pins on 12 x 12 mm, many of them crossing
+        let names: Vec<String> = (0..40).map(|i| format!("N{i}")).collect();
+        for n in &names {
+            for fp in ["U1", "U2"] {
+                let (u, v) = (next(), next());
+                pins.push((fp, n.as_str(), 4.0 + 12.0 * u, 4.0 + 12.0 * v));
+            }
+        }
+        let b = pad_board(&pins);
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let run = |check_at: usize| {
+            GOAL_CHECK_TEST.with(|c| c.set(Some(check_at)));
+            GOAL_SHUT_TEST.with(|c| c.set(0));
+            let mut r = Router::new(&b, &sub, RouterConfig::default());
+            r.plan();
+            let routed = r.run();
+            let geo = format!("{:?}", r.geometry());
+            GOAL_CHECK_TEST.with(|c| c.set(None));
+            (routed, geo, GOAL_SHUT_TEST.with(|c| c.get()))
+        };
+        let (routed, geo, _) = run(0);
+        let (routed_checked, geo_checked, shut) = run(1);
+        assert!(routed < 40, "the board should be too full: {routed}");
+        assert!(shut > 0, "no goal was found shut in");
+        assert_eq!(routed, routed_checked);
+        assert!(geo == geo_checked, "the geometry differs");
     }
 
     /// The open list hands out the nodes by f, ties by index, also with pushes between pops,

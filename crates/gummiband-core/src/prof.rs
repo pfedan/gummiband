@@ -20,9 +20,11 @@ pub enum Slot {
     GpuGather,
     GpuUpload,
     GpuWait,
+    GoalChecks,
+    GoalShut,
 }
 
-const NAMES: [&str; 13] = [
+const NAMES: [&str; 15] = [
     "evaluate",
     "relax setup",
     "relax pieces",
@@ -36,9 +38,11 @@ const NAMES: [&str; 13] = [
     "gpu gather ns",
     "gpu upload ns",
     "gpu wait ns",
+    "goal checks",
+    "goal shut in",
 ];
 
-static SLOTS: [AtomicU64; 13] = [const { AtomicU64::new(0) }; 13];
+static SLOTS: [AtomicU64; 15] = [const { AtomicU64::new(0) }; 15];
 
 #[inline]
 pub fn add(s: Slot, n: u64) {
