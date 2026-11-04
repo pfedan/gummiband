@@ -799,27 +799,30 @@ are ordered exactly as with `groups`.
   through a wall with a narrow and a wide gap), `bus_memory` (MCU to parallel SRAM, 4 layers).
   `bench/bus_metrics.py` measures vias and cohesion per bus, `bench/bus_series.py` runs series.
 
-Own clearance check (KiCad was not available in the cloud container), `--runs 4 --generations 1
---geometry-generations 0`, seeds 1 and 2, means (2026-11-04). Bus vias and cohesion over the
-buses of `bus_metrics.py` (nets named like D0..D15 with at least 4 members); spots are those of
-the check before any geometry generation:
+`bench/bus_series.py --kicad-drc` on the Mac, `--runs 4 --generations 1 --geometry-generations
+0`, seeds 1 and 2, means (2026-11-04, 144 runs, every run complete). Vias (bus vias, cohesion over
+the buses of `bus_metrics.py`: nets named like D0..D15 with at least 4 members), then the KiCad DRC
+errors (silk and library types left out):
 
 | Board | none | `groups` | `buses` |
 | --- | --- | --- | --- |
-| bus | 34 vias (bus 32, cohesion 0.48) | 32 (26, 0.67) | 5 (3, 0.89) |
-| bus_gap | 12 (12, 0.83) | 11 (4, 0.84) | 0 (0, 0.90), 1105 instead of 982 mm |
-| bus_cross | 21 (19, 0.64) | 26 (24, 0.81) | 26 (24, 0.88) |
-| bus_memory | 35 (14, 0.17) | 39 (16, 0.23) | 37 (14, 0.35), 2.5 spots |
-| matching | 18, 26 s | 8, 66 s | 4, 28 s |
-| parts_hard | 73.5 | 59 | 44.5, 4 spots |
-| parts_multi | 71.5 | 66.5 | 65 |
-| parts_multi_feed | 96 | 98.5 | 109 |
-| parts_xhard | 105 | 123, 1 spot | 130, 4.5 spots |
+| bus | 34 vias (bus 32, cohesion 0.46), 0 DRC | 32 (26, 0.67), 0 | 5 (3, 0.89), 0 |
+| bus_gap | 12 (12, 0.83), 0 | 11 (4, 0.83), 0 | 0 (0, 0.91), 0; 1105 instead of 982 mm |
+| bus_cross | 21 (19, 0.63), 0 | 26 (24, 0.81), 0 | 26 (24, 0.88), 0 |
+| bus_memory | 35 (14, 0.17), 0 | 39 (16, 0.23), 0 | 40 (16, 0.36), 5 (tracks crossing) |
+| matching | 18, 7 (length rules) | 8, 11 | 4, 11 |
+| parts_hard | 73.5, 1 | 59, 0 | 44.5, 4 (tracks crossing) |
+| parts_multi | 71.5, 0 | 66.5, 0 | 65, 0 |
+| parts_multi_feed | 96, 0 | 98.5, 0.5 | 109, 0 |
+| parts_xhard | 105, 1 | 123, 2 | 130, 9 (tracks crossing, 1.5 shorts, pair gap) |
+| diff_pairs | 68, 11 | 7, 44 | 7, 44 (as `groups`) |
 
-All other boards of the suite (24) route the same with `buses` as with `groups`, all complete.
-With the default geometry generations the spots of parts_hard and bus_memory are gone (seed 1:
-47 and 37 vias, 0 violations). Open: the crowded boards (parts_multi_feed, parts_xhard), where a
-bundle takes room the scattered parts need; KiCad DRC of the series.
+All other boards of the suite route the same with `buses` as with `groups`, with the same DRC.
+The errors with `buses` are the spots of the own check before any geometry generation; with the
+default geometry generations parts_hard and bus_memory are clean (seed 1: 47 and 37 vias, 0
+violations of the own check). Open: the crowded boards (parts_multi_feed, parts_xhard), where a
+bundle takes room the scattered parts need, and the shorts on parts_xhard without geometry
+generations; diff_pairs gains DRC errors with `groups` already.
 
 ## M4b: GPU experiment
 
