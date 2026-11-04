@@ -22,6 +22,10 @@ use crate::board::{Board, NetId};
 use crate::geom::Point;
 use crate::index::FastMap;
 
+/// A line of a block: (place across the block, start pin of its connection, the pins at both
+/// ends, net).
+pub type Line = (f64, usize, Vec<usize>, NetId);
+
 /// A block needs at least this many connections to be a bus.
 pub const MIN_MEMBERS: usize = 3;
 
@@ -46,7 +50,7 @@ impl Buses {
     /// Buses from the blocks of a plan: per block the members as (place across the block, start
     /// pin, pins at both ends, net). Every block gives its runs that keep their order
     /// ([`planar_runs`]) of at least [`MIN_MEMBERS`].
-    pub fn from_blocks(board: &Board, blocks: Vec<Vec<(f64, usize, Vec<usize>, NetId)>>) -> Buses {
+    pub fn from_blocks(board: &Board, blocks: Vec<Vec<Line>>) -> Buses {
         let mut out = Buses::default();
         for mut block in blocks {
             if block.len() < MIN_MEMBERS {
@@ -61,7 +65,7 @@ impl Buses {
     }
 
     /// Adds one bus, its members in order across it.
-    fn push(&mut self, board: &Board, block: Vec<(f64, usize, Vec<usize>, NetId)>) {
+    fn push(&mut self, board: &Board, block: Vec<Line>) {
         let bi = self.members.len() as u32;
         let mut pitch: f64 = 0.0;
         let mut pins = Vec::new();
@@ -120,28 +124,49 @@ impl Buses {
     }
 }
 
+/// The longest run of a block that keeps its order ([`planar_runs`]), at least [`MIN_MEMBERS`]
+/// long; the members as in [`Buses::from_blocks`], in their order across the block.
+pub fn longest_run(board: &Board, mut block: Vec<Line>) -> Option<Vec<Line>> {
+    if block.len() < MIN_MEMBERS {
+        return None;
+    }
+    block.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    planar_runs(board, block).into_iter().max_by_key(|r| r.len())
+}
+
 /// The runs of a block (in order across it at its first part) whose lines keep their order at
-/// the other part as well: next to each other at both ends, in the same direction, along a row
-/// of pins (each step more across the bus than along it). A block with
-/// swapped lines crosses itself, and pulling its members together would pull them across each
-/// other; only the runs between the swaps are bundles. Runs shorter than [`MIN_MEMBERS`] are
-/// left out.
-fn planar_runs(
-    board: &Board,
-    block: Vec<(f64, usize, Vec<usize>, NetId)>,
-) -> Vec<Vec<(f64, usize, Vec<usize>, NetId)>> {
+/// the other part as well: next to each other at both ends (at most one pin left out between
+/// them), on the same side, along a row of pins (at least a third of each step across the bus).
+/// A block with swapped lines crosses itself, and pulling its members together would pull them
+/// across each other; only the runs between the swaps are bundles. Runs shorter than
+/// [`MIN_MEMBERS`] are left out.
+fn planar_runs(board: &Board, block: Vec<Line>) -> Vec<Vec<Line>> {
     let fp = |p: usize| board.pins[p].footprint.as_str();
     let first = &block[0].2;
     let part_a = fp(first[0]).min(fp(*first.last().unwrap()));
     // the pin of every member on each of the two parts
-    let ends: Vec<(Point, Point)> = block
+    let pins: Vec<(usize, usize)> = block
         .iter()
         .map(|(_, _, e, _)| {
             let (p, q) = (e[0], *e.last().unwrap());
-            let (a, z) = if fp(p) == part_a { (p, q) } else { (q, p) };
-            (board.pins[a].pos, board.pins[z].pos)
+            if fp(p) == part_a { (p, q) } else { (q, p) }
         })
         .collect();
+    let ends: Vec<(Point, Point)> = pins
+        .iter()
+        .map(|&(a, z)| (board.pins[a].pos, board.pins[z].pos))
+        .collect();
+    // the pitch at a pin: the distance to the nearest other pin of its part
+    let pitch = |p: usize| {
+        board
+            .pins
+            .iter()
+            .enumerate()
+            .filter(|&(i, q)| i != p && q.footprint == board.pins[p].footprint)
+            .map(|(_, q)| q.pos.dist(board.pins[p].pos))
+            .fold(f64::MAX, f64::min)
+    };
+    let pitches: Vec<(f64, f64)> = pins.iter().map(|&(a, z)| (pitch(a), pitch(z))).collect();
     let n = ends.len() as f64;
     let ca = ends.iter().fold(Point::default(), |s, e| s + e.0) * (1.0 / n);
     let cb = ends.iter().fold(Point::default(), |s, e| s + e.1) * (1.0 / n);
@@ -164,22 +189,26 @@ fn planar_runs(
     for (r, &i) in by_a.iter().enumerate() {
         rank_a[i] = r as i64;
     }
-    // runs along the block order: the next member is the next one at both parts, in the
-    // direction of the run
+    // runs along the block order: the next member is the next one at both parts, on the same
+    // side (lines that come in the other order at the other part cross each other)
     let mut runs: Vec<Vec<usize>> = Vec::new();
     let mut cur: Vec<usize> = vec![0];
     let mut dir: Option<(i64, i64)> = None;
     for k in 1..block.len() {
         let j = *cur.last().unwrap();
         let step = (rank_a[k] - rank_a[j], rank_b[k] - rank_b[j]);
-        // and a step along a row at both parts: across the bus more than along it (pins of a
-        // pad grid next to each other across the bus may lie in different rows)
-        let across = |p: Point, q: Point| 2.0 * (q - p).dot(normal).abs() >= (q - p).dist(Point::default());
+        // and a step along a row at both parts: at least a third of it across the bus (pins of a
+        // pad grid next to each other across the bus may lie in different rows), and at most one
+        // pin left out between them (a ground, not a pair or another line)
+        let row = |p: Point, q: Point, pitch: f64| {
+            let d = q - p;
+            3.0 * d.dot(normal).abs() >= d.dist(Point::default()) && d.dist(Point::default()) <= 2.5 * pitch
+        };
         let ok = step.0.abs() == 1
-            && step.1.abs() == 1
+            && step.0 == step.1
             && dir.is_none_or(|d| d == step)
-            && across(ends[j].0, ends[k].0)
-            && across(ends[j].1, ends[k].1);
+            && row(ends[j].0, ends[k].0, pitches[j].0.min(pitches[k].0))
+            && row(ends[j].1, ends[k].1, pitches[j].1.min(pitches[k].1));
         if ok {
             dir = Some(step);
             cur.push(k);

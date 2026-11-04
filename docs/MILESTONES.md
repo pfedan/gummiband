@@ -722,6 +722,50 @@ LED controller (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
   1 clearance errors. So the leash, not a fixed IC, is the right default; a switching regulator
   with its power nets may need a shorter one.
 
+## Buses as bundles
+
+`--patterns buses` (experimental, not in `all`) routes the lines of a part to part block as a
+bundle (`crate::bus`, ARCHITECTURE "Local patterns"). It implies `groups`; blocks without a bus
+are ordered exactly as with `groups`.
+
+- Bus: a run of at least 3 lines (one pin on each of the two parts, no differential pair) that
+  are neighbours at both parts on the same side, along a row of pins, at most one pin left out
+  between two of them. A swap, reversed order (crossing lines), lines between the pairs of a
+  pair connector and the rows of a pad grid end a run.
+- Order: the block starts on the inside of its bend; a ground in the rows of a bus goes after it.
+- Pull towards the routed neighbours (`GB_BUS_PULL`, 1) and a price for missing room beside the
+  way for the members still to come (`GB_BUS_ROOM`, 2 per mm and mm), not within 2 mm of the
+  pins of the bus.
+- Tried and dropped: a higher escape cost for the pins of the bus still to come (kept other
+  nets out of the connector rows but cost vias everywhere else), pull without the planarity
+  check (parts_multi 66 to 107 vias: a bus with swaps was pulled across itself), every fourth
+  run of the portfolio without the pull (no gain).
+- New synthetic boards: `bus_cross` (two 12 bit buses that must cross), `bus_gap` (16 bit bus
+  through a wall with a narrow and a wide gap), `bus_memory` (MCU to parallel SRAM, 4 layers).
+  `bench/bus_metrics.py` measures vias and cohesion per bus, `bench/bus_series.py` runs series.
+
+Own clearance check (KiCad was not available in the cloud container), `--runs 4 --generations 1
+--geometry-generations 0`, seeds 1 and 2, means (2026-11-04). Bus vias and cohesion over the
+buses of `bus_metrics.py` (nets named like D0..D15 with at least 4 members); spots are those of
+the check before any geometry generation:
+
+| Board | none | `groups` | `buses` |
+| --- | --- | --- | --- |
+| bus | 34 vias (bus 32, cohesion 0.48) | 32 (26, 0.67) | 5 (3, 0.89) |
+| bus_gap | 12 (12, 0.83) | 11 (4, 0.84) | 0 (0, 0.90), 1105 instead of 982 mm |
+| bus_cross | 21 (19, 0.64) | 26 (24, 0.81) | 26 (24, 0.88) |
+| bus_memory | 35 (14, 0.17) | 39 (16, 0.23) | 37 (14, 0.35), 2.5 spots |
+| matching | 18, 26 s | 8, 66 s | 4, 28 s |
+| parts_hard | 73.5 | 59 | 44.5, 4 spots |
+| parts_multi | 71.5 | 66.5 | 65 |
+| parts_multi_feed | 96 | 98.5 | 109 |
+| parts_xhard | 105 | 123, 1 spot | 130, 4.5 spots |
+
+All other boards of the suite (24) route the same with `buses` as with `groups`, all complete.
+With the default geometry generations the spots of parts_hard and bus_memory are gone (seed 1:
+47 and 37 vias, 0 violations). Open: the crowded boards (parts_multi_feed, parts_xhard), where a
+bundle takes room the scattered parts need; KiCad DRC of the series.
+
 ## M4b: GPU experiment
 
 - Opt-in: `--features gpu` at build time and `GB_GPU=1` at run time, Metal through wgpu. Without

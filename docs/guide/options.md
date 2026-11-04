@@ -23,7 +23,8 @@ about an option.
 
 | Board | Try first | Leave off |
 | --- | --- | --- |
-| Several chips with buses between them (MCU and PHY, SPI, parallel interfaces) | `--patterns groups`; on a tight board also `--clear-corridors` | `groups-short`, `groups-inline` |
+| Several chips with buses between them (MCU and PHY, SPI, parallel interfaces) | `--patterns groups`; on a tight board also `--clear-corridors` | `groups-short`, `groups-inline`, `buses` |
+| Wide parallel buses between connectors or to a memory, with room to run them | `--patterns buses` | `groups` |
 | FPGA or BGA board with differential pairs and buses (Arty) | `--patterns pairs,groups` | `shares` |
 | DDR memory fan-out | `--patterns groups-short`; `--pairs --via-pairs` for the strobes and clocks | `--breakouts` |
 | Fine pitch keyboard style board, no planes (Corne) | nothing; `rows` in the open end | `decaps`, `pairs,groups` |
@@ -41,6 +42,7 @@ they existed.
 | Hint | What it does | Helped | Hurt |
 | --- | --- | --- | --- |
 | `groups` (= `groups-long`) | The connections between two parts with 4 or more pins that share at least 2 nets (a bus, SPI, I2C, a connector) are routed as one block in pin order, so they do not cross each other; the longest block goes first. | Boards with several chips: parts_hard 56 to 49 vias, parts_multi_feed 127 to 98, crossing 26 to 15. | A board whose placement is fixed and already clean (LED controller: 0 to 0.3 clearance errors); a few percent more length. |
+| `buses` | As `groups`, and the lines of a block that keep their order at both parts (a data or address bus, a connector to connector bus) are routed as a bundle: each line follows its neighbour through the same gaps and leaves room beside it for the lines still to come. Experimental, not part of `all`. | Buses between connectors and chips: bus 32 to 5 vias, bus_gap 11 to 0, parts_hard 59 to 45, matching 8 to 4; the lines of a bus stay together (cohesion 0.67 to 0.89 on bus). | Crowded boards with many small parts in the way: parts_multi_feed 99 to 109 vias, parts_xhard 123 to 130; a few percent more length where the bus takes the longer, common way. |
 | `groups-short` | As `groups`, the shortest block first. | DDR5 (fewest DRC errors of all orders). | Most other boards: LED controller 5 clearance errors, parts_multi 84 instead of 59 vias. |
 | `groups-inline` | Members of a block together, but each block at the place of its connections in the normal order. | Weakest order overall; for experiments. | |
 | `pairs` | Differential pairs first, the longest first, both nets next to each other. | Shorter, better coupled pairs (pair_traffic 581 to 503 mm, uncoupled 4.0 to 2.2 mm); with `groups` the best result on Arty (161 to 141 vias). | Costs vias and DRC errors when the pairs are the minority (diff_pairs). |

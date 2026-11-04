@@ -186,6 +186,9 @@ struct OrderKey {
     group: usize,
     /// Place across the block.
     sweep: f64,
+    /// With buses: the pin at the other end of a line of a bus (usize::MAX for none), see
+    /// [`crate::bus`].
+    bus_to: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -3329,25 +3332,16 @@ impl<'a> Router<'a> {
         self.buses = Default::default();
         self.bus_ways.clear();
         if self.cfg.bus_pull > 0.0 || self.cfg.bus_room > 0.0 {
-            let mut blocks: HashMap<usize, Vec<(f64, usize, Vec<usize>, NetId)>> = HashMap::new();
+            let mut blocks: HashMap<usize, Vec<crate::bus::Line>> = HashMap::new();
             for (i, k) in order.iter().enumerate() {
-                if k.group == usize::MAX {
+                if k.group == usize::MAX || k.bus_to == usize::MAX {
                     continue;
                 }
                 let c = &conns[i].2;
-                let Goal::Pins(tree) = &c.goal else { continue };
-                // the end on the other part: the tree pin nearest to the start
-                let from = b.pins[c.from].pos;
-                let Some(&to) = tree
-                    .iter()
-                    .min_by(|&&x, &&y| b.pins[x].pos.dist(from).total_cmp(&b.pins[y].pos.dist(from)))
-                else {
-                    continue;
-                };
                 blocks
                     .entry(k.group)
                     .or_default()
-                    .push((k.sweep, c.from, vec![c.from, to], c.net));
+                    .push((k.sweep, c.from, vec![c.from, k.bus_to], c.net));
             }
             let mut blocks: Vec<(usize, Vec<_>)> = blocks.into_iter().collect();
             blocks.sort_by_key(|x| x.0);
@@ -3374,6 +3368,7 @@ impl<'a> Router<'a> {
                 block: jitter(seed, c.from as u64) * d,
                 group: usize::MAX,
                 sweep: 0.0,
+                bus_to: usize::MAX,
             }
         };
         let mut keys: Vec<OrderKey> = (0..conns.len()).map(plain).collect();
@@ -3422,6 +3417,7 @@ impl<'a> Router<'a> {
         }
         let end = |p: usize| count.get(b.pins[p].footprint.as_str()).copied().unwrap_or(0) >= 4;
         let mut by_pair: HashMap<(&str, &str), Vec<(usize, usize)>> = HashMap::new();
+        let mut not_line: HashSet<usize> = HashSet::new();
         for (i, (_, _, c)) in conns.iter().enumerate() {
             if !signal(c) || keys[i].tier == 0 || !end(c.from) {
                 continue;
@@ -3437,10 +3433,11 @@ impl<'a> Router<'a> {
                 continue;
             };
             // a line of a bus has one pin on each of the two parts (a ground at both ends of a
-            // connector row has two and goes with the other connections), and the nets of a
-            // differential pair keep to their own partner
-            if bus && (!bus_line(b, c.net, c.from, to) || paired.contains(&c.net)) {
-                continue;
+            // connector row has two), and the nets of a differential pair keep to their partner
+            if bus && bus_line(b, c.net, c.from, to) && !paired.contains(&c.net) {
+                keys[i].bus_to = to;
+            } else if bus && !bus_line(b, c.net, c.from, to) {
+                not_line.insert(i);
             }
             let (fa, fb) = (b.pins[c.from].footprint.as_str(), b.pins[to].footprint.as_str());
             let (k, a_pin) = if fa < fb { ((fa, fb), c.from) } else { ((fb, fa), to) };
@@ -3487,17 +3484,26 @@ impl<'a> Router<'a> {
                 y: axis.x / len,
             };
             let mut side = if (seed / 2) % 2 == 0 { 1.0 } else { -1.0 };
-            // a bus starts on the inside of its bend, where the shorter of its two outer
-            // connections runs: each member then lays itself round the one before, and the first
-            // keeps the inside, not the room the others need
+            // a bus starts on the inside of its bend, where the shorter of its two outer lines
+            // runs: each member then lays itself round the one before, and the first keeps the
+            // inside, not the room the others need
+            let mut has_bus = false;
             if bus {
-                let across = |&(_, a): &(usize, usize)| (b.pins[a].pos - ca).dot(normal);
-                let lo = members.iter().min_by(|x, y| across(x).total_cmp(&across(y)));
-                let hi = members.iter().max_by(|x, y| across(x).total_cmp(&across(y)));
-                if let (Some(&(i, _)), Some(&(j, _))) = (lo, hi) {
-                    let (di, dj) = (conns[i].1, conns[j].1);
+                let lines: Vec<crate::bus::Line> = members
+                    .iter()
+                    .filter(|&&(i, _)| keys[i].bus_to != usize::MAX)
+                    .map(|&(i, a)| {
+                        let c = &conns[i].2;
+                        ((b.pins[a].pos - ca).dot(normal), i, vec![c.from, keys[i].bus_to], c.net)
+                    })
+                    .collect();
+                if let Some(run) = crate::bus::longest_run(b, lines)
+                    && let (Some(lo), Some(hi)) = (run.first(), run.last())
+                {
+                    has_bus = true;
+                    let (di, dj) = (conns[lo.1].1, conns[hi.1].1);
                     if (di - dj).abs() > 0.02 * di.max(dj) {
-                        side = if di < dj { 1.0 } else { -1.0 };
+                        side = if (di < dj) == (lo.0 < hi.0) { 1.0 } else { -1.0 };
                     }
                 }
             }
@@ -3511,6 +3517,11 @@ impl<'a> Router<'a> {
                 _ => lens.iter().copied().fold(f64::MAX, f64::min),
             };
             for &(i, a) in members {
+                // a ground in the rows of a bus goes with the rest, after the bus
+                if has_bus && not_line.contains(&i) {
+                    keys[i].bus_to = usize::MAX;
+                    continue;
+                }
                 let k = &mut keys[i];
                 k.tier = if self.cfg.groups == GroupOrder::Inline { 2 } else { 1 };
                 k.block = block;
@@ -4499,7 +4510,7 @@ mod tests {
         let mut pins = Vec::new();
         for (k, net) in ["GND", "A", "B", "C", "D", "GND"].iter().enumerate() {
             pins.push(("U1", *net, 3.0, 4.0 + k as f64));
-            pins.push(("U2", *net, 6.0 + k as f64, 17.0));
+            pins.push(("U2", *net, 11.0 - k as f64, 17.0));
         }
         pad_board(&pins)
     }
@@ -4516,7 +4527,7 @@ mod tests {
             .iter()
             .map(|&p| b.nets[b.pins[p].net as usize].name.as_str())
             .collect();
-        // D (U1 at y 8, U2 at x 10) is the inner line of the bend, the shortest
+        // D (U1 at y 8, U2 at x 7) is the inner line of the bend, the shortest
         assert_eq!(names, ["D", "C", "B", "A"]);
         let order: Vec<&str> = r
             .conns

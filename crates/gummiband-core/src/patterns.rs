@@ -509,21 +509,22 @@ fn buses(board: &Board, rows: &[PinRow]) -> Vec<Bus> {
     out
 }
 
-/// The hints that `route --patterns` knows.
-pub const HINTS: [&str; 6] = ["shares", "decaps", "rows", "pairs", "groups", "buses"];
+/// The hints that `route --patterns` knows and `all` switches on.
+pub const HINTS: [&str; 5] = ["shares", "decaps", "rows", "pairs", "groups"];
 
 /// `groups` with another place for the blocks in the routing order (see
 /// [`crate::route::GroupOrder`]): `groups` alone is `long`, the longest block first.
 pub const GROUP_VARIANTS: [&str; 3] = ["groups-long", "groups-short", "groups-inline"];
 
-/// Parse a comma separated list of hints: names of [`HINTS`] or [`GROUP_VARIANTS`], `all` or
-/// `none`.
+/// Parse a comma separated list of hints: names of [`HINTS`] or [`GROUP_VARIANTS`], `buses`
+/// (experimental, not part of `all` yet), `all` or `none`.
 pub fn hints(arg: &str) -> Result<Vec<&'static str>, String> {
     let mut out = Vec::new();
     for w in arg.split(',').map(str::trim).filter(|w| !w.is_empty()) {
         match w {
             "none" => {}
             "all" => out.extend(HINTS),
+            "buses" => out.push("buses"),
             _ => match HINTS.iter().chain(&GROUP_VARIANTS).find(|&&a| a == w) {
                 Some(&a) => out.push(a),
                 None => {
@@ -730,6 +731,11 @@ mod tests {
         assert_eq!(order("all,groups-inline"), GroupOrder::Inline);
         assert!(hints("groups-short,groups-inline").is_err());
         assert!(hints("groups-sideways").is_err());
+        // buses implies groups, long unless a variant says otherwise; not part of all yet
+        assert_eq!(order("buses"), GroupOrder::Long);
+        assert_eq!(order("buses,groups-short"), GroupOrder::Short);
+        assert!(!hints("all").unwrap().contains(&"buses"));
+        assert!(RouterConfig::default().with_hints(&hints("buses").unwrap()).bus_pull > 0.0);
     }
 
     fn pin(board: &mut Board, fp: &str, num: usize, net: NetId, x: f64, y: f64) {
