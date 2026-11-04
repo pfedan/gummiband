@@ -94,7 +94,9 @@ enum Cmd {
         /// connections of a pin row in pin order), `pairs` (differential pairs before the other
         /// signal connections, the longest first), `groups` (the connections between two parts
         /// as one block in pin order, the longest block first; `groups-short` puts the shortest
-        /// first, `groups-inline` leaves each block at the place of its connections), `all` or
+        /// first, `groups-inline` leaves each block at the place of its connections), `buses`
+        /// (as `groups`, and the lines of a block that keep their order at both parts are routed
+        /// as a bundle: each follows its neighbour and leaves room for the next), `all` or
         /// `none`. `gummiband info` lists the patterns it finds. When to use which: see
         /// docs/guide/options.md.
         #[arg(long, default_value = "none")]

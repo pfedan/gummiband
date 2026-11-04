@@ -1,6 +1,7 @@
 //! Gummiband core: geometry, board model and the topological router.
 
 pub mod board;
+pub mod bus;
 pub mod check;
 pub mod follow;
 pub mod geom;

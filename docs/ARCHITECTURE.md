@@ -544,6 +544,20 @@ hints on, all off by default (and then byte for byte the same as without them):
   of their priority, the longest block first; `short` the same, the shortest first; `inline` each
   block at the place of its shortest connection. The evolutionary search may still move single
   connections out of a block.
+- `buses` (implies `groups`, long unless a `groups-*` hint says otherwise): the blocks of
+  `groups` routed as bundles (`crate::bus`). A bus is a run of at least 3 lines of a block (nets
+  with one pin on each of the two parts) that are neighbours at both parts in the same order;
+  a swap ends the run, since pulling crossing lines together pulls them across each other. The
+  block starts on the inside of its bend (the shorter of its two outer lines, by more than 2 %),
+  so every member lays itself round the one before. While a member is routed it pays
+  - for every step away from the ways of its neighbours across the bus that are routed already
+    (as the second net of a pair towards the first, `RouterConfig::bus_pull`, `GB_BUS_PULL`,
+    default 1; on the other layer the neighbour counts as `GB_BUS_OFF_LAYER` = 1 mm farther),
+  - per mm of way and mm of room missing beside it for the members still to come
+    (`RouterConfig::bus_room`, `GB_BUS_ROOM`, default 2): a ray from the way towards their side
+    finds the next fixed obstacle of another net (pad, keepout, board edge); within
+    `GB_BUS_FAN` (2 mm) of the pins of the bus the members fan out to their pads and no room is
+    asked for.
 
 Pockets (a pad that can only be left through a via in it) are not a pattern: the tracks of its
 neighbours close the pocket, not the fixed copper, so the empty board does not show them (see

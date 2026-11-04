@@ -73,6 +73,13 @@ pub struct RouterConfig {
     /// Connections between the same two parts (a bus, SPI, I2C, a connector) go as one block, in pin order
     /// across the block, see [`GroupOrder`].
     pub groups: GroupOrder,
+    /// Buses as bundles (see [`crate::bus`]): a member of a block of at least [`crate::bus::MIN_MEMBERS`]
+    /// connections between two parts is pulled towards the ways of its neighbours across the
+    /// block, a step costs up to this factor of its length extra (0 = off).
+    pub bus_pull: f64,
+    /// Price per mm of way and mm of room missing beside it for the members of its bus still to
+    /// come (up to the next fixed obstacle on their side), away from the pins of the bus (0 = off).
+    pub bus_room: f64,
 }
 
 /// Where the block of a part to part group goes in the routing order.
@@ -115,6 +122,8 @@ impl Default for RouterConfig {
             row_moves: 0.0,
             pairs_first: false,
             groups: GroupOrder::Off,
+            bus_pull: 0.0,
+            bus_room: 0.0,
         }
     }
 }
@@ -143,6 +152,16 @@ impl RouterConfig {
         } else {
             GroupOrder::Off
         };
+        // buses as bundles: the blocks of `groups` (long, unless a groups hint says otherwise)
+        // with the pull towards the neighbours and the room for the members still to come
+        if hints.contains(&"buses") {
+            let env = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+            if self.groups == GroupOrder::Off {
+                self.groups = GroupOrder::Long;
+            }
+            self.bus_pull = env("GB_BUS_PULL", 1.0);
+            self.bus_room = env("GB_BUS_ROOM", 2.0);
+        }
         self
     }
 }
@@ -285,6 +304,10 @@ pub struct Router<'a> {
     /// Partner net of each differential pair net, and where the nets ran so far.
     partner: HashMap<NetId, NetId>,
     guides: HashMap<NetId, Vec<Guide>>,
+    /// Buses of the plan (with `bus_pull` or `bus_room`), see [`crate::bus`].
+    pub buses: crate::bus::Buses,
+    /// Where the routed members of the buses run, by start pin.
+    bus_ways: HashMap<usize, Guide>,
     /// The board has kept tracks or vias.
     pub has_kept: bool,
     /// Soft copper of the board is in the topology, see [`crate::import`].
@@ -488,16 +511,16 @@ fn node_layer(k: &NK) -> Option<u8> {
 }
 
 /// Distance from q on routing layer li to the nearest piece of the guides, a piece on another
-/// layer [`OFF_LAYER`] farther; at most `cap`.
-fn guide_dist(guides: &[Guide], li: usize, q: Point, cap: f64) -> f64 {
+/// layer `off` farther; at most `cap`.
+fn guide_dist(guides: &[Guide], li: usize, q: Point, cap: f64, off: f64) -> f64 {
     let mut best = cap;
     for g in guides {
         if let [(p, _)] = g.pts[..] {
-            best = best.min(p.dist(q) + OFF_LAYER);
+            best = best.min(p.dist(q) + off);
         }
         for w in g.pts.windows(2) {
             let (a, b, l) = (w[0].0, w[1].0, w[1].1);
-            let extra = if l as usize == li { 0.0 } else { OFF_LAYER };
+            let extra = if l as usize == li { 0.0 } else { off };
             if extra >= best {
                 continue;
             }
@@ -549,6 +572,8 @@ impl<'a> Router<'a> {
             plane_groups,
             partner,
             guides: HashMap::new(),
+            buses: Default::default(),
+            bus_ways: HashMap::new(),
             has_kept: board
                 .obstacles
                 .iter()
@@ -837,13 +862,16 @@ impl<'a> Router<'a> {
             )
     }
 
-    /// Extra cost of a step of length `step` ending at q, away from the pair partner's way.
-    /// Nothing within the pitch of the pair (track width and gap) on the same layer; the way of
-    /// the partner on another layer counts as [`OFF_LAYER`] farther.
-    fn pull(&self, guide: Option<(&[Guide], f64)>, li: usize, q: Point, step: f64) -> f64 {
-        let Some((g, pitch)) = guide else { return 0.0 };
-        let d = guide_dist(g, li, q, 2.0 + pitch);
-        self.cfg.pair_pull * step * ((d - pitch).max(0.0) / 2.0).min(1.0)
+    /// Extra cost of a step of length `step` ending at q, away from the pair partner's way (or the
+    /// ways of the neighbours of a bus member), as `guide`: (ways, pitch, weight, off layer).
+    /// Nothing within the pitch (track width and gap) on the same layer; a way on another layer
+    /// counts as `off` farther.
+    fn pull(&self, guide: Option<(&[Guide], f64, f64, f64)>, li: usize, q: Point, step: f64) -> f64 {
+        let Some((g, pitch, weight, off)) = guide else {
+            return 0.0;
+        };
+        let d = guide_dist(g, li, q, 2.0 + pitch, off);
+        weight * step * ((d - pitch).max(0.0) / 2.0).min(1.0)
     }
 
     /// Extra cost of the step a-b on routing layer li for leaving the layer's preferred
@@ -854,6 +882,48 @@ impl<'a> Router<'a> {
         }
         let d = b - a;
         self.cfg.layer_dirs * if li % 2 == 0 { d.y.abs() } else { d.x.abs() }
+    }
+
+    /// Free length from q along the unit direction f on routing layer li, up to `len`: how far a
+    /// band of tracks of `net` may reach before it comes closer than its clearance `c` to the
+    /// copper of another net or to the board edge. Fixed obstacles only.
+    fn side_room(&self, li: usize, q: Point, f: Point, len: f64, net: NetId, c: f64) -> f64 {
+        let layer = self.m(li).layer;
+        let shared = &self.sub.shared;
+        let mut r = Rect::empty();
+        r.add(q);
+        r.add(q + f * len);
+        let mut free = len;
+        let blocked = |t: f64, hit: &dyn Fn(Point) -> bool| -> f64 {
+            // the largest free length below t, by bisection
+            let (mut lo, mut hi) = (0.0, t);
+            for _ in 0..10 {
+                let mid = (lo + hi) / 2.0;
+                if hit(q + f * mid) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            lo
+        };
+        for id in shared.obs_index.query(&r.grow(c + 0.1)) {
+            let o = &self.board.obstacles[id as usize];
+            if !o.layers.has(layer) || o.net == Some(net) {
+                continue;
+            }
+            let poly = &shared.obs_polys[id as usize];
+            let cl = c.max(o.clearance);
+            if poly.dist_to_seg(q, q + f * free) < cl {
+                free = blocked(free, &|e| poly.dist_to_seg(q, e) < cl);
+            }
+        }
+        let ec = self.board.rules.edge_clearance.max(c);
+        let off = |p: Point| self.board.edge_dist(p) < ec;
+        if off(q + f * free) {
+            free = blocked(free, &off);
+        }
+        free
     }
 
     /// Escape penalty for crossing edge e: an end vertex on a pad of another net that still
@@ -2039,11 +2109,53 @@ impl<'a> Router<'a> {
     /// A* for one connection. Returns the node chain from start to goal.
     fn search(&self, ci: usize, buf: &mut SearchBuf) -> Option<Vec<Node>> {
         let conn = &self.conns[ci];
-        let guide = self.partner.get(&conn.net).and_then(|&p| {
-            let g = self.guides.get(&p)?;
-            let (w, gap, _) = self.board.pair_shape(conn.net, p, 0);
-            Some((g.as_slice(), w + gap))
-        });
+        // a bus member follows the ways of its routed neighbours across the bus
+        let bus = self.buses.of.get(&conn.from).map(|&(b, _)| b as usize);
+        let bus_guides: Vec<Guide> = match bus {
+            Some(_) if self.cfg.bus_pull > 0.0 => self
+                .buses
+                .neighbours(conn.from)
+                .filter_map(|p| self.bus_ways.get(&p).cloned())
+                .collect(),
+            _ => Vec::new(),
+        };
+        let guide = self
+            .partner
+            .get(&conn.net)
+            .and_then(|&p| {
+                let g = self.guides.get(&p)?;
+                let (w, gap, _) = self.board.pair_shape(conn.net, p, 0);
+                Some((g.as_slice(), w + gap, self.cfg.pair_pull, OFF_LAYER))
+            })
+            .or_else(|| {
+                let b = bus?;
+                (!bus_guides.is_empty()).then(|| {
+                    (
+                        bus_guides.as_slice(),
+                        self.buses.pitch[b],
+                        self.cfg.bus_pull,
+                        bus_off_layer(),
+                    )
+                })
+            });
+        // the members of its bus still to come, on either side of the way: (on the left, the
+        // room they take there)
+        let bus_sides: Vec<(bool, f64)> = match bus {
+            Some(b) if self.cfg.bus_room > 0.0 => {
+                let k = self.buses.of[&conn.from].1 as usize;
+                let m = &self.buses.members[b];
+                let open = |s: &[usize]| s.iter().filter(|p| !self.bus_ways.contains_key(p)).count();
+                let left = self.buses.after_left[b][k];
+                let (pitch, half) = (self.buses.pitch[b], self.board.class_of(conn.net).track_width / 2.0);
+                [(left, open(&m[k + 1..])), (!left, open(&m[..k]))]
+                    .into_iter()
+                    .filter(|x| x.1 > 0)
+                    .map(|(l, n)| (l, n as f64 * pitch + half))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        let bus_fan = bus_fan();
         let net = conn.net;
         // a via in a pad is a last resort, except for the nets of `GB_VIP_NETS`, with
         // `GB_VIP_LEARN` the nets that needed one before, and the nets of `cfg.vip_nets`
@@ -2294,6 +2406,27 @@ impl<'a> Router<'a> {
             let dir = (pv - pu) * (1.0 / len);
             let n = self.cross[lu][e as usize].len();
             let escape = self.escape_penalty(lu, e, net);
+            // beside the way: room for the members still to come, up to the next obstacle
+            let side_price = if bus_sides.is_empty() {
+                0.0
+            } else {
+                let q = pu + dir * (node.pos - pu).dot(dir).clamp(0.0, len);
+                let d = (q - node.pos).norm();
+                let b = bus.unwrap();
+                if d.len2() < 0.5 || !self.buses.away_from_pins(b, q, bus_fan) {
+                    0.0
+                } else {
+                    bus_sides
+                        .iter()
+                        .map(|&(left, need)| {
+                            let f = if left { d.perp() } else { d.perp() * -1.0 };
+                            (need - self.side_room(lu, q, f, need, net, item.c)).max(0.0)
+                        })
+                        .sum::<f64>()
+                        * self.cfg.bus_room
+                        * node.pos.dist(q)
+                }
+            };
             let view = views
                 .entry((lu as u8, e))
                 .or_insert_with(|| self.edge_view(lu, e, &item));
@@ -2374,6 +2507,7 @@ impl<'a> Router<'a> {
                         price += p.tight * (1.0 - (hi - lo) / room);
                     }
                 }
+                price += side_price;
                 if conflict {
                     if cheapest.is_none_or(|c| price < c.0) {
                         cheapest = Some((price, j, lo, hi));
@@ -2918,6 +3052,10 @@ impl<'a> Router<'a> {
             g.retain(|x| x.conn != ci);
             g.push(Guide::of(ci, &chain));
         }
+        let from = self.conns[ci].from;
+        if self.buses.of.contains_key(&from) {
+            self.bus_ways.insert(from, Guide::of(ci, &chain));
+        }
         if vip_learn()
             && self.conns[ci].goal != Goal::Plane
             && self.conn_vias[ci]
@@ -3032,6 +3170,7 @@ impl<'a> Router<'a> {
         if let Some(g) = self.guides.get_mut(&net) {
             g.retain(|x| x.conn != ci);
         }
+        self.bus_ways.remove(&self.conns[ci].from);
         let gone = self.conn_segs[ci].clone();
         for sid in std::mem::take(&mut self.conn_segs[ci]) {
             let Some(s) = self.segs[sid as usize].take() else {
@@ -3186,6 +3325,34 @@ impl<'a> Router<'a> {
                 })
                 .then(a.cmp(&b))
         });
+        // the blocks of part to part connections as buses
+        self.buses = Default::default();
+        self.bus_ways.clear();
+        if self.cfg.bus_pull > 0.0 || self.cfg.bus_room > 0.0 {
+            let mut blocks: HashMap<usize, Vec<(f64, usize, Vec<usize>, NetId)>> = HashMap::new();
+            for (i, k) in order.iter().enumerate() {
+                if k.group == usize::MAX {
+                    continue;
+                }
+                let c = &conns[i].2;
+                let Goal::Pins(tree) = &c.goal else { continue };
+                // the end on the other part: the tree pin nearest to the start
+                let from = b.pins[c.from].pos;
+                let Some(&to) = tree
+                    .iter()
+                    .min_by(|&&x, &&y| b.pins[x].pos.dist(from).total_cmp(&b.pins[y].pos.dist(from)))
+                else {
+                    continue;
+                };
+                blocks
+                    .entry(k.group)
+                    .or_default()
+                    .push((k.sweep, c.from, vec![c.from, to], c.net));
+            }
+            let mut blocks: Vec<(usize, Vec<_>)> = blocks.into_iter().collect();
+            blocks.sort_by_key(|x| x.0);
+            self.buses = crate::bus::Buses::from_blocks(b, blocks.into_iter().map(|x| x.1).collect());
+        }
         let mut slots: Vec<Option<Conn>> = conns.into_iter().map(|c| Some(c.2)).collect();
         self.conns = idx.iter().map(|&i| slots[i].take().unwrap()).collect();
         self.pair_up();
@@ -3234,6 +3401,19 @@ impl<'a> Router<'a> {
         if self.cfg.groups == GroupOrder::Off {
             return keys;
         }
+        let bus = self.cfg.bus_pull > 0.0 || self.cfg.bus_room > 0.0;
+        let mut paired: HashSet<NetId> = HashSet::new();
+        if bus {
+            for (p, n) in b.diff_pairs() {
+                paired.insert(p);
+                paired.insert(n);
+            }
+            for (i, n) in b.nets.iter().enumerate() {
+                if b.classes[n.class as usize].name.starts_with("pair:") {
+                    paired.insert(i as NetId);
+                }
+            }
+        }
         // group ends: parts with at least 4 pins on nets (ICs, connectors); passives and
         // SOT-23 do not end a group, so a pull-up on the way does not split it
         let mut count: HashMap<&str, usize> = HashMap::new();
@@ -3256,6 +3436,12 @@ impl<'a> Router<'a> {
             else {
                 continue;
             };
+            // a line of a bus has one pin on each of the two parts (a ground at both ends of a
+            // connector row has two and goes with the other connections), and the nets of a
+            // differential pair keep to their own partner
+            if bus && (!bus_line(b, c.net, c.from, to) || paired.contains(&c.net)) {
+                continue;
+            }
             let (fa, fb) = (b.pins[c.from].footprint.as_str(), b.pins[to].footprint.as_str());
             let (k, a_pin) = if fa < fb { ((fa, fb), c.from) } else { ((fb, fa), to) };
             by_pair.entry(k).or_default().push((i, a_pin));
@@ -3300,7 +3486,21 @@ impl<'a> Router<'a> {
                 x: -axis.y / len,
                 y: axis.x / len,
             };
-            let side = if (seed / 2) % 2 == 0 { 1.0 } else { -1.0 };
+            let mut side = if (seed / 2) % 2 == 0 { 1.0 } else { -1.0 };
+            // a bus starts on the inside of its bend, where the shorter of its two outer
+            // connections runs: each member then lays itself round the one before, and the first
+            // keeps the inside, not the room the others need
+            if bus {
+                let across = |&(_, a): &(usize, usize)| (b.pins[a].pos - ca).dot(normal);
+                let lo = members.iter().min_by(|x, y| across(x).total_cmp(&across(y)));
+                let hi = members.iter().max_by(|x, y| across(x).total_cmp(&across(y)));
+                if let (Some(&(i, _)), Some(&(j, _))) = (lo, hi) {
+                    let (di, dj) = (conns[i].1, conns[j].1);
+                    if (di - dj).abs() > 0.02 * di.max(dj) {
+                        side = if di < dj { 1.0 } else { -1.0 };
+                    }
+                }
+            }
             let lens: Vec<f64> = members
                 .iter()
                 .map(|&(i, _)| jitter(seed, conns[i].2.from as u64) * conns[i].1)
@@ -4083,6 +4283,43 @@ fn jitter(seed: u64, x: u64) -> f64 {
     0.5 + (z % 1000) as f64 / 1000.0
 }
 
+/// How much farther a neighbour's way on another layer counts for the pull of a bus member
+/// (`GB_BUS_OFF_LAYER`, mm).
+fn bus_off_layer() -> f64 {
+    static W: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *W.get_or_init(|| {
+        std::env::var("GB_BUS_OFF_LAYER")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(OFF_LAYER)
+    })
+}
+
+/// A connection of `net` from pin `from` to pin `to` (on another part) is a line of a bus if the
+/// net has no other pin on either of the two parts.
+fn bus_line(b: &Board, net: NetId, from: usize, to: usize) -> bool {
+    let on = |q: usize| {
+        b.nets[net as usize]
+            .pins
+            .iter()
+            .filter(|&&x| b.pins[x].footprint == b.pins[q].footprint)
+            .count()
+    };
+    on(from) == 1 && on(to) == 1
+}
+
+/// Distance from the pins of a bus within which its members fan out to their pads and need no
+/// room for the others (`GB_BUS_FAN`, mm).
+fn bus_fan() -> f64 {
+    static FAN: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *FAN.get_or_init(|| {
+        std::env::var("GB_BUS_FAN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2.0)
+    })
+}
+
 /// Experiment: the nets named in `GB_VIP_NETS` (comma separated) may leave or enter a pad through
 /// a via in it at any time, not only as the last resort of a run. Off when the variable is unset.
 fn vip_net(name: &str) -> bool {
@@ -4150,10 +4387,10 @@ mod tests {
         };
         let guides = [g];
         // between two nodes the way is right there, not 2 mm off at the nodes
-        assert!((guide_dist(&guides, 1, pt(2.0, 0.3), 10.0) - 0.3).abs() < 1e-9);
+        assert!((guide_dist(&guides, 1, pt(2.0, 0.3), 10.0, OFF_LAYER) - 0.3).abs() < 1e-9);
         // on another layer right above, it counts farther
-        assert!((guide_dist(&guides, 0, pt(2.0, 0.3), 10.0) - 0.3 - OFF_LAYER).abs() < 1e-9);
-        assert_eq!(guide_dist(&guides, 1, pt(2.0, 50.0), 3.0), 3.0);
+        assert!((guide_dist(&guides, 0, pt(2.0, 0.3), 10.0, OFF_LAYER) - 0.3 - OFF_LAYER).abs() < 1e-9);
+        assert_eq!(guide_dist(&guides, 1, pt(2.0, 50.0), 3.0, OFF_LAYER), 3.0);
     }
 
     /// A board of small square pads: (footprint, net, x, y) per pin, on a 20 mm square.
@@ -4250,6 +4487,73 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(planned_nets(&b, pairs), ["L_P", "L_N", "E", "F", "C", "A", "D", "B"]);
+    }
+
+    fn bus_config() -> RouterConfig {
+        RouterConfig::default().with_hints(&["buses"])
+    }
+
+    /// A bus of four lines round a corner, from a vertical row of U1 to a horizontal row of U2,
+    /// with a ground at both ends of each row.
+    fn corner_bus() -> Board {
+        let mut pins = Vec::new();
+        for (k, net) in ["GND", "A", "B", "C", "D", "GND"].iter().enumerate() {
+            pins.push(("U1", *net, 3.0, 4.0 + k as f64));
+            pins.push(("U2", *net, 6.0 + k as f64, 17.0));
+        }
+        pad_board(&pins)
+    }
+
+    #[test]
+    fn a_bus_is_laid_from_the_inside_of_its_bend() {
+        let b = corner_bus();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, bus_config());
+        r.plan();
+        // the grounds have two pins on each part: no lines of the bus
+        assert_eq!(r.buses.members.len(), 1);
+        let names: Vec<&str> = r.buses.members[0]
+            .iter()
+            .map(|&p| b.nets[b.pins[p].net as usize].name.as_str())
+            .collect();
+        // D (U1 at y 8, U2 at x 10) is the inner line of the bend, the shortest
+        assert_eq!(names, ["D", "C", "B", "A"]);
+        let order: Vec<&str> = r
+            .conns
+            .iter()
+            .map(|c| b.nets[c.net as usize].name.as_str())
+            .filter(|n| *n != "GND")
+            .collect();
+        assert_eq!(order, ["D", "C", "B", "A"]);
+        // the lines still to come lie on the outside, to the right of D's way from U1 down to U2
+        assert!(r.buses.after_left[0].iter().all(|&l| l == r.buses.after_left[0][0]));
+        assert_eq!(r.buses.neighbours(r.buses.members[0][1]).count(), 2);
+    }
+
+    #[test]
+    fn a_swap_splits_a_bus_into_the_runs_that_keep_their_order() {
+        // six lines between two parallel rows, D and E swap places at U2
+        let mut pins = Vec::new();
+        for (k, (a, z)) in ["A", "B", "C", "D", "E", "F"]
+            .iter()
+            .zip(["A", "B", "C", "E", "D", "F"])
+            .enumerate()
+        {
+            pins.push(("U1", *a, 3.0, 4.0 + k as f64));
+            pins.push(("U2", z, 15.0, 4.0 + k as f64));
+        }
+        let b = pad_board(&pins);
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, bus_config());
+        r.plan();
+        // A, B, C keep their order; D and E cross, F is left alone
+        assert_eq!(r.buses.members.len(), 1);
+        let mut names: Vec<&str> = r.buses.members[0]
+            .iter()
+            .map(|&p| b.nets[b.pins[p].net as usize].name.as_str())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["A", "B", "C"]);
     }
 
     #[test]

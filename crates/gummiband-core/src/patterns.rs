@@ -510,7 +510,7 @@ fn buses(board: &Board, rows: &[PinRow]) -> Vec<Bus> {
 }
 
 /// The hints that `route --patterns` knows.
-pub const HINTS: [&str; 5] = ["shares", "decaps", "rows", "pairs", "groups"];
+pub const HINTS: [&str; 6] = ["shares", "decaps", "rows", "pairs", "groups", "buses"];
 
 /// `groups` with another place for the blocks in the routing order (see
 /// [`crate::route::GroupOrder`]): `groups` alone is `long`, the longest block first.
@@ -528,7 +528,7 @@ pub fn hints(arg: &str) -> Result<Vec<&'static str>, String> {
                 Some(&a) => out.push(a),
                 None => {
                     return Err(format!(
-                        "unknown hint {w:?} (shares, decaps, rows, pairs, groups, groups-long, \
+                        "unknown hint {w:?} (shares, decaps, rows, pairs, groups, buses, groups-long, \
                          groups-short, groups-inline, all, none)"
                     ));
                 }
