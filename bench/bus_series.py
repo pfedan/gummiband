@@ -6,7 +6,9 @@ metrics of bus_metrics.py.
 Usage: bench/bus_series.py OUTDIR [--boards a,b] [--seeds 1,2,3] [--variant name=args ...]
        [--route-args "--runs 4 --generations 1 --geometry-generations 0"] [--kicad-drc]
 
-Default variants: base (no extra arguments) and buses (--patterns buses). Results go to
+Default variants: base (no extra arguments) and buses (--patterns buses). With --kicad-drc the
+table also gives the mean KiCad DRC errors (silk and library types left out) and unconnected
+items. Results go to
 OUTDIR/results.jsonl (one line per run, appended, runs already there are skipped) and a table
 of the means per board and variant on stdout. Run from the repository root after
 `cargo build --release -p gummiband-cli`.
@@ -131,8 +133,10 @@ def table(rows, boards, variants):
     def f(x, nd=1):
         return "-" if x is None else f"{x:.{nd}f}"
 
-    print("| Board | Variant | Open | Vias | Length | Spots | Time s | Bus vias | Cohesion |")
-    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    drc = any("drc" in r for r in rows)
+    print("| Board | Variant | Open | Vias | Length | Spots | Time s | Bus vias | Cohesion |"
+          + (" DRC errors | Unconnected |" if drc else ""))
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |" + (" --- | --- |" if drc else ""))
     for b in boards:
         for v in variants:
             rs = [r for r in rows if r["board"] == b and r["variant"] == v]
@@ -143,7 +147,9 @@ def table(rows, boards, variants):
             print(f"| {b} | {v} | {f(opn, 2)} | {f(mean([r.get('vias') for r in rs]))} | "
                   f"{f(mean([r.get('length') for r in rs]), 0)} | {f(mean([r.get('spots') for r in rs]), 2)} | "
                   f"{f(mean([r['time'] for r in rs]))} | {f(mean([x[0] for x in bus]))} | "
-                  f"{f(mean([x[1] for x in bus]), 2)} |")
+                  f"{f(mean([x[1] for x in bus]), 2)} |"
+                  + (f" {f(mean([sum(r['drc'].values()) if 'drc' in r else None for r in rs]))} | "
+                     f"{f(mean([r.get('unconnected') for r in rs]))} |" if drc else ""))
 
 
 if __name__ == "__main__":
