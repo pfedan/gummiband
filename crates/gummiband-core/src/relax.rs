@@ -392,7 +392,10 @@ struct Sweep {
     /// Pieces and vias of other nets within the skin of `anchor`, and the candidates of the
     /// current point (pieces by their order keys, vias by id).
     anchor: Point,
+    /// In key order, so that the candidates of a point are in key order as well.
     list: Vec<Swept>,
+    /// Scratch of the merge of the tiers.
+    merge: Vec<Swept>,
     via_list: Vec<SweptVia>,
     near: Vec<u64>,
     vias: Vec<u32>,
@@ -403,6 +406,7 @@ impl Default for Sweep {
         Sweep {
             anchor: pt(f64::INFINITY, f64::INFINITY),
             list: Vec::new(),
+            merge: Vec::new(),
             via_list: Vec::new(),
             near: Vec::new(),
             vias: Vec::new(),
@@ -535,6 +539,10 @@ pub struct BoardStatic {
     layer_cells: Vec<CellLists>,
     near_obs: Vec<NearObstacle>,
     near_edge: Vec<bool>,
+    /// Per cell the board outlines whose box comes within the reach of the edge clearance of
+    /// a track as wide as the widest (ascending): the others neither contain a point of the
+    /// cell nor push it. A board of many outlines (a panel with mouse bites) has hundreds.
+    edge_cells: CellLists,
 }
 
 /// The board-static part of a relaxation, from the cache of `sub` or built (and kept) now. It
@@ -623,12 +631,16 @@ fn build_board_static(
             d < board.rules.edge_clearance + max_w / 2.0 + margin + half + 0.01 || !board.inside(mid)
         })
         .collect();
+    let outline_boxes: Vec<Rect> = board.outline.iter().map(|o| o.bbox()).collect();
+    let edge_reach = board.rules.edge_clearance + max_w / 2.0 + margin + 0.01;
+    let edge_cells = CellLists::new(bounds, 0.5, &outline_boxes, edge_reach, |_| true);
     BoardStatic {
         bounds,
         cells,
         layer_cells,
         near_obs,
         near_edge,
+        edge_cells,
     }
 }
 
@@ -744,7 +756,9 @@ pub fn relax_while(
         layer_cells,
         near_obs,
         near_edge,
+        edge_cells,
     } = &*st;
+    let all_outlines: Vec<u32> = (0..board.outline.len() as u32).collect();
     let bounds = *bounds;
     // vias as static obstacles: (centre, radius, net, clearance)
     let mut vias: Vec<(Point, f64, u32, f64)> = geo
@@ -1290,9 +1304,24 @@ pub fn relax_while(
                                 push = push + dir * (need - d);
                             }
                         }
-                        // board edge (only near it)
-                        let inside_board = !near_edge[cell] || board.inside(p);
-                        for o in board.outline.iter().filter(|_| near_edge[cell]) {
+                        // board edge (only near it): an outline far from the cell neither
+                        // contains the point nor pushes it, unless the point is off the board
+                        let near_outlines: &[u32] = if near_edge[cell] { edge_cells.get(cell) } else { &[] };
+                        let inside_board = !near_edge[cell]
+                            || near_outlines
+                                .iter()
+                                .filter(|&&o| board.outline[o as usize].contains(p))
+                                .count()
+                                % 2
+                                == 1;
+                        let pushing: &[u32] = if !near_edge[cell] {
+                            &[]
+                        } else if inside_board && w <= max_w {
+                            near_outlines
+                        } else {
+                            &all_outlines
+                        };
+                        for o in pushing.iter().map(|&o| &board.outline[o as usize]) {
                             let (d, q) = nearest_on_poly(o, p);
                             let need = edge_clr + w / 2.0 + cfg.margin;
                             // a point outside the board always goes back in
@@ -1306,6 +1335,7 @@ pub fn relax_while(
                         let Sweep {
                             anchor,
                             list,
+                            merge,
                             via_list,
                             near,
                             vias: hits,
@@ -1361,7 +1391,9 @@ pub fn relax_while(
                             *anchor = p;
                             list.clear();
                             let base = half_w(t) + cfg.margin + SWEEP_SKIN + 1e-6;
+                            let mut far_at = 0;
                             for tier in [&grid.fine, &grid.far] {
+                                far_at = list.len();
                                 let radius = base + nc.max(tier.max_clr) + tier.max_extent;
                                 tier.for_each_keyed(p, radius, |r, key| {
                                     let dm = p - r.mid;
@@ -1376,6 +1408,29 @@ pub fn relax_while(
                                     }
                                 });
                             }
+                            // the fine grid hands out its pieces in key order already (rows of
+                            // cells, ids within a cell); the far ones go in between
+                            if !list[..far_at].is_sorted_by_key(|r| r.key) {
+                                list[..far_at].sort_unstable_by_key(|r| r.key);
+                            }
+                            if far_at < list.len() {
+                                list[far_at..].sort_unstable_by_key(|r| r.key);
+                                merge.clear();
+                                let (a, b) = list.split_at(far_at);
+                                let (mut i, mut j) = (0, 0);
+                                while i < a.len() && j < b.len() {
+                                    if a[i].key < b[j].key {
+                                        merge.push(a[i]);
+                                        i += 1;
+                                    } else {
+                                        merge.push(b[j]);
+                                        j += 1;
+                                    }
+                                }
+                                merge.extend_from_slice(&a[i..]);
+                                merge.extend_from_slice(&b[j..]);
+                                std::mem::swap(list, merge);
+                            }
                         }
                         near.clear();
                         let base = w / 2.0 + cfg.margin;
@@ -1386,7 +1441,6 @@ pub fn relax_while(
                                 near.push(r.key);
                             }
                         }
-                        near.sort_unstable();
                         for &key in near.iter() {
                             let pc = &pieces[key as u32 as usize];
                             let o = &geo.tracks[pc.track as usize];

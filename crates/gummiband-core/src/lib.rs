@@ -1322,6 +1322,7 @@ fn search_fixed(
     // the via pass route computed ahead, valid while the winner stays the same
     let mut ahead: Option<Option<Candidate>> = None;
     let mut hotspots: Vec<(geom::Point, f64)> = Vec::new();
+    let geo_screen: Option<usize> = std::env::var("GB_GEO_SCREEN").ok().and_then(|v| v.parse().ok());
     let mut done = 0;
     for generation in 1..=search.geometry_generations {
         if search.stopped() || (best.stats.violations == Some(0) && best.failed.is_empty()) {
@@ -1349,23 +1350,50 @@ fn search_fixed(
             })
             .collect();
         let last = generation == search.geometry_generations && !open;
+        let route_variant = |(g, scale): &(Genome, f64)| {
+            let cfg = RouterConfig {
+                seed: 0,
+                fanout_first: best.stats.fanout_first,
+                via_cost: best.stats.via_cost,
+                layer_dirs: best.stats.layer_dirs,
+                via_pass: 0.0,
+                hotspots: std::sync::Arc::new(hotspots.iter().map(|&(p, x)| (p, x * scale)).collect()),
+                ..base.clone()
+            };
+            evaluate(board, &sub, cfg, Some(g), search.generations + generation)
+        };
         let (next, early): (Vec<Candidate>, _) = rayon::join(
-            || {
-                variants
-                    .par_iter()
-                    .map(|(g, scale)| {
-                        let cfg = RouterConfig {
-                            seed: 0,
-                            fanout_first: best.stats.fanout_first,
-                            via_cost: best.stats.via_cost,
-                            layer_dirs: best.stats.layer_dirs,
-                            via_pass: 0.0,
-                            hotspots: std::sync::Arc::new(hotspots.iter().map(|&(p, x)| (p, x * scale)).collect()),
-                            ..base.clone()
-                        };
-                        geo_eval(evaluate(board, &sub, cfg, Some(g), search.generations + generation))
-                    })
-                    .collect()
+            || match geo_screen.filter(|&k| k < variants.len()) {
+                // experiment: a short relaxation for all, the full one for the best few
+                Some(k) => {
+                    let screen = relax::RelaxConfig {
+                        iterations: (full_relax.iterations / 4).max(40),
+                        ..full_relax.clone()
+                    };
+                    let mut screened: Vec<(Candidate, Geometry)> = variants
+                        .par_iter()
+                        .map(|v| {
+                            let c = route_variant(v);
+                            let geo = c.geo.clone();
+                            (geo_eval_with(c, &screen), geo)
+                        })
+                        .collect();
+                    screened.sort_by(|a, b| {
+                        b.0.stats
+                            .routed
+                            .cmp(&a.0.stats.routed)
+                            .then(full_cost(&a.0).total_cmp(&full_cost(&b.0)))
+                    });
+                    screened.truncate(k);
+                    screened
+                        .into_par_iter()
+                        .map(|(mut c, geo)| {
+                            c.geo = geo;
+                            geo_eval(c)
+                        })
+                        .collect()
+                }
+                None => variants.par_iter().map(|v| geo_eval(route_variant(v))).collect(),
             },
             || last.then(|| via_route(&best)),
         );

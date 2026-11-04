@@ -373,7 +373,7 @@ const OVER_TOL: f64 = 1e-6;
 const MAX_STALE: usize = 5;
 
 /// Per search state the least cost so far and the node that holds it.
-type Best = FastMap<(u8, u32, u32), (f64, u32)>;
+type Best = FastMap<u64, (f64, u32)>;
 
 #[derive(Default)]
 struct SearchBuf {
@@ -564,16 +564,21 @@ fn guide_dist(guides: &[Guide], li: usize, q: Point, cap: f64) -> f64 {
     best
 }
 
-fn key(k: &NK) -> (u8, u32, u32) {
-    match *k {
-        NK::Tri { t, li, entry, slot } => (0, t, ((li as u32) << 24) | ((entry as u32) << 16) | slot as u32),
+/// The search state of a node in one word: the kind in the top three bits, the triangle, site,
+/// pin or segment below, the rest in the low half. One round of the hasher instead of three.
+#[inline]
+fn key(k: &NK) -> u64 {
+    let (kind, a, b) = match *k {
+        NK::Tri { t, li, entry, slot } => (0u64, t, ((li as u32) << 24) | ((entry as u32) << 16) | slot as u32),
         NK::Vert { site, li } => (1, site, li as u32),
         NK::GoalPin { pin } => (2, pin as u32, 0),
         NK::GoalVia { site } => (3, site, 0),
         NK::Site { site, li } => (4, site, li as u32),
         NK::GoalSite { site } => (5, site, 0),
         NK::GoalTap { seg, e } => (6, seg, e),
-    }
+    };
+    assert!(a < 1 << 29, "search state out of range");
+    kind << 61 | (a as u64) << 32 | b as u64
 }
 
 impl<'a> Router<'a> {
