@@ -391,18 +391,69 @@ fn evaluate(
     genome: Option<&Genome>,
     generation: usize,
 ) -> Candidate {
+    evaluate_kept(board, sub, cfg, genome, generation).0
+}
+
+/// What a panic says, for the message of a lost run.
+fn panic_text(e: &(dyn std::any::Any + Send)) -> String {
+    e.downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| e.downcast_ref::<String>().cloned())
+        .unwrap_or_default()
+}
+
+/// `evaluate`, and the router as the run left it (none for a lost run).
+fn evaluate_kept<'a>(
+    board: &'a Board,
+    sub: &Substrate,
+    cfg: RouterConfig,
+    genome: Option<&Genome>,
+    generation: usize,
+) -> (Candidate, Option<Router<'a>>) {
     prof::time(prof::Slot::Evaluate, || {
         // a run that trips over an inconsistency of its own topology is lost, not the search
         let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             evaluate_inner(board, sub, cfg.clone(), genome, generation)
         }));
+        match run {
+            Ok((c, r)) => (c, Some(r)),
+            Err(e) => {
+                eprintln!(
+                    "run of seed {} in generation {generation} lost: {}",
+                    cfg.seed,
+                    panic_text(&*e)
+                );
+                (lost_run(board, sub, cfg, generation), None)
+            }
+        }
+    })
+}
+
+/// The via pass of a winner from the router of its own run. A via pass routes the winner again
+/// in its order with its configuration, and only the end of the run, which routes the
+/// connections with vias again and keeps what has fewer, does something else: so it is that
+/// end on a copy of the winner's router, without routing everything again.
+fn via_pass_of<'a>(
+    board: &'a Board,
+    sub: &Substrate,
+    r: &Router<'a>,
+    cfg: RouterConfig,
+    generation: usize,
+) -> Candidate {
+    prof::time(prof::Slot::Evaluate, || {
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut r = r.clone();
+            let routed = r.via_pass_on(cfg.via_pass);
+            debug_hooks(board, &mut r);
+            let geo = r.geometry();
+            candidate(board, &r, geo, routed, cfg.clone(), generation)
+        }));
         run.unwrap_or_else(|e| {
-            let what = e
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| e.downcast_ref::<String>().cloned())
-                .unwrap_or_default();
-            eprintln!("run of seed {} in generation {generation} lost: {what}", cfg.seed);
+            eprintln!(
+                "run of seed {} in generation {generation} lost: {}",
+                cfg.seed,
+                panic_text(&*e)
+            );
             lost_run(board, sub, cfg, generation)
         })
     })
@@ -446,13 +497,13 @@ fn lost_run(board: &Board, sub: &Substrate, cfg: RouterConfig, generation: usize
     }
 }
 
-fn evaluate_inner(
-    board: &Board,
+fn evaluate_inner<'a>(
+    board: &'a Board,
     sub: &Substrate,
     cfg: RouterConfig,
     genome: Option<&Genome>,
     generation: usize,
-) -> Candidate {
+) -> (Candidate, Router<'a>) {
     let cfg_used = cfg.clone();
     let mut r = Router::new(board, sub, cfg.clone());
     r.plan();
@@ -462,7 +513,7 @@ fn evaluate_inner(
     let routed = r.run();
     debug_hooks(board, &mut r);
     let geo = r.geometry();
-    candidate(board, &r, geo, routed, cfg_used, generation)
+    (candidate(board, &r, geo, routed, cfg_used, generation), r)
 }
 
 /// What a finished router run is worth, with `geo` as its geometry.
@@ -1334,6 +1385,8 @@ fn search_fixed(
             evaluate(board, &sub, cfg, Some(&identity), best.stats.generation)
         })
     };
+    // the router of the winner's run, where the geometry generations found it
+    let mut best_router: Option<Router> = None;
     let mut hotspots: Vec<(geom::Point, f64)> = Vec::new();
     let geo_screen: Option<usize> = std::env::var("GB_GEO_SCREEN").ok().and_then(|v| v.parse().ok());
     let mut done = 0;
@@ -1372,21 +1425,21 @@ fn search_fixed(
                 hotspots: std::sync::Arc::new(hotspots.iter().map(|&(p, x)| (p, x * scale)).collect()),
                 ..base.clone()
             };
-            evaluate(board, &sub, cfg, Some(g), search.generations + generation)
+            evaluate_kept(board, &sub, cfg, Some(g), search.generations + generation)
         };
         // completion first: a candidate with fewer connections than the most of this generation
         // (or the best so far) never wins, whatever its violations, so only those with the most
         // are relaxed; a relaxation stops once another candidate has routed more
         let floor = std::sync::atomic::AtomicUsize::new(best.stats.routed);
         let relaxed = std::sync::atomic::Ordering::Relaxed;
-        let mut next: Vec<Candidate> = match geo_screen.filter(|&k| k < variants.len()) {
+        let mut next: Vec<(Candidate, Option<Router>)> = match geo_screen.filter(|&k| k < variants.len()) {
             // experiment: a short relaxation for all, the full one for the best few
             Some(k) => {
                 let screen = relax::RelaxConfig {
                     iterations: (full_relax.iterations / 4).max(40),
                     ..full_relax.clone()
                 };
-                let routed: Vec<Candidate> = variants.par_iter().map(route_variant).collect();
+                let routed: Vec<Candidate> = variants.par_iter().map(|v| route_variant(v).0).collect();
                 let top = routed
                     .iter()
                     .map(|c| c.stats.routed)
@@ -1410,32 +1463,37 @@ fn search_fixed(
                     })
                     .collect();
                 out.extend(rest);
-                out
+                out.into_iter().map(|c| (c, None)).collect()
             }
             None => variants
                 .par_iter()
                 .map(|v| {
-                    let c = route_variant(v);
+                    let (c, router) = route_variant(v);
                     let r = c.stats.routed;
                     if floor.fetch_max(r, relaxed) > r {
-                        return c;
+                        return (c, None);
                     }
-                    geo_eval_while(c, &|| floor.load(relaxed) <= r)
+                    (geo_eval_while(c, &|| floor.load(relaxed) <= r), router)
                 })
                 .collect(),
         };
-        let top = next.iter().map(|c| c.stats.routed).fold(best.stats.routed, usize::max);
-        for c in next.iter_mut().filter(|c| c.stats.routed < top) {
+        let top = next
+            .iter()
+            .map(|c| c.0.stats.routed)
+            .fold(best.stats.routed, usize::max);
+        for (c, router) in next.iter_mut().filter(|c| c.0.stats.routed < top) {
             c.stats.violations = None;
             c.stats.shorts = None;
+            *router = None;
         }
-        for c in next {
+        for (c, router) in next {
             portfolio.push(c.stats.clone());
             // completion first: a generation never trades a connection for cleaner geometry
             let better = c.stats.routed > best.stats.routed
                 || (c.stats.routed == best.stats.routed && full_cost(&c) < full_cost(&best));
             if better {
                 best = c;
+                best_router = router;
             }
         }
         search.report_at(
@@ -1510,6 +1568,7 @@ fn search_fixed(
             );
             if better {
                 best = c;
+                best_router = None;
                 search.report("via in pad retry", &best.stats);
             }
         }
@@ -1529,7 +1588,19 @@ fn search_fixed(
                 geo_eval_with(best.clone(), &polish)
             })
         },
-        || via_route(&best).map(geo_eval),
+        || {
+            match &best_router {
+                Some(r) if base.via_pass > 0.0 && best.stats.vias > 0 => {
+                    let cfg = RouterConfig {
+                        via_pass: base.via_pass,
+                        ..best.cfg.clone()
+                    };
+                    Some(via_pass_of(board, &sub, r, cfg, best.stats.generation))
+                }
+                _ => via_route(&best),
+            }
+            .map(geo_eval)
+        },
     );
     if let Some(c) = polished {
         if full_cost(&c) < full_cost(&best) {

@@ -3771,6 +3771,15 @@ impl<'a> Router<'a> {
 
     /// Connections with vias are routed again at a high via price. A connection keeps the
     /// result if it has fewer vias; otherwise it is routed again at the normal price.
+    /// The end of [`Router::run`] with a via pass of this price, on a router whose run had
+    /// none: the connections with vias are routed again and keep what has fewer. The routed
+    /// connections after it, as `run` returns them.
+    pub(crate) fn via_pass_on(&mut self, price: f64) -> usize {
+        self.cfg.via_pass = price;
+        self.reduce_vias();
+        self.conn_segs.iter().filter(|s| !s.is_empty()).count()
+    }
+
     fn reduce_vias(&mut self) {
         let price = self.cfg.via_pass;
         if price <= 0.0 {
