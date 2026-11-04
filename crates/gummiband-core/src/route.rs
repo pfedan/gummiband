@@ -9,12 +9,14 @@
 
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::board::{Board, NetId, ObstacleKind};
 use crate::geom::{Point, Rect, Shape, orient, point_seg_dist, pt, segs_intersect};
 use crate::index::FastMap;
 use crate::topo::{Mesh, NONE, OUTSIDE, PAD_SITE, STEINER, Substrate};
+
+mod shut;
 
 #[derive(Debug, Clone)]
 pub struct RouterConfig {
@@ -301,6 +303,9 @@ pub struct Router<'a> {
     search_buf: SearchBuf,
     /// Debugging: positions expanded by the last search of a traced connection.
     pub trace: std::sync::Arc<std::sync::Mutex<Option<Vec<(Point, u8)>>>>,
+    /// Per pin the distance to the nearest pin of its part on another net, see
+    /// [`Board::pin_room`]: every search asks for it at its pins.
+    pin_pitch: std::sync::Arc<Vec<f64>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -352,6 +357,8 @@ struct Node {
     block_len: u8,
     /// Nearest ancestor that is a via, for the hole spacing within one connection.
     via_up: u32,
+    /// A later push reached the same state for less: the node is skipped when it comes up.
+    stale: bool,
 }
 
 /// Two bits of the filter for a triangle.
@@ -364,19 +371,53 @@ fn tri_bit(t: u32, li: u8) -> u64 {
 /// almost half of the 64 and sent every fourth test through a whole block for nothing.
 const BLOCK: u8 = 12;
 
+/// A search that has expanded this many nodes asks whether its goal is shut in, looking at no
+/// more than this many places from the goal side (see `shut`). A goal shut in on the boards
+/// measured took 78 places in the middle and rarely more than 400; a successful search takes
+/// about 1000 expansions in the middle, a failing one 24000 to 35000.
+const GOAL_CHECK_AT: usize = 1000;
+const GOAL_CHECK_BUDGET: usize = 1000;
+
+#[cfg(test)]
+thread_local! {
+    /// After how many expansions a search of this thread asks (0: never), and how many goals
+    /// it found shut in. Only searches on the calling thread see them (`Router::run` is serial).
+    static GOAL_CHECK_TEST: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static GOAL_SHUT_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// After how many expansions a search asks whether its goal is shut in; 0 never.
+/// `GB_GOAL_CHECK=0` switches the check off, for comparisons: the results are the same.
+fn goal_check_at() -> usize {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    #[cfg(test)]
+    if let Some(at) = GOAL_CHECK_TEST.with(|c| c.get()) {
+        return at;
+    }
+    if *ON.get_or_init(|| std::env::var("GB_GOAL_CHECK").map_or(true, |v| v != "0")) {
+        GOAL_CHECK_AT
+    } else {
+        0
+    }
+}
+
 /// An edge counts as over capacity from this overflow in mm on.
 const OVER_TOL: f64 = 1e-6;
 
 /// A negotiation ends after this many rounds without fewer conflicts.
 const MAX_STALE: usize = 5;
 
-type Best = FastMap<(u8, u32, u32), f64>;
+/// Per search state the least cost so far and the node that holds it.
+type Best = FastMap<u64, (f64, u32)>;
 
 #[derive(Default)]
 struct SearchBuf {
     nodes: Vec<Node>,
     best: Best,
-    open: BinaryHeap<Open>,
+    open: OpenHeap,
+    /// Searches (connection, goal, via in pad) whose goal was found shut in: the next search
+    /// of the same asks right away (the answer is the same either way, only sooner).
+    shut: std::collections::HashSet<u64, std::hash::BuildHasherDefault<crate::index::FastHasher>>,
 }
 
 /// A copy of a router starts with empty buffers: every search clears them first, and copying
@@ -387,17 +428,71 @@ impl Clone for SearchBuf {
     }
 }
 
-#[derive(PartialEq, Clone)]
-struct Open(f64, u32);
-impl Eq for Open {}
-impl PartialOrd for Open {
-    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
-        Some(self.cmp(o))
+/// The open list of a search: nodes by `f`, ties by node index, both ascending. One `u128` per
+/// entry, `f` in its total order (as `f64::total_cmp`) above the index, in a four-ary heap: the
+/// order is total, so the nodes come out in the same order as from any other exact queue, and a
+/// pop compares integers and touches fewer cache lines than a binary heap of `(f64, u32)`.
+#[derive(Default)]
+struct OpenHeap(Vec<u128>);
+
+impl OpenHeap {
+    #[inline]
+    fn entry(f: f64, idx: u32) -> u128 {
+        let b = f.to_bits();
+        let k = if b >> 63 == 1 { !b } else { b | 1 << 63 };
+        (k as u128) << 32 | idx as u128
     }
-}
-impl Ord for Open {
-    fn cmp(&self, o: &Self) -> Ordering {
-        o.0.total_cmp(&self.0).then(o.1.cmp(&self.1))
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    #[inline]
+    fn push(&mut self, f: f64, idx: u32) {
+        let x = Self::entry(f, idx);
+        let h = &mut self.0;
+        let mut i = h.len();
+        h.push(x);
+        while i > 0 {
+            let up = (i - 1) / 4;
+            if h[up] <= x {
+                break;
+            }
+            h[i] = h[up];
+            i = up;
+        }
+        h[i] = x;
+    }
+
+    /// The node index with the least `f`.
+    #[inline]
+    fn pop(&mut self) -> Option<u32> {
+        let h = &mut self.0;
+        let top = *h.first()?;
+        let last = h.pop().unwrap();
+        let n = h.len();
+        if n > 0 {
+            let mut i = 0;
+            loop {
+                let c = 4 * i + 1;
+                if c >= n {
+                    break;
+                }
+                let mut m = c;
+                for j in c + 1..(c + 4).min(n) {
+                    if h[j] < h[m] {
+                        m = j;
+                    }
+                }
+                if h[m] >= last {
+                    break;
+                }
+                h[i] = h[m];
+                i = m;
+            }
+            h[i] = last;
+        }
+        Some(top as u32)
     }
 }
 
@@ -507,16 +602,21 @@ fn guide_dist(guides: &[Guide], li: usize, q: Point, cap: f64) -> f64 {
     best
 }
 
-fn key(k: &NK) -> (u8, u32, u32) {
-    match *k {
-        NK::Tri { t, li, entry, slot } => (0, t, ((li as u32) << 24) | ((entry as u32) << 16) | slot as u32),
+/// The search state of a node in one word: the kind in the top three bits, the triangle, site,
+/// pin or segment below, the rest in the low half. One round of the hasher instead of three.
+#[inline]
+fn key(k: &NK) -> u64 {
+    let (kind, a, b) = match *k {
+        NK::Tri { t, li, entry, slot } => (0u64, t, ((li as u32) << 24) | ((entry as u32) << 16) | slot as u32),
         NK::Vert { site, li } => (1, site, li as u32),
         NK::GoalPin { pin } => (2, pin as u32, 0),
         NK::GoalVia { site } => (3, site, 0),
         NK::Site { site, li } => (4, site, li as u32),
         NK::GoalSite { site } => (5, site, 0),
         NK::GoalTap { seg, e } => (6, seg, e),
-    }
+    };
+    assert!(a < 1 << 29, "search state out of range");
+    kind << 61 | (a as u64) << 32 | b as u64
 }
 
 impl<'a> Router<'a> {
@@ -545,6 +645,7 @@ impl<'a> Router<'a> {
             conn_vias: Vec::new(),
             search_buf: Default::default(),
             trace: Default::default(),
+            pin_pitch: std::sync::Arc::new(Self::pin_pitches(board)),
             pin_group,
             plane_groups,
             partner,
@@ -785,7 +886,7 @@ impl<'a> Router<'a> {
         let clr = cls.clearance.max(self.board.rules.min_clearance);
         let pad_w = pins
             .iter()
-            .map(|&p| self.board.pin_room(p, clr).min(0.4))
+            .map(|&p| self.pin_room(p, clr).min(0.4))
             .fold(f64::INFINITY, f64::min);
         let neck_w = self.board.rules.min_track_width.max(pad_w).min(cls.track_width);
         if neck_w >= cls.track_width - 1e-9 {
@@ -1546,6 +1647,45 @@ impl<'a> Router<'a> {
         )
     }
 
+    /// The pitch of every pin as [`Board::pin_room`] folds it: the nearest pin of the same part
+    /// on another net, `INFINITY` without one.
+    fn pin_pitches(board: &Board) -> Vec<f64> {
+        let mut parts: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, p) in board.pins.iter().enumerate() {
+            parts.entry(p.footprint.as_str()).or_default().push(i);
+        }
+        let mut pitch = vec![f64::INFINITY; board.pins.len()];
+        for part in parts.values() {
+            for &i in part {
+                let pin = &board.pins[i];
+                pitch[i] = part
+                    .iter()
+                    .map(|&q| &board.pins[q])
+                    .filter(|q| q.net != pin.net)
+                    .map(|q| q.pos.dist(pin.pos))
+                    .fold(f64::INFINITY, f64::min);
+            }
+        }
+        pitch
+    }
+
+    /// [`Board::pin_room`] from the pitches of the router.
+    fn pin_room(&self, p: usize, clr: f64) -> f64 {
+        let pin = &self.board.pins[p];
+        pin.size.0.min(pin.size.1).min(self.pin_pitch[p] - clr - 0.02)
+    }
+
+    /// [`Board::narrow_pin`] from the pitches of the router.
+    fn narrow_pin(&self, p: usize) -> bool {
+        let cls = self.board.class_of(self.board.pins[p].net);
+        match cls.min_width {
+            Some(min) if !cls.neck_refs.is_empty() => {
+                self.pin_room(p, cls.clearance.max(self.board.rules.min_clearance)) < min - 1e-9
+            }
+            _ => false,
+        }
+    }
+
     /// How many vias a layer change of connection ci takes: one, or on a current path (between
     /// two pins that take the minimum width of their class, [`Board::current_min`]) as many as
     /// carry what that width carries ([`Board::vias_for`]).
@@ -1555,7 +1695,7 @@ impl<'a> Router<'a> {
             return 1.0;
         };
         match &c.goal {
-            Goal::Pins(goal) if !self.board.narrow_pin(c.from) && goal.iter().any(|&p| !self.board.narrow_pin(p)) => {
+            Goal::Pins(goal) if !self.narrow_pin(c.from) && goal.iter().any(|&p| !self.narrow_pin(p)) => {
                 self.board.vias_for(min, self.via_size(c.net).1) as f64
             }
             _ => 1.0,
@@ -2110,59 +2250,75 @@ impl<'a> Router<'a> {
         buf.best.clear();
         buf.nodes.clear();
         buf.open.clear();
-        let SearchBuf { nodes, best, open } = buf;
-        let push = |best: &mut Best,
-                    nodes: &mut Vec<Node>,
-                    open: &mut BinaryHeap<Open>,
-                    kind: NK,
-                    pos: Point,
-                    g: f64,
-                    parent: u32| {
-            match best.entry(key(&kind)) {
-                Entry::Occupied(mut b) => {
-                    if *b.get() <= g + 1e-9 {
-                        return;
-                    }
-                    b.insert(g);
-                }
-                Entry::Vacant(b) => {
-                    b.insert(g);
-                }
+        let shut_key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = crate::index::FastHasher::default();
+            (ci, conn.from, via_in_pad).hash(&mut h);
+            if let Goal::Pins(p) = &conn.goal {
+                p.hash(&mut h);
             }
-            let (seen, block_up, block_len) = match (kind, nodes.get(parent as usize)) {
-                (NK::Tri { t, li, .. }, Some(n)) if n.block_len == BLOCK => (tri_bit(t, li), parent, 1),
-                (NK::Tri { t, li, .. }, Some(n)) if n.block_len > 0 => {
-                    (n.seen | tri_bit(t, li), n.block_up, n.block_len + 1)
-                }
-                (NK::Tri { t, li, .. }, _) => (tri_bit(t, li), u32::MAX, 1),
-                _ => (0, u32::MAX, 0),
-            };
-            let via_up = match nodes.get(parent as usize) {
-                Some(Node {
-                    kind: NK::Site { .. } | NK::Vert { .. },
-                    ..
-                }) => parent,
-                Some(n) => n.via_up,
-                None => u32::MAX,
-            };
-            nodes.push(Node {
-                kind,
-                pos,
-                g,
-                parent,
-                seen,
-                block_up,
-                block_len,
-                via_up,
-            });
-            // a way to the net right here: the pins of the goal say nothing about it
-            let f = if matches!(kind, NK::GoalTap { .. }) {
-                g
-            } else {
-                g + h(pos)
-            };
-            open.push(Open(f, (nodes.len() - 1) as u32));
+            h.finish()
         };
+        let SearchBuf {
+            nodes,
+            best,
+            open,
+            shut,
+        } = buf;
+        let shut_before = shut.contains(&shut_key);
+        let push =
+            |best: &mut Best, nodes: &mut Vec<Node>, open: &mut OpenHeap, kind: NK, pos: Point, g: f64, parent: u32| {
+                // a node that a cheaper one replaces is stale: every later push that gets through
+                // here is cheaper by more than 1e-9 than any node of its state before
+                let at = nodes.len() as u32;
+                match best.entry(key(&kind)) {
+                    Entry::Occupied(mut b) => {
+                        let (old, old_at) = *b.get();
+                        if old <= g + 1e-9 {
+                            return;
+                        }
+                        b.insert((g, at));
+                        nodes[old_at as usize].stale = true;
+                    }
+                    Entry::Vacant(b) => {
+                        b.insert((g, at));
+                    }
+                }
+                let (seen, block_up, block_len) = match (kind, nodes.get(parent as usize)) {
+                    (NK::Tri { t, li, .. }, Some(n)) if n.block_len == BLOCK => (tri_bit(t, li), parent, 1),
+                    (NK::Tri { t, li, .. }, Some(n)) if n.block_len > 0 => {
+                        (n.seen | tri_bit(t, li), n.block_up, n.block_len + 1)
+                    }
+                    (NK::Tri { t, li, .. }, _) => (tri_bit(t, li), u32::MAX, 1),
+                    _ => (0, u32::MAX, 0),
+                };
+                let via_up = match nodes.get(parent as usize) {
+                    Some(Node {
+                        kind: NK::Site { .. } | NK::Vert { .. },
+                        ..
+                    }) => parent,
+                    Some(n) => n.via_up,
+                    None => u32::MAX,
+                };
+                nodes.push(Node {
+                    kind,
+                    pos,
+                    g,
+                    parent,
+                    seen,
+                    block_up,
+                    block_len,
+                    via_up,
+                    stale: false,
+                });
+                // a way to the net right here: the pins of the goal say nothing about it
+                let f = if matches!(kind, NK::GoalTap { .. }) {
+                    g
+                } else {
+                    g + h(pos)
+                };
+                open.push(f, (nodes.len() - 1) as u32);
+            };
 
         for (li, m) in self.sub.m.iter().enumerate() {
             if !src.layers.has(m.layer) {
@@ -2208,7 +2364,7 @@ impl<'a> Router<'a> {
         #[allow(clippy::too_many_arguments)]
         let mut cross_out = |best: &mut Best,
                              nodes: &mut Vec<Node>,
-                             open: &mut BinaryHeap<Open>,
+                             open: &mut OpenHeap,
                              t: u32,
                              lu: usize,
                              k: u8,
@@ -2399,14 +2555,28 @@ impl<'a> Router<'a> {
         let mut vertex_ok: FastMap<u32, Option<bool>> = FastMap::default();
         let mut via_fits: FastMap<u32, bool> = FastMap::default();
         let mut expansions = 0;
-        while let Some(Open(_, idx)) = open.pop() {
+        // a traced search (GB_WHY) shows where it went: all of it
+        let check_at = if tracing { 0 } else { goal_check_at() };
+        while let Some(idx) = open.pop() {
             let node = nodes[idx as usize];
-            if best.get(&key(&node.kind)).is_some_and(|&b| b < node.g - 1e-9) {
+            if node.stale {
                 continue;
             }
             expansions += 1;
             if expansions > self.cfg.max_expansions {
                 return None;
+            }
+            // a long search: is the goal shut in? Then it can only fail (see `shut`)
+            if expansions == check_at || (shut_before && check_at != 0 && expansions == 1) {
+                crate::prof::add(crate::prof::Slot::GoalChecks, 1);
+                if self.goal_shut_in(ci, item, &necks, neck_w, &tappable, via_in_pad, GOAL_CHECK_BUDGET) {
+                    crate::prof::add(crate::prof::Slot::GoalShut, 1);
+                    #[cfg(test)]
+                    GOAL_SHUT_TEST.with(|c| c.set(c.get() + 1));
+                    shut.insert(shut_key);
+                    return None;
+                }
+                shut.remove(&shut_key);
             }
             if tracing && let Some(t) = self.trace.lock().unwrap().as_mut() {
                 let li = match node.kind {
@@ -3601,6 +3771,15 @@ impl<'a> Router<'a> {
 
     /// Connections with vias are routed again at a high via price. A connection keeps the
     /// result if it has fewer vias; otherwise it is routed again at the normal price.
+    /// The end of [`Router::run`] with a via pass of this price, on a router whose run had
+    /// none: the connections with vias are routed again and keep what has fewer. The routed
+    /// connections after it, as `run` returns them.
+    pub(crate) fn via_pass_on(&mut self, price: f64) -> usize {
+        self.cfg.via_pass = price;
+        self.reduce_vias();
+        self.conn_segs.iter().filter(|s| !s.is_empty()).count()
+    }
+
     fn reduce_vias(&mut self) {
         let price = self.cfg.via_pass;
         if price <= 0.0 {
@@ -4250,6 +4429,108 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(planned_nets(&b, pairs), ["L_P", "L_N", "E", "F", "C", "A", "D", "B"]);
+    }
+
+    /// The pitches of the router give the room of `Board::pin_room` to the bit.
+    #[test]
+    fn the_pin_pitches_give_the_room_of_the_board() {
+        let pins = [
+            ("U1", "A", 3.0, 3.0),
+            ("U1", "B", 3.5, 3.0),
+            ("U1", "A", 4.0, 3.0),
+            ("U1", "C", 3.0, 4.1),
+            ("U2", "A", 10.0, 10.0),
+            ("U2", "A", 10.4, 10.0),
+            ("U3", "B", 15.0, 15.0),
+        ];
+        let b = pad_board(&pins);
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let r = Router::new(&b, &sub, RouterConfig::default());
+        for p in 0..b.pins.len() {
+            for clr in [0.0, 0.1, 0.2, 0.127] {
+                assert_eq!(r.pin_room(p, clr).to_bits(), b.pin_room(p, clr).to_bits(), "pin {p}");
+            }
+            assert_eq!(r.narrow_pin(p), b.narrow_pin(p));
+        }
+    }
+
+    /// A search whose goal is shut in ends at once, with the same result: a dense board routed
+    /// with the check at the first expansion of every search, and without it.
+    #[test]
+    fn a_goal_shut_in_ends_the_search_with_the_same_result() {
+        let mut pins = Vec::new();
+        let mut x: u64 = 7;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % 1000) as f64 / 1000.0
+        };
+        // 40 nets of two pins on 12 x 12 mm, many of them crossing
+        let names: Vec<String> = (0..40).map(|i| format!("N{i}")).collect();
+        for n in &names {
+            for fp in ["U1", "U2"] {
+                let (u, v) = (next(), next());
+                pins.push((fp, n.as_str(), 4.0 + 12.0 * u, 4.0 + 12.0 * v));
+            }
+        }
+        let b = pad_board(&pins);
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let run = |check_at: usize| {
+            GOAL_CHECK_TEST.with(|c| c.set(Some(check_at)));
+            GOAL_SHUT_TEST.with(|c| c.set(0));
+            let mut r = Router::new(&b, &sub, RouterConfig::default());
+            r.plan();
+            let routed = r.run();
+            let geo = format!("{:?}", r.geometry());
+            GOAL_CHECK_TEST.with(|c| c.set(None));
+            (routed, geo, GOAL_SHUT_TEST.with(|c| c.get()))
+        };
+        let (routed, geo, _) = run(0);
+        let (routed_checked, geo_checked, shut) = run(1);
+        assert!(routed < 40, "the board should be too full: {routed}");
+        assert!(shut > 0, "no goal was found shut in");
+        assert_eq!(routed, routed_checked);
+        assert!(geo == geo_checked, "the geometry differs");
+    }
+
+    /// The open list hands out the nodes by f, ties by index, also with pushes between pops,
+    /// negative values and equal f.
+    #[test]
+    fn the_open_list_pops_in_total_order() {
+        let mut h = OpenHeap::default();
+        let mut reference: Vec<(f64, u32)> = Vec::new();
+        let mut x: u64 = 12345;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut out = Vec::new();
+        let mut want = Vec::new();
+        for idx in 0..5000u32 {
+            let r = next();
+            let f = match r % 5 {
+                0 => 1.0,
+                1 => -((r % 1000) as f64) * 0.25,
+                _ => (r % 997) as f64 * 0.125,
+            };
+            h.push(f, idx);
+            reference.push((f, idx));
+            if next() % 3 == 0 {
+                reference.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
+                want.push(reference.pop().unwrap().1);
+                out.push(h.pop().unwrap());
+            }
+        }
+        reference.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
+        while let Some(i) = h.pop() {
+            out.push(i);
+            want.push(reference.pop().unwrap().1);
+        }
+        assert_eq!(out, want);
+        assert!(reference.is_empty());
     }
 
     #[test]

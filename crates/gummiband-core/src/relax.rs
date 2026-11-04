@@ -387,25 +387,81 @@ impl Tier {
 /// How far a point may lie from the point of the last grid sweep and reuse its result.
 const SWEEP_SKIN: f64 = 0.4;
 
-/// Scratch of the point loop.
+/// Scratch of the point loop. Its buffers come from a pool of the thread and go back to it:
+/// a relaxation makes a few for every track in every round.
 struct Sweep {
-    /// Pieces within the skin of `anchor`, and the candidates of the current point (pieces by
-    /// their order keys, vias by id).
+    /// Pieces and vias of other nets within the skin of `anchor`, and the candidates of the
+    /// current point (pieces by their order keys, vias by id).
     anchor: Point,
+    /// In key order, so that the candidates of a point are in key order as well.
     list: Vec<Swept>,
+    /// Scratch of the merge of the tiers.
+    merge: Vec<Swept>,
+    via_list: Vec<SweptVia>,
     near: Vec<u64>,
     vias: Vec<u32>,
 }
 
+/// The buffers of a `Sweep`, kept for the next one.
+#[derive(Default)]
+struct SweepBufs {
+    list: Vec<Swept>,
+    merge: Vec<Swept>,
+    via_list: Vec<SweptVia>,
+    near: Vec<u64>,
+    vias: Vec<u32>,
+}
+
+thread_local! {
+    static SWEEP_POOL: std::cell::RefCell<Vec<SweepBufs>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl Default for Sweep {
     fn default() -> Sweep {
+        let mut b = SWEEP_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
+        b.list.clear();
+        b.merge.clear();
+        b.via_list.clear();
+        b.near.clear();
+        b.vias.clear();
         Sweep {
             anchor: pt(f64::INFINITY, f64::INFINITY),
-            list: Vec::new(),
-            near: Vec::new(),
-            vias: Vec::new(),
+            list: b.list,
+            merge: b.merge,
+            via_list: b.via_list,
+            near: b.near,
+            vias: b.vias,
         }
     }
+}
+
+impl Drop for Sweep {
+    fn drop(&mut self) {
+        let b = SweepBufs {
+            list: std::mem::take(&mut self.list),
+            merge: std::mem::take(&mut self.merge),
+            via_list: std::mem::take(&mut self.via_list),
+            near: std::mem::take(&mut self.near),
+            vias: std::mem::take(&mut self.vias),
+        };
+        // a thread holds few sweeps at a time (nested jobs); more would only keep memory
+        let _ = SWEEP_POOL.try_with(|p| {
+            let mut p = p.borrow_mut();
+            if p.len() < 16 {
+                p.push(b);
+            }
+        });
+    }
+}
+
+/// A via in the sweep of a track: its centre, the radius and clearance the point filter needs,
+/// and its id.
+#[derive(Clone, Copy)]
+struct SweptVia {
+    at: Point,
+    /// Radius plus the larger of its clearance and the track's; the custom rules come on top.
+    reach: f64,
+    id: u32,
 }
 
 /// A piece in the sweep of a track: what the point filter needs, and the order key.
@@ -523,6 +579,36 @@ pub struct BoardStatic {
     layer_cells: Vec<CellLists>,
     near_obs: Vec<NearObstacle>,
     near_edge: Vec<bool>,
+    /// The board edge by cells, for a board of many outlines or outlines of many edges (a
+    /// panel with mouse bites has hundreds). `edge_segs` are the edges of all outlines, outline
+    /// by outline, each with its outline; `edge_cells` holds per cell the edges whose box comes
+    /// within the reach of the edge clearance of a track as wide as the widest (ascending):
+    /// the nearest point of an outline that is near enough to push is on one of them.
+    edge_segs: Vec<(u32, Point, Point)>,
+    edge_cells: CellLists,
+    /// Per row of cells the edges (as the even-odd test takes them) that reach into the row:
+    /// only they can cross the line of a point in the row, so they alone decide whether the
+    /// point is on the board.
+    row_start: Vec<u32>,
+    row_edges: Vec<(Point, Point)>,
+}
+
+impl BoardStatic {
+    /// `Board::inside` for a point in row `row` of the cells: the same answer from the edges
+    /// that can tell (the parity of all outlines is the parity of all their crossings).
+    #[inline]
+    fn inside(&self, row: usize, p: Point) -> bool {
+        let mut inside = false;
+        for &(a, b) in &self.row_edges[self.row_start[row] as usize..self.row_start[row + 1] as usize] {
+            if (a.y > p.y) != (b.y > p.y) {
+                let x = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y);
+                if p.x < x {
+                    inside = !inside;
+                }
+            }
+        }
+        inside
+    }
 }
 
 /// The board-static part of a relaxation, from the cache of `sub` or built (and kept) now. It
@@ -611,12 +697,53 @@ fn build_board_static(
             d < board.rules.edge_clearance + max_w / 2.0 + margin + half + 0.01 || !board.inside(mid)
         })
         .collect();
+    let edge_segs: Vec<(u32, Point, Point)> = board
+        .outline
+        .iter()
+        .enumerate()
+        .flat_map(|(oi, o)| o.edges().map(move |(a, b)| (oi as u32, a, b)))
+        .collect();
+    let edge_boxes: Vec<Rect> = edge_segs
+        .iter()
+        .map(|&(_, a, b)| {
+            let mut r = Rect::empty();
+            r.add(a);
+            r.add(b);
+            r
+        })
+        .collect();
+    let edge_reach = board.rules.edge_clearance + max_w / 2.0 + margin + 0.01;
+    let edge_cells = CellLists::new(bounds, 0.5, &edge_boxes, edge_reach, |_| true);
+    // the rows of the even-odd test, with a little room at the borders of a row
+    let row = |y: f64| axis_cell(y, cells.origin.y, cells.inv, cells.ny);
+    let mut rows: Vec<Vec<(Point, Point)>> = vec![Vec::new(); cells.ny];
+    for o in &board.outline {
+        let n = o.pts.len();
+        let mut j = n - 1;
+        for i in 0..n {
+            let (a, b) = (o.pts[i], o.pts[j]);
+            for r in &mut rows[row(a.y.min(b.y) - 1e-6)..=row(a.y.max(b.y) + 1e-6)] {
+                r.push((a, b));
+            }
+            j = i;
+        }
+    }
+    let mut row_start = vec![0u32];
+    let mut row_edges = Vec::new();
+    for r in rows {
+        row_edges.extend(r);
+        row_start.push(row_edges.len() as u32);
+    }
     BoardStatic {
         bounds,
         cells,
         layer_cells,
         near_obs,
         near_edge,
+        edge_segs,
+        edge_cells,
+        row_start,
+        row_edges,
     }
 }
 
@@ -732,6 +859,9 @@ pub fn relax_while(
         layer_cells,
         near_obs,
         near_edge,
+        edge_segs,
+        edge_cells,
+        ..
     } = &*st;
     let bounds = *bounds;
     // vias as static obstacles: (centre, radius, net, clearance)
@@ -1279,36 +1409,83 @@ pub fn relax_while(
                             }
                         }
                         // board edge (only near it)
-                        let inside_board = !near_edge[cell] || board.inside(p);
-                        for o in board.outline.iter().filter(|_| near_edge[cell]) {
-                            let (d, q) = nearest_on_poly(o, p);
-                            let need = edge_clr + w / 2.0 + cfg.margin;
-                            // a point outside the board always goes back in
-                            if d < need || !inside_board {
-                                let dir = if inside_board { (p - q).norm() } else { (q - p).norm() };
-                                let d = if inside_board { d } else { -d };
-                                push = push + dir * (need - d);
+                        let inside_board = !near_edge[cell] || st.inside(cell / cells.nx, p);
+                        let need = edge_clr + w / 2.0 + cfg.margin;
+                        if near_edge[cell] && inside_board && w <= max_w {
+                            // the nearest point of each outline from the edges near the cell:
+                            // an outline without such an edge is too far to push
+                            let near = edge_cells.get(cell);
+                            let mut k = 0;
+                            while k < near.len() {
+                                let o = edge_segs[near[k] as usize].0;
+                                let mut best = (f64::INFINITY, p);
+                                while k < near.len() && edge_segs[near[k] as usize].0 == o {
+                                    let (_, a, b) = edge_segs[near[k] as usize];
+                                    let ab = b - a;
+                                    let l2 = ab.len2();
+                                    let t = if l2 > 0.0 {
+                                        ((p - a).dot(ab) / l2).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    let q = a + ab * t;
+                                    let d2 = (p - q).len2();
+                                    if d2 < best.0 {
+                                        best = (d2, q);
+                                    }
+                                    k += 1;
+                                }
+                                let (d, q) = (best.0.sqrt(), best.1);
+                                if d < need {
+                                    push = push + (p - q).norm() * (need - d);
+                                }
+                            }
+                        } else if near_edge[cell] {
+                            for o in &board.outline {
+                                let (d, q) = nearest_on_poly(o, p);
+                                // a point outside the board always goes back in
+                                if d < need || !inside_board {
+                                    let dir = if inside_board { (p - q).norm() } else { (q - p).norm() };
+                                    let d = if inside_board { d } else { -d };
+                                    push = push + dir * (need - d);
+                                }
                             }
                         }
                         // vias of other nets
                         let Sweep {
                             anchor,
                             list,
+                            merge,
+                            via_list,
                             near,
                             vias: hits,
                         } = sweep;
+                        // the pieces and vias near one point serve the next points along the
+                        // track too: within the skin of the anchor every candidate of a point is
+                        // in the lists, and the filters below pick exactly those of the point
+                        let sweep_again = (p - *anchor).len2() >= SWEEP_SKIN * SWEEP_SKIN;
+                        if sweep_again {
+                            via_list.clear();
+                            let radius = half_w(t) + max_clr + max_vr + cfg.margin + 0.01 + SWEEP_SKIN;
+                            via_grid.for_each_near(p, radius, |vi| {
+                                let (vc, vr, vn, vclr) = vias[vi as usize];
+                                if vn != net && via_layer[vi as usize].is_none_or(|l| l == t.layer) {
+                                    via_list.push(SweptVia {
+                                        at: vc,
+                                        reach: vr + max_of(max_of(vclr, c), item_max),
+                                        id: vi,
+                                    });
+                                }
+                            });
+                        }
                         hits.clear();
-                        via_grid.for_each_near(p, w / 2.0 + max_clr + max_vr + cfg.margin + 0.01, |vi| {
-                            let (vc, vr, vn, vclr) = vias[vi as usize];
-                            let dv = p - vc;
-                            let reach = vr + max_of(max_of(vclr, c), item_max) + w / 2.0 + cfg.margin;
-                            if vn != net
-                                && !surely_outside(dv.x, dv.y, reach)
-                                && via_layer[vi as usize].is_none_or(|l| l == t.layer)
-                            {
-                                hits.push(vi);
+                        let wm = w / 2.0 + cfg.margin;
+                        for v in via_list.iter() {
+                            let dv = p - v.at;
+                            if !surely_outside(dv.x, dv.y, v.reach + wm) {
+                                hits.push(v.id);
                             }
-                        });
+                        }
                         hits.sort_unstable();
                         for &vi in hits.iter() {
                             let (vc, vr, vn, vclr) = vias[vi as usize];
@@ -1330,12 +1507,13 @@ pub fn relax_while(
                             }
                         }
                         // other tracks (they push back from their side, so take half)
-                        // the pieces near one point serve the next points along the track too
-                        if (p - *anchor).len2() >= SWEEP_SKIN * SWEEP_SKIN {
+                        if sweep_again {
                             *anchor = p;
                             list.clear();
                             let base = half_w(t) + cfg.margin + SWEEP_SKIN + 1e-6;
+                            let mut far_at = 0;
                             for tier in [&grid.fine, &grid.far] {
+                                far_at = list.len();
                                 let radius = base + nc.max(tier.max_clr) + tier.max_extent;
                                 tier.for_each_keyed(p, radius, |r, key| {
                                     let dm = p - r.mid;
@@ -1350,6 +1528,29 @@ pub fn relax_while(
                                     }
                                 });
                             }
+                            // the fine grid hands out its pieces in key order already (rows of
+                            // cells, ids within a cell); the far ones go in between
+                            if !list[..far_at].is_sorted_by_key(|r| r.key) {
+                                list[..far_at].sort_unstable_by_key(|r| r.key);
+                            }
+                            if far_at < list.len() {
+                                list[far_at..].sort_unstable_by_key(|r| r.key);
+                                merge.clear();
+                                let (a, b) = list.split_at(far_at);
+                                let (mut i, mut j) = (0, 0);
+                                while i < a.len() && j < b.len() {
+                                    if a[i].key < b[j].key {
+                                        merge.push(a[i]);
+                                        i += 1;
+                                    } else {
+                                        merge.push(b[j]);
+                                        j += 1;
+                                    }
+                                }
+                                merge.extend_from_slice(&a[i..]);
+                                merge.extend_from_slice(&b[j..]);
+                                std::mem::swap(list, merge);
+                            }
                         }
                         near.clear();
                         let base = w / 2.0 + cfg.margin;
@@ -1360,7 +1561,6 @@ pub fn relax_while(
                                 near.push(r.key);
                             }
                         }
-                        near.sort_unstable();
                         for &key in near.iter() {
                             let pc = &pieces[key as u32 as usize];
                             let o = &geo.tracks[pc.track as usize];

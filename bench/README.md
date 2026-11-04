@@ -81,6 +81,24 @@ the core seconds, a breakdown per round, the violations and a hash of the result
 relaxes it N times with a margin changed by next to nothing: the relaxation is chaotic, a single
 violation count says little. Compare core seconds when other jobs run on the machine.
 
+## Profiling
+
+`GB_TIMING=1` prints cumulative phase timers of a route (search, relaxation rounds, taut, check;
+parallel calls add up, so the shares are of the work, not of the clock). For the functions
+behind them, record with [samply](https://github.com/mstange/samply) (`cargo install samply`;
+Instruments needs a full Xcode) and summarise with `profile.py`:
+
+```sh
+samply record --save-only --unstable-presymbolicate -r 1000 -o run.json.gz -- \
+    target/release/gummiband route BOARD -o out.kicad_pcb
+bench/profile.py run.json.gz parts      # busy time by part: search, relaxation, taut, check ...
+bench/profile.py run.json.gz top 40     # self and total time per function
+bench/profile.py run.json.gz lines 'relax_while::\{closure#41\}' relax.rs target/release/gummiband
+```
+
+A speed change that should not change results is checked by the SHA-1 of the routed file: the
+result of a route is the same for any number of threads.
+
 ## Real boards (external)
 
 `kicad-autorouter-benchmarks.zip` (not in the repository; sources and licenses in its

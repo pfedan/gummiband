@@ -138,6 +138,9 @@ pub struct Copper<'a> {
     pieces: Vec<Piece>,
     idx: GridIndex,
     oidx: GridIndex,
+    /// The edges of the board outline, and an index of them: a panel has hundreds.
+    esegs: Vec<(Point, Point)>,
+    eidx: GridIndex,
 }
 
 impl<'a> Copper<'a> {
@@ -173,11 +176,21 @@ impl<'a> Copper<'a> {
         for (i, o) in board.obstacles.iter().enumerate() {
             oidx.insert(i as u32, &o.shape.bbox());
         }
+        let esegs: Vec<(Point, Point)> = board.outline.iter().flat_map(|o| o.edges()).collect();
+        let mut eidx = GridIndex::new(board.bbox().grow(5.0), 1.0);
+        for (i, &(a, b)) in esegs.iter().enumerate() {
+            let mut r = Rect::empty();
+            r.add(a);
+            r.add(b);
+            eidx.insert(i as u32, &r);
+        }
         Copper {
             board,
             pieces,
             idx,
             oidx,
+            esegs,
+            eidx,
         }
     }
 
@@ -236,22 +249,30 @@ impl<'a> Copper<'a> {
         let r = match *p {
             Piece::Seg { r, .. } | Piece::Via { r, .. } => r,
         };
-        let edge = match line {
-            Some((a, b)) => board
-                .outline
-                .iter()
-                .map(|o| {
-                    o.edges()
-                        .map(|(c, d)| seg_seg_dist(a, b, c, d))
-                        .fold(f64::INFINITY, f64::min)
-                })
-                .fold(f64::INFINITY, f64::min),
-            None => board
-                .outline
-                .iter()
-                .map(|o| o.boundary_dist(at))
-                .fold(f64::INFINITY, f64::min),
-        } - r;
+        // only edges within reach of the piece can be too near; the nearest of them is the
+        // nearest of all whenever it is too near
+        let mut reach = Rect::empty();
+        match line {
+            Some((a, b)) => {
+                reach.add(a);
+                reach.add(b);
+            }
+            None => reach.add(at),
+        }
+        let reach = reach.grow(board.rules.edge_clearance + r + 1e-3);
+        let edge = self
+            .eidx
+            .query(&reach)
+            .into_iter()
+            .map(|k| {
+                let (c, d) = self.esegs[k as usize];
+                match line {
+                    Some((a, b)) => seg_seg_dist(a, b, c, d),
+                    None => point_seg_dist(at, c, d),
+                }
+            })
+            .fold(f64::INFINITY, f64::min)
+            - r;
         if edge < board.rules.edge_clearance - 1e-4 {
             out.push(Violation {
                 what: "edge".into(),
