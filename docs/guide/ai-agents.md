@@ -58,6 +58,28 @@ with the board path (and the currents if you know them). It asks the agent to go
 step below without asking back unless the design intent changes, and to finish with a table of
 the current paths.
 
+## You stay the layouter
+
+Gummiband's automatic tools complement manual work; the agent is not meant to hand the whole board
+to `place_parts` and `route` and accept what comes back. It places the parts that matter itself
+(`move_part`), draws critical copper by hand (`add_locked_copper`), lays out the planes and pours
+(`set_layer_type`, `add_zone`, `power_copper`, `ground_pour`) and locks what must stay (`lock`).
+The automatic tools then do the bulk around that: locked parts never move, locked copper is kept
+and routed around. After every automatic step the agent can refine by hand again: move a part on
+the routed board (its tracks follow), redraw one net and let the router join the rest, lock the
+nets that came out well and route the others again.
+
+Requests that use this:
+
+- "Place J1, U6 and L1 the way the datasheet shows, lock them, then place and route the rest."
+- "The router took the LED data line through the converter area. Draw it along the bottom edge
+  by hand, lock it and route the rest of that net again."
+- "Lock everything that is routed now and only route the nets that are still open."
+
+The agent can read how to do this at any time: the tool `guide` returns the server's own
+documentation, without a topic the workflow of manual and automatic steps, with a tool name (for
+example `route` or `lock`) its full reference.
+
 ## A session from netlist to DRC
 
 ### 1. Get the board
@@ -156,6 +178,8 @@ agent iterates on: give a blocked net priority, move a part, route again. On a f
 - **Seeds over options.** Results scatter from seed to seed. Ask the agent to compare a setting
   over the same two or three seeds and by the KiCad DRC, not by one run.
 - **Lock what you made by hand.** Locked tracks, vias and footprints stay through every tool.
+  `lock` locks parts by reference, the copper of nets or all copper, and `unlock: true` releases
+  them again.
 - **Keep the project files together.** `drc` needs the `.kicad_pro` next to the board; `route`
   copies it (and the `.kicad_dru`) next to its output when it is missing.
 - **Open the result in KiCad.** Refill the zones (B) and run the DRC there before you send the

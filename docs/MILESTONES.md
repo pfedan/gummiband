@@ -154,6 +154,11 @@ outer pours removed, routed completely by Gummiband (`bench/run-ledctl.sh`).
   total cross-section of every current path, vias included), `power_copper` (pours over the
   pads of high current paths and via fields into planes before routing, kept by the router as
   "gb:" zones), `ground_pour` (ground zones and stitching vias) and the prompt `good_practice` that runs a board end to end.
+- The agent stays the layouter (idea from Daniel): auto-place and auto-route complement manual
+  placement, manual routing and planes, and the agent refines after them. Done: `lock` (parts by
+  reference, nets, all copper, and unlock), the section "Working with the tools" in MCP.md, the
+  server instructions and tool descriptions, and `guide`, which returns the documentation through
+  MCP (the workflow, every tool's reference, concepts, options).
 - Blocks (fixed blocks): a KiCad group or placed design block (parts plus their pre-routed locked copper, e.g. the datasheet
   layout of a converter) moves only as a whole under --move-parts; inside it nothing changes.
 

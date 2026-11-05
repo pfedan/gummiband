@@ -250,8 +250,11 @@ and `render`. An agent can give the critical nets priority, route, read the viol
 positions and the nets that block each unrouted connection, look at a PNG of the region, nudge a
 part and iterate. On a finished board it can re-lay single nets: `route` with `keep_all`, `nets`
 and `reroute` removes the unlocked copper of those nets and routes them anew while everything
-else stays, and unlocked tracks of other nets shift aside where needed. The chapter
-[Working with an AI agent](ai-agents.md) walks through a session.
+else stays, and unlocked tracks of other nets shift aside where needed. The automatic steps
+complement the agent's own work: it can place and route by hand, lock parts and nets (`lock`) and
+refine the result after `place_parts` and `route`, and the tool `guide` gives it this workflow and
+the reference of every tool. The chapter [Working with an AI agent](ai-agents.md) walks through a
+session.
 
 New and preliminary: datasheet guided pre-routing. The agent asks `part_info` for the pads,
 courtyard and neighbours of a critical part, places the copper the datasheet recommends with
