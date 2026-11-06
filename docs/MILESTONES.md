@@ -159,6 +159,16 @@ outer pours removed, routed completely by Gummiband (`bench/run-ledctl.sh`).
   reference, nets, all copper, and unlock), the section "Working with the tools" in MCP.md, the
   server instructions and tool descriptions, and `guide`, which returns the documentation through
   MCP (the workflow, every tool's reference, concepts, options).
+- Gaps from a strict MCP run (the 4 port LED controller from its schematic only, 2026-11-06),
+  closed: `create_board` overwrite removes the stale working copy and `parts_outside` keeps the
+  board empty for hand placement and copper drawn first (84 parking moves before); `move_part`
+  `side`; `place_parts` keeps a locked part named in `on_front`/`on_back` on its side with a warning
+  instead of failing; `remove` (zones, tracks, vias, footprints); `set_rules` for `.kicad_dru`
+  rules, and Gummiband's own check honours clearance rules that hold in courtyards;
+  `power_copper` options for crowded power parts (`via_rings`, `via_in_pad`,
+  `vias_in_courtyards`, `via_margin`: 25 of 26 vias where the defaults found 5);
+  `current_check` adds the currents of parallel vias instead of their widths (two false flags
+  gone); `place_silk` for reference texts; `try_seeds` over placement seeds; `add_mounting_hole`.
 - Blocks (fixed blocks): a KiCad group or placed design block (parts plus their pre-routed locked copper, e.g. the datasheet
   layout of a converter) moves only as a whole under --move-parts; inside it nothing changes.
 

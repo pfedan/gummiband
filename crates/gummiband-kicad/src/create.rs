@@ -800,6 +800,9 @@ pub struct CreateOptions {
     pub pin_aliases: BTreeMap<String, BTreeMap<String, String>>,
     /// Also search the KiCad environment variables, global table and install places.
     pub system_libraries: bool,
+    /// Put every loose part in rows below the board instead of inside the outline, so that
+    /// copper drawn before the placement (add_locked_copper, zones) meets no pile of parts.
+    pub parts_outside: bool,
 }
 
 impl Default for CreateOptions {
@@ -821,6 +824,7 @@ impl Default for CreateOptions {
             footprint_dirs: Vec::new(),
             pin_aliases: BTreeMap::new(),
             system_libraries: true,
+            parts_outside: false,
         }
     }
 }
@@ -867,6 +871,10 @@ pub struct CreateReport {
     pub excluded: Vec<String>,
     /// Parts that did not fit in rows inside the outline; they sit in rows below the board.
     pub overflow: Vec<String>,
+    /// With `parts_outside`: the parts put in rows below the board on purpose.
+    pub parked: Vec<String>,
+    /// With overwrite: stale working copies of an earlier board that were removed.
+    pub removed: Vec<PathBuf>,
     /// Gap between parts in the rows.
     pub grid_gap: f64,
     pub warnings: Vec<String>,
@@ -1054,6 +1062,32 @@ fn hole_footprint(d: f64) -> LibFootprint {
         bbox,
         pads: Vec::new(),
     }
+}
+
+/// Board text of a locked, plain non-plated mounting hole of `d` mm at `at` (one tab deep, as
+/// the root items of a board).
+pub(crate) fn hole_text(d: f64, reference: &str, at: (f64, f64), seed: u64) -> String {
+    let fp = hole_footprint(d);
+    let lib_id = format!("MountingHole:MountingHole_{}mm", f(d));
+    let nets = HashMap::new();
+    let inst = Instance {
+        lib_id: &lib_id,
+        reference,
+        value: "MountingHole",
+        datasheet: "",
+        description: "",
+        fields: &[],
+        path: "",
+        sheetname: "",
+        sheetfile: "",
+        at,
+        locked: true,
+        dnp: false,
+        exclude_from_bom: false,
+        pad_nets: &nets,
+        net_by_name: false,
+    };
+    instantiate(&fp, &inst, &mut UuidGen::new(seed))
 }
 
 /// Parts inside `area` around the `keepouts`, each at the topmost, then leftmost free spot
@@ -1437,6 +1471,10 @@ pub fn build_board(
     type Placement = Vec<Option<(f64, f64)>>;
     let mut best: Option<(f64, Placement)> = None;
     for gap in [1.0, 0.5, 0.25, 0.0] {
+        if opts.parts_outside {
+            best = Some((1.0, vec![None; sizes.len()]));
+            break;
+        }
         let k: Vec<[f64; 4]> = keepouts
             .iter()
             .map(|k| [k[0] - gap, k[1] - gap, k[2] + gap, k[3] + gap])
@@ -1481,7 +1519,9 @@ pub fn build_board(
             None => (centre.0 - (b[0] + b[2]) / 2.0, centre.1 - (b[1] + b[3]) / 2.0),
         });
     }
-    if !rep.overflow.is_empty() {
+    if opts.parts_outside {
+        rep.parked = std::mem::take(&mut rep.overflow);
+    } else if !rep.overflow.is_empty() {
         let court: f64 = sizes.iter().map(|(w, h)| w * h).sum();
         rep.warnings.push(format!(
             "{} parts did not fit in rows inside the outline (the courtyards of the loose parts take {:.0} mm2, the board has {:.0} mm2); \
@@ -1822,6 +1862,9 @@ pub fn create_board_files(
         std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
     }
     std::fs::write(output, pcb).with_context(|| format!("writing {}", output.display()))?;
+    if overwrite {
+        rep.removed = remove_working_copies(output);
+    }
     let pro_path = output.with_extension("kicad_pro");
     let existing = std::fs::read_to_string(&pro_path)
         .ok()
@@ -1837,6 +1880,22 @@ pub fn create_board_files(
     rep.pcb_path = output.to_path_buf();
     rep.pro_path = pro_path;
     Ok(rep)
+}
+
+/// The working copy of a board (`<stem>.prerouted.kicad_pcb`) and its project files belong to
+/// the board they were made from: a new board under the same name must not continue on them.
+pub fn remove_working_copies(pcb: &Path) -> Vec<PathBuf> {
+    let Some(stem) = pcb.file_stem().and_then(|s| s.to_str()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for ext in ["kicad_pcb", "kicad_pro", "kicad_dru", "kicad_prl"] {
+        let f = pcb.with_file_name(format!("{stem}.prerouted.{ext}"));
+        if f.is_file() && std::fs::remove_file(&f).is_ok() {
+            out.push(f);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1933,6 +1992,60 @@ mod tests {
         assert_eq!(nl.components[1].path, "/cccc");
         assert_eq!(nl.nets.len(), 3);
         assert_eq!(nl.nets[1].class, "Power");
+    }
+
+    #[test]
+    fn parts_outside_leave_the_board_empty() {
+        let dir = lib_dir("outside");
+        let opts = CreateOptions {
+            width: 40.0,
+            height: 30.0,
+            mounting_holes: Some(HoleSpec {
+                diameter: 3.2,
+                inset: 4.0,
+                footprint: None,
+                net: None,
+            }),
+            footprint_dirs: vec![dir.clone()],
+            parts_outside: true,
+            ..Default::default()
+        };
+        let (text, rep, _) = build(&opts);
+        assert!(rep.overflow.is_empty() && rep.warnings.iter().all(|w| !w.contains("did not fit")));
+        let mut parked = rep.parked.clone();
+        parked.sort();
+        assert_eq!(parked, vec!["J1", "R1", "R2"]);
+        let kb = parse_board(text, None, &ReadOptions::default()).unwrap();
+        for r in ["J1", "R1", "R2"] {
+            let c = kb.board.courtyards[r];
+            assert!(c.min.y > opts.y0 + opts.height, "{r} {c:?}");
+        }
+        // the holes stay at the corners
+        assert!(kb.board.courtyards["H1"].max.y < opts.y0 + opts.height);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn overwrite_removes_the_old_working_copy() {
+        let dir = std::env::temp_dir().join(format!("gb-create-work-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pcb = dir.join("b.kicad_pcb");
+        for f in [
+            "b.prerouted.kicad_pcb",
+            "b.prerouted.kicad_pro",
+            "b.prerouted.kicad_dru",
+            "b.routed.kicad_pcb",
+        ] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let gone = remove_working_copies(&pcb);
+        assert_eq!(gone.len(), 3, "{gone:?}");
+        assert!(!dir.join("b.prerouted.kicad_pcb").exists());
+        assert!(
+            dir.join("b.routed.kicad_pcb").exists(),
+            "a routed result is not a working copy"
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

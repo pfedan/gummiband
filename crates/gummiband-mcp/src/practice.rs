@@ -157,6 +157,21 @@ pub struct PowerCopperIn {
     /// Via size of the via fields, default the net class.
     pub via_diameter: Option<f64>,
     pub via_drill: Option<f64>,
+    /// Rings around a pad the via field may use, one via pitch apart (default 4). More reach
+    /// further from a pad crowded by its neighbours.
+    pub via_rings: Option<usize>,
+    /// Put vias of a field into the pad itself first (via in pad, default false): for a large
+    /// pad (an exposed pad, the drain tab of a MOSFET) between close neighbours. Order the
+    /// vias filled and capped.
+    pub via_in_pad: Option<bool>,
+    /// Let vias sit in the courtyards of other parts, off their copper (default false: only
+    /// in the courtyard of the part the pad belongs to). KiCad does not object to a via in a
+    /// courtyard; it keeps the clearances to the pads.
+    pub vias_in_courtyards: Option<bool>,
+    /// Extra room in mm between a via and other nets' copper beyond the clearance (default
+    /// 0.15), so a pour reaches the via with some width; 0 packs vias as tight as the rules
+    /// allow.
+    pub via_margin: Option<f64>,
     /// Zone priority of the pours (default 20, above ground pours).
     pub priority: Option<u32>,
     /// What to do with unlocked tracks and vias of other nets already on the board (a routed
@@ -1322,6 +1337,12 @@ pub fn power_copper(all: &KicadBoard, locked: &KicadBoard, p: &PowerCopperIn) ->
             continue;
         }
         // a plane net: vias from each terminal into the plane
+        let field = power::FieldOptions {
+            rings: p.via_rings.unwrap_or(4).clamp(1, 16),
+            in_pad: p.via_in_pad.unwrap_or(false),
+        };
+        let avoid_courtyards = !p.vias_in_courtyards.unwrap_or(false);
+        let via_margin = p.via_margin.unwrap_or(0.15).max(0.0);
         let c = b.class_of(net);
         let (dia, drill) = (
             p.via_diameter.unwrap_or(c.via_diameter),
@@ -1353,7 +1374,7 @@ pub fn power_copper(all: &KicadBoard, locked: &KicadBoard, p: &PowerCopperIn) ->
                 continue;
             }
             let parts: Vec<String> = g.iter().map(|&x| b.pins[x].footprint.clone()).collect();
-            let room = power::ViaRoom::new(b, &zf, net, dia, drill, 0.15, true)
+            let room = power::ViaRoom::new(b, &zf, net, dia, drill, via_margin, avoid_courtyards)
                 .allow_in(parts)
                 .into_plane();
             // vias of the net that already touch the pad count
@@ -1367,7 +1388,7 @@ pub fn power_copper(all: &KicadBoard, locked: &KicadBoard, p: &PowerCopperIn) ->
                 })
                 .collect();
             let missing = count.saturating_sub(have.len());
-            let mut spots = power::via_field(&room, &pad, missing, &placed_all);
+            let mut spots = power::via_field_with(&room, &pad, missing, &placed_all, &field);
             let mut terms = pad.clone();
             terms.extend(
                 spots
@@ -1416,9 +1437,9 @@ pub fn power_copper(all: &KicadBoard, locked: &KicadBoard, p: &PowerCopperIn) ->
             }
             if have.len() + spots.len() < count {
                 // would the vias fit if the plane reached there? then the zone is the problem
-                let loose = power::ViaRoom::new(b, &zf, net, dia, drill, 0.15, true)
+                let loose = power::ViaRoom::new(b, &zf, net, dia, drill, via_margin, avoid_courtyards)
                     .allow_in(g.iter().map(|&x| b.pins[x].footprint.clone()).collect());
-                let beside = power::via_field(&loose, &pad, missing, &placed_all)
+                let beside = power::via_field_with(&loose, &pad, missing, &placed_all, &field)
                     .into_iter()
                     .filter(|s| !room.reaches_plane(*s))
                     .count();
@@ -1429,7 +1450,24 @@ pub fn power_copper(all: &KicadBoard, locked: &KicadBoard, p: &PowerCopperIn) ->
                         planes.join(", ")
                     )
                 } else {
-                    ": add more by hand or use a larger drill".to_string()
+                    let mut tried = Vec::new();
+                    if field.rings <= 4 {
+                        tried.push("via_rings 8");
+                    }
+                    if !field.in_pad {
+                        tried.push("via_in_pad");
+                    }
+                    if avoid_courtyards {
+                        tried.push("vias_in_courtyards");
+                    }
+                    if via_margin > 0.0 {
+                        tried.push("via_margin 0");
+                    }
+                    if tried.is_empty() {
+                        ": add more by hand or use a larger drill".to_string()
+                    } else {
+                        format!(": try {}, add more by hand or use a larger drill", tried.join(", "))
+                    }
                 };
                 warnings.push(format!(
                     "{label}: room for {} of {count} vias at {}{hint}",
@@ -2012,6 +2050,10 @@ mod tests {
             max_span: None,
             via_diameter: None,
             via_drill: None,
+            via_rings: None,
+            via_in_pad: None,
+            vias_in_courtyards: None,
+            via_margin: None,
             priority: None,
             unlocked: None,
         };
@@ -2168,6 +2210,10 @@ mod tests {
             max_span: None,
             via_diameter: None,
             via_drill: None,
+            via_rings: None,
+            via_in_pad: None,
+            vias_in_courtyards: None,
+            via_margin: None,
             priority: None,
             unlocked: Some(mode.into()),
         };

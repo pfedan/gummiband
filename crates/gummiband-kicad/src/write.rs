@@ -512,6 +512,29 @@ pub fn add_locked_removing(kb: &KicadBoard, remove: &[Range<usize>], items: &[It
 /// Set a footprint's position (and rotation, if given) in a board file. Pads, texts and the
 /// footprint's zones follow, see `place_write::Patch::move_footprint`.
 pub fn place_footprint(text: &str, reference: &str, x: f64, y: f64, rotation: Option<f64>) -> anyhow::Result<String> {
+    place_footprint_on(text, reference, x, y, rotation, None)
+}
+
+/// Whether the footprint sits on the back (None: no such footprint).
+pub fn footprint_on_back(text: &str, reference: &str) -> Option<bool> {
+    let root = crate::sexpr::parse(text).ok()?;
+    root.args()
+        .iter()
+        .filter(|n| matches!(n.head(), Some("footprint") | Some("module")))
+        .find(|fp| footprint_reference(fp) == Some(reference))
+        .map(|fp| fp.child_str("layer").is_some_and(|l| l.starts_with("B.")))
+}
+
+/// Like [`place_footprint`], and with `back` the side: a footprint on the other side is
+/// flipped as KiCad flips it (layers, pads, graphics and texts change side).
+pub fn place_footprint_on(
+    text: &str,
+    reference: &str,
+    x: f64,
+    y: f64,
+    rotation: Option<f64>,
+    back: Option<bool>,
+) -> anyhow::Result<String> {
     let root = crate::sexpr::parse(text).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
     for fp in root
         .args()
@@ -533,7 +556,11 @@ pub fn place_footprint(text: &str, reference: &str, x: f64, y: f64, rotation: Op
         let Some(at) = fp.child("at") else { continue };
         let old = at.args().iter().filter_map(|x| x.as_f64()).nth(2).unwrap_or(0.0);
         let mut patch = crate::place_write::Patch::new(0);
-        patch.move_footprint(fp, Point { x, y }, rotation.unwrap_or(old));
+        let on_back = fp.child_str("layer").is_some_and(|l| l.starts_with("B."));
+        match back {
+            Some(b) if b != on_back => patch.flip_footprint(fp, Point { x, y }, rotation.unwrap_or(old)),
+            _ => patch.move_footprint(fp, Point { x, y }, rotation.unwrap_or(old)),
+        }
         return Ok(patch.apply(text, &root));
     }
     anyhow::bail!("no footprint {reference:?}")
@@ -703,7 +730,7 @@ pub struct LockCounts {
 }
 
 /// Reference of a footprint node (KiCad 8+ property or the older fp_text).
-fn footprint_reference(fp: &crate::sexpr::Node) -> Option<&str> {
+pub(crate) fn footprint_reference(fp: &crate::sexpr::Node) -> Option<&str> {
     fp.children("property")
         .find(|p| p.args().first().and_then(|x| x.as_str()) == Some("Reference"))
         .and_then(|p| p.args().get(1)?.as_str())
@@ -715,7 +742,7 @@ fn footprint_reference(fp: &crate::sexpr::Node) -> Option<&str> {
 }
 
 /// Net name of a track, arc or via (by name, or by number through the net table).
-fn item_net_name(kb: &KicadBoard, n: &crate::sexpr::Node) -> Option<String> {
+pub(crate) fn item_net_name(kb: &KicadBoard, n: &crate::sexpr::Node) -> Option<String> {
     let net = n.child("net").and_then(|c| c.args().first());
     net.and_then(|x| x.as_str())
         .filter(|s| s.parse::<f64>().is_err())
@@ -935,6 +962,32 @@ mod tests {
         assert_eq!(out.matches("(segment").count(), 1, "{out}");
         assert!(out.contains("(end 12 20)"), "{out}");
     }
+    #[test]
+    fn moves_a_footprint_to_the_back() {
+        let text = "(kicad_pcb (version 20240108) (generator \"test\")\n\t(layers (0 \"F.Cu\" signal) (31 \"B.Cu\" signal))\n\t(footprint \"R\"\n\t\t(layer \"F.Cu\")\n\t\t(at 10 20)\n\t\t(property \"Reference\" \"R1\" (at 0 -1.5 0) (layer \"F.SilkS\"))\n\t\t(pad \"1\" smd rect (at -0.8 0.2) (size 1 1) (layers \"F.Cu\" \"F.Mask\"))\n\t)\n)\n";
+        assert_eq!(footprint_on_back(text, "R1"), Some(false));
+        assert_eq!(footprint_on_back(text, "R9"), None);
+        let back = place_footprint_on(text, "R1", 12.0, 22.0, None, Some(true)).unwrap();
+        assert_eq!(footprint_on_back(&back, "R1"), Some(true), "{back}");
+        assert!(
+            back.contains("(at 12 22)") && back.contains("\"B.Cu\" \"B.Mask\""),
+            "{back}"
+        );
+        assert!(back.contains("(at -0.8 -0.2)") && back.contains("B.SilkS"), "{back}");
+        // the same side again only moves
+        let moved = place_footprint_on(&back, "R1", 13.0, 22.0, None, Some(true)).unwrap();
+        assert!(
+            moved.contains("(at 13 22)") && moved.contains("(at -0.8 -0.2)"),
+            "{moved}"
+        );
+        let front = place_footprint_on(&moved, "R1", 13.0, 22.0, None, Some(false)).unwrap();
+        assert_eq!(footprint_on_back(&front, "R1"), Some(false));
+        assert!(
+            front.contains("(at -0.8 0.2)") && front.contains("\"F.Cu\" \"F.Mask\""),
+            "{front}"
+        );
+    }
+
     #[test]
     fn lock_and_unlock_in_place() {
         let text = "(kicad_pcb (version 20240108) (generator \"test\")\n\t(layers (0 \"F.Cu\" signal) (31 \"B.Cu\" signal))\n\t(net 0 \"\") (net 1 \"A\") (net 2 \"B\")\n\t(footprint \"R\"\n\t\t(layer \"F.Cu\")\n\t\t(at 10 20)\n\t\t(property \"Reference\" \"R1\" (at 0 0 0))\n\t\t(pad \"1\" smd rect (at 0 0) (size 1 1) (layers \"F.Cu\") (net 1 \"A\"))\n\t)\n\t(footprint \"R\" locked (at 20 20) (property \"Reference\" \"R2\" (at 0 0 0)))\n\t(segment (start 10 20) (end 12 20) (width 0.25) (layer \"F.Cu\") (net 1))\n\t(segment (start 12 20) (end 14 20) (width 0.25) (layer \"F.Cu\") (net 2))\n\t(via (at 12 20) (size 0.6) (drill 0.3) (layers \"F.Cu\" \"B.Cu\") (net 1))\n)\n";

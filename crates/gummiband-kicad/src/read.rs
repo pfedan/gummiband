@@ -86,6 +86,7 @@ pub fn read_board(path: &Path, opts: &ReadOptions) -> Result<KicadBoard> {
         crate::dru::apply_width_rules(&mut kb.board, &dru);
         crate::dru::apply_pair_rules(&mut kb.board, &dru);
         kb.board.match_rules = crate::dru::match_rules(&kb.board, &dru);
+        kb.board.courtyard_clearance = crate::dru::courtyard_clearances(&dru);
     }
     Ok(kb)
 }

@@ -305,6 +305,10 @@ pub struct Board {
     /// Length, skew and uncoupled length rules of the `.kicad_dru`, with the nets they hold for.
     #[serde(default)]
     pub match_rules: Vec<MatchRule>,
+    /// Clearances of custom rules that hold in the courtyard of a footprint
+    /// (`A.intersectsCourtyard('U4')`): reference and minimum, below the net class clearance.
+    #[serde(default)]
+    pub courtyard_clearance: Vec<(String, f64)>,
 }
 
 /// A min, opt and max value of a custom rule constraint.
@@ -891,6 +895,17 @@ impl Board {
             return 0.0;
         };
         self.item_clearance.get(&(a.min(b), a.max(b))).copied().unwrap_or(0.0)
+    }
+
+    /// The smallest clearance a custom courtyard rule allows at p (None: no such rule there).
+    /// KiCad applies such a rule when either item touches the courtyard; `reach` grows the
+    /// courtyards by the distance to the other item.
+    pub fn courtyard_clearance_at(&self, p: crate::geom::Point, reach: f64) -> Option<f64> {
+        self.courtyard_clearance
+            .iter()
+            .filter(|(r, _)| self.courtyards.get(r).is_some_and(|c| c.grow(reach).contains(p)))
+            .map(|(_, m)| *m)
+            .reduce(f64::min)
     }
 
     /// Clearance between copper of a net and a hole.

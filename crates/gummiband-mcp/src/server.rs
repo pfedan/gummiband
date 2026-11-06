@@ -34,7 +34,12 @@ Locked parts never move in place_parts or route, locked copper is kept and route
 without keep_all replaces all unlocked copper, with keep_all + nets + reroute only that of the named \
 nets. After place_parts and route keep refining: move_part on the routed board (tracks follow), \
 add_locked_copper then route keep_all + nets + reroute to redraw a net, lock good nets and route the \
-rest again, add pours, angles_45. The tool guide returns the documentation: guide without topic for \
+rest again, add pours, angles_45. remove takes zones, tracks, vias and footprints away again (a \
+power_copper pour by its gb: name), add_mounting_hole adds a hole, move_part side flips a part, \
+set_rules adds .kicad_dru rules, place_silk moves the reference texts off pads and other silk, and \
+try_seeds compares place_parts + route over several seeds (results scatter widely on tight boards). \
+create_board parts_outside keeps the board empty for hand placement and copper drawn first. \
+The tool guide returns the documentation: guide without topic for \
 this workflow and the topic list, guide with a tool name for its full reference. \
 From a schematic only: create_board turns a KiCad netlist into a board (footprints, nets, outline, stackup, net classes). The automatic loop: load_board (gives a board id) -> list_nets -> optionally \
 set_net_options (priority: lower routes first; skip: leave a net unrouted) -> route (writes a \
@@ -260,8 +265,16 @@ pub struct CreateBoardIn {
     /// The .kicad_pcb to write; the .kicad_pro next to it is written or, if it exists (the
     /// schematic's project), merged.
     pub output: String,
-    /// Replace an existing output file (default false).
+    /// Replace an existing output file (default false). The working copy of the old board
+    /// (<output>.prerouted.kicad_pcb with its project files) is removed, so the new board starts
+    /// clean.
     pub overwrite: Option<bool>,
+    /// Put every part (but the mounting holes) in rows below the board instead of inside the
+    /// outline (default false): the board stays empty for the parts you place by hand and for
+    /// copper you draw before the placement (add_locked_copper, add_zone), which would
+    /// otherwise meet the pile of parts. place_parts with scope "outside" (or "all_unlocked")
+    /// takes them in afterwards.
+    pub parts_outside: Option<bool>,
     /// Board outline in mm (a rectangle).
     pub width: f64,
     pub height: f64,
@@ -354,6 +367,9 @@ pub struct CreateBoardOut {
     /// Parts that did not fit in rows inside the outline: they sit in rows below the board
     /// (place_parts with scope "outside" takes them in).
     pub outside: Vec<String>,
+    /// Stale working copies of an earlier board under the same name that overwrite removed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<String>,
     /// Gap between the parts in the rows, mm.
     pub grid_gap: f64,
     pub warnings: Vec<String>,
@@ -426,6 +442,11 @@ pub struct MovePartIn {
     /// The part stops short where the copper cannot give way any more or its courtyard meets
     /// another part or the edge; the message says where. Only for a move without rotation.
     pub follow: Option<bool>,
+    /// "front" or "back": the side the part goes to (default: it keeps its side). A part on
+    /// the other side is flipped as KiCad flips it (pads, graphics, texts mirrored, layers
+    /// swapped); the tracks do not follow a flip. Use it to bring back a part that place_parts
+    /// two_sided put on the back, or to put one there yourself.
+    pub side: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -445,6 +466,192 @@ pub struct GuideOut {
     pub topics: Vec<String>,
     /// The documentation as Markdown.
     pub text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ZoneFilterIn {
+    /// Zone name, a glob with * and ? (power_copper's pours are named "gb: ...").
+    pub name: Option<String>,
+    /// Net name, a glob.
+    pub net: Option<String>,
+    /// Copper layer, e.g. In2.Cu.
+    pub layer: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RemoveIn {
+    /// Board id from load_board (a routed board too).
+    pub board: String,
+    /// Zones to remove; a zone goes if it matches every field of one filter (at least one
+    /// field per filter). Zones inside footprints stay.
+    #[serde(default)]
+    pub zones: Vec<ZoneFilterIn>,
+    /// Nets (globs) whose tracks, arcs and vias go, e.g. the via field power_copper laid out
+    /// for a net. With `area` only those within it.
+    #[serde(default)]
+    pub nets: Vec<String>,
+    /// [x0, y0, x1, y1] in mm: copper within this box goes (of every net, or of `nets`).
+    pub area: Option<[f64; 4]>,
+    /// Only copper on these layers (a via goes if it spans one of them).
+    #[serde(default)]
+    pub layers: Vec<String>,
+    /// "tracks", "vias" or "all" (default).
+    pub copper: Option<String>,
+    /// "locked" or "unlocked": only that copper (default: both).
+    pub only: Option<String>,
+    /// Footprints to remove by reference, e.g. a mounting hole (H3). A part with pads on a
+    /// net stays in the netlist; the result warns.
+    #[serde(default)]
+    pub parts: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RemoveOut {
+    /// Id of the working copy; use this one from now on.
+    pub board: String,
+    pub path: String,
+    /// Removed zones as "name (net on layers)".
+    pub zones: Vec<String>,
+    pub tracks: usize,
+    pub vias: usize,
+    pub parts: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MountingHoleIn {
+    /// Board id from load_board.
+    pub board: String,
+    /// Centre in mm.
+    pub x: f64,
+    pub y: f64,
+    /// Hole diameter in mm (default 3.2, M3).
+    pub diameter: Option<f64>,
+    /// Reference (default: the next free H<n>).
+    pub reference: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlaceSilkIn {
+    /// Board id from load_board (a routed board too).
+    pub board: String,
+    /// Only the references of these parts (default: all).
+    #[serde(default)]
+    pub parts: Vec<String>,
+    /// Smallest text height in mm a reference may shrink to (default 0.8, JLCPCB's minimum
+    /// for legible text).
+    pub min_size: Option<f64>,
+    /// Room to pads, other silk and texts in mm (default 0.1).
+    pub margin: Option<f64>,
+    /// Room to the board edge in mm (default 0.3).
+    pub edge_margin: Option<f64>,
+    /// How far from its courtyard a reference may go, mm (default 2).
+    pub reach: Option<f64>,
+    /// Hide a reference that finds no clear spot (default true; false leaves it where it is).
+    pub hide_unplaced: Option<bool>,
+    /// Also remove the silk graphics of footprints that run over or near the board edge
+    /// (connector bodies drawn beyond it; KiCad's silk_edge_clearance). Default false.
+    pub trim_edge: Option<bool>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PlaceSilkOut {
+    /// Id of the working copy; use this one from now on.
+    pub board: String,
+    pub path: String,
+    /// Clear where they were.
+    pub kept: usize,
+    pub moved: Vec<String>,
+    /// Moved with a smaller text: reference and new height in mm.
+    pub shrunk: Vec<(String, f64)>,
+    pub hidden: Vec<String>,
+    /// No clear spot, left where they were (hide_unplaced false).
+    pub left: Vec<String>,
+    /// Footprints whose silk at the board edge was removed (trim_edge).
+    pub trimmed: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetRulesIn {
+    /// Board id from load_board.
+    pub board: String,
+    /// KiCad custom rules, one or more (rule ...) as in a .kicad_dru, e.g.
+    /// (rule "fine pitch" (condition "A.intersectsCourtyard('U4')") (constraint clearance (min 0.1))).
+    pub rules: String,
+    /// Replace the rules of the working copy instead of adding to them (default false).
+    pub replace: Option<bool>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SetRulesOut {
+    /// Id of the working copy; use this one from now on.
+    pub board: String,
+    /// The .kicad_dru written next to the working copy (KiCad's DRC reads it too).
+    pub path: String,
+    /// Rules in the file now.
+    pub rules: usize,
+    /// What Gummiband itself makes of them (routing and its own check); KiCad's drc applies
+    /// all of them.
+    pub understood: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrySeedsIn {
+    /// Board id from load_board: the state every seed starts from (parts placed by hand,
+    /// locked copper, zones); it is restored before each seed.
+    pub board: String,
+    /// Placement seeds to try (default 1 to 4).
+    #[serde(default)]
+    pub seeds: Vec<u64>,
+    /// Arguments of place_parts for every seed (without board and seed), e.g.
+    /// {"scope": "all_unlocked", "semantic": true, "two_sided": true}.
+    #[serde(default)]
+    pub place: serde_json::Map<String, serde_json::Value>,
+    /// Arguments of power_copper (without board) to lay out after each placement and before
+    /// its route, e.g. {"paths": [...]}; leave it out for none.
+    pub power_copper: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Arguments of route for every seed (without board and output), e.g. {"pair_pull": 2}.
+    #[serde(default)]
+    pub route: serde_json::Map<String, serde_json::Value>,
+    /// Run KiCad's DRC on every result and rank by its errors (default true when kicad-cli is
+    /// there; Gummiband's own check otherwise).
+    pub drc: Option<bool>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SeedOut {
+    pub seed: u64,
+    /// The placed working copy of this seed (kept, to go on from another seed).
+    pub placed: String,
+    /// Its routed file.
+    pub routed: String,
+    pub unrouted: usize,
+    /// Gummiband's clearance violations.
+    pub violations: usize,
+    /// KiCad's DRC errors (silk and library findings left out) and unconnected items.
+    pub drc_errors: Option<usize>,
+    pub drc_unconnected: Option<usize>,
+    pub vias: usize,
+    pub length_mm: f64,
+    /// Why the seed failed, if it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Why KiCad's DRC did not run on it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drc_failed: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TrySeedsOut {
+    /// Best first: fewest unrouted, then fewest DRC errors (or Gummiband violations), then
+    /// fewest vias, then shortest.
+    pub seeds: Vec<SeedOut>,
+    pub best_seed: Option<u64>,
+    /// Id of the working copy, now the placement of the best seed.
+    pub board: Option<String>,
+    /// Id of the routed file of the best seed.
+    pub routed_board: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1338,6 +1545,7 @@ impl Gummiband {
             footprint_dirs: p.footprint_dirs.iter().map(|d| abs_path(d)).collect(),
             pin_aliases: p.pin_aliases,
             system_libraries: true,
+            parts_outside: p.parts_outside.unwrap_or(false),
         };
         let rep = create_board_files(&abs_path(&p.netlist), &output, &opts, p.overwrite.unwrap_or(false))?;
         let (_, loaded) = self.load(LoadBoardIn {
@@ -1383,7 +1591,12 @@ impl Gummiband {
                 .collect(),
             libraries: rep.libraries.clone(),
             excluded: rep.excluded.clone(),
-            outside: rep.overflow.clone(),
+            outside: if rep.parked.is_empty() {
+                rep.overflow.clone()
+            } else {
+                rep.parked.clone()
+            },
+            removed: rep.removed.iter().map(|f| f.display().to_string()).collect(),
             grid_gap: rep.grid_gap,
             warnings: rep.warnings.clone(),
         };
@@ -1412,7 +1625,12 @@ impl Gummiband {
                     out.unmatched.len()
                 )
             },
-            if out.outside.is_empty() {
+            if !rep.parked.is_empty() {
+                format!(
+                    "All {} parts sit in rows below the board (parts_outside), unlocked: place them with move_part / place_parts scope \"outside\".",
+                    rep.parked.len()
+                )
+            } else if out.outside.is_empty() {
                 "Parts sit in rows inside the outline, unlocked: place them with move_part / place_parts.".to_string()
             } else {
                 format!(
@@ -1925,8 +2143,545 @@ impl Gummiband {
         ))
     }
 
+    fn do_remove(&self, p: RemoveIn) -> Result<(String, RemoveOut)> {
+        use gummiband_kicad::edit::{RemoveSpec, ZoneFilter, remove_items};
+        let locked = match p.only.as_deref() {
+            None | Some("all") => None,
+            Some("locked") => Some(true),
+            Some("unlocked") => Some(false),
+            Some(o) => bail!("only must be \"locked\" or \"unlocked\", not {o:?}"),
+        };
+        if let Some(c) = p.copper.as_deref()
+            && !matches!(c, "tracks" | "vias" | "all")
+        {
+            bail!("copper must be \"tracks\", \"vias\" or \"all\", not {c:?}");
+        }
+        let zones: Vec<ZoneFilter> = p
+            .zones
+            .iter()
+            .map(|z| ZoneFilter {
+                name: z.name.clone(),
+                net: z.net.clone(),
+                layer: z.layer.clone(),
+            })
+            .collect();
+        if zones
+            .iter()
+            .any(|z| z.name.is_none() && z.net.is_none() && z.layer.is_none())
+        {
+            bail!("a zone filter needs name, net or layer");
+        }
+        if zones.is_empty() && p.nets.is_empty() && p.area.is_none() && p.parts.is_empty() {
+            bail!("nothing to remove: give zones, nets, area or parts");
+        }
+        let spec = RemoveSpec {
+            zones,
+            nets: p.nets.clone(),
+            area: p.area.map(|a| gummiband_core::geom::Rect {
+                min: gummiband_core::geom::pt(a[0].min(a[2]), a[1].min(a[3])),
+                max: gummiband_core::geom::pt(a[0].max(a[2]), a[1].max(a[3])),
+            }),
+            layers: p.layers.clone(),
+            copper: p.copper.clone(),
+            locked,
+            parts: p.parts.clone(),
+        };
+        let mut counts = None;
+        let (id, path) = self.edit_copy(&p.board, |kb, _| {
+            let (text, c) = remove_items(kb, &spec);
+            counts = Some(c);
+            Ok(text)
+        })?;
+        let c = counts.unwrap_or_default();
+        let mut warnings: Vec<String> = c
+            .unknown_parts
+            .iter()
+            .map(|r| format!("no footprint {r} on the board"))
+            .collect();
+        if !c.parts_with_nets.is_empty() {
+            warnings.push(format!(
+                "{} had pads on nets: the netlist still has them, KiCad's DRC reports them as missing",
+                c.parts_with_nets.join(", ")
+            ));
+        }
+        if c.zones.is_empty() && c.tracks == 0 && c.vias == 0 && c.parts.is_empty() {
+            warnings.push("nothing matched".into());
+        }
+        let s = format!(
+            "Removed {} zones, {} tracks, {} vias and {} footprints in {path} (board {id}).{}",
+            c.zones.len(),
+            c.tracks,
+            c.vias,
+            c.parts.len(),
+            if warnings.is_empty() {
+                String::new()
+            } else {
+                format!(" Warnings: {}", warnings.join("; "))
+            }
+        );
+        Ok((
+            s,
+            RemoveOut {
+                board: id,
+                path,
+                zones: c.zones,
+                tracks: c.tracks,
+                vias: c.vias,
+                parts: c.parts,
+                warnings,
+            },
+        ))
+    }
+
+    fn do_mounting_hole(&self, p: MountingHoleIn) -> Result<(String, AddLockedOut)> {
+        let d = p.diameter.unwrap_or(3.2);
+        let mut name = String::new();
+        let (id, path) = self.edit_copy(&p.board, |kb, _| {
+            let (text, r) = gummiband_kicad::edit::add_mounting_hole(kb, p.x, p.y, d, p.reference.as_deref())?;
+            name = r;
+            Ok(text)
+        })?;
+        let mut warnings = Vec::new();
+        self.with_entry(&id, |e| {
+            let b = &e.kb.board;
+            let me = b.courtyards.get(&name).copied();
+            if let Some(c) = me {
+                for (r, o) in &b.courtyards {
+                    if *r != name && o.overlaps(&c) {
+                        warnings.push(format!("the hole's courtyard overlaps {r}"));
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        warnings.sort();
+        Ok((
+            format!(
+                "Added mounting hole {name} ({d} mm) at {}, {} in {path} (board {id}), locked.",
+                p.x, p.y
+            ),
+            AddLockedOut {
+                board: id,
+                path,
+                items_added: 1,
+                warnings,
+            },
+        ))
+    }
+
+    fn do_place_silk(&self, p: PlaceSilkIn) -> Result<(String, PlaceSilkOut)> {
+        use gummiband_kicad::edit::{SilkOptions, place_references, trim_edge_silk};
+        let d = SilkOptions::default();
+        let o = SilkOptions {
+            parts: p.parts.clone(),
+            min_size: p.min_size.unwrap_or(d.min_size),
+            margin: p.margin.unwrap_or(d.margin),
+            edge_margin: p.edge_margin.unwrap_or(d.edge_margin),
+            hide_unplaced: p.hide_unplaced.unwrap_or(true),
+            reach: p.reach.unwrap_or(d.reach),
+        };
+        let mut trimmed = Vec::new();
+        if p.trim_edge == Some(true) {
+            let margin = o.edge_margin;
+            self.edit_copy(&p.board, |kb, _| {
+                let (text, refs) = trim_edge_silk(kb, margin);
+                trimmed = refs;
+                Ok(text)
+            })?;
+        }
+        let mut rep = None;
+        let (id, path) = self.edit_copy(&p.board, |kb, _| {
+            let (text, r) = place_references(kb, &o);
+            rep = Some(r);
+            Ok(text)
+        })?;
+        let r = rep.unwrap_or_default();
+        let s = format!(
+            "References: {} clear where they were, {} moved, {} moved smaller, {} hidden{}{} in {path} (board {id}).",
+            r.kept.len(),
+            r.moved.len(),
+            r.shrunk.len(),
+            r.hidden.len(),
+            if r.left.is_empty() {
+                String::new()
+            } else {
+                format!(", {} without a clear spot left as they were", r.left.len())
+            },
+            if trimmed.is_empty() {
+                String::new()
+            } else {
+                format!("; edge silk removed from {}", trimmed.join(", "))
+            }
+        );
+        Ok((
+            s,
+            PlaceSilkOut {
+                board: id,
+                path,
+                kept: r.kept.len(),
+                moved: r.moved,
+                shrunk: r.shrunk,
+                hidden: r.hidden,
+                left: r.left,
+                trimmed,
+            },
+        ))
+    }
+
+    fn do_set_rules(&self, p: SetRulesIn) -> Result<(String, SetRulesOut)> {
+        let new = p.rules.trim();
+        let parsed = gummiband_kicad::sexpr::parse(&format!("(rules {new})"))
+            .map_err(|e| anyhow::anyhow!("rules do not parse: {e}"))?;
+        let n_new = parsed.children("rule").count();
+        if n_new == 0 {
+            bail!("no (rule ...) in rules");
+        }
+        if let Some(o) = parsed
+            .args()
+            .iter()
+            .find(|x| !matches!(x.head(), Some("rule") | Some("version")))
+        {
+            bail!(
+                "rules may only hold (rule ...) items, found {:?}",
+                o.head().unwrap_or("an atom")
+            );
+        }
+        // the working copy carries the rules from now on (with the project files of the input)
+        let (_, work) = self.edit_copy(&p.board, |_, text| Ok(text.to_string()))?;
+        let work = PathBuf::from(work);
+        let dru = work.with_extension("kicad_dru");
+        let old = if p.replace == Some(true) {
+            String::new()
+        } else {
+            std::fs::read_to_string(&dru).unwrap_or_default()
+        };
+        let mut text = if old.trim().is_empty() {
+            "(version 1)\n".to_string()
+        } else {
+            old.trim_end().to_string() + "\n"
+        };
+        let body: String = new
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("(version"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        text.push_str(body.trim());
+        text.push('\n');
+        std::fs::write(&dru, &text).with_context(|| format!("writing {}", dru.display()))?;
+        let keep = self.with_entry(&p.board, |e| Ok(e.options.clone()))?;
+        let (_, loaded) = self.load(LoadBoardIn {
+            path: work.display().to_string(),
+            keep_locked: Some(true),
+        })?;
+        let id = loaded.board;
+        self.with_entry(&id, |e| {
+            e.options = keep;
+            Ok(())
+        })?;
+        let (understood, total) = self.with_entry(&id, |e| {
+            let b = &e.kb.board;
+            let mut u = Vec::new();
+            for (r, m) in &b.courtyard_clearance {
+                u.push(format!("clearance {m} mm in the courtyard of {r} (own check)"));
+            }
+            if !b.pair_clearance.is_empty() || !b.item_clearance.is_empty() {
+                u.push(format!(
+                    "clearance between {} net pairs",
+                    b.pair_clearance.len() + b.item_clearance.len()
+                ));
+            }
+            for c in &b.classes {
+                if let Some(w) = c.min_width {
+                    u.push(format!("minimum width {w} mm for class {}", c.name));
+                }
+            }
+            if !b.match_rules.is_empty() {
+                u.push(format!("{} length or skew rules", b.match_rules.len()));
+            }
+            let total = gummiband_kicad::sexpr::parse(&format!("(rules {text})"))
+                .map(|r| r.children("rule").count())
+                .unwrap_or(0);
+            Ok((u, total))
+        })?;
+        let mut warnings = Vec::new();
+        if !b_has_kicad_pro(&work) {
+            warnings.push(format!(
+                "no {} next to the rules: KiCad needs the project for them",
+                work.with_extension("kicad_pro").display()
+            ));
+        }
+        Ok((
+            format!(
+                "{n_new} rules written to {} ({total} in the file), board {id}. Gummiband reads: {}.",
+                dru.display(),
+                if understood.is_empty() {
+                    "none of them (KiCad's drc still applies them)".to_string()
+                } else {
+                    understood.join("; ")
+                }
+            ),
+            SetRulesOut {
+                board: id,
+                path: dru.display().to_string(),
+                rules: total,
+                understood,
+                warnings,
+            },
+        ))
+    }
+
+    fn do_try_seeds(&self, p: TrySeedsIn) -> Result<(String, TrySeedsOut)> {
+        let seeds: Vec<u64> = if p.seeds.is_empty() {
+            vec![1, 2, 3, 4]
+        } else {
+            p.seeds.clone()
+        };
+        for k in ["board", "seed"] {
+            if p.place.contains_key(k) {
+                bail!("place: leave out {k}, try_seeds sets it");
+            }
+        }
+        for k in ["board", "output", "clear_corridors"] {
+            if p.route.contains_key(k) {
+                bail!("route: leave out {k}");
+            }
+        }
+        let (path, keep, options) =
+            self.with_entry(&p.board, |e| Ok((e.path.clone(), e.keep_locked, e.options.clone())))?;
+        let work = Self::working_copy(&path);
+        let start: Option<String> = if work.is_file() {
+            Some(std::fs::read_to_string(&work)?)
+        } else {
+            None
+        };
+        let stem = work
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("board")
+            .trim_end_matches(".prerouted")
+            .to_string();
+        let restore = || -> Result<()> {
+            match &start {
+                Some(t) => std::fs::write(&work, t)?,
+                None => {
+                    if work.is_file() {
+                        std::fs::remove_file(&work)?;
+                    }
+                }
+            }
+            Ok(())
+        };
+        let use_drc = p.drc.unwrap_or_else(|| external::kicad_cli().is_ok());
+        let mut results: Vec<SeedOut> = Vec::new();
+        for &seed in &seeds {
+            restore()?;
+            let placed = work.with_file_name(format!("{stem}.seed{seed}.placed.kicad_pcb"));
+            let routed = work.with_file_name(format!("{stem}.seed{seed}.routed.kicad_pcb"));
+            let mut out = SeedOut {
+                seed,
+                placed: placed.display().to_string(),
+                routed: routed.display().to_string(),
+                unrouted: 0,
+                violations: 0,
+                drc_errors: None,
+                drc_unconnected: None,
+                vias: 0,
+                length_mm: 0.0,
+                error: None,
+                drc_failed: None,
+            };
+            let run = || -> Result<RouteOut> {
+                let mut a = p.place.clone();
+                a.insert("board".into(), p.board.clone().into());
+                a.insert("seed".into(), seed.into());
+                let pin: PlacePartsIn = serde_json::from_value(serde_json::Value::Object(a)).context("place")?;
+                let (_, po) = self.do_place_parts(pin)?;
+                let mut board = po.board;
+                if let Some(pc) = &p.power_copper {
+                    let mut a = pc.clone();
+                    a.insert("board".into(), board.clone().into());
+                    let pin: practice::PowerCopperIn =
+                        serde_json::from_value(serde_json::Value::Object(a)).context("power_copper")?;
+                    board = self.do_power_copper(&pin)?.board;
+                }
+                std::fs::copy(&work, &placed)?;
+                external::copy_project_files(&work, &placed);
+                let mut r = p.route.clone();
+                r.insert("board".into(), board.clone().into());
+                r.insert("output".into(), routed.display().to_string().into());
+                let rin: RouteIn = serde_json::from_value(serde_json::Value::Object(r)).context("route")?;
+                let (rpath, kb, opts, loaded_keep) = self.with_entry(&board, |e| {
+                    Ok((e.path.clone(), e.kb.clone(), e.options.clone(), e.keep_locked))
+                })?;
+                let keep_locked = rin.keep_locked.unwrap_or(loaded_keep);
+                let kb = if rin.keep_all == Some(true) {
+                    Arc::new(read_board(
+                        &rpath,
+                        &ReadOptions {
+                            keep: KeepCopper::All,
+                            ignore_nets: reroute_nets(&rin),
+                            ..Default::default()
+                        },
+                    )?)
+                } else {
+                    kb
+                };
+                let (_, ro) = route_blocking(board, rpath, kb, opts, keep_locked, rin)?;
+                Ok(ro)
+            };
+            match run() {
+                Ok(ro) => {
+                    out.unrouted = ro.unrouted.len();
+                    out.violations = ro.violations_total;
+                    out.vias = ro.vias;
+                    out.length_mm = r3(ro.length_mm);
+                    if use_drc {
+                        match external::drc(&routed, 0) {
+                            Ok(d) => {
+                                out.drc_errors = Some(d.violations);
+                                out.drc_unconnected = Some(d.unconnected);
+                            }
+                            Err(e) => out.drc_failed = Some(format!("{e:#}")),
+                        }
+                    }
+                }
+                Err(e) => out.error = Some(format!("{e:#}")),
+            }
+            results.push(out);
+        }
+        let key = |r: &SeedOut| {
+            (
+                r.error.is_some(),
+                r.unrouted + r.drc_unconnected.unwrap_or(0),
+                r.drc_errors.unwrap_or(r.violations),
+                r.vias,
+                (r.length_mm * 1000.0) as i64,
+            )
+        };
+        results.sort_by_key(key);
+        let best = results.first().filter(|r| r.error.is_none());
+        let (mut board, mut routed_board) = (None, None);
+        restore()?;
+        if let Some(b) = best {
+            std::fs::copy(&b.placed, &work)?;
+            external::copy_project_files(&path, &work);
+            let (_, l) = self.load(LoadBoardIn {
+                path: work.display().to_string(),
+                keep_locked: Some(keep || work.is_file()),
+            })?;
+            self.with_entry(&l.board, |e| {
+                e.options = options.clone();
+                Ok(())
+            })?;
+            board = Some(l.board);
+            let (_, r) = self.load(LoadBoardIn {
+                path: b.routed.clone(),
+                keep_locked: None,
+            })?;
+            routed_board = Some(r.board);
+        }
+        let mut s = format!("{} seeds, best first:", results.len());
+        for r in &results {
+            s += &format!(
+                "\nseed {}: {} unrouted, {}{} Gummiband violations, {} vias, {:.0} mm{}",
+                r.seed,
+                r.unrouted,
+                match (r.drc_errors, r.drc_unconnected) {
+                    (Some(e), Some(u)) => format!("KiCad {e} errors and {u} unconnected, "),
+                    _ => String::new(),
+                },
+                r.violations,
+                r.vias,
+                r.length_mm,
+                r.error
+                    .as_ref()
+                    .or(r.drc_failed.as_ref())
+                    .map(|e| format!(" ({e})"))
+                    .unwrap_or_default()
+            );
+        }
+        if let (Some(b), Some(id), Some(rid)) = (best, &board, &routed_board) {
+            s += &format!(
+                "\nThe working copy (board {id}) now holds the placement of seed {}; its routed file is board {rid}.",
+                b.seed
+            );
+        }
+        Ok((
+            s,
+            TrySeedsOut {
+                best_seed: best.map(|b| b.seed),
+                seeds: results,
+                board,
+                routed_board,
+            },
+        ))
+    }
+
+    fn do_power_copper(&self, p: &practice::PowerCopperIn) -> Result<practice::PowerCopperOut> {
+        practice::Unlocked::parse(p.unlocked.as_deref())?;
+        // the board with all its copper: unlocked tracks of a routed board are in the way too
+        let all = {
+            let path = self.with_entry(&p.board, |e| Ok(e.path.clone()))?;
+            let work = Self::working_copy(&path);
+            read_board(
+                if work.is_file() { &work } else { &path },
+                &ReadOptions {
+                    keep: KeepCopper::All,
+                    ..Default::default()
+                },
+            )?
+        };
+        let mut out = None;
+        let (id, path) = self.edit_copy(&p.board, |kb, _| {
+            let (text, o) = practice::power_copper(&all, kb, p)?;
+            out = Some(o);
+            Ok(text)
+        })?;
+        let mut out = out.context("power_copper made no report")?;
+        out.board = id;
+        out.path = path.clone();
+        // the pours carry their current already: measure them before routing
+        let pour_paths: Vec<practice::PathIn> = p
+            .paths
+            .iter()
+            .filter(|q| out.pours.iter().any(|x| x.kind == "pour" && x.net == q.net))
+            .cloned()
+            .collect();
+        if !pour_paths.is_empty() {
+            let check = practice::current_check(&practice::CurrentCheckIn {
+                path: path.clone(),
+                paths: Some(pour_paths),
+                temp_rise: p.temp_rise,
+                refill: None,
+                max_segments: Some(3),
+            });
+            match check {
+                Ok(c) => out.check = Some(c),
+                Err(e) => out.warnings.push(format!("current_check of the pours failed: {e:#}")),
+            }
+        }
+        Ok(out)
+    }
+
     fn do_move_part(&self, p: MovePartIn) -> Result<(String, AddLockedOut)> {
-        let follow = p.follow.unwrap_or(true) && p.rotation.is_none();
+        let back = match p.side.as_deref() {
+            None => None,
+            Some("front") | Some("top") | Some("F.Cu") => Some(false),
+            Some("back") | Some("bottom") | Some("B.Cu") => Some(true),
+            Some(o) => bail!("side must be \"front\" or \"back\", not {o:?}"),
+        };
+        // a flip is a change of side, not a move: the tracks stay where they are
+        let flips = match back {
+            Some(b) => {
+                let text = std::fs::read_to_string(self.current_file(&p.board)?)?;
+                match write::footprint_on_back(&text, &p.reference) {
+                    Some(on_back) => on_back != b,
+                    None => bail!("no footprint {:?}", p.reference),
+                }
+            }
+            None => false,
+        };
+        let follow = p.follow.unwrap_or(true) && p.rotation.is_none() && !flips;
         let mut no_rules = None;
         // all copper, not only the locked: the tracks are what follows
         let all = if follow {
@@ -1949,7 +2704,7 @@ impl Gummiband {
         let mut followed = None;
         let (id, path) = self.edit_copy(&p.board, |_, text| {
             let Some(all) = &all else {
-                return write::place_footprint(text, &p.reference, p.x, p.y, p.rotation);
+                return write::place_footprint_on(text, &p.reference, p.x, p.y, p.rotation, back);
             };
             let (text, r) = gummiband_kicad::follow_write::move_part_following(all, &p.reference, p.x, p.y)?;
             followed = Some(r);
@@ -1985,7 +2740,20 @@ impl Gummiband {
                 "no {pro} next to the board: the tracks gave way by default clearances and widths"
             ));
         }
+        if flips {
+            warnings.push(format!(
+                "{} changed side: its tracks did not follow, route or redraw them",
+                p.reference
+            ));
+        }
         let msg = match &followed {
+            None if flips => format!(
+                "flipped {} to the {} at {}, {}",
+                p.reference,
+                if back == Some(true) { "back" } else { "front" },
+                p.x,
+                p.y
+            ),
             None => format!("moved {} to {}, {}", p.reference, p.x, p.y),
             Some(r) => {
                 if let Some(why) = &r.stats.stopped {
@@ -3179,6 +3947,58 @@ impl Gummiband {
     }
 
     #[tool(
+        description = "Remove zones (by name, net or layer, e.g. a pour of power_copper named \"gb: ...\" or a plane), tracks and vias (of nets, within a box, on layers, locked or unlocked only) and footprints (a mounting hole) from the working copy. Use it to correct power_copper, add_locked_copper, add_zone or a routed net without building the board again; then add the copper anew or route keep_all + nets + reroute. Use the returned board id from now on.",
+        output_schema = schema_for_output::<RemoveOut>(),
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn remove(&self, Parameters(p): Parameters<RemoveIn>) -> Result<CallToolResult, ErrorData> {
+        let me = self.clone();
+        match blocking(move || me.do_remove(p)).await {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Add one locked, plain non-plated mounting hole (diameter, default 3.2 mm) at x, y to the working copy, besides or instead of create_board's corner holes; move_part moves it, remove (parts) takes one away. Warns where its courtyard overlaps a part. Use the returned board id from now on.",
+        output_schema = schema_for_output::<AddLockedOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn add_mounting_hole(&self, Parameters(p): Parameters<MountingHoleIn>) -> Result<CallToolResult, ErrorData> {
+        let me = self.clone();
+        match blocking(move || me.do_mounting_hole(p)).await {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Place the reference texts on the silk screen after placement (also on a routed board, copper does not change): each stays if its spot is clear, else goes to the nearest clear spot around its courtyard, else smaller (down to min_size), else it is hidden. Clear: off the pads of its side, off other footprints' silk and the texts placed before, inside the board edge. This removes most of KiCad's silk_over_copper and silk_overlap messages. trim_edge also removes footprint silk over the board edge. Use the returned board id from now on; check with drc.",
+        output_schema = schema_for_output::<PlaceSilkOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn place_silk(&self, Parameters(p): Parameters<PlaceSilkIn>) -> Result<CallToolResult, ErrorData> {
+        let me = self.clone();
+        match blocking(move || me.do_place_silk(p)).await {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Add KiCad custom rules ((rule ...) items as in a .kicad_dru) to the working copy, or replace them: the file <input>.prerouted.kicad_dru is written and the board reloaded, so KiCad's drc and Gummiband use them. Gummiband reads clearance rules by net, class and pair, minimum widths per class, length and skew rules, and clearance rules that hold in courtyards (A.intersectsCourtyard('U4') || ..., e.g. 0.1 mm at a fine pitch power IC), which its own check applies. The result lists what Gummiband understood. Use the returned board id from now on.",
+        output_schema = schema_for_output::<SetRulesOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn set_rules(&self, Parameters(p): Parameters<SetRulesIn>) -> Result<CallToolResult, ErrorData> {
+        let me = self.clone();
+        match blocking(move || me.do_set_rules(p)).await {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
         description = "Add a copper zone (net, layer, polygon, priority) to the working copy. On a KiCad power layer it becomes a plane the router connects to with vias; on a routing layer it is a pour the router keeps other nets out of. Planes and pours are yours to lay out, before or after route. KiCad fills it; drc refills zones.",
         output_schema = schema_for_output::<AddLockedOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
@@ -3289,6 +4109,20 @@ impl Gummiband {
                 out.cleared_corridors = cleared;
                 ok(s, &out)
             }
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Run place_parts (then power_copper, if given) and route over several placement seeds from the same start (your hand placement, locks, zones and copper) and rank the results: fewest unrouted, then fewest KiCad DRC errors (Gummiband's check without kicad-cli), then fewest vias and the shortest length. The same placement rules can give anything from 0 to dozens of errors on a tight board, so try a few seeds before refining one. Each seed's placed working copy and routed file are kept (<input>.seed<N>.*); the working copy becomes the placement of the best seed, and its routed board is loaded too. CPU heavy: one route per seed.",
+        output_schema = schema_for_output::<TrySeedsOut>(),
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn try_seeds(&self, Parameters(p): Parameters<TrySeedsIn>) -> Result<CallToolResult, ErrorData> {
+        let _guard = self.route_lock.lock().await;
+        let me = self.clone();
+        match blocking(move || me.do_try_seeds(p)).await {
+            Ok((s, out)) => ok(s, &out),
             Err(e) => fail(format!("{e:#}")),
         }
     }
@@ -3419,52 +4253,7 @@ impl Gummiband {
         Parameters(p): Parameters<practice::PowerCopperIn>,
     ) -> Result<CallToolResult, ErrorData> {
         let me = self.clone();
-        let res = blocking(move || {
-            practice::Unlocked::parse(p.unlocked.as_deref())?;
-            // the board with all its copper: unlocked tracks of a routed board are in the way too
-            let all = {
-                let path = me.with_entry(&p.board, |e| Ok(e.path.clone()))?;
-                let work = Self::working_copy(&path);
-                read_board(
-                    if work.is_file() { &work } else { &path },
-                    &ReadOptions {
-                        keep: KeepCopper::All,
-                        ..Default::default()
-                    },
-                )?
-            };
-            let mut out = None;
-            let (id, path) = me.edit_copy(&p.board, |kb, _| {
-                let (text, o) = practice::power_copper(&all, kb, &p)?;
-                out = Some(o);
-                Ok(text)
-            })?;
-            let mut out = out.context("power_copper made no report")?;
-            out.board = id;
-            out.path = path.clone();
-            // the pours carry their current already: measure them before routing
-            let pour_paths: Vec<practice::PathIn> = p
-                .paths
-                .iter()
-                .filter(|q| out.pours.iter().any(|x| x.kind == "pour" && x.net == q.net))
-                .cloned()
-                .collect();
-            if !pour_paths.is_empty() {
-                let check = practice::current_check(&practice::CurrentCheckIn {
-                    path: path.clone(),
-                    paths: Some(pour_paths),
-                    temp_rise: p.temp_rise,
-                    refill: None,
-                    max_segments: Some(3),
-                });
-                match check {
-                    Ok(c) => out.check = Some(c),
-                    Err(e) => out.warnings.push(format!("current_check of the pours failed: {e:#}")),
-                }
-            }
-            Ok(out)
-        })
-        .await;
+        let res = blocking(move || me.do_power_copper(&p)).await;
         match res {
             Ok(out) => {
                 let lines: Vec<String> = out
@@ -3671,4 +4460,8 @@ impl ServerHandler for Gummiband {
             .into(),
         )
     }
+}
+
+fn b_has_kicad_pro(pcb: &std::path::Path) -> bool {
+    pcb.with_extension("kicad_pro").is_file()
 }
