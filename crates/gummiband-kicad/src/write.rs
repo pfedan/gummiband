@@ -688,6 +688,153 @@ pub fn set_layer_types(text: &str, changes: &[(String, String)]) -> anyhow::Resu
     Ok((out, old))
 }
 
+/// What [`set_locked`] changed.
+#[derive(Debug, Clone, Default)]
+pub struct LockCounts {
+    /// References whose footprint changed its lock state.
+    pub parts: Vec<String>,
+    /// Tracks and arcs that changed.
+    pub tracks: usize,
+    pub vias: usize,
+    /// Named references with no footprint on the board.
+    pub unknown_parts: Vec<String>,
+    /// Named nets without a track, arc or via on the board.
+    pub nets_without_copper: Vec<String>,
+}
+
+/// Reference of a footprint node (KiCad 8+ property or the older fp_text).
+fn footprint_reference(fp: &crate::sexpr::Node) -> Option<&str> {
+    fp.children("property")
+        .find(|p| p.args().first().and_then(|x| x.as_str()) == Some("Reference"))
+        .and_then(|p| p.args().get(1)?.as_str())
+        .or_else(|| {
+            fp.children("fp_text")
+                .find(|t| t.args().first().and_then(|x| x.as_str()) == Some("reference"))
+                .and_then(|t| t.args().get(1)?.as_str())
+        })
+}
+
+/// Net name of a track, arc or via (by name, or by number through the net table).
+fn item_net_name(kb: &KicadBoard, n: &crate::sexpr::Node) -> Option<String> {
+    let net = n.child("net").and_then(|c| c.args().first());
+    net.and_then(|x| x.as_str())
+        .filter(|s| s.parse::<f64>().is_err())
+        .map(str::to_string)
+        .or_else(|| {
+            let id = net.and_then(|x| x.as_f64())? as i64;
+            let table = kb.net_numbers.as_ref()?;
+            table.iter().find(|(_, v)| **v == id).map(|(k, _)| k.clone())
+        })
+}
+
+/// Lock (or with `lock` false unlock) footprints by reference and the tracks, arcs and vias of
+/// nets, in place: only the `locked` flag of each item changes. `all_copper` takes every track,
+/// arc and via of the board. Locked footprints stay where they are in place and route, locked
+/// copper is kept by route (keep_locked) and never shoved.
+pub fn set_locked(
+    kb: &KicadBoard,
+    parts: &[String],
+    nets: &[String],
+    all_copper: bool,
+    lock: bool,
+) -> (String, LockCounts) {
+    use crate::sexpr::{Atom, Node};
+    let text = &kb.text;
+    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+    let mut counts = LockCounts::default();
+    let mut seen_parts: Vec<&str> = Vec::new();
+    let mut seen_nets: Vec<String> = Vec::new();
+    // the existing flag: `(locked yes|no)` or a bare `locked`
+    let flag_node = |n: &Node| -> Option<Range<usize>> {
+        n.args().iter().find_map(|a| match a {
+            Node::Atom(Atom::Symbol(s), r) if s == "locked" => Some(r.clone()),
+            Node::List(..) if a.head() == Some("locked") => Some(a.span()),
+            _ => None,
+        })
+    };
+    let toggle = |n: &Node, after: Range<usize>, edits: &mut Vec<(Range<usize>, String)>| -> bool {
+        if n.flag("locked") == lock {
+            return false;
+        }
+        match (flag_node(n), lock) {
+            (Some(r), true) => edits.push((r, "(locked yes)".into())),
+            (Some(r), false) => {
+                // drop the flag with the white space in front of it
+                let start = text[..r.start].trim_end().len();
+                edits.push((start..r.end, String::new()));
+            }
+            (None, true) => {
+                let rest = &text[after.end..];
+                let sep = if rest.starts_with('\n') || rest.starts_with("\r\n") {
+                    let line_start = text[..n.span().start].rfind('\n').map_or(0, |i| i + 1);
+                    let indent: String = text[line_start..n.span().start]
+                        .chars()
+                        .take_while(|c| c.is_whitespace())
+                        .collect();
+                    format!("\n{indent}\t")
+                } else {
+                    " ".into()
+                };
+                edits.push((after.end..after.end, format!("{sep}(locked yes)")));
+            }
+            (None, false) => return false,
+        }
+        true
+    };
+    for n in kb.root.args() {
+        match n.head() {
+            Some("footprint") | Some("module") => {
+                let Some(r) = footprint_reference(n) else {
+                    continue;
+                };
+                if !parts.iter().any(|p| p == r) {
+                    continue;
+                }
+                seen_parts.push(r);
+                // after the library name, or the head when there is none
+                let items = n.items();
+                let after = match items.get(1) {
+                    Some(a @ Node::Atom(Atom::Str(_), _)) => a.span(),
+                    _ => items[0].span(),
+                };
+                if toggle(n, after, &mut edits) {
+                    counts.parts.push(r.to_string());
+                }
+            }
+            Some(h @ ("segment" | "arc" | "via")) => {
+                let net = item_net_name(kb, n);
+                let listed = net.as_ref().is_some_and(|x| nets.contains(x));
+                if listed {
+                    seen_nets.push(net.unwrap());
+                }
+                if !(listed || all_copper) {
+                    continue;
+                }
+                if toggle(n, n.items()[0].span(), &mut edits) {
+                    if h == "via" {
+                        counts.vias += 1;
+                    } else {
+                        counts.tracks += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    counts.unknown_parts = parts
+        .iter()
+        .filter(|p| !seen_parts.contains(&p.as_str()))
+        .cloned()
+        .collect();
+    counts.nets_without_copper = nets.iter().filter(|x| !seen_nets.contains(x)).cloned().collect();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.0.start));
+    let mut out = text.to_string();
+    for (r, t) in edits {
+        out.replace_range(r, &t);
+    }
+    (out, counts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,5 +934,31 @@ mod tests {
         let out = patch(&kb, &[], &items);
         assert_eq!(out.matches("(segment").count(), 1, "{out}");
         assert!(out.contains("(end 12 20)"), "{out}");
+    }
+    #[test]
+    fn lock_and_unlock_in_place() {
+        let text = "(kicad_pcb (version 20240108) (generator \"test\")\n\t(layers (0 \"F.Cu\" signal) (31 \"B.Cu\" signal))\n\t(net 0 \"\") (net 1 \"A\") (net 2 \"B\")\n\t(footprint \"R\"\n\t\t(layer \"F.Cu\")\n\t\t(at 10 20)\n\t\t(property \"Reference\" \"R1\" (at 0 0 0))\n\t\t(pad \"1\" smd rect (at 0 0) (size 1 1) (layers \"F.Cu\") (net 1 \"A\"))\n\t)\n\t(footprint \"R\" locked (at 20 20) (property \"Reference\" \"R2\" (at 0 0 0)))\n\t(segment (start 10 20) (end 12 20) (width 0.25) (layer \"F.Cu\") (net 1))\n\t(segment (start 12 20) (end 14 20) (width 0.25) (layer \"F.Cu\") (net 2))\n\t(via (at 12 20) (size 0.6) (drill 0.3) (layers \"F.Cu\" \"B.Cu\") (net 1))\n)\n";
+        let read =
+            |t: &str| crate::read::parse_board(t.to_string(), None, &crate::read::ReadOptions::default()).unwrap();
+        let kb = read(text);
+        let parts = vec!["R1".to_string(), "R2".to_string(), "R9".to_string()];
+        let (out, c) = set_locked(&kb, &parts, &["A".into(), "C".into()], false, true);
+        assert_eq!(c.parts, vec!["R1".to_string()], "R2 was locked already");
+        assert_eq!((c.tracks, c.vias), (1, 1));
+        assert_eq!(c.unknown_parts, vec!["R9".to_string()]);
+        assert_eq!(c.nets_without_copper, vec!["C".to_string()]);
+        assert!(out.contains("(footprint \"R\"\n\t\t(locked yes)\n\t\t(layer"), "{out}");
+        assert!(out.contains("(segment (locked yes) (start 10 20)"), "{out}");
+        assert!(out.contains("(segment (start 12 20)"), "net B stays unlocked: {out}");
+        assert!(out.contains("(via (locked yes) (at 12 20)"), "{out}");
+        let kb = read(&out);
+        let (back, c) = set_locked(&kb, &parts, &[], true, false);
+        assert_eq!(c.parts, vec!["R1".to_string(), "R2".to_string()]);
+        assert_eq!((c.tracks, c.vias), (1, 1));
+        assert!(!back.contains("locked"), "{back}");
+        assert_eq!(
+            back.replace("(footprint \"R\" (at 20 20)", "(footprint \"R\" locked (at 20 20)"),
+            text
+        );
     }
 }

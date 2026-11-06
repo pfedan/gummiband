@@ -1830,7 +1830,13 @@ pub fn prompt_text(path: &str, currents: Option<&str>, notes: Option<&str>) -> S
     format!(
         "Route the board {path} in one go with the gummiband tools and apply the usual rules of good \
 PCB practice around the autorouter. Work through every step without asking back, unless a decision \
-would change the design intent (moving a connector, dropping a part); then stop and ask.
+would change the design intent (moving a connector, dropping a part); then stop and ask. \
+You are the layouter and Gummiband is your toolbox: place_parts and route do the bulk, but what has \
+its place (connectors, power stages, datasheet layouts, planes, critical nets) you place, route, pour \
+and lock yourself, and after every automatic step you refine by hand (move_part, add_locked_copper, \
+lock, route keep_all + nets + reroute for single nets). Locked parts and copper stay; unlocked copper \
+is replaced by the next route without keep_all. guide (no topic) has the workflow, guide with a tool \
+name its reference.
 {currents}{notes}
 1. Look: load_board, list_nets. Note the layers and which are planes, the net classes, the \
 differential pairs, the power and ground nets. part_info on connectors, regulators, fuses and \
@@ -1855,14 +1861,17 @@ power_copper with their from and to pads: the switch node of a converter from it
 inductor, a large pad of a plane net (inductor, output capacitor, connector) into its plane. \
 Route the board id it returns. If you can write files, append \
 power_plan's dru_rules to the project's .kicad_dru and load_board again, so KiCad's DRC enforces \
-the widths too. Lock what has its place: connectors, mounting holes, power stages (pass them as \
-fixed to place_parts and route). Keep the switch node of a converter \
+the widths too. Lock what has its place: connectors, mounting holes, power stages (lock with their \
+references, or pass them as fixed to place_parts and route). Keep the switch node of a converter \
 small and the input capacitor loop short. Place parts first if they are not placed (move_part for \
 connectors and power stages, place_parts with semantic true for the rest).
 
 4. Route: route the latest board id (keep_locked when you added locked copper). Use pair_pull or \
 pairs for differential pairs that need coupling. Read unrouted and blocked; fix with set_net_options \
-(priority, width) and route again, or finish single nets with keep_all, nets and reroute. Opt-in \
+(priority, width) and route again, or finish single nets with keep_all, nets and reroute. Nets that came out well: lock them \
+before routing others again. A net the router did badly: draw the critical stretch with \
+add_locked_copper, then route that net with keep_all, nets and reroute. A part in the way: move_part \
+on the routed board (its tracks follow), then lock it. Opt-in \
 hints are worth a try only against the plain run over the same 2 or 3 seeds: patterns groups (or \
 pairs,groups with many pairs) where several chips share buses, with track_corridors to see what sits \
 in their bands and clear_corridors or place_parts only + corridors + leash 1.5 to clear them; no \

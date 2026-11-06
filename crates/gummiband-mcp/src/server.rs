@@ -20,11 +20,23 @@ use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 
 use crate::external;
+use crate::guide;
 use crate::practice;
 use crate::reference;
 
 const INSTRUCTIONS: &str = "Gummiband is a topological (any-angle, rubber band) autorouter for \
-KiCad boards. From a schematic only: create_board turns a KiCad netlist into a board (footprints, nets, outline, stackup, net classes). Typical loop: load_board (gives a board id) -> list_nets -> optionally \
+KiCad boards, and a toolbox for the layouter, not a one-stop shop: you stay the designer. Auto-place \
+(place_parts) and auto-route (route) complement manual work, they do not replace it. Place the parts \
+that matter yourself (move_part), route critical copper by hand (add_locked_copper: tracks and vias, \
+always locked), lay out planes and pours (set_layer_type, add_zone, power_copper, ground_pour) and \
+lock what must stay (lock: parts by reference, nets, or all copper; unlock: true releases them). \
+Locked parts never move in place_parts or route, locked copper is kept and routed around; route \
+without keep_all replaces all unlocked copper, with keep_all + nets + reroute only that of the named \
+nets. After place_parts and route keep refining: move_part on the routed board (tracks follow), \
+add_locked_copper then route keep_all + nets + reroute to redraw a net, lock good nets and route the \
+rest again, add pours, angles_45. The tool guide returns the documentation: guide without topic for \
+this workflow and the topic list, guide with a tool name for its full reference. \
+From a schematic only: create_board turns a KiCad netlist into a board (footprints, nets, outline, stackup, net classes). The automatic loop: load_board (gives a board id) -> list_nets -> optionally \
 set_net_options (priority: lower routes first; skip: leave a net unrouted) -> route (writes a \
 routed .kicad_pcb and returns stats, unrouted connections and clearance violations) -> drc on \
 the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board coordinates) to \
@@ -414,6 +426,61 @@ pub struct MovePartIn {
     /// The part stops short where the copper cannot give way any more or its courtyard meets
     /// another part or the edge; the message says where. Only for a move without rotation.
     pub follow: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GuideIn {
+    /// A topic: "workflow" (default: how manual and automatic steps fit together), a tool name
+    /// ("route", "place_parts", "lock", ...), a section such as "good_practice",
+    /// "choosing_opt_in_options" or "open_points", "concepts" or "options". "index" or an unknown
+    /// topic lists them all.
+    pub topic: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GuideOut {
+    /// The topic answered ("index" for the list).
+    pub topic: String,
+    /// Every topic the tool knows.
+    pub topics: Vec<String>,
+    /// The documentation as Markdown.
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LockIn {
+    /// Board id from load_board (a routed board too).
+    pub board: String,
+    /// Footprint references to lock: place_parts, route (move_parts) and move_part's rubber bands
+    /// leave them where they are.
+    #[serde(default)]
+    pub parts: Vec<String>,
+    /// Nets whose tracks, arcs and vias to lock: route keeps them as they are and routes the rest
+    /// around them, shove and give do not move them.
+    #[serde(default)]
+    pub nets: Vec<String>,
+    /// Every track, arc and via of the board (default false), e.g. to freeze a routed result
+    /// before routing more nets or editing by hand.
+    pub all_copper: Option<bool>,
+    /// Unlock instead of lock (default false), so that the router may move or replace them again.
+    pub unlock: Option<bool>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LockOut {
+    /// Id of the working copy; use this one from now on.
+    pub board: String,
+    /// The working copy (<input>.prerouted.kicad_pcb); the input file stays untouched.
+    pub path: String,
+    /// true: locked, false: unlocked.
+    pub locked: bool,
+    /// References whose lock state changed.
+    pub parts: Vec<String>,
+    /// Tracks and arcs whose lock state changed.
+    pub tracks: usize,
+    pub vias: usize,
+    /// Unknown references, nets without copper.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1809,6 +1876,55 @@ impl Gummiband {
         Ok((id, work.display().to_string()))
     }
 
+    fn do_lock(&self, p: LockIn) -> Result<(String, LockOut)> {
+        let all = p.all_copper.unwrap_or(false);
+        if p.parts.is_empty() && p.nets.is_empty() && !all {
+            bail!("nothing to lock: name parts, nets or set all_copper");
+        }
+        let lock = !p.unlock.unwrap_or(false);
+        let mut counts = None;
+        let (id, path) = self.edit_copy(&p.board, |kb, _| {
+            let (text, c) = write::set_locked(kb, &p.parts, &p.nets, all, lock);
+            counts = Some(c);
+            Ok(text)
+        })?;
+        let c = counts.unwrap_or_default();
+        let mut warnings: Vec<String> = c
+            .unknown_parts
+            .iter()
+            .map(|r| format!("no footprint {r} on the board"))
+            .collect();
+        warnings.extend(
+            c.nets_without_copper
+                .iter()
+                .map(|n| format!("net {n} has no tracks or vias on the board (unknown, or not routed yet)")),
+        );
+        let verb = if lock { "Locked" } else { "Unlocked" };
+        let s = format!(
+            "{verb} {} parts, {} tracks and {} vias in {path} (board {id}).{}",
+            c.parts.len(),
+            c.tracks,
+            c.vias,
+            if warnings.is_empty() {
+                String::new()
+            } else {
+                format!(" Warnings: {}", warnings.join("; "))
+            }
+        );
+        Ok((
+            s,
+            LockOut {
+                board: id,
+                path,
+                locked: lock,
+                parts: c.parts,
+                tracks: c.tracks,
+                vias: c.vias,
+                warnings,
+            },
+        ))
+    }
+
     fn do_move_part(&self, p: MovePartIn) -> Result<(String, AddLockedOut)> {
         let follow = p.follow.unwrap_or(true) && p.rotation.is_none();
         let mut no_rules = None;
@@ -3024,7 +3140,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Give parts a position from the netlist in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. By default all parts move except locked ones, connectors, modules, mounting holes, buttons and test points (those move too while they sit piled up, on a pad of a larger part or off the board, listed in `released`); `only`, `scope` and `fixed` narrow that, so you can place the key parts yourself with move_part and leave the small parts to this tool. Run it before route: tracks do not follow. Read `warnings`: parts that stay piled up or off the board, pads of a plane net without room for their via (`no_via_room`).",
+        description = "Give parts a position from the netlist in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. By default all parts move except locked ones, connectors, modules, mounting holes, buttons and test points (those move too while they sit piled up, on a pad of a larger part or off the board, listed in `released`); `only`, `scope` and `fixed` narrow that, so you can place the key parts yourself with move_part (and lock them) and leave the small parts to this tool; afterwards move_part refines any part. Run it before route: tracks do not follow. Read `warnings`: parts that stay piled up or off the board, pads of a plane net without room for their via (`no_via_room`).",
         output_schema = schema_for_output::<PlacePartsOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
@@ -3037,7 +3153,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Move a part to a new position (and rotation) in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. Without rotation the tracks around it follow like rubber bands (follow: false switches that off): its own tracks stretch, other nets give way within their clearances, and the part stops short where nothing can give way any more (a warning says where). `warnings` also names courtyards it now overlaps (by their outlines; drc has the exact answer).",
+        description = "Move a part to a new position (and rotation) in the working copy <input>.prerouted.kicad_pcb; the input file stays untouched. Use the returned board id from now on. Without rotation the tracks around it follow like rubber bands (follow: false switches that off): its own tracks stretch, other nets give way within their clearances, and the part stops short where nothing can give way any more (a warning says where). `warnings` also names courtyards it now overlaps (by their outlines; drc has the exact answer). Works before and after place_parts and route, for manual placement and fine-tuning; lock the part afterwards so that place_parts and route leave it there. Locked copper neither follows nor gives way.",
         output_schema = schema_for_output::<AddLockedOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
@@ -3050,7 +3166,20 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Add a copper zone (net, layer, polygon, priority) to the working copy. On a KiCad power layer it becomes a plane the router connects to with vias. KiCad fills it; drc refills zones.",
+        description = "Lock (or with unlock: true unlock) parts by reference and the tracks and vias of nets, or all copper, in the working copy <input>.prerouted.kicad_pcb; only the lock flag changes. Locked parts stay in place_parts and route; locked copper is kept by route and never shoved or replaced. Use it to fix what you placed or routed yourself, or to freeze a good autorouted net before you route or edit the rest. Use the returned board id from now on.",
+        output_schema = schema_for_output::<LockOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn lock(&self, Parameters(p): Parameters<LockIn>) -> Result<CallToolResult, ErrorData> {
+        let me = self.clone();
+        match blocking(move || me.do_lock(p)).await {
+            Ok((s, out)) => ok(s, &out),
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "Add a copper zone (net, layer, polygon, priority) to the working copy. On a KiCad power layer it becomes a plane the router connects to with vias; on a routing layer it is a pour the router keeps other nets out of. Planes and pours are yours to lay out, before or after route. KiCad fills it; drc refills zones.",
         output_schema = schema_for_output::<AddLockedOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
@@ -3076,7 +3205,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Add pre-routed copper (tracks as polylines, vias) as locked items: the router keeps it and routes around it, and track ends join their net. The input file stays untouched: the copper goes into a working copy <input>.prerouted.kicad_pcb, which is loaded with keep_locked; use the returned board id from now on. Check the result with drc and render.",
+        description = "Add pre-routed copper (tracks as polylines, vias) as locked items: the router keeps it and routes around it, and track ends join their net. Use it for manual routing before or after route: datasheet layouts, power lanes, critical nets, or to redraw a net the router did badly (then route keep_all + nets + reroute for that net). The input file stays untouched: the copper goes into a working copy <input>.prerouted.kicad_pcb, which is loaded with keep_locked; use the returned board id from now on. Check the result with drc and render.",
         output_schema = schema_for_output::<AddLockedOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
@@ -3101,7 +3230,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Route a loaded board with Gummiband (topological any-angle router, portfolio plus evolutionary order search on all routing threads) and write the routed .kicad_pcb (default <input>.routed.kicad_pcb next to the input; tracks and vias of the input are replaced). Returns routed/total connections, unrouted connections, vias, track length, Gummiband's clearance violations with nets and positions, and the portfolio. CPU heavy: seconds to minutes; one route at a time. Check the result with drc.",
+        description = "Route a loaded board with Gummiband (topological any-angle router, portfolio plus evolutionary order search on all routing threads) and write the routed .kicad_pcb (default <input>.routed.kicad_pcb next to the input; unlocked tracks and vias of the input are replaced; with keep_all it adds to them, with keep_all + nets + reroute only those nets are redone). It complements manual routing: locked tracks and vias (add_locked_copper, lock) are kept and routed around, locked parts do not move, and the result can be refined afterwards with move_part, add_locked_copper, lock and another route of single nets. Returns routed/total connections, unrouted connections, vias, track length, Gummiband's clearance violations with nets and positions, and the portfolio. CPU heavy: seconds to minutes; one route at a time. Check the result with drc.",
         output_schema = schema_for_output::<RouteOut>(),
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
@@ -3441,6 +3570,21 @@ impl Gummiband {
             }
             Err(e) => fail(format!("{e:#}")),
         }
+    }
+
+    #[tool(
+        description = "How to use Gummiband, from the server's own documentation (Markdown). Without topic: the workflow (Gummiband complements manual work: what to place, route, pour and lock by hand, what place_parts and route do with it, the order of work and fine-tuning afterwards) and the list of topics. With topic: the reference of one tool (e.g. route, place_parts, lock), a section (good_practice, choosing_opt_in_options, open_points, ...), concepts or options. Read it before a whole board and whenever a tool's arguments or results are unclear.",
+        output_schema = schema_for_output::<GuideOut>(),
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn guide(&self, Parameters(p): Parameters<GuideIn>) -> Result<CallToolResult, ErrorData> {
+        let (topic, text, topics) = guide::lookup(p.topic.as_deref());
+        let out = GuideOut { topic, topics, text };
+        let value = serde_json::to_value(&out).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        // the Markdown once as text, for the reader; the structured copy for clients that read only that
+        let mut r = CallToolResult::success(vec![ContentBlock::text(out.text)]);
+        r.structured_content = Some(value);
+        Ok(r)
     }
 
     #[tool(

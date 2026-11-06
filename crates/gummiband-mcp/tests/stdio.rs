@@ -150,8 +150,10 @@ fn initialize_list_load_route() {
             "current_check",
             "drc",
             "ground_pour",
+            "guide",
             "list_nets",
             "load_board",
+            "lock",
             "move_part",
             "part_info",
             "place_parts",
@@ -282,6 +284,49 @@ fn initialize_list_load_route() {
         std::fs::read_to_string(&done).unwrap().matches("(segment").count(),
         after
     );
+
+    // lock: parts and the copper of a net in a working copy, only the flag changes; unlock again
+    let lk = s.call(
+        "lock",
+        json!({"board": kept["board"], "parts": ["R1", "R9"], "nets": ["B"]}),
+    );
+    assert_eq!(lk["locked"], true, "{lk}");
+    assert_eq!(lk["parts"], json!(["R1"]), "{lk}");
+    assert!(lk["tracks"].as_u64().unwrap() >= 1, "{lk}");
+    assert!(lk["warnings"].to_string().contains("R9"), "{lk}");
+    let lock_copy = dir.join("tiny.kept.prerouted.kicad_pcb");
+    assert_eq!(lk["path"], lock_copy.display().to_string());
+    let locked_text = std::fs::read_to_string(&lock_copy).unwrap();
+    assert_eq!(locked_text.matches("(segment").count(), after);
+    assert!(locked_text.matches("(locked yes)").count() >= 2, "{locked_text}");
+    let un = s.call(
+        "lock",
+        json!({"board": lk["board"], "parts": ["R1"], "all_copper": true, "unlock": true}),
+    );
+    assert_eq!(un["locked"], false, "{un}");
+    assert_eq!(un["tracks"], lk["tracks"], "{un}");
+    assert!(!std::fs::read_to_string(&lock_copy).unwrap().contains("(locked yes)"));
+    assert!(
+        s.call_err("lock", json!({"board": lk["board"]}))
+            .contains("nothing to lock")
+    );
+
+    // guide: the workflow by default, a tool's reference by name, the list for anything else
+    let g = s.request("tools/call", json!({"name": "guide", "arguments": {}}));
+    assert_eq!(g["isError"], json!(false), "{g}");
+    let wf = g["content"][0]["text"].as_str().unwrap();
+    assert!(wf.contains("not a one-stop shop") && wf.contains("`lock`"), "{wf}");
+    assert_eq!(g["structuredContent"]["topic"], "workflow");
+    let g = s.request("tools/call", json!({"name": "guide", "arguments": {"topic": "route"}}));
+    assert!(
+        g["content"][0]["text"].as_str().unwrap().starts_with("### route"),
+        "{g}"
+    );
+    let g = s.request(
+        "tools/call",
+        json!({"name": "guide", "arguments": {"topic": "nonsense"}}),
+    );
+    assert_eq!(g["structuredContent"]["topic"], "index", "{g}");
 
     // reroute replaces the copper of the net, the other nets stay
     let again = dir.join("tiny.again.kicad_pcb");

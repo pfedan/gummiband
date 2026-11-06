@@ -72,6 +72,88 @@ when starting `claude`).
 
 Restart Claude Desktop after editing the file.
 
+## Working with the tools: by hand, automatic, both
+
+Gummiband is a toolbox for the layouter, not a one-stop shop. The agent stays the designer: it
+decides where the parts that matter go, which layers are planes, how the power copper runs and
+when a result is good enough. `place_parts` and `route` are helpers for the bulk of the work. They
+complement manual placement, manual routing and planes; they do not replace them, and everything
+they produce can be edited afterwards. A good board usually mixes all three: the critical parts and
+copper by hand, the rest automatic, then a round of fine-tuning by hand again.
+
+The server reads this section back through the tool `guide` (topic `workflow`), together with every
+tool section below and the guide chapters on concepts and options.
+
+### What the agent can do by hand
+
+- **Place parts**: `move_part` sets position and rotation of one footprint; on a routed board its
+  tracks follow like rubber bands. `part_info` shows pads, courtyard and neighbours first.
+- **Route by hand**: `add_locked_copper` adds tracks (polylines on one layer) and vias, for a
+  datasheet layout, a power lane, a critical net or a single connection the router did badly. The
+  copper is always locked, and copper that would short another net is refused.
+- **Planes and pours**: `set_layer_type` makes inner layers plane layers, `add_zone` puts zones on
+  them (several side by side for a split plane) or on an outer layer, `power_copper` shapes pours
+  and via fields for current paths, `ground_pour` pours ground with stitching vias.
+- **Lock and unlock**: `lock` locks footprints by reference and the tracks and vias of nets (or all
+  copper) in place, `unlock: true` releases them again.
+- **Rules per net**: `set_net_options` sets priority, width and skip for the next route.
+
+### What the automatic tools do with it
+
+- **Locked stays.** Locked footprints never move in `place_parts` or in the part shifts of `route`
+  (`move_parts`). Locked tracks and vias are kept by `route`, routed around and joined by their
+  net, and never shoved or replaced; in `move_part` they neither follow nor give way. The working copies
+  of the editing tools are loaded with `keep_locked`; for a file of your own with locked copper,
+  pass `keep_locked: true` to `load_board` (or to `route`).
+- **Unlocked is fair game.** `route` without `keep_all` replaces all unlocked tracks and vias of the
+  board. With `keep_all` it adds to the board, and with `keep_all`, `nets` and `reroute` it
+  replaces only the unlocked copper of those nets while the unlocked tracks of other nets may shift
+  aside (`shove`) or be routed again near the pins (`give`). `place_parts` moves every part that is
+  not locked, not in `fixed` and in scope.
+- **So lock before you hand over**: what you placed (`lock` the parts or name them in `fixed`), what
+  you routed (`add_locked_copper` locks by itself), and autorouted nets you are happy with (`lock`
+  with `nets`) before you route the rest again.
+- **Use the newest board id.** Every editing tool writes a working copy next to the input and
+  returns its board id; the input file is never changed.
+
+### Order of work
+
+1. Look: `load_board`, `list_nets`, `board_patterns`, `part_info` on connectors, regulators and
+   the main ICs.
+2. By hand, what has its place: connectors, mounting holes, power stages and other datasheet
+   layouts (`move_part`, then `lock`), plane layers and zones (`set_layer_type`, `add_zone`), power
+   copper (`power_plan`, `power_copper`, `add_locked_copper`).
+3. Automatic, the rest: `place_parts` for the parts you did not place, `route` for the nets you did
+   not route. Compare a few seeds.
+4. Fine-tuning by hand and in small automatic steps (below), until `drc`, `current_check` and
+   `reference_check` are clean and the renders look right.
+
+The order is no rule. An agent may route a few critical nets by hand after a first automatic run,
+or place everything itself and only let `route` finish; `place_parts` with `only` and `route` with
+`nets` keep each automatic step as small as wanted.
+
+### Fine-tuning after place_parts and route
+
+- **Move a part on a routed board**: `move_part` on the routed board id; its tracks stretch and
+  other nets give way, nothing is routed again. Then `lock` it.
+- **Route one net differently**: draw the way you want with `add_locked_copper` (the whole net or
+  only the critical stretch), then `route` with `keep_all`, `nets` and `reroute`: the router's old
+  unlocked copper of that net goes, your locked copper stays, and the router joins the rest.
+- **Route a few nets again**: `set_net_options` (priority, width), then `route` with `keep_all`,
+  `nets` and `reroute`. `lock` the nets that must not move first.
+- **Freeze a good result**: `lock` with `all_copper: true`, then route only what is left with
+  `keep_all` and `nets`, or edit by hand without the router touching the rest.
+- **Necks and current**: widen with `set_net_options` `width` and route the net again, add a pour
+  over the neck (`add_zone`), or `power_copper` with `unlocked: "clear"` on the routed board and
+  route its `reroute_nets` again.
+- **Copper after routing**: `ground_pour`, `add_zone`, `angles_45` for conventional 45 degree
+  tracks.
+- **Judge**: `drc`, `render` of the region you changed, `current_check`, `reference_check`.
+
+Not reachable through MCP yet: deleting single tracks or vias (route the net again with
+`keep_all`, `nets` and `reroute`) and changing or removing zones. KiCad itself remains the tool for
+those, and the server reads the edited file again with `load_board`.
+
 ## Tools
 
 Coordinates are millimetres in KiCad board coordinates (y grows downwards), the same numbers
@@ -90,6 +172,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?`, `pad_connection?`, `thermal_spoke_width?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `set_layer_type` | `board`, `layers [{layer, type}]` | id and path of the working copy with the new KiCad layer types (`signal`, `power`, `mixed`, `jumper`), per change the old type and the nets with a zone on the layer, all copper layers with their plane flag, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
+| `lock` | `board`, `parts?`, `nets?`, `all_copper?`, `unlock?` | id and path of the working copy with the lock flags changed, `locked`, the `parts` whose state changed, `tracks` and `vias` changed, `warnings` (unknown references, nets without copper) |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `width?`, `reset?` | the net's options and effective priority |
 | `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `move_parts?`, `fixed?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `patterns?`, `clear_corridors?`, `pair_pull?`, `pairs?`, `pair_all?`, `pair_breakouts?`, `pair_via_pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `via_pass?`, `open_end_seconds?`, `open_via_cost?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `tune_spacing?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
 | `angles_45` | `path`, `output?`, `nets?` | path of the written `<input>.45.kicad_pcb`, runs of track looked at and changed, length before and after, pieces off the grid, sharp corners, Gummiband's violations before and after |
@@ -100,6 +183,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `ground_pour` | `path`, `net?`, `layers?`, `pitch?`, `edge_pitch?`, `edge_inset?`, `avoid_courtyards?`, `via_diameter?`, `via_drill?`, `priority?`, `pad_connection?`, `thermal_spoke_width?`, `output?` | id and path of `<input>.gnd.kicad_pcb` with ground zones on the outer layers and locked stitching vias, `warnings` |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?`, `refill?` | PNG (image content) and its path, region, pixels per mm |
+| `guide` | `topic?` | how to use Gummiband: the workflow of manual and automatic steps (default), one section per tool, concepts, options, open points; without a known topic the list of topics |
 
 ### Manufacturer limits: JLCPCB as an example
 
@@ -418,6 +502,26 @@ final check.
 Typical use, the datasheet layout of an eFuse or a converter: `part_info` for the part and its
 neighbours, `add_locked_copper` for the recommended copper, `render` of the region to check it,
 then `route` with the returned board id.
+
+### lock
+
+Locks (or with `unlock: true` unlocks) footprints by reference and the tracks, arcs and vias of
+`nets` in the working copy `<input>.prerouted.kicad_pcb`; `all_copper: true` takes every track,
+arc and via of the board. Only the lock flag of each item changes, nothing moves. Locked parts stay
+where they are in `place_parts` and in the part shifts of `route`; locked copper is kept by `route`
+(the working copy is loaded with `keep_locked`), routed around, and never shoved, given way or
+replaced by `reroute`. Unlocking hands an item back to the automatic tools.
+
+Use it to fix what you placed with `move_part` before `place_parts`, to freeze an autorouted net
+you are happy with before routing others again, or `all_copper` to keep a whole routed result
+while you route the remaining nets with `keep_all` and `nets`. `warnings` names references without
+a footprint and nets without copper on the board.
+
+```json
+{"name": "lock", "arguments": {"board": "b2", "parts": ["J1", "U6", "L1"], "nets": ["VBUS_IN", "SW"]}}
+{"name": "lock", "arguments": {"board": "b3", "all_copper": true}}
+{"name": "lock", "arguments": {"board": "b3", "nets": ["/LED/DATA1"], "unlock": true}}
+```
 
 ### set_net_options
 
@@ -876,6 +980,23 @@ in a temp copy first (`refill`, kicad-cli 9 or newer); the file itself is not ch
 ```json
 {"name": "render", "arguments": {"path": "/abs/path/ledctl.routed.kicad_pcb",
   "region": {"x0": 140, "y0": 120, "x1": 160, "y1": 140}, "width_px": 800}}
+```
+
+### guide
+
+Returns the documentation of the server as Markdown, so an agent can look up how to use a feature
+or the whole workflow while it works. Without `topic` it returns `workflow` (the section
+[Working with the tools](#working-with-the-tools-by-hand-automatic-both): what to do by hand,
+what the automatic tools do with it, the order of work and fine-tuning) followed by the list of
+topics. Topics: `workflow`, every tool name (`route`, `place_parts`, `lock`, ...), the other
+sections of this reference (`good_practice`, `planes_and_wide_supply_nets`,
+`choosing_opt_in_options`, `manufacturer_limits`, `open_points`, ...), `concepts` (how the router
+works: topology, rules, necking, vias, priorities) and `options` (the opt-in options with
+measurements). An unknown topic returns the list. The text is built into the server, so it matches
+its version.
+
+```json
+{"name": "guide", "arguments": {"topic": "route"}}
 ```
 
 ## Try it without a client
