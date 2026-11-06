@@ -135,6 +135,51 @@ pub fn apply_width_rules(board: &mut Board, text: &str) {
     }
 }
 
+/// Clearance rules that hold only in courtyards: a condition made of nothing but
+/// `A.intersectsCourtyard('REF')` (or `B.`) joined by `||`, with a clearance minimum. Returns
+/// (reference, minimum) per courtyard.
+pub fn courtyard_clearances(text: &str) -> Vec<(String, f64)> {
+    let text: String = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let wrapped = format!("(rules {text})");
+    let Ok(root) = sexpr::parse(&wrapped) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for r in root.children("rule") {
+        let Some(cond) = r.child_str("condition") else { continue };
+        let mut refs = quoted_after(cond, "A.intersectsCourtyard(");
+        refs.extend(quoted_after(cond, "B.intersectsCourtyard("));
+        if refs.is_empty() {
+            continue;
+        }
+        // what is left after the calls must be only `||`, brackets and space
+        let mut rest = cond.to_string();
+        for side in ["A", "B"] {
+            for q in ['\'', '"'] {
+                for x in &refs {
+                    rest = rest.replace(&format!("{side}.intersectsCourtyard({q}{x}{q})"), "");
+                }
+            }
+        }
+        if !rest.chars().all(|c| c.is_whitespace() || "|()".contains(c)) {
+            continue;
+        }
+        for c in r.children("constraint") {
+            if c.args().first().and_then(|x| x.as_str()) != Some("clearance") {
+                continue;
+            }
+            if let Some(min) = constraint_min(c) {
+                out.extend(refs.iter().map(|x| (x.clone(), min)));
+            }
+        }
+    }
+    out
+}
+
 /// The preferred value of a constraint, else its minimum.
 fn constraint_opt(c: &Node) -> Option<f64> {
     let v = c.child("opt").or_else(|| c.child("min"))?;
@@ -734,6 +779,26 @@ mod tests {
         assert_eq!(p.neck_refs, vec!["U1".to_string()]);
         // the width of a pair rule is no target of the class
         assert_eq!((u.min_width, u.target_width), (None, None));
+    }
+
+    #[test]
+    fn courtyard_clearance_rules() {
+        let t = r#"(version 1)
+(rule "fine pitch power ICs"
+  (condition "A.intersectsCourtyard('U4') || A.intersectsCourtyard('U6') || B.intersectsCourtyard(\"U1\")")
+  (constraint clearance (min 0.1)))
+(rule "not only courtyards"
+  (condition "A.intersectsCourtyard('U9') && A.NetClass == 'Power'")
+  (constraint clearance (min 0.12)))"#;
+        let c = courtyard_clearances(t);
+        assert_eq!(
+            c,
+            vec![
+                ("U4".to_string(), 0.1),
+                ("U6".to_string(), 0.1),
+                ("U1".to_string(), 0.1)
+            ]
+        );
     }
 
     #[test]

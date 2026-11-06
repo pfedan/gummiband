@@ -494,6 +494,17 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
         .enumerate()
         .flat_map_iter(|(i, p)| copper.violations(p, Some(i)))
         .collect();
+    // a custom rule may lower the clearance in a courtyard (fine pitch power ICs)
+    if !board.courtyard_clearance.is_empty() {
+        out.retain_mut(|v| match board.courtyard_clearance_at(v.at, v.required) {
+            Some(min) if v.actual >= min - 1e-6 => false,
+            Some(min) => {
+                v.required = v.required.min(min);
+                true
+            }
+            None => true,
+        });
+    }
     out.extend(min_widths(board, geo));
     out.extend(current_ways(board, geo));
     out

@@ -143,6 +143,7 @@ fn initialize_list_load_route() {
         names,
         [
             "add_locked_copper",
+            "add_mounting_hole",
             "add_zone",
             "angles_45",
             "board_patterns",
@@ -157,14 +158,18 @@ fn initialize_list_load_route() {
             "move_part",
             "part_info",
             "place_parts",
+            "place_silk",
             "power_copper",
             "power_plan",
             "reference_check",
+            "remove",
             "render",
             "route",
             "set_layer_type",
             "set_net_options",
-            "track_corridors"
+            "set_rules",
+            "track_corridors",
+            "try_seeds",
         ]
     );
     for t in tools["tools"].as_array().unwrap() {

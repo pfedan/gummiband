@@ -2085,15 +2085,8 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
 
     // with two sides: the small SMD parts that may change sides, counted before the groups of
     // the semantic placement add their pads
-    let chosen = |r: &str| -> Option<u8> {
-        if opts.on_back.iter().any(|x| x == r) {
-            Some(1)
-        } else if opts.on_front.iter().any(|x| x == r) {
-            Some(0)
-        } else {
-            None
-        }
-    };
+    // a named part that cannot change sides keeps its own and is reported, the rest still goes
+    let mut side_kept: Vec<String> = Vec::new();
     for r in opts.on_front.iter().chain(&opts.on_back) {
         if !opts.two_sided {
             bail!("on_front and on_back need two_sided");
@@ -2103,9 +2096,28 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         };
         let single = units.iter().any(|u| u.members.len() == 1 && u.members[0].part == i);
         if fixed[i] || !single || d.parts[i].through {
-            bail!("{r} cannot be put on a side: it is fixed, locked, in a block or a through hole part");
+            let why = if fixed[i] {
+                "fixed or locked"
+            } else if d.parts[i].through {
+                "a through hole part"
+            } else {
+                "in a block"
+            };
+            side_kept.push(format!("{r} ({why})"));
         }
     }
+    let kept_side = |r: &str| side_kept.iter().any(|k| k.split(' ').next() == Some(r));
+    let chosen = |r: &str| -> Option<u8> {
+        if kept_side(r) {
+            None
+        } else if opts.on_back.iter().any(|x| x == r) {
+            Some(1)
+        } else if opts.on_front.iter().any(|x| x == r) {
+            Some(0)
+        } else {
+            None
+        }
+    };
     let flips: Vec<bool> = units
         .iter()
         .map(|u| {
@@ -2646,6 +2658,12 @@ pub fn place_board(path: &Path, opts: &PlaceOptions) -> Result<Placed> {
         v
     };
     let mut warnings = Vec::new();
+    if !side_kept.is_empty() {
+        warnings.push(format!(
+            "on_front / on_back: kept on their side, they cannot change it here: {}",
+            side_kept.join(", ")
+        ));
+    }
     let released_refs = refs(&mut released.iter().copied());
     if !released_refs.is_empty() {
         warnings.push(format!(

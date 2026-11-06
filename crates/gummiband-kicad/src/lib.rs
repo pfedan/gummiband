@@ -2,6 +2,7 @@
 
 pub mod create;
 pub mod dru;
+pub mod edit;
 pub mod follow_write;
 pub mod octo_write;
 pub mod place_write;

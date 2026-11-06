@@ -94,6 +94,8 @@ tool section below and the guide chapters on concepts and options.
 - **Planes and pours**: `set_layer_type` makes inner layers plane layers, `add_zone` puts zones on
   them (several side by side for a split plane) or on an outer layer, `power_copper` shapes pours
   and via fields for current paths, `ground_pour` pours ground with stitching vias.
+- **Remove**: `remove` takes zones, tracks, vias and footprints away again, `add_mounting_hole`
+  adds a hole where it is needed.
 - **Lock and unlock**: `lock` locks footprints by reference and the tracks and vias of nets (or all
   copper) in place, `unlock: true` releases them again.
 - **Rules per net**: `set_net_options` sets priority, width and skip for the next route.
@@ -150,9 +152,17 @@ or place everything itself and only let `route` finish; `place_parts` with `only
   tracks.
 - **Judge**: `drc`, `render` of the region you changed, `current_check`, `reference_check`.
 
-Not reachable through MCP yet: deleting single tracks or vias (route the net again with
-`keep_all`, `nets` and `reroute`) and changing or removing zones. KiCad itself remains the tool for
-those, and the server reads the edited file again with `load_board`.
+- **Take something away**: `remove` deletes zones (a `power_copper` pour by its `gb:` name),
+  tracks and vias of nets or within a box, and footprints such as a mounting hole;
+  `add_mounting_hole` adds one.
+- **Silk and rules**: `place_silk` moves the reference texts off pads and other silk,
+  `set_rules` adds custom KiCad rules (a smaller clearance in the courtyard of a fine pitch part).
+- **Compare seeds**: `try_seeds` runs `place_parts` and `route` over several seeds and keeps the
+  best.
+
+Not reachable through MCP yet: changing a zone's outline in place (remove it and add it anew) and
+editing silk graphics beyond `place_silk`. KiCad itself remains the tool for those, and the server
+reads the edited file again with `load_board`.
 
 ## Tools
 
@@ -161,24 +171,29 @@ KiCad shows in the status bar. Optional arguments may be left out.
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
-| `create_board` | `netlist`, `output`, `width`, `height`, `x0?`, `y0?`, `corner_radius?`, `layers?`, `plane_layers?`, `thickness?`, `copper_oz?`, `prepreg?`, `mounting_holes? {diameter?, inset?, footprint?, net?}`, `net_classes? [{name, clearance?, track_width?, via_diameter?, via_drill?, diff_pair_width?, diff_pair_gap?, priority?, patterns}]`, `rules?`, `footprint_dirs?`, `pin_aliases?`, `overwrite?` | id of the new board (already loaded), paths of the `.kicad_pcb` and `.kicad_pro`, file version, footprint, hole, net and pad counts, pads with a net, missing footprints, parts whose pads and pins do not match (with the `pin_aliases` entry to pass), libraries read, parts that did not fit inside the outline, `warnings` |
+| `create_board` | `netlist`, `output`, `width`, `height`, `x0?`, `y0?`, `corner_radius?`, `layers?`, `plane_layers?`, `thickness?`, `copper_oz?`, `prepreg?`, `mounting_holes? {diameter?, inset?, footprint?, net?}`, `net_classes? [{name, clearance?, track_width?, via_diameter?, via_drill?, diff_pair_width?, diff_pair_gap?, priority?, patterns}]`, `rules?`, `footprint_dirs?`, `pin_aliases?`, `overwrite?`, `parts_outside?` | id of the new board (already loaded), paths of the `.kicad_pcb` and `.kicad_pro`, file version, footprint, hole, net and pad counts, pads with a net, missing footprints, parts whose pads and pins do not match (with the `pin_aliases` entry to pass), libraries read, parts that did not fit inside the outline (or all with `parts_outside`), stale working copies removed by `overwrite`, `warnings` |
 | `load_board` | `path`, `keep_locked?` | board id, layers (plane flag), outline box and size, pins, nets, routable nets, connections, planes, net classes (priority, width, clearance, via), custom rule count, custom clearance net pairs, kept net options, recognised differential pairs |
 | `list_nets` | `board`, `filter?`, `include_single?` | nets with class, pin count, plane flag, effective priority, skip flag |
 | `board_patterns` | `board` | local patterns of the board: pin rows (part, pins in order, pitch, the side tracks leave to), pad grids, decoupling capacitors with their IC pin, pins of a plane net that can share a fan-out via, buses between two parts; a summary line per kind |
 | `part_info` | `board`, `reference` | value, position, rotation, locked, sheet, pads (name, net, position, size, layers), courtyard box, neighbouring footprints within 3 mm |
-| `move_part` | `board`, `reference`, `x`, `y`, `rotation?`, `follow?` | id and path of the working copy with the footprint at its new position, `items_added`, `warnings` |
+| `move_part` | `board`, `reference`, `x`, `y`, `rotation?`, `follow?`, `side?` | id and path of the working copy with the footprint at its new position, `items_added`, `warnings` |
 | `track_corridors` | `board`, `fixed?` | groups of tracks between two parts (`a`, `b`, `nets`, `width_mm`, `length_mm`) with the movable parts `in_the_way` of each band, and all of them once; nothing moves |
 | `place_parts` | `board`, `only?`, `scope?`, `fixed?`, `seed?`, `starts?`, `gap?`, `halo?`, `semantic?`, `corridors?`, `escape_halo?`, `leash?`, `two_sided?`, `back_max_pads?`, `back_cost?`, `on_front?`, `on_back?` | id and path of the working copy, the new poses (with `back` for a part on the back), decoupling assignment, crossings, smallest courtyard distance, pins off their plane, pads without via room, released connectors, with `semantic` inductors, groups and ties, with `two_sided` `flipped` and `free_mm2` per side, `warnings` |
 | `add_zone` | `board`, `net`, `layer`, `points`, `priority?`, `pad_connection?`, `thermal_spoke_width?` | id and path of the working copy with the new zone, `items_added`, `warnings` |
 | `set_layer_type` | `board`, `layers [{layer, type}]` | id and path of the working copy with the new KiCad layer types (`signal`, `power`, `mixed`, `jumper`), per change the old type and the nets with a zone on the layer, all copper layers with their plane flag, `warnings` |
 | `add_locked_copper` | `board`, `tracks? [{net, layer, width?, points}]`, `vias? [{net, x, y, diameter?, drill?}]` | id and path of the working copy `<input>.prerouted.kicad_pcb` with the copper added as locked items, `items_added`, `warnings` |
 | `lock` | `board`, `parts?`, `nets?`, `all_copper?`, `unlock?` | id and path of the working copy with the lock flags changed, `locked`, the `parts` whose state changed, `tracks` and `vias` changed, `warnings` (unknown references, nets without copper) |
+| `remove` | `board`, `zones? [{name?, net?, layer?}]`, `nets?`, `area? [x0, y0, x1, y1]`, `layers?`, `copper?`, `only?`, `parts?` | id and path of the working copy, the zones removed, tracks and vias removed, footprints removed, `warnings` |
+| `add_mounting_hole` | `board`, `x`, `y`, `diameter?`, `reference?` | id and path of the working copy with the new locked hole, `warnings` (courtyards it overlaps) |
+| `place_silk` | `board`, `parts?`, `min_size?`, `margin?`, `edge_margin?`, `reach?`, `hide_unplaced?`, `trim_edge?` | id and path of the working copy, references kept, moved, shrunk, hidden, left, footprints whose edge silk was trimmed |
+| `set_rules` | `board`, `rules`, `replace?` | id of the working copy, path of its `.kicad_dru`, rule count, what Gummiband understood of the rules, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `width?`, `reset?` | the net's options and effective priority |
+| `try_seeds` | `board`, `seeds?`, `place?`, `route?`, `drc?` | per seed (best first) the placed and routed files, unrouted, Gummiband violations, KiCad DRC errors and unconnected, vias, length; the best seed, the working copy now holding its placement and its routed board |
 | `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `move_parts?`, `fixed?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `patterns?`, `clear_corridors?`, `pair_pull?`, `pairs?`, `pair_all?`, `pair_breakouts?`, `pair_via_pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `via_pass?`, `open_end_seconds?`, `open_via_cost?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `tune_spacing?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
 | `angles_45` | `path`, `output?`, `nets?` | path of the written `<input>.45.kicad_pcb`, runs of track looked at and changed, length before and after, pieces off the grid, sharp corners, Gummiband's violations before and after |
 | `power_plan` | `board`, `currents? [{net, amps, short_amps?}]`, `temp_rise?`, `apply?` | per power net the IPC-2221 width per layer, the track width to route with, vias per layer change, planes and zones, advice; board notes (GND plane, reference planes); the widths as `.kicad_dru` rules; with `apply` the widths stored as net options |
 | `current_check` | `path`, `paths? [{net, amps, short_amps?, from?, to?, name?}]`, `temp_rise?`, `refill?`, `max_segments?` | per current path the narrow segments, the narrowest single band and the total cross-section between the terminals (pours and vias included) with their position, vias against the current, verdict `ok` or `FLAG` |
-| `power_copper` | `board`, `paths [{net, amps, short_amps?, from, to?, layer?, name?}]`, `temp_rise?`, `margin?`, `max_span?`, `via_diameter?`, `via_drill?`, `priority?`, `unlocked?` | id and path of the working copy with "gb:" power pours over the pads of each path and, for plane nets, locked via fields with a pour into the plane; per pour its outline, area, what cut it, vias needed and placed; a `current_check` of the pours; the unlocked copper on the board, with `unlocked: "clear"` what was removed (`cleared`) and the nets to route again (`reroute_nets`); `warnings` |
+| `power_copper` | `board`, `paths [{net, amps, short_amps?, from, to?, layer?, name?}]`, `temp_rise?`, `margin?`, `max_span?`, `via_diameter?`, `via_drill?`, `via_rings?`, `via_in_pad?`, `vias_in_courtyards?`, `via_margin?`, `priority?`, `unlocked?` | id and path of the working copy with "gb:" power pours over the pads of each path and, for plane nets, locked via fields with a pour into the plane; per pour its outline, area, what cut it, vias needed and placed; a `current_check` of the pours; the unlocked copper on the board, with `unlocked: "clear"` what was removed (`cleared`) and the nets to route again (`reroute_nets`); `warnings` |
 | `reference_check` | `path`, `nets?`, `min_gap?`, `refill?`, `max_items?` | per routing layer its reference layers and their zone nets; signal tracks over no copper (`gap`, with length) or across the border between two zone nets (`split`) on their reference layer, with position; per net the length over no copper; short gaps only counted |
 | `ground_pour` | `path`, `net?`, `layers?`, `pitch?`, `edge_pitch?`, `edge_inset?`, `avoid_courtyards?`, `via_diameter?`, `via_drill?`, `priority?`, `pad_connection?`, `thermal_spoke_width?`, `output?` | id and path of `<input>.gnd.kicad_pcb` with ground zones on the outer layers and locked stitching vias, `warnings` |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
@@ -256,7 +271,11 @@ it (the result carries the board id).
   topmost then leftmost free place around the holes, with a gap of 1 mm (down to 0 mm if needed,
   see `grid_gap`). What does not fit sits in rows below the board (listed in `outside`), so
   `place_parts` with `scope: "outside"` takes it in. Both are only a start for `move_part` and
-  `place_parts`.
+  `place_parts`. With `parts_outside: true` every part but the mounting holes sits in rows
+  below the board from the start: the board stays empty for the parts you place by hand and for
+  copper drawn before the placement (`add_locked_copper`, `add_zone`), which would otherwise
+  meet the pile of parts and be refused as a short. Before this option the 4 port LED controller
+  run needed 84 `move_part` calls only to park the parts.
 - `.kicad_pro`: written next to the board, or merged into an existing one (the schematic's
   project; the rest of it stays). It gets `board.design_settings.rules` (KiCad's defaults for
   edge clearance, hole clearances and via sizes if missing, overridden by `rules`) and
@@ -265,7 +284,10 @@ it (the result carries the board id).
   into `netclass_assignments` if `net_classes` defines that class (a warning otherwise).
 - File format: KiCad 9 (version 20241229, with net table) when all footprint files are KiCad 9
   or older, otherwise KiCad 10 (20260206, nets by name), so the result opens in the KiCad that
-  made the libraries. An existing output is only replaced with `overwrite: true`.
+  made the libraries. An existing output is only replaced with `overwrite: true`, which also
+  removes the working copy of the old board (`<output>.prerouted.kicad_pcb` with its
+  `.kicad_pro`, `.kicad_dru` and `.kicad_prl`, listed in `removed`): otherwise the editing tools
+  would go on from the stale copy (parts on the old side, zones twice).
 
 ```json
 {"name": "create_board", "arguments": {"netlist": "hw/ledctl.net",
@@ -342,6 +364,11 @@ and vias of other nets give way within their clearances, and copper nothing touc
 is. The part stops short where nothing can give way any more, or where its courtyard meets
 another part or the edge; a warning then names where it stopped and why, and the message counts
 the tracks and vias that followed. `follow: false` only moves the footprint, as before.
+
+`side` (`"front"` or `"back"`) puts the part on that side: a part on the other side is flipped
+as KiCad flips it (layers, pads, graphics and texts mirrored to the other side) and placed at
+`x`, `y` with `rotation`. The tracks do not follow a flip; a warning says so. Use it to bring back
+a part that `place_parts` with `two_sided` put on the back, or to put one there yourself.
 
 ```json
 {"name": "move_part", "arguments": {"board": "b1", "reference": "C12", "x": 152.4, "y": 118.0, "rotation": 90}}
@@ -523,6 +550,72 @@ a footprint and nets without copper on the board.
 {"name": "lock", "arguments": {"board": "b3", "nets": ["/LED/DATA1"], "unlock": true}}
 ```
 
+### remove
+
+Removes what the other editing tools added, in the working copy: zones by `name`, `net` and
+`layer` (each filter needs at least one field and a zone goes when it matches every field of one
+filter; names and nets are globs with `*` and `?`, so `{"name": "gb:*"}` takes every pour of
+`power_copper`), the tracks, arcs and vias of `nets` (globs), or of any net within `area`
+(`[x0, y0, x1, y1]`, with `nets` only of those), narrowed by `layers` (a via goes if it spans one),
+`copper` (`tracks`, `vias`, `all`) and `only` (`locked`, `unlocked`), and footprints by reference in
+`parts` (a mounting hole; a part with pads on a net stays in the netlist, the result warns).
+Zones inside footprints stay. It is how a pour, a via field or a hand drawn track is corrected
+without building the board again: remove it, then add it anew or route the net again with
+`keep_all`, `nets` and `reroute`.
+
+```json
+{"name": "remove", "arguments": {"board": "b4", "zones": [{"name": "gb:vias +5V_A Q2*"}], "nets": ["+5V_A"], "area": [132, 110, 136, 114], "copper": "vias", "only": "locked"}}
+{"name": "remove", "arguments": {"board": "b4", "parts": ["H4"]}}
+```
+
+### add_mounting_hole
+
+Adds one locked, plain non-plated mounting hole (`diameter`, default 3.2 mm) at `x`, `y`, as
+`create_board` makes them, with the next free `H<n>` or `reference`. With `move_part` (which
+moves holes too) and `remove` (`parts`) the holes are no longer bound to the four corners of
+`create_board`. `warnings` names courtyards the hole overlaps.
+
+```json
+{"name": "add_mounting_hole", "arguments": {"board": "b4", "x": 130, "y": 124, "diameter": 2.7}}
+```
+
+### place_silk
+
+Places the reference texts on the silk screen, after placement or on a routed board (copper does
+not change). Each reference stays where it is if that spot is clear; else it goes to the nearest
+clear spot around its courtyard (above, below, left, right, then the corners, stepping out up to
+`reach` mm, default 2), first as it is, then turned by 90 degrees, then smaller in steps down to
+`min_size` (default 0.8 mm, about the smallest legible text at JLCPCB); a reference with no clear
+spot is hidden (`hide_unplaced: false` leaves it). Clear means: `margin` (0.1 mm) away from the
+pads of its side, from the silk graphics of other footprints and from the texts placed before,
+and `edge_margin` (0.3 mm) inside the board edge. Larger parts choose first. `trim_edge: true`
+also removes footprint silk over or near the board edge (a connector body drawn beyond it,
+KiCad's `silk_edge_clearance`).
+
+The text size is estimated from KiCad's stroke font (0.9 of the height per character), so a
+`drc` afterwards has the last word. On the 4 port LED controller 178 of 190 silk messages were
+reference texts on pads or other silk, and 12 connector outlines over the edge.
+
+```json
+{"name": "place_silk", "arguments": {"board": "b7", "trim_edge": true}}
+```
+
+### set_rules
+
+Adds KiCad custom rules (one or more `(rule ...)` items as in a `.kicad_dru`) to the working
+copy, or with `replace: true` replaces them: the file `<input>.prerouted.kicad_dru` is written
+and the board loaded again, so KiCad's `drc` and Gummiband both use them. The result lists what
+Gummiband itself reads of them: clearance rules by net, class and pair, minimum widths per class
+(with the courtyards exempt from them), length and skew rules, and clearance rules that hold only
+in courtyards (`A.intersectsCourtyard('U4') || A.intersectsCourtyard('U6')`, e.g. 0.1 mm at
+fine pitch power ICs). Gummiband's own check after `route` then accepts the smaller clearance
+in those courtyards (and reports the rule's minimum where it is still short); the router itself
+keeps the class clearance there, on the safe side.
+
+```json
+{"name": "set_rules", "arguments": {"board": "b2", "rules": "(rule \"fine pitch power ICs\" (condition \"A.intersectsCourtyard('U4') || A.intersectsCourtyard('U6')\") (constraint clearance (min 0.1)))"}}
+```
+
 ### set_net_options
 
 Stored in the session by net name and applied on every following `route` of the board:
@@ -540,6 +633,27 @@ others.
 {"name": "set_net_options", "arguments": {"board": "b1", "net": "/MCU/SDA", "priority": -10}}
 {"name": "set_net_options", "arguments": {"board": "b1", "net": "VBUS_F", "width": 0.75}}
 {"name": "set_net_options", "arguments": {"board": "b1", "net": "VBUS_IN", "skip": true}}
+```
+
+### try_seeds
+
+Runs `place_parts` and `route` over several placement seeds (default 1 to 4) from the same
+start, the board as you left it (hand placement, locks, zones, locked copper, power copper):
+before each seed the working copy is restored. `place` holds the arguments of `place_parts`
+(without `board` and `seed`), `route` those of `route` (without `board` and `output`). Each seed
+keeps its placed working copy `<input>.seed<N>.placed.kicad_pcb` and its routed file
+`<input>.seed<N>.routed.kicad_pcb`. With `drc` (default when `kicad-cli` is found) KiCad's DRC
+runs on each routed file. The ranking: fewest unrouted (with KiCad's unconnected items), then
+fewest KiCad errors (Gummiband's violations without `drc`), then fewest vias, then the shortest
+length. Afterwards the working copy holds the placement of the best seed, and its routed file is
+loaded too (`routed_board`).
+
+On a tight board the same placement rules scatter widely: on the 4 port LED controller (60 x 46
+mm, two sided) seeds 1 to 8 gave anything from 0 to 47 KiCad errors, so an agent should compare
+a few seeds before it refines one.
+
+```json
+{"name": "try_seeds", "arguments": {"board": "b6", "seeds": [1, 2, 3, 4, 5, 6], "place": {"scope": "all_unlocked", "semantic": true, "two_sided": true}, "route": {"pair_pull": 2}}}
 ```
 
 ### route
@@ -774,6 +888,14 @@ pins to the inductor, a big pad that reaches its plane through one via. For each
   plane zone with room for the via and its clearance, and outside the zones of other nets on
   that layer with a higher priority (KiCad fills those first). When vias would fit beside the
   pad but the plane has no copper there, the warning says so (extend the plane zone).
+- At a crowded power part the field may find too little room. Four options widen it, each
+  named in the warning when it would help: `via_rings` (default 4) lets the field reach more
+  rings out, `via_in_pad: true` puts vias into the pad itself first (a large pad such as an
+  exposed pad or a drain tab; order the vias filled and capped), `vias_in_courtyards: true`
+  lets vias sit in the courtyards of neighbouring parts (off their copper; KiCad does not object
+  to that), and `via_margin` (default 0.15 mm beyond the clearance, so the pour reaches the via
+  with some width) down to 0 packs the vias as tight as the rules allow. On the 4 port LED
+  controller the four together found 25 of 26 vias where the defaults found 5.
 
 - On a routed board (or one with any unlocked tracks and vias) `unlocked` decides what
   happens to the unlocked copper of other nets. `avoid` (the default) treats it as an obstacle
@@ -1054,8 +1176,12 @@ Shortened session on the LED controller benchmark (4 threads):
   a long narrow pad, see above): obstacles between the terminals cost more copper than needed,
   and a terminal behind another net's pad is lost (a warning says so). It does not move parts; the via fields sit on rings around the pad.
 - `route` has no per net layer choice: a wide net can only be kept off inner signal layers by a
-  plane, a pour or locked copper (see Planes and wide supply nets). Zones can be added, not
-  changed or removed.
+  plane, a pour or locked copper (see Planes and wide supply nets). Zones can be added and
+  removed, not changed in place.
+- `place_silk` moves only reference texts; footprint silk over other parts' pads stays (KiCad
+  clips silk at solder mask openings when it plots). Its text sizes are estimates.
+- Courtyard clearance rules (`set_rules`) relax Gummiband's own check, not the router, which
+  keeps the class clearance in those courtyards.
 - `current_check` measures on a raster (0.05 mm, coarser on very large nets); it does not weigh
   the length of a neck, and the cross-section is skipped for nets of more than three million
   copper cells. `ground_pour` does not yet check that the fill reaches every via (the DRC does).

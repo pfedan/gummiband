@@ -489,7 +489,7 @@ pub fn neck(
     // vias and plated holes join the layers they span
     let mut joints: HashMap<usize, Vec<usize>> = HashMap::new();
     // what the barrels at a cell carry, as a width on the reference layer
-    let mut joint_mm: HashMap<usize, f64> = HashMap::new();
+    let mut joint_amps: HashMap<usize, f64> = HashMap::new();
     for &i in &obs {
         let x = &b.obstacles[i];
         if x.hole.is_none() || !matches!(x.kind, ObstacleKind::Via | ObstacleKind::Pad) {
@@ -499,7 +499,8 @@ pub fn neck(
         if let Some(cell) = g.cell(c) {
             let drill = 2.0 * x.hole.unwrap_or(0.0);
             let a = via_amps(drill, o.temp_rise);
-            *joint_mm.entry(cell).or_default() += ipc_width(a, o.ref_copper_mm, o.ref_outer, o.temp_rise);
+            // parallel barrels add their currents, not their widths
+            *joint_amps.entry(cell).or_default() += a;
             let e = joints.entry(cell).or_default();
             for &l in &layers {
                 if x.layers.has(l as LayerId) && !e.contains(&l) {
@@ -508,6 +509,9 @@ pub fn neck(
             }
         }
     }
+    let width_of = |a: f64| ipc_width(a, o.ref_copper_mm, o.ref_outer, o.temp_rise);
+    let amps_of = |w: f64| ipc_amps(w, o.ref_copper_mm, o.ref_outer, o.temp_rise);
+    let joint_mm: HashMap<usize, f64> = joint_amps.iter().map(|(&c, &a)| (c, width_of(a))).collect();
     // the cells of each terminal
     let cells_of = |pins: &[usize]| -> Vec<(usize, usize)> {
         let mut out = Vec::new();
@@ -705,6 +709,11 @@ pub fn neck(
                     t,
                     &sink_cells,
                     2.0 * o.required,
+                    Some(ViaSum {
+                        amps: &joint_amps,
+                        width_of: &width_of,
+                        amps_of: &amps_of,
+                    }),
                 );
                 if worst.as_ref().is_none_or(|w| r.0 < w.0) {
                     worst = Some(r);
@@ -1071,6 +1080,16 @@ impl Flow {
     }
 }
 
+/// How barrels in a cut add up: by their currents (IPC-2221 is not linear in the width), so a
+/// cut through copper and several barrels counts as copper plus the sum of the barrel currents.
+struct ViaSum<'a> {
+    /// Current of the barrels at a joint cell.
+    amps: &'a HashMap<usize, f64>,
+    /// Current to the width on the reference layer and back.
+    width_of: &'a dyn Fn(f64) -> f64,
+    amps_of: &'a dyn Fn(f64) -> f64,
+}
+
 /// Smallest cross-section between a source terminal and the sinks: a node cut on the raster of
 /// the copper (4-neighbourhood, so a cut at an angle counts a little short, on the safe side),
 /// every cell weighted with its layer's factor, vias and plated holes carrying what their
@@ -1088,6 +1107,7 @@ fn min_cut(
     src: &[(usize, usize)],
     sinks: &[(usize, usize)],
     limit: f64,
+    vias: Option<ViaSum>,
 ) -> (f64, Option<(Point, LayerId)>) {
     const S: f64 = 16.0;
     let n = g.n();
@@ -1240,11 +1260,26 @@ fn min_cut(
         .map(|(_, c)| *c)
         .collect();
     // saturated barrels: reported on the first layer of the via, at its centre
+    let mut barrel_amps = 0.0;
+    let mut barrel_mm = 0.0;
     for (q, &i) in joint_cells.iter().enumerate() {
         if lv[nodes + 2 * q] >= 0 && lv[nodes + 2 * q + 1] < 0 {
             cut.push((joints[&i].iter().copied().min().unwrap_or(0), i));
+            if let Some(v) = &vias {
+                barrel_amps += v.amps.get(&i).copied().unwrap_or(0.0);
+                barrel_mm += joint_mm.get(&i).copied().unwrap_or(0.0);
+            }
         }
     }
+    // the copper of the cut as one conductor, the barrels by their currents
+    let width = match &vias {
+        Some(v) if barrel_amps > 0.0 => {
+            let copper = (width - barrel_mm).max(0.0);
+            let copper_amps = if copper > 1e-9 { (v.amps_of)(copper) } else { 0.0 };
+            (v.width_of)(copper_amps + barrel_amps).max(width).min(limit)
+        }
+        _ => width,
+    };
     if cut.is_empty() {
         return (width, None);
     }
@@ -1924,12 +1959,65 @@ pub fn pour_joining(
 /// the first one just off the pad (the hole stays out of the pad, a pour joins them), each spot
 /// free by `room`. Fewer when there is no room.
 pub fn via_field(room: &ViaRoom, pad: &[Polygon], count: usize, existing: &[Point]) -> Vec<Point> {
+    via_field_with(room, pad, count, existing, &FieldOptions::default())
+}
+
+/// Where a via field may go beyond the rings next to the pad.
+#[derive(Debug, Clone, Copy)]
+pub struct FieldOptions {
+    /// Rings around the pad, one via pitch apart (default 4).
+    pub rings: usize,
+    /// Vias in the pad itself first (via in pad: filled and capped by the fab), on a grid of
+    /// the via pitch, each with its whole annular ring on the pad.
+    pub in_pad: bool,
+}
+
+impl Default for FieldOptions {
+    fn default() -> Self {
+        FieldOptions {
+            rings: 4,
+            in_pad: false,
+        }
+    }
+}
+
+pub fn via_field_with(
+    room: &ViaRoom,
+    pad: &[Polygon],
+    count: usize,
+    existing: &[Point],
+    o: &FieldOptions,
+) -> Vec<Point> {
     let pts: Vec<Point> = pad.iter().flat_map(|t| t.pts.iter().copied()).collect();
     let hull = Polygon::new(convex_hull(&pts));
     let pitch = room.pitch();
     let mut placed: Vec<Point> = existing.to_vec();
     let start = placed.len();
-    for ring in 0..4 {
+    if o.in_pad {
+        for poly in pad {
+            let bb = poly.bbox();
+            let (nx, ny) = (
+                ((bb.max.x - bb.min.x) / pitch).floor() as usize + 1,
+                ((bb.max.y - bb.min.y) / pitch).floor() as usize + 1,
+            );
+            // the grid centred on the pad
+            let x0 = (bb.min.x + bb.max.x) / 2.0 - (nx - 1) as f64 * pitch / 2.0;
+            let y0 = (bb.min.y + bb.max.y) / 2.0 - (ny - 1) as f64 * pitch / 2.0;
+            for i in 0..nx {
+                for j in 0..ny {
+                    let p = pt(x0 + i as f64 * pitch, y0 + j as f64 * pitch);
+                    if placed.len() - start < count
+                        && poly.contains(p)
+                        && poly.boundary_dist(p) >= room.r - 1e-9
+                        && room.free(p, &placed)
+                    {
+                        placed.push(p);
+                    }
+                }
+            }
+        }
+    }
+    for ring in 0..o.rings.max(1) {
         if placed.len() - start >= count {
             break;
         }
@@ -2044,6 +2132,7 @@ mod cut_tests {
             &src,
             &dst,
             2.0,
+            None,
         );
         assert!((w - 0.2).abs() < 1e-6, "{w}");
         let (p, l) = at.unwrap();
@@ -2146,8 +2235,69 @@ mod cut_tests {
             &src,
             &dst,
             2.0,
+            None,
         );
         assert!((w - 0.7).abs() < 1e-6, "{w}");
         assert!(at.is_some());
+    }
+
+    #[test]
+    fn barrels_add_their_currents() {
+        // two copper blocks joined only by three barrels: the cut runs through the barrels
+        let g = Grid {
+            x0: 0.0,
+            y0: 0.0,
+            step: 0.05,
+            nx: 40,
+            ny: 10,
+        };
+        let mut a = vec![false; g.n()];
+        let mut b = vec![false; g.n()];
+        for r in 0..10 {
+            for c in 0..40 {
+                if c < 20 {
+                    a[r * 40 + c] = true;
+                } else {
+                    b[r * 40 + c] = true;
+                }
+            }
+        }
+        let cells = [3 * 40 + 19, 5 * 40 + 19, 7 * 40 + 19];
+        for &i in &cells {
+            b[i] = true;
+        }
+        let joints: HashMap<usize, Vec<usize>> = cells.iter().map(|&i| (i, vec![0, 1])).collect();
+        let amps: HashMap<usize, f64> = cells.iter().map(|&i| (i, 1.0)).collect();
+        let width_of = |x: f64| ipc_width(x, 0.035, true, 20.0);
+        let amps_of = |w: f64| ipc_amps(w, 0.035, true, 20.0);
+        let mm: HashMap<usize, f64> = amps.iter().map(|(&c, &x)| (c, width_of(x))).collect();
+        let src: Vec<(usize, usize)> = (0..10).map(|r| (0, r * 40)).collect();
+        let dst: Vec<(usize, usize)> = (0..10).map(|r| (1, r * 40 + 39)).collect();
+        let run = |vias: Option<ViaSum>| {
+            min_cut(
+                &g,
+                &[0, 1],
+                &[a.clone(), b.clone()],
+                // the copper counts as wide: only the barrels limit
+                &[vec![true; g.n()], vec![true; g.n()]],
+                &[1.0, 1.0],
+                &joints,
+                &mm,
+                &src,
+                &dst,
+                10.0,
+                vias,
+            )
+            .0
+        };
+        let linear = run(None);
+        let summed = run(Some(ViaSum {
+            amps: &amps,
+            width_of: &width_of,
+            amps_of: &amps_of,
+        }));
+        assert!((linear - 3.0 * width_of(1.0)).abs() < 0.01, "{linear}");
+        assert!((summed - width_of(3.0)).abs() < 0.01, "{summed} vs {}", width_of(3.0));
+        assert!(summed > linear * 1.3, "{summed} {linear}");
     }
 }

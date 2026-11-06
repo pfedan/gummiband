@@ -83,6 +83,16 @@ impl Patch {
         self.edits.push((n.span(), s));
     }
 
+    /// Replace a node by new text.
+    pub fn replace_node(&mut self, n: &Node, s: String) {
+        self.replace(n, s);
+    }
+
+    /// Insert text at a byte offset of the original text.
+    pub fn insert_at(&mut self, at: usize, s: String) {
+        self.edits.push((at..at, s));
+    }
+
     /// Remove a node (with the line break and indentation in front of it).
     pub fn remove(&mut self, n: &Node) {
         self.removes.push(n.span());
