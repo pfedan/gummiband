@@ -120,10 +120,16 @@ pub fn powf(x: f64, y: f64) -> f64 {
     libm::pow(x, y)
 }
 
-/// sqrt(x^2 + y^2) without overflow in between.
+/// sqrt(x^2 + y^2), computed exactly as written.
+///
+/// The router compares squared distances (`dx * dx + dy * dy` against `r * r`) in some places and
+/// lengths from here in others. With this definition the two always agree. A correctly rounded
+/// hypot differs from the plain formula in the last bit at about one point in ten, and that was
+/// enough to change clearance decisions (measured on the Corne keyboard). Board coordinates are far
+/// from overflow, so the guard a library hypot carries buys nothing here.
 #[inline]
 pub fn hypot(x: f64, y: f64) -> f64 {
-    libm::hypot(x, y)
+    (x * x + y * y).sqrt()
 }
 
 #[inline]
@@ -408,7 +414,7 @@ mod tests {
         ("log2", 0x71D39B4374374F06),
         ("log10", 0x6D0D313AE8E00CD2),
         ("powf", 0x599FAECCDC38E926),
-        ("hypot", 0xF021D54595967E1B),
+        ("hypot", 0xF4B5FE0AF6E304DB),
         ("cbrt", 0xE1BBBD7D30A799A2),
     ];
 }

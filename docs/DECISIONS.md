@@ -37,7 +37,12 @@ Standing decisions of the project owner, kept here so that they survive any sess
   without an open end. For it the workspace has its own maths (2026-11-10): `sin`, `cos`,
   `atan2`, `acos`, `exp`, `ln`, `powf`, `hypot` and their kin come from `gummiband_core::math`
   (the `libm` crate, pure Rust), never from the system's maths library, whose last bits differ
-  between glibc versions, musl and macOS and changed the routed file with them. A test keeps
+  between glibc versions, musl and macOS and changed the routed file with them. `hypot` is the
+  exception: it is `(x * x + y * y).sqrt()`, exactly as written, so that a length agrees with
+  the squared distances the router compares elsewhere. A correctly rounded hypot differs from
+  that in the last bit at about one point in ten, which was enough to change clearance decisions
+  (Corne keyboard, 7 seeds, macOS: median 468 violations with the plain formula's bits, 797
+  with the library's). A test keeps
   the methods of `f64` that go to the system out of the sources, `powi` too. Measured: the glibc
   and the musl build on x86_64 Linux give the same files (`bench/README.md`, route hashes);
   macOS on ARM is expected to, and still to be measured. The reference results stayed those of
