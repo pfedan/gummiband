@@ -78,7 +78,7 @@ class RouteOptions:
     placement_seed: int = 1
     # routing order hints (--patterns), all off: none wins on every board
     hint_groups: bool = False
-    group_order: str = "long"  # "long", "short" or "inline"
+    group_order: str = "long"  # "long" or "short"
     hint_pairs: bool = False
     hint_decaps: bool = False
     hint_rows: bool = False
@@ -145,7 +145,7 @@ PLACE_FLAGS = (("seed", "--seed"), ("iters", "--iters"), ("margin", "--margin"),
 PLACE_SIDE_FLAGS = ("back_cost", "back_max_pads")  # only with two_sided
 PLACE_SWITCHES = (("semantic", "--semantic"), ("corridors", "--corridors"),
                   ("escape_halo", "--escape-halo"), ("two_sided", "--two-sided"))
-GROUP_ORDERS = ("long", "short", "inline")
+GROUP_ORDERS = ("long", "short")
 
 
 def load_settings(path: Path = SETTINGS_FILE) -> dict:

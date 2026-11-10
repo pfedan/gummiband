@@ -59,7 +59,7 @@ over the same two or three search seeds: one run says little.
 | Option | Default | CLI | What it does |
 | --- | --- | --- | --- |
 | Route buses between parts as blocks | off | `--patterns groups` | The connections between two parts that share at least two nets are routed as one block in pin order. Fewer vias on boards with several chips; leave it off on a placement that already routes cleanly. |
-| Order of the blocks | Longest first | `groups-short`, `groups-inline` | *Shortest first* suited a DDR fan-out and hurt elsewhere; *In place* is for experiments. |
+| Order of the blocks | Longest first | `groups-short` | *Shortest first* suited a DDR fan-out and hurt elsewhere. |
 | Differential pairs first | off | `--patterns pairs` | Pairs before the rest, longest first. With the blocks the best result on an FPGA board with many pairs. |
 | Decoupling capacitors first | off | `--patterns decaps` | A capacitor to its IC pin first, one via for both. Helps boards with many decaps. |
 | Lay pin rows again in pin order | off | `--patterns rows` | Only with *Keep improving*. |

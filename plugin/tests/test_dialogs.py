@@ -42,7 +42,7 @@ class DialogTest(unittest.TestCase):
         self.assertFalse(form.controls["open_via_cost"].IsEnabled())
 
     def test_opt_in_values_come_back_unchanged(self):
-        route = runner.RouteOptions(hint_groups=True, group_order="inline", hint_rows=True,
+        route = runner.RouteOptions(hint_groups=True, group_order="short", hint_rows=True,
                                     clear_corridors=True, seed=77, placements=2,
                                     placement_seed=5, pairs=True, via_pairs=True, air=0.05)
         self.assertEqual(dataclasses.replace(route, **self.build(fields.ROUTE_TABS, route).values()),

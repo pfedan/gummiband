@@ -462,7 +462,7 @@ seeds), with fewer vias and a little more length. `GB_BANDIT=0`, `GB_AIM_COST=0`
 switch them off; runs without an open end are untouched by them. The bold moves that start a side
 branch are not pruned: they may start worse than their parent on purpose. Pruned as well, nearly every
 start on a board without clearance spots came to nothing, and the level climbed by one per
-generation up to "converged" (`GB_PRUNE_STARTS=1` prunes them again, as before 2026-11-02).
+generation up to "converged" (they are left out since 2026-11-02).
 
 The open end does not count violations but spots: all violations of one pair of nets within 2 mm
 are one spot (`check::spots`), because the check reports every short piece of track, so that one
@@ -539,10 +539,9 @@ hints on, all off by default (and then byte for byte the same as without them):
   (`Router::order_keys`).
 - `groups`: the connections between the same two parts (ICs or connectors, at least 4 pins on
   nets: a bus, SPI, I2C; a pull-up on the way does not count) form a block of at least two, laid in pin
-  order across the block, from one side or the other by seed. Where the block goes is the
-  experiment `GB_GROUP_ORDER`: `long` (default) all blocks before the other signal connections
-  of their priority, the longest block first; `short` the same, the shortest first; `inline` each
-  block at the place of its shortest connection. The evolutionary search may still move single
+  order across the block, from one side or the other by seed. All blocks go before the other signal
+  connections of their priority: the longest block first (`groups`, `groups-long`) or the
+  shortest first (`groups-short`). The evolutionary search may still move single
   connections out of a block.
 
 Pockets (a pad that can only be left through a via in it) are not a pattern: the tracks of its

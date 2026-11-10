@@ -109,7 +109,7 @@ pub fn render(board: &Board, sub: Option<&Substrate>, geo: &Geometry, viol: &[Vi
         );
     }
     if let Ok(t) = std::fs::read_to_string("/tmp/gb-why.txt")
-        && std::env::var("GB_WHY").is_ok()
+        && gummiband_core::knobs::WHY.text().is_some()
     {
         for l in t.lines() {
             let v: Vec<f64> = l.split(' ').filter_map(|x| x.parse().ok()).collect();

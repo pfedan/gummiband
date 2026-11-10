@@ -23,7 +23,7 @@ about an option.
 
 | Board | Try first | Leave off |
 | --- | --- | --- |
-| Several chips with buses between them (MCU and PHY, SPI, parallel interfaces) | `--patterns groups`; on a tight board also `--clear-corridors` | `groups-short`, `groups-inline` |
+| Several chips with buses between them (MCU and PHY, SPI, parallel interfaces) | `--patterns groups`; on a tight board also `--clear-corridors` | `groups-short` |
 | FPGA or BGA board with differential pairs and buses (Arty) | `--patterns pairs,groups` | `shares` |
 | DDR memory fan-out | `--patterns groups-short`; `--pairs --via-pairs` for the strobes and clocks | `--breakouts` |
 | Fine pitch keyboard style board, no planes (Corne) | nothing; `rows` in the open end | `decaps`, `pairs,groups` |
@@ -42,13 +42,10 @@ they existed.
 | --- | --- | --- | --- |
 | `groups` (= `groups-long`) | The connections between two parts with 4 or more pins that share at least 2 nets (a bus, SPI, I2C, a connector) are routed as one block in pin order, so they do not cross each other; the longest block goes first. | Boards with several chips: parts_hard 56 to 49 vias, parts_multi_feed 127 to 98, crossing 26 to 15. | A board whose placement is fixed and already clean (LED controller: 0 to 0.3 clearance errors); a few percent more length. |
 | `groups-short` | As `groups`, the shortest block first. | DDR5 (fewest DRC errors of all orders). | Most other boards: LED controller 5 clearance errors, parts_multi 84 instead of 59 vias. |
-| `groups-inline` | Members of a block together, but each block at the place of its connections in the normal order. | Weakest order overall; for experiments. | |
 | `pairs` | Differential pairs first, the longest first, both nets next to each other. | Shorter, better coupled pairs (pair_traffic 581 to 503 mm, uncoupled 4.0 to 2.2 mm); with `groups` the best result on Arty (161 to 141 vias). | Costs vias and DRC errors when the pairs are the minority (diff_pairs). |
 | `decaps` | A decoupling capacitor is connected to its IC pin first; the via serves both. | LED controller about 7 % lower cost. | Corne much worse; Arty even. |
 | `rows` | The open end lays the connections of a pin row again in pin order. Acts only with `--until-stop`. | Small gain on every run measured, Corne complete. | Three runs are no proof yet. |
 | `shares` | Pins of a plane net next to each other reach the plane through one via. | Rarely: the router shares close vias anyway. | Arty 70 vias more. |
-
-`GB_GROUP_ORDER` still picks the order for a plain `groups`, for older scripts.
 
 ## Room for track groups
 

@@ -193,7 +193,7 @@ impl<'a> Env<'a> {
         self.blocker(geo, ti, a, b, w).is_none()
     }
 
-    /// What keeps the piece a-b from fitting, if anything (for `GB_OCTO_DEBUG`).
+    /// What keeps the piece a-b from fitting, if anything (for `GB_LOG=octo`).
     fn blocker(&self, geo: &Geometry, ti: usize, a: Point, b: Point, w: f64) -> Option<String> {
         let board = self.board;
         let t = &geo.tracks[ti];
@@ -820,7 +820,7 @@ pub fn octilinear_only(
         t.elems = elems.into_iter().map(|(e, _)| e).collect();
         t.pts = crate::realize::flatten(&t.elems);
     }
-    if std::env::var("GB_OCTO_DEBUG").is_ok() {
+    if crate::knobs::log(crate::knobs::Log::Octo) {
         for &ti in &todo {
             let t = &geo.tracks[ti];
             for w in t.pts.windows(2) {

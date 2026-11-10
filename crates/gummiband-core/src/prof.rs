@@ -1,4 +1,4 @@
-//! Cumulative phase timers and work counters, printed with `GB_TIMING`. Calls that run in
+//! Cumulative phase timers and work counters, printed with `GB_LOG=timing`. Calls that run in
 //! parallel add up, so the shares are of the work done, not of the wall clock. Not for loops
 //! over points: an atomic that all threads touch makes the relaxation three times slower.
 
@@ -64,7 +64,7 @@ pub fn snapshot() -> Vec<u64> {
 
 /// Print everything collected so far, if asked for.
 pub fn report() {
-    if std::env::var("GB_TIMING").is_err() {
+    if !crate::knobs::log(crate::knobs::Log::Timing) {
         return;
     }
     let v: Vec<u64> = SLOTS.iter().map(|s| s.load(Ordering::Relaxed)).collect();

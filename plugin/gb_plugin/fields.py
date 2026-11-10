@@ -140,11 +140,8 @@ ROUTE_TABS: Tuple = (
             Field("group_order", "Order of the blocks:",
                   "Longest first: the default and the best order on most boards.\n"
                   "Shortest first: best on a DDR memory fan-out, worse elsewhere (more vias, "
-                  "more violations).\n"
-                  "In place: each block keeps the place of its connections in the normal order; "
-                  "the weakest overall, for experiments.", "choice", requires="hint_groups",
-                  choices=(("long", "Longest first"), ("short", "Shortest first"),
-                           ("inline", "In place"))),
+                  "more violations).", "choice", requires="hint_groups",
+                  choices=(("long", "Longest first"), ("short", "Shortest first"))),
             check("hint_pairs", "Differential pairs first (pairs)",
                   "Differential pairs are routed before the other signals, the longest first, "
                   "both nets next to each other.\n\n"
