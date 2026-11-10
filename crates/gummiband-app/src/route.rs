@@ -439,8 +439,8 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
         _ => board,
     };
     let shifted_in;
-    let b = match std::env::var("GB_SHIFT") {
-        Ok(spec) => {
+    let b = match gummiband_core::knobs::SHIFT.text() {
+        Some(spec) => {
             let off: std::collections::HashMap<String, gummiband_core::geom::Point> = spec
                 .split(';')
                 .filter_map(|e| {
@@ -455,14 +455,14 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
             shifted_in = board.with_offsets(&off);
             &shifted_in
         }
-        Err(_) => board,
+        None => board,
     };
     if opts.move_parts() {
         hooks.emit(Event::MovableParts { count: b.movable.len() });
     }
     let tune_cfg = opts.tune_config();
     let deg45 = opts.angles == Angles::Deg45;
-    let tune_room = opts.tune && std::env::var("GB_NO_TUNE_ROOM").is_err();
+    let tune_room = opts.tune && !gummiband_core::knobs::NO_TUNE_ROOM.on();
     let shove = opts.shove();
     // the nets asked for, and the nets that give way when a connection finds no way
     let finished = gummiband_core::finish_nets(b, &opts.nets, shove, opts.give(), &search_cfg, |board, search| {
@@ -781,17 +781,17 @@ pub fn clear_corridors(from: &Path, place: &PlaceOptions, hooks: &Hooks) -> Resu
         return Ok(None);
     }
     hooks.emit(Event::CorridorParts { parts: &intruders });
-    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
+    use gummiband_core::knobs;
     let placed = place_board(
         from,
         &PlaceOptions {
             scope: Scope::Only(intruders.clone()),
             corridors: true,
-            gap: env("GB_CC_GAP").unwrap_or(place.gap),
-            halo: env("GB_CC_HALO").unwrap_or(place.halo),
-            escape_halo: env("GB_CC_ESCAPE").is_some_and(|v| v > 0.0),
-            semantic: env("GB_CC_SEMANTIC").is_some_and(|v| v > 0.0),
-            leash: env("GB_CC_LEASH").unwrap_or(CLEAR_CORRIDORS_LEASH),
+            gap: knobs::CC_GAP.get::<f64>().unwrap_or(place.gap),
+            halo: knobs::CC_HALO.get::<f64>().unwrap_or(place.halo),
+            escape_halo: knobs::CC_ESCAPE.get::<f64>().is_some_and(|v| v > 0.0),
+            semantic: knobs::CC_SEMANTIC.get::<f64>().is_some_and(|v| v > 0.0),
+            leash: knobs::CC_LEASH.get::<f64>().unwrap_or(CLEAR_CORRIDORS_LEASH),
             ..place.clone()
         },
     )?;

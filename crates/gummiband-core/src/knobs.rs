@@ -477,9 +477,8 @@ any of them may change or go with any commit. For normal work use the options
 - A variable is read once per process, when it is first needed.
 - Each keeps the way its value is read: *set to anything* means that also `0` or an empty value
   turns it on; *`0` turns it off* means that every other value, and no value, leaves it on.
-- The table lives in `gummiband_core::knobs`, with the accessors the code uses; nothing else in
-  the core, kicad and place crates reads the environment. The lines marked CLI are still read in
-  `crates/gummiband-cli/src/main.rs`.
+- The table lives in `gummiband_core::knobs`, with the accessors the code uses; no other code
+  reads a `GB_` variable.
 ";
 
 const OTHERS: &str = "

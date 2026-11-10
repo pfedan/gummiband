@@ -93,7 +93,7 @@ enum Cmd {
         /// connections of a pin row in pin order), `pairs` (differential pairs before the other
         /// signal connections, the longest first), `groups` (the connections between two parts
         /// as one block in pin order, the longest block first; `groups-short` puts the shortest
-        /// first, `groups-inline` leaves each block at the place of its connections), `all` or
+        /// first), `all` or
         /// `none`. `gummiband info` lists the patterns it finds. When to use which: see
         /// docs/guide/options.md.
         #[arg(long, default_value = defaults::PATTERNS)]
@@ -649,7 +649,7 @@ fn main() -> Result<()> {
             if placements > 0 && (keep_all || !opts.nets.is_empty() || pairs) {
                 anyhow::bail!("--placements routes the whole board: not with --keep-all, --nets or --pairs");
             }
-            if std::env::var_os("GB_GPU").is_some() && !cfg!(feature = "gpu") {
+            if gummiband_core::knobs::GPU.on() && !cfg!(feature = "gpu") {
                 println!("warning: GB_GPU has no effect, this binary is built without the gpu feature");
             }
             let t0 = std::time::Instant::now();
@@ -793,7 +793,7 @@ fn main() -> Result<()> {
             for u in s.unrouted.iter().take(40) {
                 println!("  unrouted: {u}");
             }
-            if let Ok(near) = std::env::var("GB_NEAR") {
+            if let Some(near) = gummiband_core::knobs::NEAR.text() {
                 let v: Vec<f64> = near.split(',').filter_map(|x| x.parse().ok()).collect();
                 let p = gummiband_core::geom::pt(v[0], v[1]);
                 for t in &res.geometry.tracks {
@@ -852,7 +852,7 @@ fn main() -> Result<()> {
                     .or_insert(0) += 1;
             }
             println!("  {kinds:?}");
-            if std::env::var("GB_VIOL").is_ok() {
+            if gummiband_core::knobs::VIOL.on() {
                 let mut hist = [0usize; 6];
                 for v in viol {
                     let r = (v.actual / v.required).clamp(0.0, 0.999);

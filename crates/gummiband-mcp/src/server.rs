@@ -983,8 +983,7 @@ pub struct RouteIn {
     /// Hints from the local patterns of board_patterns, comma separated (default none), as
     /// `gummiband route --patterns`. All are opt-in because none wins on every board:
     /// `groups` (connections between two chips or a chip and a connector as one block in pin
-    /// order, the longest block first; `groups-short` shortest first, `groups-inline` blocks in
-    /// place) saves vias on boards with several chips and buses; `pairs` (differential pairs
+    /// order, the longest block first; `groups-short` shortest first) saves vias on boards with several chips and buses; `pairs` (differential pairs
     /// first, longest first) couples pairs better at a few vias; `pairs,groups` was best on an
     /// FPGA board; `groups-short` suited a DDR fan-out; `decaps` (a decoupling capacitor to its IC
     /// pin first) helps boards with many decaps on one side; `rows` (the open end re-lays pin
