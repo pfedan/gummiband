@@ -153,7 +153,8 @@ pub enum Log {
 pub struct Topic {
     pub log: Log,
     pub name: &'static str,
-    /// The variable that switched this output on before 2026-11-10.
+    /// The variable that switched this output on before 2026-11-10, without its `GB_`: a search
+    /// of the sources for variable names finds only the ones that are read.
     pub was: &'static str,
     pub doc: &'static str,
 }
@@ -163,79 +164,79 @@ pub static TOPICS: &[Topic] = &[
     Topic {
         log: Log::Open,
         name: "open",
-        was: "GB_OPEN_LOG",
+        was: "OPEN_LOG",
         doc: "The open end: one line per generation, side branches, merges, the rounds that make room.",
     },
     Topic {
         log: Log::Pair,
         name: "pair",
-        was: "GB_PAIR_LOG",
+        was: "PAIR_LOG",
         doc: "Differential pairs: breakouts, joints, and joins of the two tracks that found no short way.",
     },
     Topic {
         log: Log::Tune,
         name: "tune",
-        was: "GB_TUNE_LOG",
+        was: "TUNE_LOG",
         doc: "Length tuning: the rounds that make room for the meanders.",
     },
     Topic {
         log: Log::Neg,
         name: "neg",
-        was: "GB_NEG_LOG",
+        was: "NEG_LOG",
         doc: "Negotiated routing: conflicts and open connections round by round.",
     },
     Topic {
         log: Log::Zip,
         name: "zip",
-        was: "GB_ZIP_LOG",
+        was: "ZIP_LOG",
         doc: "What closing up the pairs at the end (`pairs::zip`) did.",
     },
     Topic {
         log: Log::Plane,
         name: "plane",
-        was: "GB_PLANE_LOG",
+        was: "PLANE_LOG",
         doc: "The open end says when a new via would leave the plane of its net.",
     },
     Topic {
         log: Log::Octo,
         name: "octo",
-        was: "GB_OCTO_DEBUG",
+        was: "OCTO_DEBUG",
         doc: "`--angles 45`: the pieces that stay at their angle, and what is in their way.",
     },
     Topic {
         log: Log::Vias,
         name: "vias",
-        was: "GB_DEBUG_VIAS",
+        was: "DEBUG_VIAS",
         doc: "After a router run: via pairs and vias of the topology.",
     },
     Topic {
         log: Log::Corridors,
         name: "corridors",
-        was: "GB_DEBUG_CORRIDOR",
+        was: "DEBUG_CORRIDOR",
         doc: "After a router run: corridors of the topology.",
     },
     Topic {
         log: Log::Intersections,
         name: "intersections",
-        was: "GB_DEBUG_X",
+        was: "DEBUG_X",
         doc: "After a router run: intersections in the topology.",
     },
     Topic {
         log: Log::Timing,
         name: "timing",
-        was: "GB_TIMING",
+        was: "TIMING",
         doc: "Cumulative phase timers and work counters at the end of a route, and the split of each relaxation.",
     },
     Topic {
         log: Log::Validate,
         name: "validate",
-        was: "GB_VALIDATE",
+        was: "VALIDATE",
         doc: "After a router run: check the inner state of the router and print the problems.",
     },
     Topic {
         log: Log::ValidateEach,
         name: "validate-each",
-        was: "GB_VALIDATE_EACH",
+        was: "VALIDATE_EACH",
         doc: "Check the inner state after every routed connection and print the one that broke it (slow).",
     },
 ];
@@ -438,7 +439,7 @@ pub fn markdown() -> String {
          | Topic | Output | Replaces |\n| --- | --- | --- |\n",
     );
     for t in TOPICS {
-        let _ = writeln!(s, "| `{}` | {} | `{}` |", t.name, t.doc, t.was);
+        let _ = writeln!(s, "| `{}` | {} | `GB_{}` |", t.name, t.doc, t.was);
     }
     s.push_str(
         "\n## Switches\n\n\
