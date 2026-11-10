@@ -462,11 +462,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "gummiband-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gummiband-core",
+ "gummiband-kicad",
+ "gummiband-place",
+ "serde_json",
+]
+
+[[package]]
 name = "gummiband-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "gummiband-app",
  "gummiband-core",
  "gummiband-kicad",
  "gummiband-place",

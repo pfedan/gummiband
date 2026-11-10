@@ -12,6 +12,7 @@ path = "src/main.rs"
 gpu = ["gummiband-core/gpu"]
 
 [dependencies]
+gummiband-app.workspace = true
 gummiband-core.workspace = true
 gummiband-kicad.workspace = true
 gummiband-place.workspace = true
