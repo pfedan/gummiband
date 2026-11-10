@@ -60,10 +60,42 @@ negotiated congestion), not any existing product's code.
 | `gummiband-core` | geometry, board model, triangulation substrate, topological router, realization, checks. No I/O. |
 | `gummiband-kicad` | KiCad 9/10 s-expression reader and writer, net class and rule import from `.kicad_pro`. |
 | `gummiband-place` | placement: `auto` places any board from its netlist (`gummiband place`, MCP `place_parts`), a library without a program of its own. Its `variants` example (a benchmark tool, `bench/place`) makes the LED controller outline variants. |
-| `gummiband-cli` | `gummiband` binary: `info`, `place`, `route`, `svg`. The plugin calls this. |
+| `gummiband-app` | the pipelines behind the front ends: `RouteOptions` (every option of a route with its default, defined once), `route_board` and `route_file` (see [Route pipeline](#route-pipeline)). Prints nothing. |
+| `gummiband-cli` | `gummiband` binary: `info`, `place`, `route`, `angles45`, `move-part`, `lengths`, `strip`. Maps its arguments to `gummiband-app`, prints and writes the reports. The plugin calls this. |
+| `gummiband-mcp` | `gummiband-mcp` binary: the MCP server (stdio) for AI agents, see `docs/MCP.md`. Keeps the session (loaded boards, working copies, net options) and calls `gummiband-app` for `route` and `try_seeds`. |
 | `plugin/` | KiCad action plugin (Python, KiCad IPC API): exports the board, runs the CLI, imports the result. |
 
 Units: millimetres as `f64` in the core. The writer rounds to KiCad's nanometre grid.
+
+## Route pipeline
+
+"Route a board with these options" exists once, in `gummiband-app::route`, and both front ends
+are adapters around it: they map their arguments to `RouteOptions`, call, and present the result.
+
+- `RouteOptions` has every option. `Default` gives the documented defaults from the constants in
+  `gummiband_app::defaults`; the clap defaults of the CLI name these constants and the MCP server
+  falls back to `RouteOptions::default()`. Options that follow from others are `Option`s with one
+  method each that resolves them: `move_parts` (on unless `keep_all`), `shove` (on when finishing
+  nets with fixed parts), `give` (8 mm when finishing nets), `air` (0.03 mm in an open ended run
+  of the whole board).
+- `route_board(board, options, hooks)` takes a board model and returns `Routed`: the search
+  (`finish_nets` around `route_pairs` or `route_board` of the core), then room for meanders, the
+  45 degree step, length tuning, the length rules, the clearance check and the soft copper that
+  moved. `Routed::board_text` and `Routed::write` put a geometry (the result or an alternative of
+  the open end) into the board file. The reports of both front ends are built from `Routed`.
+- `route_file(path, options, hooks)` is the whole way from a file, as `gummiband route` goes it:
+  `clear_corridors`, the search over `placements`, `load_board` (copper to keep, movable parts,
+  widths and priorities per net from their JSON files), then `route_board`.
+- `Hooks` carry what differs between front ends while a route runs: the stop flag of the open end
+  (the CLI sets it on a line on stdin, the MCP server after a time budget), the progress callback
+  of the search and the `Event`s of the steps before it (the CLI prints them). The crate itself
+  prints nothing.
+
+The MCP server enters at `route_board`: its board comes from the session (the loaded file with
+the options of `set_net_options` applied), and placement and corridors are tools of their own
+that work on the working copy. The checks of the arguments stay in each front end, in its own
+words. The debugging switches of the environment that belong to the pipeline are read there
+(`GB_SHIFT`, `GB_NO_TUNE_ROOM`, `GB_CC_*`), so they act in both front ends.
 
 ## Board model
 
@@ -195,7 +227,7 @@ the portals, where a wrap around a far pivot could swing past a neighbour.
 
 For finishing nets on a routed board (`--keep-all --nets`, shove on by default) the unlocked
 tracks and vias of the other nets are no obstacles but part of the topology
-(`gummiband-core::import`). `finish_nets` drives it for the CLI and the MCP server: when a
+(`gummiband-core::import`). `finish_nets` drives it in the route pipeline: when a
 connection still finds no way, the nets near its pins give way in growing circles, and the try
 with the fewest open connections, then violations is kept. With an open end (`--until-stop`,
 MCP `open_end_seconds`, since 2026-11-01) the tries run without it, and the one kept runs again:
