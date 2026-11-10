@@ -84,7 +84,11 @@ fn assert_ends_in_the_pour(out: &gummiband_app::RouteOutcome) {
         "{:?}",
         r.legal
     );
-    assert!(r.legal.dangling.is_empty(), "{:?}", r.legal);
+    assert!(
+        r.legal.dangling.is_empty() && r.legal.put_back.is_empty(),
+        "{:?}",
+        r.legal
+    );
     assert!(r.violations.is_empty(), "{:?}", r.violations);
     let gnd = r.board.net_id("GND").unwrap();
     let new: Vec<_> = r
