@@ -170,6 +170,9 @@ pub enum End {
     Via(u32),
     /// A point on kept copper of the net.
     Point(Point),
+    /// A point in a pour of the net, just inside its outline, where a track enters or leaves
+    /// it. The pin is one the pour holds: the end stands for that pin's group.
+    Area(Point, usize),
     /// On a segment of the net, where it crosses this edge.
     Tap(u32, u32),
 }
@@ -269,10 +272,13 @@ pub struct Router<'a> {
     pub pin_group: Vec<u32>,
     /// Pin groups whose kept copper has a via into a plane of the net.
     plane_groups: HashSet<u32>,
+    /// Per pour (by obstacle) a pin its copper holds. A pour is copper of its net like a large
+    /// pad: a way into it ends where it enters, a way out of it starts where it leaves.
+    pour_pin: FastMap<u32, usize>,
     /// Partner net of each differential pair net, and where the nets ran so far.
     partner: HashMap<NetId, NetId>,
     guides: HashMap<NetId, Vec<Guide>>,
-    /// The board has kept tracks or vias.
+    /// The board has kept tracks, vias or pours: a group of pins may be more than one place.
     pub has_kept: bool,
     /// Soft copper of the board is in the topology, see [`crate::import`].
     pub soft_on: bool,
@@ -325,6 +331,12 @@ enum NK {
     GoalTap {
         seg: u32,
         e: u32,
+    },
+    /// In a pour of the net that holds a pin of the goal, right where the way enters it
+    /// (triangle t on layer li).
+    GoalArea {
+        t: u32,
+        li: u8,
     },
 }
 
@@ -599,6 +611,7 @@ fn key(k: &NK) -> u64 {
         NK::Site { site, li } => (4, site, li as u32),
         NK::GoalSite { site } => (5, site, 0),
         NK::GoalTap { seg, e } => (6, seg, e),
+        NK::GoalArea { t, li } => (7, t, li as u32),
     };
     assert!(a < 1 << 29, "search state out of range");
     kind << 61 | (a as u64) << 32 | b as u64
@@ -615,7 +628,7 @@ impl<'a> Router<'a> {
         } else {
             HashMap::new()
         };
-        let (pin_group, plane_groups) = Self::pin_groups(board, sub);
+        let (pin_group, plane_groups, pour_pin) = Self::pin_groups(board, sub);
         let mut r = Router {
             board,
             sub: sub.clone(),
@@ -633,12 +646,13 @@ impl<'a> Router<'a> {
             pin_pitch: std::sync::Arc::new(Self::pin_pitches(board)),
             pin_group,
             plane_groups,
+            pour_pin,
             partner,
             guides: HashMap::new(),
             has_kept: board
                 .obstacles
                 .iter()
-                .any(|o| matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via)),
+                .any(|o| matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via | ObstacleKind::Pour)),
             pending: vec![0; board.pins.len()],
             prices: None,
             torn: Vec::new(),
@@ -651,7 +665,7 @@ impl<'a> Router<'a> {
         r
     }
 
-    fn pin_groups(board: &Board, sub: &Substrate) -> (Vec<u32>, HashSet<u32>) {
+    fn pin_groups(board: &Board, sub: &Substrate) -> (Vec<u32>, HashSet<u32>, FastMap<u32, usize>) {
         let n = board.pins.len();
         let mut parent: Vec<u32> = (0..n as u32).collect();
         fn find(p: &mut [u32], x: u32) -> u32 {
@@ -699,6 +713,7 @@ impl<'a> Router<'a> {
             board.planes.iter().any(on)
         };
         let mut on_plane: Vec<u32> = Vec::new();
+        let mut pour_pin: FastMap<u32, usize> = FastMap::default();
         let mut seen = vec![false; board.obstacles.len()];
         for start in 0..board.obstacles.len() {
             if seen[start] || !kept(&board.obstacles[start]) {
@@ -709,8 +724,12 @@ impl<'a> Router<'a> {
             let mut stack = vec![start];
             let mut first_pin: Option<u32> = None;
             let mut plane = false;
+            let mut pours: Vec<u32> = Vec::new();
             while let Some(o) = stack.pop() {
                 plane |= into_plane(&board.obstacles[o]);
+                if board.obstacles[o].kind == ObstacleKind::Pour {
+                    pours.push(o as u32);
+                }
                 let poly = &sub.shared.obs_polys[o];
                 for q in sub.shared.obs_index.query(&poly.bbox()) {
                     let q = q as usize;
@@ -741,10 +760,13 @@ impl<'a> Router<'a> {
             if let (true, Some(f)) = (plane, first_pin) {
                 on_plane.push(f);
             }
+            if let Some(f) = first_pin {
+                pour_pin.extend(pours.into_iter().map(|o| (o, f as usize)));
+            }
         }
         let groups: Vec<u32> = (0..n as u32).map(|x| find(&mut parent, x)).collect();
         let on_plane = on_plane.iter().map(|&p| groups[p as usize]).collect();
-        (groups, on_plane)
+        (groups, on_plane, pour_pin)
     }
 
     fn m(&self, li: usize) -> &Mesh {
@@ -2156,6 +2178,24 @@ impl<'a> Router<'a> {
         self.board.obstacles[s as usize].pin
     }
 
+    /// The pour of a net that covers triangle t (the search only gets there on its own net).
+    fn tri_pour(&self, li: usize, t: u32) -> Option<u32> {
+        let s = self.m(li).status[t as usize];
+        (s != NONE && s != OUTSIDE && self.board.obstacles[s as usize].kind == ObstacleKind::Pour).then_some(s)
+    }
+
+    /// Where a track that crosses the outline of a pour at `q` ends in it: a little inside
+    /// triangle t of the pour, so that the end lies in its copper, and what stands for it.
+    fn area_end(&self, li: usize, t: u32, q: Point, width: f64) -> End {
+        let mid = self.m(li).tri_mid(t);
+        let d = mid.dist(q);
+        let at = if d > 1e-9 { q.lerp(mid, (width / d).min(0.6)) } else { q };
+        match self.tri_pour(li, t).and_then(|o| self.pour_pin.get(&o)) {
+            Some(&p) => End::Area(at, p),
+            None => End::Point(at),
+        }
+    }
+
     /// A negotiation is on and capacity and planarity are soft.
     fn soft(&self) -> bool {
         self.prices.as_ref().is_some_and(|p| p.soft)
@@ -2364,7 +2404,17 @@ impl<'a> Router<'a> {
             let free = m.status[t as usize] == NONE;
             let e = m.tri_edges[t as usize][k as usize];
             let k2 = m.local_edge(t2, e) as u8;
+            let from_pour = !free && self.tri_pour(lu, t).is_some();
             if !free && s2 != NONE {
+                // a pour is no place the way came from: in it, and on what it leads to, the
+                // way stands where the copper is
+                let pos = if self.tri_pour(lu, t2).is_some() {
+                    m.tri_mid(t2)
+                } else if from_pour {
+                    self.tri_pin(lu, t2).map_or(m.tri_mid(t2), |p| self.board.pins[p].pos)
+                } else {
+                    node.pos
+                };
                 push(
                     best,
                     nodes,
@@ -2375,7 +2425,7 @@ impl<'a> Router<'a> {
                         entry: 3,
                         slot: 0,
                     },
-                    node.pos,
+                    pos,
                     node.g,
                     idx,
                 );
@@ -2449,9 +2499,12 @@ impl<'a> Router<'a> {
             let from_coord = chord_from.map(|(cp, cs)| self.coord(t, lu, cp, None, cs));
             let node_at = |j: usize, lo: f64, hi: f64, price: f64| {
                 let q = pu + dir * (node.pos - pu).dot(dir).clamp(lo, hi);
-                // on kept copper of the net the way is already there
+                // on kept copper of the net the way is already there, and out of a pour the track
+                // starts on this edge
                 let g = if self.on_kept(lu, t2) {
                     node.g
+                } else if from_pour {
+                    node.g + escape + price
                 } else {
                     let step = node.pos.dist(q);
                     node.g + step + self.across(lu, node.pos, q) + escape + self.pull(guide, lu, q, step) + price
@@ -2572,7 +2625,11 @@ impl<'a> Router<'a> {
                 t.push((node.pos, li));
             }
             match node.kind {
-                NK::GoalPin { .. } | NK::GoalVia { .. } | NK::GoalSite { .. } | NK::GoalTap { .. } => {
+                NK::GoalPin { .. }
+                | NK::GoalVia { .. }
+                | NK::GoalSite { .. }
+                | NK::GoalTap { .. }
+                | NK::GoalArea { .. } => {
                     let mut chain = vec![node];
                     let mut p = node.parent;
                     while p != u32::MAX {
@@ -2592,6 +2649,18 @@ impl<'a> Router<'a> {
                     } else {
                         None
                     };
+                    // into a pour that holds a pin of the goal: the way ends where it enters. On
+                    // through the pour to the pad it would be one straight line from here to
+                    // there, across the holes of the pour and what lies in them.
+                    if entry < 3
+                        && matches!(conn.goal, Goal::Pins(_))
+                        && let Some(o) = self.tri_pour(lu, t)
+                        && let Some(&pin) = self.pour_pin.get(&o)
+                        && is_target(pin)
+                    {
+                        push(best, nodes, open, NK::GoalArea { t, li }, node.pos, node.g, idx);
+                        continue;
+                    }
                     if let Some(pin) = self.tri_pin(lu, t)
                         && is_target(pin)
                     {
@@ -3093,6 +3162,7 @@ impl<'a> Router<'a> {
                 }
                 Some(NK::GoalPin { pin }) => End::Pin(pin),
                 Some(NK::GoalTap { seg, e }) => End::Tap(seg, e),
+                Some(NK::GoalArea { t, li: l }) => self.area_end(l as usize, t, chain[j].pos, width),
                 // through hole layer change: the run ends at that pin
                 // or at a kept via of the net
                 _ => match self.tri_pin(li as usize, last_t) {
@@ -3101,23 +3171,26 @@ impl<'a> Router<'a> {
                     None => End::Pin(conn.from),
                 },
             };
-            let seg = Seg {
-                net,
-                conn: ci as u32,
-                li,
-                width,
-                clearance,
-                start,
-                end,
-                crossings: Vec::new(),
-                widths: Vec::new(),
-                chord_tris: Vec::new(),
-                necks: necks.clone(),
-                neck_w,
-                imported: None,
-            };
-            seg_ids.push(self.insert_seg(seg, &run));
-            start = end;
+            let (parts, next) = self.off_pours(li as usize, &chain[i..j], run, start, end, width);
+            for (start, end, run) in parts {
+                let seg = Seg {
+                    net,
+                    conn: ci as u32,
+                    li,
+                    width,
+                    clearance,
+                    start,
+                    end,
+                    crossings: Vec::new(),
+                    widths: Vec::new(),
+                    chord_tris: Vec::new(),
+                    necks: necks.clone(),
+                    neck_w,
+                    imported: None,
+                };
+                seg_ids.push(self.insert_seg(seg, &run));
+            }
+            start = next;
             i = j;
         }
         self.conn_segs[ci] = seg_ids;
@@ -3130,6 +3203,77 @@ impl<'a> Router<'a> {
         true
     }
 
+    /// The pieces of one run of a chain (its nodes, and the triangles, entries and slots in
+    /// `run`) that become segments, each with its ends, and where the next run starts. A run
+    /// that touches no pour of its net is one piece from `start` to `end`. In a pour there is
+    /// no track: the piece before ends where the way enters it, the piece after starts where
+    /// it leaves, both just inside the outline. A straight line from one to the other, or on
+    /// to a pad under the pour, would cross its holes and what lies in them.
+    #[allow(clippy::type_complexity)]
+    fn off_pours(
+        &self,
+        li: usize,
+        nodes: &[Node],
+        run: Vec<(u32, u8, u16)>,
+        start: End,
+        end: End,
+        width: f64,
+    ) -> (Vec<(End, End, Vec<(u32, u8, u16)>)>, End) {
+        let m = self.m(li);
+        let in_pour = |r: usize| self.tri_pour(li, run[r].0).is_some();
+        if !(0..run.len()).any(in_pour) {
+            return (vec![(start, end, run)], end);
+        }
+        let own = |r: usize| m.status[run[r].0 as usize] != NONE;
+        // what stands for the own copper of node r, for a track that crosses its outline at q
+        let stand = |r: usize, q: Point| {
+            if in_pour(r) {
+                self.area_end(li, run[r].0, q, width)
+            } else {
+                self.tri_pin(li, run[r].0).map_or(End::Point(nodes[r].pos), End::Pin)
+            }
+        };
+        let mut parts = Vec::new();
+        let (mut from, mut cur) = (start, Vec::new());
+        let mut r = 0;
+        while r < run.len() {
+            let a = r;
+            if !own(a) {
+                cur.push(run[a]);
+                r += 1;
+                continue;
+            }
+            // one piece of own copper: nodes a to b
+            let mut b = a;
+            while b + 1 < run.len() && own(b + 1) {
+                b += 1;
+            }
+            r = b + 1;
+            if !(a..=b).any(in_pour) {
+                cur.extend_from_slice(&run[a..=b]);
+                continue;
+            }
+            // the way came in from free ground: that piece ends here
+            if run[a].1 < 3 {
+                cur.push(run[a]);
+                parts.push((from, stand(a, nodes[a].pos), std::mem::take(&mut cur)));
+            }
+            cur.clear();
+            if b + 1 < run.len() {
+                // and goes on from where it leaves
+                from = stand(b, nodes[b + 1].pos);
+                cur.push((run[b].0, 3, 0));
+            } else {
+                from = stand(b, nodes[b].pos);
+            }
+        }
+        if cur.is_empty() {
+            return (parts, from);
+        }
+        parts.push((from, end, cur));
+        (parts, end)
+    }
+
     /// Insert a segment: its chords (against the lists as the search saw them), then its
     /// crossings at their slots.
     fn insert_seg(&mut self, mut s: Seg, run: &[(u32, u8, u16)]) -> u32 {
@@ -3138,7 +3282,7 @@ impl<'a> Router<'a> {
         let m = &self.sub.m[li];
         let vert = |e: End| match e {
             End::Via(site) => m.site_vert.get(&site).copied(),
-            End::Pin(_) | End::Point(_) | End::Tap(..) => None,
+            End::Pin(_) | End::Point(_) | End::Area(..) | End::Tap(..) => None,
         };
         let vpos = |t: u32, v: u32| CPos::Vertex(m.tris[t as usize].iter().position(|&x| x == v).unwrap_or(0) as u8);
         let mut chords: Vec<(u32, Chord)> = Vec::new();
@@ -4016,7 +4160,7 @@ impl<'a> Router<'a> {
             for &sid in &self.conn_segs[ci] {
                 let s = self.segs[sid as usize].as_ref().unwrap();
                 let node = |e: End| match e {
-                    End::Pin(p) => Some(pin(p)),
+                    End::Pin(p) | End::Area(_, p) => Some(pin(p)),
                     End::Via(v) => Some(site(v)),
                     End::Point(_) | End::Tap(..) => None,
                 };
@@ -4148,7 +4292,7 @@ impl<'a> Router<'a> {
     /// Two ends at the same place: pins of one group, or the same via.
     fn same_end(&self, a: End, b: End) -> bool {
         match (a, b) {
-            (End::Pin(a), End::Pin(b)) => self.pin_group[a] == self.pin_group[b],
+            (End::Pin(a) | End::Area(_, a), End::Pin(b) | End::Area(_, b)) => self.pin_group[a] == self.pin_group[b],
             (End::Via(a), End::Via(b)) => a == b,
             _ => false,
         }
