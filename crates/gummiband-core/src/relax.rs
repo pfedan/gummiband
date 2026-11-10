@@ -543,6 +543,100 @@ pub(crate) fn resample(pts: &[Point], spacing: f64) -> Vec<Point> {
     out
 }
 
+/// The chain without its folds. The rounds move every point by tension and pushes with no
+/// regard for the order of the points along the track, so a point pushed along the track can
+/// pass its neighbour: the chain then runs forth, back and forth again, and neither `simplify`
+/// nor `resample` opens that. A point at which the chain turns back by more than 90 degrees is
+/// left out, again and again until none is left, where `ok(a, b, c)` allows the piece from a
+/// to c in place of a-b-c. The first and the last point stay.
+fn unfold(pts: &[Point], ok: impl Fn(Point, Point, Point) -> bool) -> Vec<Point> {
+    let mut out: Vec<Point> = Vec::with_capacity(pts.len());
+    for (i, &p) in pts.iter().enumerate() {
+        out.push(p);
+        let Some(&c) = pts.get(i + 1) else { break };
+        while out.len() >= 2 {
+            let (a, b) = (out[out.len() - 2], out[out.len() - 1]);
+            if (b - a).dot(c - b) < 0.0 && ok(a, b, c) {
+                out.pop();
+            } else {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// By how much the piece a-b of track `t`, `w` wide there, misses what it needs to the pads,
+/// holes and keepouts, to the board edge and to the vias of other nets (centre, radius, net,
+/// half line of a pair) at worst, with `m` as reserve: at most 0 where it is clear of them
+/// all. The needs are those of [`taut`].
+#[allow(clippy::too_many_arguments)]
+fn fixed_shortage(
+    board: &Board,
+    sub: &Substrate,
+    t: &Track,
+    w: f64,
+    m: f64,
+    vias: impl Iterator<Item = (Point, f64, u32, Point)>,
+    a: Point,
+    b: Point,
+) -> f64 {
+    let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
+    let (net, layer, c) = (t.net, t.layer, clr(t.net));
+    let mut worst = f64::NEG_INFINITY;
+    let mut r = Rect::empty();
+    r.add(a);
+    r.add(b);
+    for oi in sub.shared.obs_index.query(&r.grow(w / 2.0 + 1.0)) {
+        let o = &board.obstacles[oi as usize];
+        if !o.layers.has(layer) || (o.net == Some(net) && o.kind != ObstacleKind::Hole) {
+            continue;
+        }
+        let need = match o.kind {
+            ObstacleKind::Keepout { tracks, .. } => {
+                if !tracks {
+                    continue;
+                }
+                crate::board::KEEPOUT_GAP
+            }
+            ObstacleKind::Hole => board.hole_gap(net),
+            _ => o.clearance.max(c).max(board.item_gap(net, o.net)),
+        } + w / 2.0
+            + m;
+        worst = worst.max(need - sub.shared.obs_polys[oi as usize].dist_to_seg(a, b));
+    }
+    let need = board.rules.edge_clearance + w / 2.0 + m;
+    let edge_box = r.grow(need + 1e-9);
+    for o in &board.outline {
+        let near = |(p, q): &(Point, Point)| {
+            p.x.max(q.x) >= edge_box.min.x
+                && p.x.min(q.x) <= edge_box.max.x
+                && p.y.max(q.y) >= edge_box.min.y
+                && p.y.min(q.y) <= edge_box.max.y
+        };
+        for (p, q) in o.edges().filter(near) {
+            worst = worst.max(need - seg_seg_dist(a, b, p, q));
+        }
+    }
+    for (vc, vr, vn, half) in vias {
+        if vn == net {
+            continue;
+        }
+        let need = vr + c.max(clr(vn)).max(board.item_gap(net, Some(vn))) + w / 2.0 + m;
+        let reach = need + half.len();
+        if vc.x < r.min.x - reach || vc.x > r.max.x + reach || vc.y < r.min.y - reach || vc.y > r.max.y + reach {
+            continue;
+        }
+        let d = if half != Point::default() {
+            seg_seg_dist(vc - half, vc + half, a, b)
+        } else {
+            point_seg_dist(vc, a, b)
+        };
+        worst = worst.max(need - d);
+    }
+    worst
+}
+
 /// Drop points that lie on the line of their neighbours (within `tol`).
 pub fn simplify(pts: &[Point], tol: f64) -> Vec<Point> {
     if pts.len() <= 2 {
@@ -1023,6 +1117,23 @@ pub fn relax_while(
                     if !awake[ti] {
                         return p.clone();
                     }
+                    // a fold goes only where the straight piece in its place comes no nearer to
+                    // a pad, a hole, the board edge or a via than the track needs, or no
+                    // nearer than the fold was: tracks answer in the rounds that follow, a
+                    // pad corner or a board edge inside a fold must stay on its side
+                    // (the rounds on the GPU run from one resampling to the next and take
+                    // their tracks from here, so they get them unfolded as well)
+                    let t = &geo.tracks[ti];
+                    let w = 2.0 * half_w(t);
+                    let short = |a: Point, b: Point| {
+                        let near = vias
+                            .iter()
+                            .zip(&pair_r)
+                            .zip(&halves)
+                            .map(|((v, &r), &half)| (v.0, r, v.2, half));
+                        fixed_shortage(board, sub, t, w, cfg.margin * 0.5, near, a, b)
+                    };
+                    let p = &unfold(p, |a, b, c| short(a, c) <= short(a, b).max(short(b, c)).max(0.0) + 1e-9);
                     resample(
                         &simplify(p, 0.0005),
                         if it * 4 >= cfg.iterations * 3 {
@@ -2802,6 +2913,50 @@ pub fn prefer_width(board: &Board, sub: &Substrate, geo: &mut Geometry, target: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fold_is_taken_out_and_the_ends_stay() {
+        let yes = |_: Point, _: Point, _: Point| true;
+        // forth, back and forth again: the point that passed its neighbour goes
+        let chain = [pt(0.0, 0.0), pt(1.2, 0.0), pt(1.0, 0.01), pt(2.0, 0.0)];
+        assert_eq!(unfold(&chain, yes), [chain[0], chain[2], chain[3]]);
+        // two points that passed the third: one after the other
+        let two = [pt(0.0, 0.0), pt(1.0, 0.0), pt(1.2, 0.0), pt(0.9, 0.01), pt(2.0, 0.0)];
+        assert_eq!(unfold(&two, yes), [two[0], two[3], two[4]]);
+        // a corner is no fold, and the ends stay whatever the chain does
+        let corner = [pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0)];
+        assert_eq!(unfold(&corner, yes), corner);
+        assert_eq!(unfold(&chain[..2], yes), chain[..2]);
+        let back = [pt(0.0, 0.0), pt(1.0, 0.0), pt(0.5, 0.01)];
+        assert_eq!(unfold(&back, yes), [back[0], back[2]]);
+        // where the straight piece is not allowed the fold stays
+        assert_eq!(unfold(&chain, |_, _, _| false), chain);
+    }
+
+    /// A spike away from a via of another net: the straight piece in its place runs nearer to
+    /// the via than the spike did, so the fold may not go there. With nothing near, the piece
+    /// is clear.
+    #[test]
+    fn the_piece_in_place_of_a_fold_is_measured_against_what_does_not_move() {
+        let mut b = crate::topo::tests::two_pad_board();
+        let mut other = b.nets[0].clone();
+        other.name = "B".into();
+        other.pins.clear();
+        b.nets.push(other);
+        let sub = Substrate::build(&b, &crate::topo::SubstrateConfig::default());
+        let t = crate::check::tests::line((3.0, 1.0), (3.2, 1.0), 0);
+        let via = [(pt(3.1, 0.6), 0.3, 1u32, Point::default())];
+        let (p, spike, q) = (pt(3.0, 1.0), pt(3.1, 1.5), pt(3.2, 1.0));
+        let short = |a: Point, c: Point| fixed_shortage(&b, &sub, &t, 0.2, 0.004, via.iter().copied(), a, c);
+        assert!(short(p, q) > short(p, spike).max(short(spike, q)));
+        assert!(short(p, q) > 0.0);
+        assert!(fixed_shortage(&b, &sub, &t, 0.2, 0.004, std::iter::empty(), p, q) < 0.0);
+        // the board edge counts as well
+        let (p, q) = (pt(3.0, 0.2), pt(3.2, 0.2));
+        let need = b.rules.edge_clearance + 0.1 + 0.004;
+        let found = fixed_shortage(&b, &sub, &t, 0.2, 0.004, std::iter::empty(), p, q);
+        assert!((found - (need - 0.2)).abs() < 1e-9, "{found}");
+    }
 
     #[test]
     fn a_rail_lets_go_of_a_track_that_turns_away() {
