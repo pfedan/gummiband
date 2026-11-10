@@ -42,6 +42,40 @@ types ignored). A crash or timeout on one board is reported in the table and the
 not stop the suite. The table is also written to `boards/out/results.txt`; the router output of
 each board is in `boards/out/<board>.route.log`.
 
+## Route hashes (regression test)
+
+`hashes.sh` routes the synthetic boards with fixed settings and prints one line per run: the name
+and the SHA-1 of the routed `.kicad_pcb`. Runs without an open end are deterministic (same input
+and seed, any thread count, any machine), so the list is a regression test: a refactoring or a
+micro-optimisation must leave it unchanged. Only the router runs, no `kicad-cli` is needed.
+
+```sh
+cargo build --release -p gummiband-cli
+bench/hashes.sh --check             # all boards against hashes.txt, about 5 min at 2 threads
+QUICK=1 bench/hashes.sh --check     # the quick set against hashes.quick.txt, what CI runs
+bench/hashes.sh easy bus            # print the hashes of some boards, compare nothing
+bench/hashes.sh --check path/to/gummiband    # another binary
+```
+
+Every board is routed with `--runs 4 --generations 1 --geometry-generations 0 --no-move-parts`.
+A few extra runs on small boards cover option paths the plain run does not touch (the defaults,
+`--angles 45`, `--pairs`, `--pair-pull`, `--patterns groups`, `--negotiate`); their names carry a
+`+`, as in `medium+45`. `--check` prints a diff and exits with 1 when a hash differs, and a run
+that fails shows up as `FAILED` in place of its hash. `RAYON_NUM_THREADS` sets the threads
+(default 4) and changes the time only.
+
+A change that is meant to alter results (a new heuristic, a changed default) is judged with
+`compare.py` and the KiCad DRC as before, and then the reference is updated deliberately, in the
+same commit as the change and with the reason in its message:
+
+```sh
+bench/hashes.sh --update            # rewrites hashes.txt
+QUICK=1 bench/hashes.sh --update    # rewrites hashes.quick.txt
+```
+
+Never update the reference to make a refactoring pass: there a changed hash is a bug. A new board
+from `gen_boards.py` needs `--update` too, since the full list covers every board in `boards/`.
+
 ## Two sided placement
 
 `gen_two_sided.py` writes four synthetic boards into `boards/two_sided/` for `gummiband place
@@ -131,3 +165,10 @@ First results (2026-10-29, `--runs 14 --generations 1`, no geometry generations)
 holds the length rules (the board has none of its own). `run-ddr5.sh [route args]` prints the
 lengths of the reference routing, routes the stripped board into `work/ddr5/routed/`, prints its
 lengths and the KiCad DRC summary.
+
+## Repository housekeeping
+
+`merged-branches.sh [REMOTE] [MAIN]` lists the branches of the remote (default `origin`) whose
+head is an ancestor of its main branch, and prints the `git push origin --delete ...` command for
+them. It is read-only: it asks the remote for its heads, fetches nothing and deletes nothing. A
+head whose commit is not in the local clone is listed as unknown, never as merged.

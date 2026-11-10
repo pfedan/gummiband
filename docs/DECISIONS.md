@@ -104,5 +104,8 @@ Standing decisions of the project owner, kept here so that they survive any sess
 - Order of work: converge the current state, then the roadmap at bird's eye level
   (`docs/MILESTONES.md`), then targeted new benchmarks. Micro-optimisation runs independently,
   also on newly added algorithms, and must preserve results byte for byte.
+- Refactorings must keep `bench/hashes.txt` unchanged (`bench/hashes.sh --check`, the quick set
+  runs in CI). The reference is only rewritten (`--update`) together with a change that is meant
+  to alter results, and the commit says so.
 - User documentation lives in the main README and `docs/`, user centred, in English.
 - Jetson Orin is not a test or benchmark board until the owner explicitly says so.
