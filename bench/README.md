@@ -49,21 +49,27 @@ and the SHA-1 of the routed `.kicad_pcb`. Runs without an open end are determini
 and seed, any thread count), so the list is a regression test: a refactoring or a
 micro-optimisation must leave it unchanged. Only the router runs, no `kicad-cli` is needed.
 
-The same machine, that is. The router calls `sin`, `cos`, `atan2`, `acos`, `exp`, `log`, `pow` and
-`hypot` of the system's maths library, and their last bits differ between glibc versions and
-macOS: the first CI run (glibc of Ubuntu 26.04) changed 12 of 15 hashes of a reference made with
-glibc 2.39, with the same compiler. So the reference files hold the hashes of the static musl
-build, which brings its own maths library and gives the same hashes on every x86_64 Linux; CI
-checks that build. On a Mac, compare two binaries instead.
+The reference holds for every build. The router used to call `sin`, `cos`, `atan2`, `acos`, `exp`,
+`log`, `pow` and `hypot` of the system's maths library, whose last bits differ between glibc
+versions, musl and macOS: the first CI run (glibc of Ubuntu 26.04) changed 12 of 15 hashes of a
+reference made with glibc 2.39, with the same compiler. Since 2026-11-10 these functions come from
+`gummiband_core::math` (the `libm` crate, pure Rust, compiled in), and the binary asks the system's
+maths library for nothing. Measured on x86_64 Linux: the glibc build and the static musl build give
+the same hash on all 27 runs, where before they agreed on 6. The reference did not change with it:
+the hashes are the ones the musl build had before. (The crate is a port of musl's maths library; its
+`sin`, `cos`, `tan`, `atan2`, `acos` and `hypot` give the bits of today's musl, its `exp`, `ln` and
+`powf` are an older version and differ in some last bits, which no run of the list noticed.) Another
+processor (macOS on ARM) is expected to give the same hashes, because only operations that IEEE 754
+fixes to the last bit are left to the hardware; that is not measured yet. `cargo test -p
+gummiband-core math` compares the bits of every function with fixed numbers, on any machine.
 
 ```sh
-# x86_64 Linux: against the reference
-rustup target add x86_64-unknown-linux-musl
-cargo build --release -p gummiband-cli --target x86_64-unknown-linux-musl
-bench/hashes.sh --check             # all boards against hashes.txt, about 5 min at 2 threads
+cargo build --release -p gummiband-cli
+bench/hashes.sh --check             # all boards against hashes.txt, about 2 min at 4 threads
 QUICK=1 bench/hashes.sh --check     # the quick set against hashes.quick.txt, what CI runs
 
-# any machine: the build before a change against the build after it
+# two binaries against each other: the build before a change and the one after it, or two
+# builds of the same source (glibc and musl, two compilers)
 bench/hashes.sh --compare path/to/old/gummiband target/release/gummiband
 QUICK=1 bench/hashes.sh --compare OLD NEW
 
@@ -95,7 +101,7 @@ from `gen_boards.py` needs `--update` too, since the full list covers every boar
 --two-sided` (placement only, no routing): `ts_som` (4 layers, 42 x 30 mm, BGA SoC and memory,
 PMIC, about 120 0402 parts, a board to board connector locked on the back; the parts need about
 1.4 times the front), `ts_sensor` (34 x 23 mm, a coin cell holder locked on the back, an antenna
-keepout on the front: one sided nothing fits, two sided the front holds it all), `ts_roomy` (a
+keepout on the front: one sided nothing fits, two sided the front holds nearly all), `ts_roomy` (a
 control with room to spare) and `ts_tht` (through hole electrolytics and a terminal block between
 SMD converters). `check_sides.py PLACED [--input ORIGINAL]` checks a result from the file alone:
 courtyard overlaps per side, the holes of through hole parts against parts on the other side, SMD
@@ -103,14 +109,15 @@ pads and courtyards on the layers of their side, mirrored texts on the back, and
 that every part that changed sides keeps its pad distances and is mirrored. `draw_sides.py PLACED
 OUT.svg` draws front and back next to each other.
 
-With `--iters 1000000`, one start, seed 1:
+With `--iters 1000000`, one start, seed 1 (counts of 2026-11-10, with the maths of
+`gummiband_core::math`; the system's maths gave 0 and 10 on `ts_sensor` and `ts_tht`):
 
 | Board | One sided | Two sided: parts on the back | Wall time |
 | --- | --- | --- | --- |
 | `ts_som` | fails before the search, 321 mm2 missing | 105 | 20 s |
-| `ts_sensor` | fails before the search, 275 mm2 missing | 0 (the front holds it all once the holder only takes the back) | 6 s |
+| `ts_sensor` | fails before the search, 275 mm2 missing | 1 (the front holds the rest once the holder only takes the back) | 6 s |
 | `ts_roomy` | places | 9 (decoupling capacitors under their IC) | 3 s |
-| `ts_tht` | places | 10, some under the electrolytics | 3 s |
+| `ts_tht` | places | 11, some under the electrolytics | 3 s |
 
 `check_sides.py` finds no problem on any of them.
 

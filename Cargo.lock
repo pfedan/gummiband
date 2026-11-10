@@ -491,6 +491,7 @@ name = "gummiband-core"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "libm",
  "pollster",
  "rayon",
  "serde",

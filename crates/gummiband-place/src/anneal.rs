@@ -3,6 +3,7 @@
 //! low temperature polish that only accepts overlap free moves.
 
 use gummiband_core::geom::{Point, pt};
+use gummiband_core::math;
 use gummiband_kicad::place_write::kicad_rot;
 
 use crate::model::{Design, R};
@@ -722,7 +723,7 @@ impl<'a> Placer<'a> {
 
     fn intrusion_area(&self, u: usize, c: &Corridor, a: Point, b: Point) -> f64 {
         let ab = b - a;
-        let len = ab.x.hypot(ab.y);
+        let len = math::hypot(ab.x, ab.y);
         if len < 1e-6 {
             return 0.0;
         }
@@ -958,9 +959,9 @@ impl<'a> Placer<'a> {
         }
         for it in 0..iters {
             let f = it as f64 / iters as f64;
-            let t = t0 * (t1 / t0).powf(f);
-            let lambda = if hard { 0.0 } else { l0 * (l1 / l0).powf(f) };
-            let rad = r0 * (r1 / r0).powf(f);
+            let t = t0 * math::powf(t1 / t0, f);
+            let lambda = if hard { 0.0 } else { l0 * math::powf(l1 / l0, f) };
+            let rad = r0 * math::powf(r1 / r0, f);
             let mv = rng.f();
             let u = rng.below(n);
             let us: Vec<usize>;
@@ -1011,7 +1012,7 @@ impl<'a> Placer<'a> {
                 }
             }
             let delta = (w1 - w0) + lambda * (o1 - o0);
-            if !reject && (delta <= 0.0 || rng.f() < (-delta / t).exp()) {
+            if !reject && (delta <= 0.0 || rng.f() < math::exp(-delta / t)) {
                 for &n in &nets {
                     self.net_cost[n] = self.hpwl(n);
                 }

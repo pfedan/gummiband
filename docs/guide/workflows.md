@@ -148,8 +148,9 @@ Effort knobs, from cheap to expensive:
 | the last connections on a dense board | nothing: the search negotiates on its own when a few stay open; `--negotiate 20` does it from the start |
 
 The search is deterministic: the same board, options and `GB_EVO_SEED` give the same result with
-any `--threads` on the same build and operating system; the thread count only changes the run time. Set a different
-`GB_EVO_SEED` to get another attempt.
+any `--threads`; the thread count only changes the run time. It is designed to give the same
+result on every machine as well (verified on x86_64 Linux with glibc and with musl, see
+[Concepts](concepts.md)). Set a different `GB_EVO_SEED` to get another attempt.
 
 ## Let parts move
 

@@ -3,12 +3,10 @@
 # Results without an open end are deterministic (same input and seed, any thread count), so the
 # list is a regression test: a refactoring must leave it unchanged.
 #
-# The reference files hold the hashes of the static musl build on x86_64 Linux
-# (cargo build --release -p gummiband-cli --target x86_64-unknown-linux-musl). The router calls
-# sin, cos, atan2, acos, exp, log, pow and hypot of the system's maths library, and their last bits
-# differ between glibc versions and macOS, which changes the routed file. musl brings its own, so
-# that build gives the same hashes on every x86_64 Linux. On another build compare two binaries
-# with --compare instead of --check.
+# The router brings its own maths (gummiband_core::math, the libm crate) and asks the system's
+# maths library for nothing, so the reference files hold for every build: the glibc build and the
+# static musl build give the same hashes (measured on x86_64 Linux). --compare routes with two
+# binaries, for a change that should leave the results alone or for a look at another platform.
 #
 # Usage: bench/hashes.sh [BIN] [board ...]      (default BIN: target/release/gummiband)
 #        bench/hashes.sh --check [BIN]          compare with bench/hashes.txt, exit 1 on a difference
@@ -25,15 +23,12 @@ case "${1:-}" in
     --update) MODE=update; shift ;;
     --compare) MODE=compare; shift ;;
 esac
-MUSL=$ROOT/target/x86_64-unknown-linux-musl/release/gummiband
 if [ $MODE = compare ]; then
     [ $# -ge 2 ] || { echo "usage: bench/hashes.sh --compare OLD_BIN NEW_BIN [board ...]" >&2; exit 2; }
     OLD=$1; BIN=$2; shift 2
     [ -x "$OLD" ] || { echo "no router binary at $OLD" >&2; exit 2; }
 elif [ $# -gt 0 ]; then
     BIN=$1; shift
-elif [ $MODE != print ] && [ -x "$MUSL" ]; then
-    BIN=$MUSL
 else
     BIN=$ROOT/target/release/gummiband
 fi

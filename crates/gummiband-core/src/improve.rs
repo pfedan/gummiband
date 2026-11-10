@@ -13,6 +13,7 @@ use crate::board::Board;
 use crate::geom::{Point, Rect};
 use crate::index::FastMap;
 use crate::knobs;
+use crate::math;
 use crate::realize::{Geometry, Track, Via};
 use crate::route::{End, Goal, Router, seg_param_intersection};
 use crate::topo::Substrate;
@@ -1857,25 +1858,26 @@ impl Bandit {
 
 fn normal_draw(rng: &mut Rng) -> f64 {
     let u = rng.unit().max(1e-300);
-    (-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * rng.unit()).cos()
+    (-2.0 * math::ln(u)).sqrt() * math::cos(std::f64::consts::TAU * rng.unit())
 }
 
 /// Gamma(a, 1) after Marsaglia and Tsang.
 fn gamma_draw(a: f64, rng: &mut Rng) -> f64 {
     if a < 1.0 {
         let u = rng.unit().max(1e-300);
-        return gamma_draw(a + 1.0, rng) * u.powf(1.0 / a);
+        return gamma_draw(a + 1.0, rng) * math::powf(u, 1.0 / a);
     }
     let d = a - 1.0 / 3.0;
     let c = 1.0 / (9.0 * d).sqrt();
     loop {
         let x = normal_draw(rng);
-        let v = (1.0 + c * x).powi(3);
+        let t = 1.0 + c * x;
+        let v = t * t * t;
         if v <= 0.0 {
             continue;
         }
         let u = rng.unit().max(1e-300);
-        if u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
+        if math::ln(u) < 0.5 * x * x + d * (1.0 - v + math::ln(v)) {
             return d * v;
         }
     }

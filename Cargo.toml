@@ -15,6 +15,9 @@ gummiband-place = { path = "crates/gummiband-place" }
 gummiband-app = { path = "crates/gummiband-app" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+# The maths of gummiband_core::math, see there. Default features only: `arch` uses the hardware for
+# sqrt, fma and rint, which IEEE 754 defines to the last bit; never the `unstable` ones.
+libm = "0.2.16"
 rayon = "1"
 rstar = "0.12"
 serde = { version = "1", features = ["derive"] }

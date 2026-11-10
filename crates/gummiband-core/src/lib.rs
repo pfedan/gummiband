@@ -9,6 +9,7 @@ mod improve;
 pub mod index;
 pub mod knobs;
 pub mod matching;
+pub mod math;
 pub mod octo;
 pub mod pairs;
 pub mod patterns;

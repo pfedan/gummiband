@@ -4,6 +4,7 @@
 //! net, so the pair stays together and nothing gets between its tracks. Afterwards the wide
 //! track is split into the two real tracks, parallel to its centre line.
 
+use crate::math;
 use std::collections::HashMap;
 
 use crate::board::{Board, ClassId, LayerId, LayerSet, NetId, Obstacle, ObstacleKind, Pin};
@@ -215,7 +216,7 @@ fn breakout_towards(
         let disc: Vec<Point> = (0..16)
             .map(|i| {
                 let a = i as f64 * std::f64::consts::PI / 8.0;
-                c + pt(a.cos(), a.sin()) * r
+                c + pt(math::cos(a), math::sin(a)) * r
             })
             .collect();
         if let Some(mut o) = zone(b, p, n, &disc, carrier_clr) {
@@ -2267,7 +2268,7 @@ pub fn route_pairs(
             if let Some(mp) = merged.pairs.iter().find(|mp| mp.p == t.net) {
                 let (w, g, _) = real.pair_shape(mp.p, mp.n, t.layer);
                 let s = (w + g) / 2.0;
-                let out = s * (1.0 / (std::f64::consts::PI / 8.0).cos() - 1.0);
+                let out = s * (1.0 / math::cos(std::f64::consts::PI / 8.0) - 1.0);
                 t.width = t.width.max(2.0 * (s + out + w / 2.0) + 0.002);
             }
         }
@@ -3431,7 +3432,7 @@ mod tests {
             .iter()
             .map(|x| {
                 let (a, b) = elem_ends(x);
-                (b.y - a.y).atan2(b.x - a.x).to_degrees()
+                math::atan2(b.y - a.y, b.x - a.x).to_degrees()
             })
             .collect();
         assert!(dirs[0].abs() < 1e-9 && (dirs[1] + 45.0).abs() < 1e-9);

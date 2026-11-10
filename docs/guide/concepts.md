@@ -304,8 +304,11 @@ the geometry step), then fewest vias and shortest length.
 
 ![The phases of a run: portfolio, generations, geometry, geometry generations, keep improving, finishing](img/search-pipeline.svg)
 
-Results are deterministic for the same input, options and seed, with any thread count on the
-same build and operating system (another maths library can change the last bits and the result): the portfolio size is a constant (14 runs), and threads only change the run time.
+Results are deterministic for the same input, options and seed, with any thread count: the
+portfolio size is a constant (14 runs), and threads only change the run time. The router is built
+to give the same file on every machine too: it brings its own maths functions and does not use
+the ones of the operating system, whose last bits differ. That is verified on x86_64 Linux
+(with two different C libraries); other platforms are expected to agree.
 
 ## Judging and violations
 

@@ -14,6 +14,7 @@
 //!   net's track length minus what counts. Lines a hair off parallel, as any-angle offsets
 //!   rounded to the grid are, do not count at all.
 
+use crate::math;
 use std::collections::HashMap;
 
 use crate::board::{Board, LayerId, MatchKind, MinOptMax, NetId, Obstacle, ObstacleKind};
@@ -66,7 +67,7 @@ pub fn circle(a: Point, m: Point, b: Point) -> Option<(Point, f64)> {
 }
 
 fn ang(p: Point, c: Point) -> f64 {
-    (p.y - c.y).atan2(p.x - c.x)
+    math::atan2(p.y - c.y, p.x - c.x)
 }
 
 fn norm_pi(mut a: f64) -> f64 {
@@ -250,8 +251,8 @@ fn point_at(e: &Elem, t: f64) -> Point {
                 let s = sweep(a, m, b, c) * t;
                 let a0 = ang(a, c) + s;
                 Point {
-                    x: c.x + r * a0.cos(),
-                    y: c.y + r * a0.sin(),
+                    x: c.x + r * math::cos(a0),
+                    y: c.y + r * math::sin(a0),
                 }
             }
             None => a.lerp(b, t),
@@ -367,8 +368,8 @@ pub fn coupling(board: &Board, geo: &Geometry, p: NetId, n: NetId, gap: MinOptMa
                             };
                             let mid = from + span / 2.0;
                             let at = |c: Point, r: f64| Point {
-                                x: c.x + r * mid.cos(),
-                                y: c.y + r * mid.sin(),
+                                x: c.x + r * math::cos(mid),
+                                y: c.y + r * math::sin(mid),
                             };
                             let d = (rp - rn).abs();
                             if fits(d - half) && !foreign(at(cp, rp), at(cn, rn), a.layer) {

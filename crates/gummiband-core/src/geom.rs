@@ -1,5 +1,6 @@
 //! Planar geometry in millimetres.
 
+use crate::math;
 use std::f64::consts::PI;
 use std::ops::{Add, Mul, Neg, Sub};
 
@@ -21,7 +22,7 @@ impl Point {
         self.x * o.y - self.y * o.x
     }
     pub fn len(self) -> f64 {
-        self.x.hypot(self.y)
+        math::hypot(self.x, self.y)
     }
     pub fn len2(self) -> f64 {
         self.dot(self)
@@ -38,7 +39,7 @@ impl Point {
         pt(-self.y, self.x)
     }
     pub fn rotate(self, angle_rad: f64) -> Point {
-        let (s, c) = angle_rad.sin_cos();
+        let (s, c) = math::sin_cos(angle_rad);
         pt(self.x * c - self.y * s, self.x * s + self.y * c)
     }
     pub fn lerp(self, o: Point, t: f64) -> Point {
@@ -141,7 +142,7 @@ impl Rect {
         let to_box = |p: Point| {
             let dx = (self.min.x - p.x).max(p.x - self.max.x).max(0.0);
             let dy = (self.min.y - p.y).max(p.y - self.max.y).max(0.0);
-            dx.hypot(dy)
+            math::hypot(dx, dy)
         };
         [
             self.min,
@@ -446,13 +447,13 @@ pub fn arc_segments(r: f64, max_error: f64, angle: f64) -> usize {
         return 4.max((angle / (PI / 2.0)).ceil() as usize);
     }
     // Circumscribed polygon: r / cos(a/2) - r <= e  =>  a <= 2 acos(r / (r + e))
-    let step = 2.0 * (r / (r + max_error)).acos();
+    let step = 2.0 * math::acos(r / (r + max_error));
     ((angle / step).ceil() as usize).max(2)
 }
 
 pub fn circle_polygon(c: Point, r: f64, max_error: f64) -> Polygon {
     let n = arc_segments(r, max_error, 2.0 * PI).max(8);
-    let rr = r / (PI / n as f64).cos();
+    let rr = r / math::cos(PI / n as f64);
     Polygon::new(
         (0..n)
             .map(|i| c + pt(rr, 0.0).rotate(2.0 * PI * (i as f64 + 0.5) / n as f64))
@@ -467,7 +468,7 @@ pub fn capsule_polygon(a: Point, b: Point, r: f64, max_error: f64) -> Polygon {
     }
     let dir = d.norm();
     let n = arc_segments(r, max_error, PI).max(4);
-    let rr = r / (PI / (2.0 * n as f64)).cos();
+    let rr = r / math::cos(PI / (2.0 * n as f64));
     let mut pts = Vec::with_capacity(2 * n + 2);
     let base = dir.perp();
     // cap around b, from +perp to -perp through +dir
@@ -501,7 +502,7 @@ pub fn roundrect_polygon(at: Point, w: f64, h: f64, radius: f64, angle_rad: f64,
         ];
     } else {
         let n = arc_segments(r, max_error, PI / 2.0).max(2);
-        let rr = r / (PI / (4.0 * n as f64)).cos();
+        let rr = r / math::cos(PI / (4.0 * n as f64));
         let corners = [
             (pt(hx, hy), 0.0),
             (pt(-hx, hy), PI / 2.0),
@@ -534,8 +535,8 @@ pub fn arc_from_three(a: Point, m: Point, b: Point) -> Option<(Point, f64, f64, 
     let cy = (a2 * (b.x - m.x) + m2 * (a.x - b.x) + b2 * (m.x - a.x)) / d;
     let c = pt(cx, cy);
     let r = c.dist(a);
-    let sa = (a - c).y.atan2((a - c).x);
-    let ea = (b - c).y.atan2((b - c).x);
+    let sa = math::atan2((a - c).y, (a - c).x);
+    let ea = math::atan2((b - c).y, (b - c).x);
     let ccw = orient(a, m, b) > 0.0;
     let mut sweep = ea - sa;
     if ccw {

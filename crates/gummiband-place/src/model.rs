@@ -1,6 +1,7 @@
 //! Footprints of a KiCad board as placement objects: reference, pose, courtyard as rectangles in
 //! the footprint frame, pads with nets. Parsed from the s-expression tree of the board.
 
+use gummiband_core::math;
 use std::collections::HashMap;
 
 use gummiband_core::geom::{Point, pt};
@@ -314,7 +315,7 @@ fn arc_extremes(a: Point, m: Point, b: Point) -> Vec<Point> {
         (sq(a) * (b.x - m.x) + sq(m) * (a.x - b.x) + sq(b) * (m.x - a.x)) / d,
     );
     let r = c.dist(a);
-    let ang = |p: Point| (p.y - c.y).atan2(p.x - c.x);
+    let ang = |p: Point| math::atan2(p.y - c.y, p.x - c.x);
     let tau = std::f64::consts::TAU;
     // sweep from a in the direction that passes m
     let ccw = |t: f64| (t - ang(a)).rem_euclid(tau);
@@ -328,7 +329,7 @@ fn arc_extremes(a: Point, m: Point, b: Point) -> Vec<Point> {
         .iter()
         .map(|k| k * std::f64::consts::PI)
         .filter(|&t| passes(t))
-        .map(|t| pt(c.x + r * t.cos(), c.y + r * t.sin()))
+        .map(|t| pt(c.x + r * math::cos(t), c.y + r * math::sin(t)))
         .collect()
 }
 

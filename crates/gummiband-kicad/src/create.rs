@@ -3,6 +3,7 @@
 //! mounting holes, and the net classes in the `.kicad_pro`. Parts are laid out in rows inside
 //! the outline, unlocked, for `place_parts` / `move_part` to take over.
 
+use gummiband_core::math;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::ops::Range;
@@ -443,7 +444,7 @@ fn footprint_bbox(root: &Node) -> [f64; 4] {
         }
         if h == "fp_circle" {
             if let (Some(c), Some(e)) = (xy(g, "center"), xy(g, "end")) {
-                let r = (e.0 - c.0).hypot(e.1 - c.1);
+                let r = math::hypot(e.0 - c.0, e.1 - c.1);
                 add(c.0, c.1, r, r);
                 any = true;
             }
@@ -476,8 +477,8 @@ fn footprint_bbox(root: &Node) -> [f64; 4] {
             add(
                 x,
                 y,
-                (w * a.cos()).abs() + (h * a.sin()).abs(),
-                (w * a.sin()).abs() + (h * a.cos()).abs(),
+                (w * math::cos(a)).abs() + (h * math::sin(a)).abs(),
+                (w * math::sin(a)).abs() + (h * math::cos(a)).abs(),
             );
             any = true;
         }

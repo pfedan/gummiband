@@ -18,7 +18,8 @@ negotiated congestion), not any existing product's code.
 - Nets are routed by priority (net class priority, overridable per net).
 - Use all cores: independent work (portfolio search over net orders, per layer realization,
   per net checks) runs in parallel with rayon.
-- Deterministic: the same input and seed give the same board.
+- Deterministic: the same input and seed give the same board, on every machine. Transcendental
+  functions come from `gummiband_core::math` (pure Rust), not from the system's maths library.
 - First target: two signal layers (F.Cu, B.Cu); inner plane layers are only crossed by vias.
 
 ## Overview
@@ -66,6 +67,12 @@ negotiated congestion), not any existing product's code.
 | `plugin/` | KiCad action plugin (Python, KiCad IPC API): exports the board, runs the CLI, imports the result. |
 
 Units: millimetres as `f64` in the core. The writer rounds to KiCad's nanometre grid.
+
+Maths: every crate takes `sin`, `cos`, `atan2`, `exp`, `ln`, `powf`, `hypot` and the like from
+`gummiband_core::math` (free functions, `math::atan2(y, x)`), which wraps the `libm` crate. The
+methods of `f64` call the system's maths library, whose last bits differ between systems; a test
+in that module fails when one of them, or `powi`, appears in a source file. `sqrt`, `abs`,
+rounding and `mul_add` are exact everywhere and stay with the standard library.
 
 ## Route pipeline
 

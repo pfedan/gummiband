@@ -34,11 +34,15 @@ Standing decisions of the project owner, kept here so that they survive any sess
 - Completion comes first: the geometry stage never trades a connection for cleaner geometry.
 - Results are deterministic: the same input and seed give the same output on every machine, at
   any thread count (fixed default portfolio, no decisions by the clock). This rule holds for runs
-  without an open end. Measured on 2026-11-10: it holds per build and maths library, not across
-  them. The core calls the system's `sin`, `cos`, `atan2`, `acos`, `exp`, `log`, `pow` and `hypot`,
-  whose last bits differ between glibc versions and macOS, and the routed file changes with them
-  (see `bench/README.md`, route hashes). Open: a maths library of our own in the core would make
-  the rule true everywhere, at the price of new reference results. An open ended run (`--until-stop`) ends when the user says so; there
+  without an open end. For it the workspace has its own maths (2026-11-10): `sin`, `cos`,
+  `atan2`, `acos`, `exp`, `ln`, `powf`, `hypot` and their kin come from `gummiband_core::math`
+  (the `libm` crate, pure Rust), never from the system's maths library, whose last bits differ
+  between glibc versions, musl and macOS and changed the routed file with them. A test keeps
+  the methods of `f64` that go to the system out of the sources, `powi` too. Measured: the glibc
+  and the musl build on x86_64 Linux give the same files (`bench/README.md`, route hashes);
+  macOS on ARM is expected to, and still to be measured. The reference results stayed those of
+  the musl build (no hash changed); a new version of the crate that changes a bit may change
+  them. An open ended run (`--until-stop`) ends when the user says so; there
   keeping the cores busy comes first, and its results may change with the way the mutants are
   scheduled, also with the timing. Its present scheduling still repeats the same seed and last
   generation at any thread count.

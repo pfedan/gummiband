@@ -26,16 +26,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
       # No kicad-cli or rsvg-convert on the runner: the tests do not call them.
       - name: Tests
         run: cargo test --workspace
-      # The static musl build: its results do not depend on the runner's maths library.
+      # The router brings its own maths (gummiband_core::math), so the hashes do not depend on the
+      # runner's C library.
       - name: Release build of the router
-        run: cargo build --release -p gummiband-cli --target x86_64-unknown-linux-musl
+        run: cargo build --release -p gummiband-cli
       # Routes the quick synthetic boards and compares the SHA-1 of every result with
       # bench/hashes.quick.txt (see bench/README.md). Deterministic at any thread count.
       - name: Route hashes (quick set)

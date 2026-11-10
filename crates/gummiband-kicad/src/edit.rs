@@ -4,6 +4,7 @@
 
 use gummiband_core::board::ObstacleKind;
 use gummiband_core::geom::{Point, Rect, pt};
+use gummiband_core::math;
 
 use crate::place_write::{Patch, fmt_mm, kicad_rot, norm_angle};
 use crate::power::glob;
@@ -285,7 +286,7 @@ fn text_box(at: Point, chars: usize, size: (f64, f64), thickness: f64, angle: f6
 fn rect_dist(a: &Rect, b: &Rect) -> f64 {
     let dx = (b.min.x - a.max.x).max(a.min.x - b.max.x).max(0.0);
     let dy = (b.min.y - a.max.y).max(a.min.y - b.max.y).max(0.0);
-    dx.hypot(dy)
+    math::hypot(dx, dy)
 }
 
 /// Silk graphics of a footprint on `layer` in board coordinates, as segments with their width.
@@ -330,7 +331,7 @@ fn graphic_segments(g: &Node, at: Point, rot: f64, out: &mut Vec<(Point, Point, 
                 let ring: Vec<Point> = (0..=16)
                     .map(|k| {
                         let t = k as f64 / 16.0 * std::f64::consts::TAU;
-                        c + pt(r * t.cos(), r * t.sin())
+                        c + pt(r * math::cos(t), r * math::sin(t))
                     })
                     .collect();
                 push(&ring);

@@ -13,6 +13,7 @@
 use crate::board::{Board, KEEPOUT_GAP, NetId, ObstacleKind};
 use crate::geom::{Point, Rect, point_seg_dist, pt, seg_seg_dist};
 use crate::index::GridIndex;
+use crate::math;
 use crate::realize::{Elem, Geometry, Track, Via};
 
 /// What the 45 degree step did.
@@ -71,7 +72,7 @@ fn two_legs(a: Point, b: Point) -> Option<([Point; 2], [usize; 2])> {
     if v.len() < 1e-9 {
         return None;
     }
-    let ang = v.y.atan2(v.x).rem_euclid(std::f64::consts::TAU);
+    let ang = math::atan2(v.y, v.x).rem_euclid(std::f64::consts::TAU);
     let k = ((ang / std::f64::consts::FRAC_PI_4).floor() as usize) % 8;
     let d = dirs();
     let (d1, d2) = (d[k], d[(k + 1) % 8]);
