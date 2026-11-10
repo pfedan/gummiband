@@ -218,6 +218,22 @@ fn initialize_list_load_route() {
         "the open end did not stop: {:?}",
         t0.elapsed()
     );
+    // what the open end leaves to choose from is written next to the output and listed
+    for a in r["alternatives"].as_array().expect("alternatives") {
+        let path = a["path"].as_str().unwrap();
+        assert!(path.contains(".alt") && std::path::Path::new(path).is_file(), "{a}");
+    }
+    // the input is never the output, in the words of the pipeline
+    assert_eq!(
+        s.call_err("route", json!({"board": "b1", "output": pcb})),
+        "error: the output must differ from the input file: the input stays as it is"
+    );
+    // a layer taken as a plane for this route only: nothing is routed on it
+    let r = s.call(
+        "route",
+        json!({"board": "b1", "runs": 1, "generations": 0, "plane_layers": ["B.Cu"]}),
+    );
+    assert_eq!((&r["routed"], &r["vias"]), (&json!(1), &json!(0)), "{r}");
 
     // pre-routing: look at a part, lock copper in a working copy, route around it
     let part = s.call("part_info", json!({"board": "b1", "reference": "R1"}));
