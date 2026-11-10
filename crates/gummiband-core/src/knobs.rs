@@ -45,10 +45,6 @@ pub enum Read {
     Set,
     /// On unless the variable is exactly `0`; on when unset.
     NotZero,
-    /// On only when the variable is exactly `1`.
-    One,
-    /// On when the variable is set to anything but `0`; off when unset.
-    SetNotZero,
     /// A number; the default of the table holds when the variable is unset or does not parse.
     Num,
     /// A value the reading code interprets (a name, a path, a list, a number whose default
@@ -62,8 +58,6 @@ impl Read {
         match self {
             Read::Set => "set to anything",
             Read::NotZero => "`0` turns it off",
-            Read::One => "`1` turns it on",
-            Read::SetNotZero => "anything but `0` turns it on",
             Read::Num => "number",
             Read::Value => "value",
         }
@@ -88,8 +82,6 @@ fn flag(read: Read, raw: Option<&str>) -> bool {
     match read {
         Read::Set => raw.is_some(),
         Read::NotZero => raw != Some("0"),
-        Read::One => raw == Some("1"),
-        Read::SetNotZero => raw.is_some_and(|v| v != "0"),
         Read::Num | Read::Value => unreachable!("not a flag"),
     }
 }
@@ -111,8 +103,7 @@ impl Knob {
         self.cell.get_or_init(|| std::env::var(self.name).ok()).as_deref()
     }
 
-    /// For a flag ([`Read::Set`], [`Read::NotZero`], [`Read::One`], [`Read::SetNotZero`]):
-    /// whether it is on.
+    /// For a flag ([`Read::Set`], [`Read::NotZero`]): whether it is on.
     pub fn on(&'static self) -> bool {
         flag(self.read, self.text())
     }
@@ -204,8 +195,6 @@ knobs! {
         "Open end, combination A: this share of the moves aims at an expensive routed connection; `0` turns it off.";
     PRUNE = "GB_PRUNE", Switch, NotZero, "on",
         "Open end, combination A: a mutant that cannot beat its parent is dropped before its relaxation.";
-    PRUNE_STARTS = "GB_PRUNE_STARTS", Experiment, SetNotZero, "off",
-        "Open end: prune the starts of side branches too, as before 2026-11-02.";
     PLANE_HOLD = "GB_PLANE_HOLD", Switch, NotZero, "on",
         "Open end: a new via that reaches the plane of its net stays in it when it is moved.";
     NO_RELAX = "GB_NO_RELAX", Switch, Set, "off",
@@ -282,8 +271,6 @@ knobs! {
         "Extra cost in mm for passing right next to a pad of another net that still waits for its route.";
     SHARE_KIND = "GB_SHARE_KIND", Experiment, Value, "all kinds",
         "`--patterns shares`: only the shares of this kind (`neighbours` or `decap`).";
-    GROUP_ORDER = "GB_GROUP_ORDER", Experiment, Value, "long",
-        "`--patterns groups`: the order of the blocks (`long`, `short`, `inline`).";
     SKEW_WEIGHT = "GB_SKEW_WEIGHT", Experiment, Num, "0.5",
         "Weight of a mm of skew need in the cost of a candidate.";
     REFINE = "GB_REFINE", Experiment, Num, "0.6",
@@ -294,16 +281,6 @@ knobs! {
         "Relaxation: distance of the points on a track in mm.";
     COARSE = "GB_COARSE", Experiment, Value, "twice the spacing, at least 0.1",
         "Relaxation: distance of the points in mm while the bands still move a lot.";
-    VIP_NETS = "GB_VIP_NETS", Experiment, Value, "none",
-        "Via in pad experiment: these nets (comma separated) may take a via in a pad at any time.";
-    VIP_LEARN = "GB_VIP_LEARN", Experiment, One, "off",
-        "Via in pad experiment: a net that needed the last resort once may take it at any time.";
-    VIP_RETRY = "GB_VIP_RETRY", Experiment, Value, "off",
-        "Via in pad experiment: `1` or `each` routes the winner again with a via in a pad for its open nets.";
-    VIP_EARLY = "GB_VIP_EARLY", Experiment, Value, "off",
-        "Via in pad experiment: `empty` or `1` decides the nets before the generations.";
-    PAD_REUSE = "GB_PAD_REUSE", Experiment, One, "off",
-        "Via in pad experiment: a via in the source pad that was ripped up can come back.";
     SHIFT = "GB_SHIFT", Experiment, Value, "unset",
         "CLI `route`, debugging: `R8:0.3,0;C4:0,-0.2` routes the board with these parts shifted by mm.";
     CC_GAP = "GB_CC_GAP", Experiment, Value, "the gap of `place`",
@@ -329,8 +306,6 @@ mod tests {
         for (read, want) in [
             (Read::Set, [false, true, true, true, true]),
             (Read::NotZero, [true, true, false, true, true]),
-            (Read::One, [false, false, false, true, false]),
-            (Read::SetNotZero, [false, true, false, true, true]),
         ] {
             let got = [None, Some(""), Some("0"), Some("1"), Some("x")].map(|raw| on(read, raw));
             assert_eq!(got, want, "{read:?}");

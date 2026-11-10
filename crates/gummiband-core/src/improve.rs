@@ -844,7 +844,7 @@ fn mutant_traced<'a>(
     // a side branch starts below its parent on purpose: its floor lies under what the parent
     // routes, and a start that cannot beat the parent is what it is for
     let start = floor < s.cand.stats.routed;
-    if ideas().prune && !(start && !ideas().prune_starts) && hopeless(s, &r, &conns, routed) {
+    if ideas().prune && !start && hopeless(s, &r, &conns, routed) {
         PRUNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tr.why = "pruned";
         return None;
@@ -1702,8 +1702,6 @@ struct Ideas {
     /// without clearance spots nearly every one of them looked hopeless, so no side branch started
     /// and the level climbed by one per generation.
     prune: bool,
-    /// `GB_PRUNE_STARTS=1`: prune the starts of side branches too, as before.
-    prune_starts: bool,
     /// `GB_MERGE`: the mutants of a generation that beat their parent in places apart from each
     /// other all count, not only the best of them, see [`merge_wins`].
     merge: bool,
@@ -1730,7 +1728,6 @@ fn ideas() -> &'static Ideas {
         bandit: knobs::BANDIT.on(),
         aim_cost: knobs::AIM_COST.num(),
         prune: knobs::PRUNE.on(),
-        prune_starts: knobs::PRUNE_STARTS.on(),
         merge: knobs::MERGE.on(),
         window: knobs::WINDOW.num(),
         spot_fade: knobs::SPOT_FADE.on(),

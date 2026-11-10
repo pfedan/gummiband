@@ -839,3 +839,12 @@ LED controller (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
   working with an AI agent (`docs/guide/ai-agents.md`), result images from the benchmark boards and
   drawings of the principles in every chapter; the drawings come from
   `docs/guide/img/src/schematics.py`.
+
+## Consolidation: environment variables
+
+- 2026-11-10: experiment switches whose measurements above are concluded were removed with their
+  code: the via in a pad experiments `GB_VIP_NETS`, `GB_VIP_LEARN`, `GB_VIP_RETRY`, `GB_VIP_EARLY`
+  and `GB_PAD_REUSE` (the via in a pad stays the last resort of a run),
+  `GB_PRUNE_STARTS`, and the routing order `groups-inline` with `GB_GROUP_ORDER` (`groups`,
+  `groups-long` and `groups-short` stay). The texts above describe them as they were; the code is
+  in the git history up to 3a9d573. What is left is listed in `docs/ENVIRONMENT.md`.
