@@ -535,6 +535,11 @@ pub struct Routed {
     pub matching: Vec<gummiband_core::matching::RuleMatch>,
     /// Clearance violations of the result.
     pub violations: Vec<gummiband_core::check::Violation>,
+    /// What the last check on the finished copper took out or found open (its open connections
+    /// are in `res.stats.unrouted` as well).
+    pub legal: gummiband_core::legal::Legal,
+    /// The same for every alternative of the open end, in their order.
+    pub legal_alternatives: Vec<gummiband_core::legal::Legal>,
     write: WriteOptions,
 }
 
@@ -691,6 +696,15 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
             seconds: t1.elapsed().as_secs_f64(),
         }
     });
+    // the last word, on the finished copper: no short between two nets is written, and a
+    // connection counts as routed only if the copper holds together
+    let legal = gummiband_core::legal::enforce(b, &mut res.geometry, &mut res.stats);
+    // the alternatives of the open end are written as boards too
+    let legal_alternatives = res
+        .alternatives
+        .iter_mut()
+        .map(|(stats, geometry)| gummiband_core::legal::enforce(b, geometry, stats))
+        .collect();
     let matching = gummiband_core::matching::check(b, &res.geometry);
     let violations = gummiband_core::check::check(b, &res.geometry);
     let soft = gummiband_core::import::soft_changes(b, &res.geometry);
@@ -712,6 +726,8 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
         tuned,
         matching,
         violations,
+        legal,
+        legal_alternatives,
         write: WriteOptions {
             keep_all: opts.keep_all,
             keep_locked: opts.keep_locked,
@@ -725,8 +741,14 @@ impl Routed {
     /// The board file with `geometry` (the result's own, or one of its alternatives) in place
     /// of the copper that goes, and the number of items written. Soft copper that rests stays
     /// in the file as it is; the meanders of the tuning become KiCad tuning patterns.
+    ///
+    /// Every board of a route is written here, so the writer looks once more: a track of the
+    /// route that shorts another net is not written, whatever way the geometry came
+    /// (`gummiband_core::legal::without_shorts`). After [`route_board`] there is none.
     pub fn board_text(&self, kb: &KicadBoard, geometry: &Geometry) -> Result<(String, usize)> {
         let b = &self.board;
+        let without = gummiband_core::legal::without_shorts(b, geometry);
+        let geometry = without.as_ref().unwrap_or(geometry);
         // an alternative has its own soft copper that moved
         let changes = gummiband_core::import::soft_changes(b, geometry);
         let rests = |origin: Option<u32>, list: &[bool]| origin.is_some_and(|o| !list[o as usize]);

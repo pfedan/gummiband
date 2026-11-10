@@ -39,6 +39,15 @@ pub fn angles_45(kb: &KicadBoard, nets: &[String]) -> Result<(String, Angles45)>
         t.elems = ch.elems.clone();
         t.fitted.clear();
     }
+    // this step changes copper it did not lay: it may not take a track out, so a result with
+    // a short that the file does not have is not written
+    let shorts = gummiband_core::legal::new_shorts(&b, &old, &b, &geo);
+    if !shorts.is_empty() {
+        bail!(
+            "the 45 degree step would short {}: nothing written, please report this board",
+            shorts.join(", ")
+        );
+    }
     let violations_before = gummiband_core::check::check(&b, &old).len();
     let violations_after = gummiband_core::check::check(&b, &geo).len();
     let mut items = Vec::new();

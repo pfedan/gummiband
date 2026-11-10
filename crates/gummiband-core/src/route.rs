@@ -2415,6 +2415,12 @@ impl<'a> Router<'a> {
                     it_in.w = self.width_at_edge(lu, e_in, cls.track_width, &necks, neck_w);
                     let si = m.edge_tris[e_in as usize].iter().position(|&x| x == t).unwrap();
                     it_in.sides[si] = self.side_of_pos(lu, t, e_in, CPos::Edge(k));
+                    // Only the apex of t is taken here. The side of the apex before the edge is
+                    // known as well, and the two together leave the track less than each alone,
+                    // which is what `validate` counts as an edge over capacity. Testing both was
+                    // measured and left out: the search then takes other ways and the finished
+                    // copper of the synthetic boards has more clearance spots, not fewer (65
+                    // against 42 over 39 quick runs). The geometry step settles these edges.
                     let view = views
                         .entry((lu as u8, e_in))
                         .or_insert_with(|| self.edge_view(lu, e_in, &it_in));
@@ -2967,6 +2973,81 @@ impl<'a> Router<'a> {
                 {
                     return false;
                 }
+            }
+        }
+        // The chords at the chain's vias were tested in the mesh the search saw. A second new via
+        // of the chain in the same triangle splits it again and threads the tracks there anew
+        // (a chord becomes a bent line through the new triangles), so a via can end up on the
+        // other side of a track than the search assumed: test those chords in the mesh as it is
+        // now. (In a negotiation crossings are allowed, for a price.)
+        if split_tris.len() > self.nl() && !self.soft() {
+            for w in chain.windows(2) {
+                match (w[0].kind, w[1].kind) {
+                    (NK::Tri { t, li, entry, slot }, NK::Vert { site, .. } | NK::GoalVia { site }) if entry < 3 => {
+                        let m = self.m(li as usize);
+                        if m.status[t as usize] == NONE
+                            && let Some(&v) = m.site_vert.get(&site)
+                            && let Some(i) = m.tris[t as usize].iter().position(|&x| x == v)
+                            && !self.chord_ok(
+                                t,
+                                li as usize,
+                                net,
+                                CPos::Edge(entry),
+                                Some(slot as usize),
+                                CPos::Vertex(i as u8),
+                                None,
+                            )
+                        {
+                            return false;
+                        }
+                    }
+                    (NK::Vert { site, li }, NK::Tri { t, li: l2, entry, slot }) if li == l2 && entry < 3 => {
+                        let m = self.m(li as usize);
+                        let e = m.tri_edges[t as usize][entry as usize];
+                        let from = m.other_tri(e, t);
+                        if from != NONE
+                            && m.status[from as usize] == NONE
+                            && let Some(&v) = m.site_vert.get(&site)
+                            && let Some(i) = m.tris[from as usize].iter().position(|&x| x == v)
+                            && !self.chord_ok(
+                                from,
+                                li as usize,
+                                net,
+                                CPos::Vertex(i as u8),
+                                None,
+                                CPos::Edge(m.local_edge(from, e) as u8),
+                                Some(slot as usize),
+                            )
+                        {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Each new via was tested alone against the tracks around it, and two new vias of one
+        // chain can leave a track less room between them than each does alone (`validate` then
+        // counts an edge over capacity). Refusing such a way was measured and left out: on the
+        // LED controller the search then took 14 % more vias and the finished copper had more
+        // clearance spots (7 against 2 over three seeds). The geometry step settles these edges.
+        // A chain may cross an edge twice: it dives under a track through two vias and comes
+        // back on the other side. Its slots count the tracks on the edge as the search saw them,
+        // so the second crossing has to step over the chain's own first one, or it would land on
+        // the wrong side of a track of another net.
+        let mut crossed: Vec<(u8, u32, u16)> = Vec::new();
+        for n in chain.iter_mut() {
+            if let NK::Tri { t, li, entry, slot } = &mut n.kind
+                && *entry < 3
+            {
+                let e = self.m(*li as usize).tri_edges[*t as usize][*entry as usize];
+                let seen = *slot;
+                let before = crossed
+                    .iter()
+                    .filter(|&&(l, x, s)| l == *li && x == e && s <= seen)
+                    .count();
+                crossed.push((*li, e, seen));
+                *slot += before as u16;
             }
         }
         let conn = self.conns[ci].clone();
@@ -4116,11 +4197,47 @@ impl<'a> Router<'a> {
         if over > 0 {
             out.push(format!("{over} edges over capacity"));
         }
+        // no two chords of different nets in a triangle may cross
+        let mut coords: Vec<(f64, f64, u32)> = Vec::new();
+        for li in 0..self.nl() {
+            for (t, list) in self.chords[li].iter().enumerate() {
+                if list.len() < 2 {
+                    continue;
+                }
+                coords.clear();
+                coords.extend(list.iter().map(|ch| {
+                    (
+                        self.coord(t as u32, li, ch.a, Some(ch.seg), None),
+                        self.coord(t as u32, li, ch.b, Some(ch.seg), None),
+                        ch.seg,
+                    )
+                }));
+                for (i, &(x, y, sa)) in coords.iter().enumerate() {
+                    for &(c, d, sb) in &coords[i + 1..] {
+                        let net = |s: u32| self.segs[s as usize].as_ref().map(|s| s.net);
+                        if net(sa) != net(sb) && !Self::chord_fits(&[(c, d)], x, y) {
+                            out.push(format!(
+                                "layer {li} triangle {t}: the chords of seg {sa} and seg {sb} cross"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         for (sid, s) in self.segs.iter().enumerate() {
             let Some(s) = s else { continue };
             let m = self.m(s.li as usize);
             for w in s.crossings.windows(2) {
-                if m.other_tri(w[0].e, w[0].from) != w[1].from {
+                let into = m.other_tri(w[0].e, w[0].from);
+                if into == w[1].from {
+                    continue;
+                }
+                // a track may run through copper of its own net (a pad, a kept track): there it
+                // crosses no edge, so the chain goes on where it leaves that copper
+                let own = |t: u32| {
+                    t != NONE && m.status[t as usize] != NONE && self.obs_net(m.status[t as usize]) == Some(s.net)
+                };
+                if !(own(into) && own(w[1].from)) {
                     out.push(format!(
                         "seg {sid}: crossing chain broken at edge {} -> {}",
                         w[0].e, w[1].e

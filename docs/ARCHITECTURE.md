@@ -103,8 +103,22 @@ front end.
   `RouteOptions::net_options`, which the MCP server fills from its session.
 - `route_board(board, options, hooks)` takes a board model and returns `Routed`: the search
   (`finish_nets` around `route_pairs` or `route_board` of the core), then room for meanders, the
-  45 degree step, length tuning, the length rules, the clearance check and the soft copper that
-  moved. `Routed::seconds` is the wall time of the route and `Routed::seed` the seed of the
+  45 degree step, length tuning, the last check on the finished copper, the length rules, the
+  clearance check and the soft copper that moved. The last check (`gummiband_core::legal`) is the
+  final word on what was routed: a track that still touches copper of another net is taken out
+  with what hangs on it, and every net is followed through its pads, tracks, vias and planes
+  (pads that touch are one piece, a via or a through hole pad inside a plane of its net reaches
+  the plane). A connection that is not there in copper is reported as open, whatever the search
+  counted. Then the stubs go: a track of the route whose end lies on nothing of its net is cut
+  back to where it is last held (or goes as a whole, with a via that then joins nothing), and
+  the copper is counted once more as the final word. It prints a line when it had to step in; a routed file holds no short between two
+  nets. Every way to a routed file passes it: the plain run, the open end with each of its
+  alternatives and with what it has when it is stopped, finishing nets, the pairs, and so both
+  front ends, which write through `RouteOutcome::write` only. The writer (`Routed::board_text`)
+  looks once more at whatever geometry it is handed and leaves out a track of the route that
+  shorts another net. The two commands that change copper they did not lay (`angles45`,
+  `move-part`) may not take a track out; they refuse to write a result with a short that their
+  input does not have (`legal::new_shorts`). `Routed::seconds` is the wall time of the route and `Routed::seed` the seed of the
   search, the numbers every front end reports. The reports of both front ends are built from
   `Routed`.
 - `route_file(board, output, options, hooks)` is the whole way from a file: the checks,
