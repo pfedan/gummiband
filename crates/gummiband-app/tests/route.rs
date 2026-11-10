@@ -220,6 +220,8 @@ fn route_a_file_then_finish_a_net() {
     let st = &out.routed.res.stats;
     assert_eq!((st.conns, st.routed), (1, 1));
     assert!(out.routed.violations.is_empty() && out.routed.angles_45.is_none() && out.routed.tuned.is_none());
+    assert!(out.routed.seconds >= out.routed.search_seconds && out.routed.search_seconds > 0.0);
+    assert_eq!(out.routed.seed, 0x5eed, "the seed of the core when none is given");
     let written = out.write().unwrap();
     let items = written.items;
     assert!(items >= 1);
@@ -373,5 +375,50 @@ fn net_options_from_a_file_and_from_the_front_end_agree() {
     let out = route_file(&pcb, &routed, &skipping, &Hooks::default()).unwrap();
     assert_eq!(out.skipped_nets, vec!["A".to_string()]);
     assert_eq!(out.routed.res.stats.conns, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The open end with a time budget ends by itself, and its clock starts with the open end: a
+/// budget shorter than the search before it still leaves that search whole.
+#[test]
+fn the_time_budget_starts_with_the_open_end() {
+    let dir = std::env::temp_dir().join(format!("gummiband-app-open-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pcb = dir.join("tiny.kicad_pcb");
+    std::fs::write(&pcb, tiny_board()).unwrap();
+    let phases = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = phases.clone();
+    let progress = move |prefix: &str| {
+        let (seen, prefix) = (seen.clone(), prefix.to_string());
+        gummiband_core::ProgressFn(std::sync::Arc::new(move |p: &gummiband_core::Progress| {
+            seen.lock().unwrap().push(format!("{prefix}{}", p.phase));
+        }))
+    };
+    let hooks = Hooks {
+        progress: Some(&progress),
+        ..Default::default()
+    };
+    let opts = RouteOptions {
+        runs: 2,
+        generations: 1,
+        geometry_generations: 1,
+        move_parts: Some(false),
+        seed: Some(7),
+        open_end_seconds: 0.001,
+        ..Default::default()
+    };
+    assert!(opts.open_end(false));
+    assert_eq!(opts.air(opts.open_end(false)), defaults::OPEN_END_AIR);
+    let out = route_file(&pcb, &dir.join("open.kicad_pcb"), &opts, &hooks).unwrap();
+    assert_eq!(out.routed.seed, 7);
+    assert_eq!(out.routed.res.stats.routed, 2);
+    let phases = phases.lock().unwrap();
+    let open = phases.iter().position(|p| p == gummiband_core::OPEN_END_PHASE);
+    let geometry = phases.iter().position(|p| p == "geometry");
+    assert!(
+        geometry.is_some(),
+        "the budget ran out before the search and cut it: {phases:?}"
+    );
+    assert!(open.is_some() && geometry < open, "{phases:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -143,7 +143,8 @@ enum Cmd {
         #[arg(long, default_value_t = defaults::GEOMETRY_GENERATIONS)]
         geometry_generations: usize,
         /// Seed of the search (default: GB_EVO_SEED, then a constant). The same seed gives the
-        /// same result, another one a different try.
+        /// same result, another one a different try. The line "best: seed N" and the report
+        /// name the seed that was used.
         #[arg(long)]
         seed: Option<u64>,
         /// Write a debug SVG.
@@ -157,7 +158,10 @@ enum Cmd {
         #[arg(long)]
         frames: Option<PathBuf>,
         /// Write a machine readable JSON report (stats, unrouted connections, violations,
-        /// portfolio) for scripts and AI agents.
+        /// portfolio) for scripts and AI agents. Its `seconds` are the wall time of the whole
+        /// route, from reading the board to the checked result (writing the files not
+        /// included), the same number the MCP tool route returns; `search_seconds` is the part
+        /// up to the end of the search.
         #[arg(long)]
         report: Option<PathBuf>,
         /// Let the geometry generations shift parts next to clearance problems and open
@@ -214,13 +218,20 @@ enum Cmd {
         /// Finishing nets, the tries of --give run first and the one kept goes on open ended.
         #[arg(long)]
         until_stop: bool,
-        /// With --until-stop: what a via is worth in mm of track when the open end judges its
+        /// Open end with a time budget: after the normal search keep improving for this many
+        /// seconds, then finish the best result (0: off). The budget starts when the open end
+        /// starts, so it never cuts the normal search short. With --until-stop as well, the
+        /// run ends on the line on stdin or after the budget, whichever comes first.
+        #[arg(long, default_value_t = defaults::OPEN_END_SECONDS)]
+        open_end_seconds: f64,
+        /// In the open end (--until-stop, --open-end-seconds): what a via is worth in mm of track when the open end judges its
         /// results. Lower gives more vias and shorter tracks, higher fewer vias and longer ones.
         #[arg(long, default_value_t = defaults::OPEN_VIA_COST)]
         open_via_cost: f64,
         /// Give the finished copper this reserve in mm on top of the clearances where there is
-        /// room, instead of leaving it at the limit [default: 0.03 with --until-stop, but not
-        /// when finishing nets with --keep-all --nets, else 0]
+        /// room, instead of leaving it at the limit [default: 0.03 in an open ended run
+        /// (--until-stop, --open-end-seconds), but not when finishing nets with --keep-all
+        /// --nets, else 0]
         #[arg(long)]
         air: Option<f64>,
         /// At the end tracks of the default net class push aside what can give way and grow up
@@ -575,6 +586,7 @@ fn main() -> Result<()> {
             clear_corridors,
             progress,
             until_stop,
+            open_end_seconds,
             open_via_cost,
             air,
             prefer_width,
@@ -627,6 +639,7 @@ fn main() -> Result<()> {
                 geometry_generations,
                 seed,
                 frames: frames.is_some(),
+                open_end_seconds,
                 open_via_cost,
                 air,
                 prefer_width,
@@ -780,9 +793,10 @@ fn main() -> Result<()> {
                 );
             }
             let s = &res.stats;
+            // the seed of the search: the same one on the same input gives this result again
             println!(
                 "best: seed {} {}/{} routed, {} vias, {:.0} mm, {:.2} s",
-                s.seed, s.routed, s.conns, s.vias, s.length, r.search_seconds
+                r.seed, s.routed, s.conns, s.vias, s.length, r.seconds
             );
             let bound = gummiband_core::length_lower_bound(b);
             println!(
@@ -957,7 +971,9 @@ fn main() -> Result<()> {
                 let json = serde_json::json!({
                     "board": outcome.input.display().to_string(),
                     "output": output.display().to_string(),
-                    "seconds": r.search_seconds,
+                    "seed": r.seed,
+                    "seconds": r.seconds,
+                    "search_seconds": r.search_seconds,
                     "placement": outcome.placement.as_ref().map(placement_json),
                     "connections": st.conns,
                     "routed": st.routed,

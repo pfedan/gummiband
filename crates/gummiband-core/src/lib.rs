@@ -263,7 +263,7 @@ pub struct RouteResult {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Progress {
     /// "portfolio", "generation 2", "geometry", "geometry generation 1", "polish",
-    /// "placement round 1"
+    /// "placement round 1", "open end" ([`OPEN_END_PHASE`])
     pub phase: String,
     pub routed: usize,
     pub conns: usize,
@@ -275,6 +275,9 @@ pub struct Progress {
     #[serde(flatten)]
     pub search: Search,
 }
+
+/// The phase a search reports when its open end begins.
+pub const OPEN_END_PHASE: &str = "open end";
 
 /// The state of the geometry generations and the open end.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
@@ -336,6 +339,11 @@ pub struct SearchConfig {
 pub const DEFAULT_OPEN_VIA_COST: f64 = 20.0;
 
 impl SearchConfig {
+    /// The seed the search runs with: the one given, else `GB_EVO_SEED`, else a constant.
+    pub fn seed_used(&self) -> u64 {
+        self.seed.or_else(|| knobs::EVO_SEED.get()).unwrap_or(0x5eed)
+    }
+
     fn stopped(&self) -> bool {
         self.open_end
             .as_ref()
@@ -1147,7 +1155,7 @@ fn search_fixed(
     if search.frames {
         frames.push((label(&best, "portfolio"), best.geo.clone(), false));
     }
-    let mut rng = Rng(search.seed.or_else(|| knobs::EVO_SEED.get()).unwrap_or(0x5eed));
+    let mut rng = Rng(search.seed_used());
     for generation in 1..=search.generations {
         if best.failed.is_empty() && generation > 2 {
             // complete: a few generations for vias and length are enough
@@ -1462,6 +1470,8 @@ fn search_fixed(
     // the open end: from here on the result only changes where a mutant makes it better
     let mut others = Vec::new();
     if open {
+        // tells a front end that the normal search is over (a time budget starts here)
+        search.report(OPEN_END_PHASE, &best.stats);
         (best, others) = improve::run(board, &sub, search, best, done, &mut rng, &mut |c, generation| {
             if search.frames {
                 frames.push((label(c, &format!("generation {generation}")), c.geo.clone(), true));

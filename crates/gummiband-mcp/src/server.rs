@@ -1012,10 +1012,12 @@ pub struct RouteIn {
     /// Factor on the via cost in the pass that routes connections with vias again and keeps
     /// what has fewer vias (default 4; 0: off), as `gummiband route --via-pass`.
     pub via_pass: Option<f64>,
-    /// Open end: after the normal search keep improving for this many seconds, then finish the
-    /// best result (default 0: off), as `--until-stop` with a time budget instead of a stop line.
-    /// Mutants take a few connections around one spot out and lay them again; when that stops
-    /// helping, bolder side branches take over. No placement rounds while it runs.
+    /// Open end with a time budget: after the normal search keep improving for this many
+    /// seconds, then finish the best result (default 0: off), as `gummiband route
+    /// --open-end-seconds`. The budget starts when the open end starts, so it never cuts the
+    /// normal search short. Mutants take a few connections around one spot out and lay them
+    /// again; when that stops helping, bolder side branches take over. No placement rounds
+    /// while it runs. Results that differ in vias and length come back in `alternatives`.
     pub open_end_seconds: Option<f64>,
     /// With open_end_seconds: what a via is worth in mm of track when the open end judges its
     /// results (default 20). Lower gives more vias and shorter tracks, higher fewer vias and
@@ -1343,7 +1345,15 @@ pub struct RouteOut {
     pub moved: Vec<MovedOut>,
     pub input: String,
     pub output: String,
+    /// The seed the search ran with (`seed`, or the default): the same seed on the same board
+    /// gives this result again.
+    pub seed: u64,
+    /// Wall time of the whole route in seconds, from reading the board to the checked result
+    /// (writing the files not included); the same number as in the report of `gummiband route`.
     pub seconds: f64,
+    /// The part of `seconds` up to the end of the search, without the steps after it (room for
+    /// meanders, 45 degrees, length tuning, checks).
+    pub search_seconds: f64,
     pub threads: usize,
     pub connections: usize,
     pub routed: usize,
@@ -2432,8 +2442,7 @@ impl Gummiband {
         let (options, loaded_keep) = self.with_entry(&p.board, |e| Ok((e.options.clone(), e.keep_locked)))?;
         let mut opts = route_options(&p, p.keep_locked.unwrap_or(loaded_keep))?;
         opts.net_options = options;
-        opts.validate(p.open_end_seconds.is_some_and(|s| s > 0.0))
-            .map_err(anyhow::Error::msg)?;
+        opts.validate(false).map_err(anyhow::Error::msg)?;
         let (mut id, mut cleared) = (p.board.clone(), Vec::new());
         if opts.clear_corridors {
             (id, cleared) = self.clear_corridors(&p.board, &opts.place_options())?;
@@ -3194,6 +3203,7 @@ fn route_options(p: &RouteIn, keep_locked: bool) -> Result<RouteOptions> {
         generations: p.generations.unwrap_or(d.generations),
         geometry_generations: p.geometry_generations.unwrap_or(d.geometry_generations),
         seed: p.seed,
+        open_end_seconds: p.open_end_seconds.unwrap_or(d.open_end_seconds),
         open_via_cost: p.open_via_cost.unwrap_or(d.open_via_cost),
         air: p.air,
         prefer_width: p.prefer_width.unwrap_or(d.prefer_width),
@@ -3220,24 +3230,9 @@ fn route_blocking(id: String, path: PathBuf, opts: RouteOptions, p: RouteIn) -> 
             path.with_file_name(format!("{stem}.routed.kicad_pcb"))
         }
     };
-    let t0 = std::time::Instant::now();
-    // the open end of the CLI stops on a line on stdin; here a time budget sets the stop flag
-    let open_end = p.open_end_seconds.filter(|&s| s > 0.0).map(|secs| {
-        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let set = flag.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs_f64(secs));
-            set.store(true, std::sync::atomic::Ordering::Relaxed);
-        });
-        flag
-    });
-    let hooks = gummiband_app::Hooks {
-        stop: open_end.as_ref(),
-        ..Default::default()
-    };
-    let outcome = gummiband_app::route_file(&path, &output, &opts, &hooks)?;
-    let seconds = t0.elapsed().as_secs_f64();
+    let outcome = gummiband_app::route_file(&path, &output, &opts, &Default::default())?;
     let routed = &outcome.routed;
+    let seconds = routed.seconds;
     let (b, res, viol, pair_reports) = (&routed.board, &routed.res, &routed.violations, &routed.pairs);
     let angles_45 = routed.angles_45.as_ref().map(|a| AnglesOut {
         length_before_mm: r3(a.stats.length_before),
@@ -3402,7 +3397,9 @@ fn route_blocking(id: String, path: PathBuf, opts: RouteOptions, p: RouteIn) -> 
         board: id,
         input: path.display().to_string(),
         output: output.display().to_string(),
+        seed: routed.seed,
         seconds,
+        search_seconds: routed.search_seconds,
         threads: rayon::current_num_threads(),
         connections: st.conns,
         routed: st.routed,

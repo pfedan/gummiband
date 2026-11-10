@@ -64,6 +64,8 @@ pub mod defaults {
     pub const GIVE: f64 = gummiband_core::DEFAULT_GIVE;
     /// Reserve in mm on top of the clearances in an open ended run that routes the board.
     pub const OPEN_END_AIR: f64 = 0.03;
+    /// Seconds the open end keeps improving (0: no open end with a time budget).
+    pub const OPEN_END_SECONDS: f64 = 0.0;
 }
 
 /// Track angles of a routed result.
@@ -122,6 +124,11 @@ pub struct RouteOptions {
     pub seed: Option<u64>,
     /// Keep the best candidate of every generation in the result (for an animation).
     pub frames: bool,
+    /// Open end with a time budget: after the normal search the result keeps improving for
+    /// this many seconds, then the best one is finished (0: off). The budget starts when the
+    /// open end starts, so it never cuts the normal search short. [`Hooks::stop`] is the open
+    /// end without a budget; with both, whichever comes first ends the run.
+    pub open_end_seconds: f64,
     pub open_via_cost: f64,
     /// Reserve in mm on top of the clearances. None: [`defaults::OPEN_END_AIR`] in an open ended
     /// run that does not finish nets, else 0, see [`RouteOptions::air`].
@@ -182,6 +189,7 @@ impl Default for RouteOptions {
             geometry_generations: defaults::GEOMETRY_GENERATIONS,
             seed: None,
             frames: false,
+            open_end_seconds: defaults::OPEN_END_SECONDS,
             open_via_cost: defaults::OPEN_VIA_COST,
             air: None,
             prefer_width: defaults::PREFER_WIDTH,
@@ -233,13 +241,21 @@ impl RouteOptions {
         })
     }
 
-    /// Check the options against each other, for a run that is open ended or not. Options that
+    /// Whether the run is open ended: by its time budget, or because the front end may stop it
+    /// (`until_stop`, [`Hooks::stop`]).
+    pub fn open_end(&self, until_stop: bool) -> bool {
+        until_stop || self.open_end_seconds > 0.0
+    }
+
+    /// Check the options against each other; `until_stop` says that the front end may stop the
+    /// run from outside, which makes it open ended like `open_end_seconds`. Options that
     /// contradict each other are an error that says what to change; nothing is adjusted
     /// silently. An option that was left out never contradicts: its default follows from the
     /// others. [`route_board`] and [`route_file`] call this first, so every front end gets the
     /// same message. It names the options as the fields here; the CLI spells them `--kebab-case`.
-    pub fn validate(&self, open_end: bool) -> Result<(), String> {
+    pub fn validate(&self, until_stop: bool) -> Result<(), String> {
         let finishing = self.finishing();
+        let open_end = self.open_end(until_stop);
         let err = |m: &str| Err(m.to_string());
         if self.runs == 0 {
             return err("runs must be at least 1");
@@ -249,6 +265,9 @@ impl RouteOptions {
         }
         if self.give.is_some_and(|g| g.is_nan() || g < 0.0) {
             return err("give must not be negative");
+        }
+        if self.open_end_seconds.is_nan() || self.open_end_seconds < 0.0 {
+            return err("open_end_seconds must not be negative");
         }
         if self.reroute && !finishing {
             return err("reroute needs keep_all and nets");
@@ -274,7 +293,9 @@ impl RouteOptions {
             }
         }
         if open_end && self.pairs {
-            return err("an open ended run does not work with pairs: leave out pairs or the open end");
+            return err(
+                "an open ended run does not work with pairs: leave out pairs, or the open end (until_stop, open_end_seconds)",
+            );
         }
         if self.placements > 0 && (self.keep_all || !self.nets.is_empty() || self.pairs) {
             return err("placements routes the whole board: not with keep_all, nets or pairs");
@@ -344,18 +365,29 @@ impl RouteOptions {
         .with_hints(&hints))
     }
 
-    fn search_config(&self, hooks: &Hooks) -> SearchConfig {
+    /// The search of the core for these options. `prefix` goes in front of each phase the
+    /// front end is told.
+    fn search_config(&self, hooks: &Hooks, prefix: &str) -> SearchConfig {
+        let open_end = self.open_end(hooks.stop.is_some());
+        // the flag that ends the open end: the front end's, set by its user, or one for the
+        // time budget alone
+        let stop = open_end.then(|| hooks.stop.cloned().unwrap_or_default());
+        let told = hooks.progress.map(|p| p(prefix));
+        let progress = match &stop {
+            Some(stop) if self.open_end_seconds > 0.0 => Some(with_budget(told, stop.clone(), self.open_end_seconds)),
+            _ => told,
+        };
         SearchConfig {
             population: self.runs,
             generations: self.generations,
             geometry_generations: self.geometry_generations,
             frames: self.frames,
             seed: self.seed,
-            open_end: hooks.stop.cloned(),
-            air: self.air(hooks.stop.is_some()),
+            open_end: stop,
+            air: self.air(open_end),
             prefer_width: self.prefer_width,
             open_via_cost: self.open_via_cost,
-            progress: hooks.progress.map(|p| p("")),
+            progress,
         }
     }
 
@@ -372,11 +404,32 @@ impl RouteOptions {
     }
 }
 
+/// The progress callback of a search whose open end has a time budget: when the search says
+/// that its open end begins, the clock starts, and `seconds` later `stop` is set. Everything is
+/// passed on to `told`.
+fn with_budget(told: Option<ProgressFn>, stop: Arc<AtomicBool>, seconds: f64) -> ProgressFn {
+    use std::sync::atomic::Ordering;
+    let started = AtomicBool::new(false);
+    ProgressFn(Arc::new(move |p: &gummiband_core::Progress| {
+        if p.phase == gummiband_core::OPEN_END_PHASE && !started.swap(true, Ordering::Relaxed) {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+                stop.store(true, Ordering::Relaxed);
+            });
+        }
+        if let Some(f) = &told {
+            (f.0)(p);
+        }
+    }))
+}
+
 /// What a front end hooks into a run. All of it is optional.
 #[derive(Default, Clone, Copy)]
 pub struct Hooks<'a> {
-    /// Open end: after the normal search the result keeps improving until this flag is set (a
-    /// stop line of the user, a time budget). None: the run ends on its own.
+    /// Open end without a time budget: after the normal search the result keeps improving
+    /// until the front end sets this flag (a stop line of the user). None: the run ends on its
+    /// own, after `open_end_seconds` if that is set.
     pub stop: Option<&'a Arc<AtomicBool>>,
     /// Makes the progress callback of a search; the argument goes in front of each phase name
     /// (the routes of `placements` name their placement there).
@@ -463,7 +516,16 @@ pub struct Routed {
     pub shove: bool,
     /// What moved of that soft copper in the result.
     pub soft: gummiband_core::import::SoftChanges,
-    /// Seconds from the start to the end of the search (the steps after it not included).
+    /// The seed the search ran with: `seed` of the options, else `GB_EVO_SEED`, else the
+    /// constant of the core. The same seed on the same input gives the same result.
+    pub seed: u64,
+    /// How long the route took, in seconds of wall time: from the call to the result with every
+    /// step after the search done and checked. For [`route_file`] that includes reading the
+    /// board, clearing corridors and trying placements; writing the files is not included.
+    /// Every front end reports this number as `seconds`.
+    pub seconds: f64,
+    /// The part of `seconds` up to the end of the search: without room for meanders, the 45
+    /// degree step, length tuning and the checks.
     pub search_seconds: f64,
     pub room: Option<Room>,
     pub angles_45: Option<Angles45>,
@@ -501,7 +563,8 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     opts.validate(hooks.stop.is_some()).map_err(anyhow::Error::msg)?;
     let sub_cfg = opts.substrate_config();
     let router_cfg = opts.router_config()?;
-    let search_cfg = opts.search_config(hooks);
+    let search_cfg = opts.search_config(hooks, "");
+    let seed = search_cfg.seed_used();
     let with_zdiff;
     let board = match (opts.pairs, opts.pair_zdiff) {
         (true, Some(z)) => {
@@ -640,6 +703,8 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
         kept,
         shove,
         soft,
+        seed,
+        seconds: t0.elapsed().as_secs_f64(),
         search_seconds,
         room,
         angles_45,
@@ -1121,7 +1186,7 @@ pub fn route_file(board: &Path, output: &Path, opts: &RouteOptions, hooks: &Hook
                 // only the winner runs open ended
                 open_end: None,
                 progress: hooks.progress.map(|p| p(&format!("placement {i}/{count}: "))),
-                ..opts.search_config(hooks)
+                ..opts.search_config(hooks, "")
             };
             let (_, res) = gummiband_core::route_board(&kb.board, &sub_cfg, &router_cfg, &search);
             let violations = gummiband_core::check::check(&kb.board.with_offsets(&res.offsets), &res.geometry);
