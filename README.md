@@ -102,6 +102,8 @@ Reference and development:
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): crates, data model, algorithms.
 - [docs/MILESTONES.md](docs/MILESTONES.md): what is done and what comes next.
 - [docs/DECISIONS.md](docs/DECISIONS.md): standing decisions and working rules of the project.
+- [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md): the `GB_*` environment variables for development
+  and measurements (logs, switches, experiment knobs); not a stable interface.
 - [plugin/README.md](plugin/README.md): plugin internals, dry runs and tests.
 - [bench/README.md](bench/README.md): the benchmark scripts.
 

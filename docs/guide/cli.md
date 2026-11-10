@@ -426,6 +426,10 @@ with default net classes.
 | `GB_EVO_SEED` | Seed of the evolutionary search when `route --seed` is not given (default fixed). Same board, same options, same seed give the same result; another seed gives another attempt. |
 | `GB_GPU=1` | Experimental, macOS only. Runs most of the track relaxation as a compute shader on the GPU (Metal). Needs a binary built with `cargo build --release -p gummiband-cli --features gpu`; without the variable such a binary behaves exactly like the normal one, and a binary without the feature prints a warning and stays on the CPU. Only the relaxation moves to the GPU, so the gain is bounded by its share of the work: about 30 percent of the core seconds in a default run on boards like the LED controller, about 60 percent with `--geometry-generations 3 --move-parts`, and 1 to 5 percent on boards where the search dominates (Corne, ULX3S, dense BGAs), where the GPU gains nothing. In the quality run on the LED controller (4 seeds, 4 threads) it needed about 40 percent fewer core seconds than the CPU; when all cores are already busy the gain shrinks. Completion is the same; violation counts are comparable but vary more from seed to seed. Results repeat on one machine but not across GPUs or drivers, so for a final run use the CPU or try several seeds. |
 
+The router reads more `GB_*` variables: logs (`GB_LOG=timing,open`), switches that turn a default
+behaviour off for a comparison, and knobs of experiments. They are for development and
+measurements, not a stable interface; the list is in [docs/ENVIRONMENT.md](../ENVIRONMENT.md).
+
 ## Exit status
 
 0 on success, including runs with unrouted connections or violations (read the report for

@@ -298,7 +298,7 @@ knobs! {
     NEAR = "GB_NEAR", Log, Value, "unset",
         "CLI `route`: `x,y[,radius]` in mm lists the tracks with a vertex near this point.";
     VIOL = "GB_VIOL", Log, Set, "off",
-        "CLI `route`: a histogram of how much clearance the violations miss, and the worst ones.";
+        "CLI `route`: histograms of how much clearance the violations miss, and a sample of the severe ones.";
 
     // switches for behaviour that is on by default
     AUTO_NEGOTIATE = "GB_AUTO_NEGOTIATE", Switch, NotZero, "on",
@@ -330,7 +330,7 @@ knobs! {
 
     // seeds, limits and knobs of experiments
     EVO_SEED = "GB_EVO_SEED", Experiment, Value, "0x5eed",
-        "Seed of the search when `--seed` (MCP: `seed`) is not given. The bench scripts use it.";
+        "Seed of the search when the caller gives none (`route --seed`). Search changes are judged over several seeds with it.";
     GPU = "GB_GPU", Experiment, Set, "off",
         "Relaxation rounds on the GPU; needs a binary built with the `gpu` feature.";
     OPEN_GENERATIONS = "GB_OPEN_GENERATIONS", Experiment, Value, "no limit",
@@ -340,7 +340,7 @@ knobs! {
     LOCAL_IT = "GB_LOCAL_IT", Experiment, Num, "160",
         "Open end: relaxation rounds of a mutant.";
     TIGHTEN = "GB_TIGHTEN", Experiment, Num, "24",
-        "Open end: every this many generations the whole board is relaxed again.";
+        "Open end: every this many generations the whole board is cleaned and relaxed, also what no move touched.";
     BRANCH_AFTER = "GB_BRANCH_AFTER", Experiment, Num, "24",
         "Open end: generations without a gain before a side branch starts.";
     BRANCH_LIFE = "GB_BRANCH_LIFE", Experiment, Num, "32",
@@ -374,17 +374,17 @@ knobs! {
     NEG_ONLY = "GB_NEG_ONLY", Experiment, Set, "off",
         "With `--negotiate`: only the negotiated search, without the plain one to compare with.";
     NEG_GROWTH = "GB_NEG_GROWTH", Experiment, Num, "1.5",
-        "Negotiated routing: factor by which the price of a conflict grows per round.";
+        "Negotiated routing: factor by which the prices of overflow and crossing grow per round.";
     NEG_HISTORY = "GB_NEG_HISTORY", Experiment, Num, "1.0",
-        "Negotiated routing: weight of the history of conflicts on an edge.";
+        "Negotiated routing: how much a conflict that stays adds to the lasting price of its edge.";
     NEG_OVERFLOW = "GB_NEG_OVERFLOW", Experiment, Num, "2.0",
-        "Negotiated routing: starting price of an overfilled channel.";
+        "Negotiated routing: starting price per mm of overflow of an edge.";
     NEG_CROSSING = "GB_NEG_CROSSING", Experiment, Num, "1.5",
-        "Negotiated routing: starting price of a crossing.";
+        "Negotiated routing: starting price per crossed track of another net.";
     NEG_TIGHT = "GB_NEG_TIGHT", Experiment, Num, "3.0",
-        "Negotiated routing: price of a channel that is nearly full.";
+        "Negotiated routing: price of a crossing that leaves an edge no room at all.";
     NEG_RESERVE = "GB_NEG_RESERVE", Experiment, Num, "0.05",
-        "Negotiated routing: reserve in mm a channel keeps.";
+        "Negotiated routing: room in mm per gap on an edge from which on a crossing is free.";
     MAXEXP = "GB_MAXEXP", Experiment, Num, "400000",
         "Most expansions of one search for a connection.";
     RIPUP = "GB_RIPUP", Experiment, Num, "3",
@@ -417,9 +417,162 @@ knobs! {
         "CLI `route --clear-corridors`: how far ICs and connectors in a band may move, in mm.";
 }
 
+/// `docs/ENVIRONMENT.md`, printed from the tables of this module
+/// (`cargo run -p gummiband-core --example environment > docs/ENVIRONMENT.md`).
+pub fn markdown() -> String {
+    use std::fmt::Write as _;
+    let mut s = String::from(INTRO);
+    let rows = |s: &mut String, kind: Kind| {
+        s.push_str("| Variable | Value | Without it | What it does |\n| --- | --- | --- | --- |\n");
+        for k in TABLE.iter().filter(|k| k.kind == kind) {
+            let _ = writeln!(s, "| `{}` | {} | {} | {} |", k.name, k.read.words(), k.default, k.doc);
+        }
+    };
+    s.push_str("\n## Logs\n\nOutput for the developer; the routed board stays the same.\n\n");
+    rows(&mut s, Kind::Log);
+    s.push_str(
+        "\n### Topics of `GB_LOG`\n\n\
+         `GB_LOG=open,timing` turns on the topics it names, separated by commas; `all` is every \
+         topic. The output goes to stderr. A name that is no topic gets a warning. The variables \
+         of the last column did the same before 2026-11-10 and are gone.\n\n\
+         | Topic | Output | Replaces |\n| --- | --- | --- |\n",
+    );
+    for t in TOPICS {
+        let _ = writeln!(s, "| `{}` | {} | `{}` |", t.name, t.doc, t.was);
+    }
+    s.push_str(
+        "\n## Switches\n\n\
+         Each turns off a behaviour that is on by default (or, for the `GB_NO_*` names, a step of \
+         the run), to compare a run with and without it. DECISIONS.md promises the switches of the \
+         open end and of the freedoms a board leaves.\n\n",
+    );
+    rows(&mut s, Kind::Switch);
+    s.push_str(
+        "\n## Experiments and measurements\n\n\
+         Seeds and limits for benchmarks, constants under test, and ideas that are off by default; \
+         `docs/MILESTONES.md` has the measurements. A number that does not parse counts as unset.\n\n",
+    );
+    rows(&mut s, Kind::Experiment);
+    s.push_str(OTHERS);
+    s
+}
+
+const INTRO: &str = "\
+# Environment variables
+
+<!-- Printed from the table in crates/gummiband-core/src/knobs.rs, do not edit by hand:
+     cargo run -p gummiband-core --example environment > docs/ENVIRONMENT.md
+     A test of gummiband-core fails when the two differ. -->
+
+The router reads the `GB_*` variables below. They are for development and measurements, not a
+stable interface: they are not part of the options of the CLI, the MCP server or the plugin, and
+any of them may change or go with any commit. For normal work use the options
+([command line](guide/cli.md), [MCP server](MCP.md)).
+
+- They act in every program that routes: the `gummiband` CLI, the MCP server and, through the
+  CLI it starts, the KiCad plugin. A variable set in the environment of an MCP client or of KiCad
+  reaches the router unseen, so keep them out of such environments.
+- With none of them set the router gives the same files byte for byte (`bench/hashes.sh`).
+- A variable is read once per process, when it is first needed.
+- Each keeps the way its value is read: *set to anything* means that also `0` or an empty value
+  turns it on; *`0` turns it off* means that every other value, and no value, leaves it on.
+- The table lives in `gummiband_core::knobs`, with the accessors the code uses; nothing else in
+  the core, kicad and place crates reads the environment. The lines marked CLI are still read in
+  `crates/gummiband-cli/src/main.rs`.
+";
+
+const OTHERS: &str = "
+## Other variables
+
+Not the router's own, and read where they are needed:
+
+| Variable | Read by | What for |
+| --- | --- | --- |
+| `RAYON_NUM_THREADS` | CLI, MCP server | Number of threads (CLI: the default of `--threads`; MCP server: 4 without it). The result does not depend on it. |
+| `GUMMIBAND_KICAD_CLI`, `GUMMIBAND_RSVG_CONVERT` | MCP server | Paths of `kicad-cli` and `rsvg-convert`, before `PATH` and the usual install places. |
+| `KICAD10_FOOTPRINT_DIR` ... `KICAD7_FOOTPRINT_DIR`, `KICAD_FOOTPRINT_DIR` | kicad crate | Footprint libraries, when a board is created from a netlist. |
+| any `${NAME}` in an `fp-lib-table` | kicad crate | KiCad's path variables in library tables. |
+| `HOME`, `APPDATA` | kicad crate | KiCad's global library table and a Flatpak install. |
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Rust sources of the workspace: (path, text).
+    fn sources() -> Vec<(std::path::PathBuf, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    if p.file_name().is_none_or(|n| n != "target") {
+                        walk(&p, out);
+                    }
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    let text = std::fs::read_to_string(&p).unwrap();
+                    out.push((p, text));
+                }
+            }
+        }
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut out = Vec::new();
+        walk(crates, &mut out);
+        assert!(out.len() > 20);
+        out
+    }
+
+    #[test]
+    fn the_documentation_is_the_table() {
+        let doc = include_str!("../../../docs/ENVIRONMENT.md");
+        assert!(
+            doc == markdown(),
+            "docs/ENVIRONMENT.md is not what the table prints, write it again:\n\
+             cargo run -p gummiband-core --example environment > docs/ENVIRONMENT.md"
+        );
+        for k in TABLE {
+            assert!(doc.contains(&format!("| `{}` |", k.name)), "{}", k.name);
+        }
+    }
+
+    #[test]
+    fn every_variable_in_the_code_is_in_the_table() {
+        for (path, text) in sources() {
+            if path.ends_with("gummiband-core/src/knobs.rs") {
+                continue;
+            }
+            for (i, _) in text.match_indices("\"GB_") {
+                let name: String = text[i + 1..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                    .collect();
+                // a name the library table test of the kicad crate makes up
+                if name == "GB_SURELY_UNSET_VAR" || !text[i + 1 + name.len()..].starts_with('"') {
+                    continue;
+                }
+                assert!(
+                    TABLE.iter().any(|k| k.name == name),
+                    "{}: {name} is not in the table of knobs.rs",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_this_module_reads_the_environment() {
+        let needle = ["env::", "var"].concat();
+        for (path, text) in sources() {
+            let p = path.to_string_lossy().replace('\\', "/");
+            let ours = ["gummiband-core/", "gummiband-kicad/", "gummiband-place/"]
+                .iter()
+                .any(|c| p.contains(c));
+            // the binary of the place crate may read what a program reads
+            if !ours || p.ends_with("gummiband-core/src/knobs.rs") || p.ends_with("gummiband-place/src/main.rs") {
+                continue;
+            }
+            assert!(!text.contains(&needle), "{p} reads the environment, use crate::knobs");
+        }
+    }
 
     #[test]
     fn flags_keep_their_rules() {

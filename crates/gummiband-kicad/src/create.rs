@@ -2235,7 +2235,10 @@ mod tests {
           (lib (name "Odd") (type "KiCad") (uri "${GB_SURELY_UNSET_VAR}/Odd.pretty") (options "") (descr "")))"#;
         let v = parse_lib_table(t, Path::new("/prj"), Some(Path::new("/kicad/fp")));
         assert_eq!(v[0], ("Mine".to_string(), PathBuf::from("/prj/libs/Mine.pretty")));
-        assert_eq!(v.len(), 2 + usize::from(std::env::var("GB_SURELY_UNSET_VAR").is_ok()));
+        assert_eq!(
+            v.len(),
+            2 + usize::from(knobs::foreign("GB_SURELY_UNSET_VAR").is_some())
+        );
     }
 
     #[test]
