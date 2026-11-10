@@ -686,9 +686,12 @@ fn main() -> Result<()> {
                 progress: if progress { Some(&progress_fn) } else { None },
                 event: Some(&event),
             };
-            let outcome = gummiband_app::route_file(&board, &opts, &hooks)?;
+            let outcome = gummiband_app::route_file(&board, &output, &opts, &hooks)?;
             let r = &outcome.routed;
             let (b, sub, res) = (&r.board, &r.sub, &r.res);
+            if !outcome.skipped_nets.is_empty() {
+                println!("nets left out: {}", outcome.skipped_nets.len());
+            }
             for t in r.tries.iter().skip(1) {
                 println!(
                     "give way within {} mm: {} nets, {} open, {} violations",
@@ -930,14 +933,13 @@ fn main() -> Result<()> {
                     changes.shift
                 );
             }
-            let items = outcome.write(&res.geometry, &output)?;
+            let written = outcome.write()?;
             // the results the open end leaves to choose from, next to the output
-            for (i, (st, geometry)) in res.alternatives.iter().enumerate() {
-                let path = output.with_extension(format!("alt{}.kicad_pcb", i + 1));
-                outcome.write(geometry, &path)?;
+            for a in &written.alternatives {
+                let st = &a.stats;
                 println!(
                     "alternative: {}: {}/{} routed, {} vias, {:.0} mm, {} clearance spots",
-                    path.display(),
+                    a.path.display(),
                     st.routed,
                     st.conns,
                     st.vias,
@@ -945,6 +947,10 @@ fn main() -> Result<()> {
                     st.violations.unwrap_or(0)
                 );
             }
+            for path in &written.copied {
+                println!("copied {}", path.display());
+            }
+            let items = written.items;
             println!("wrote {items} items to {}", output.display());
             if let Some(path) = report {
                 let st = &res.stats;
@@ -965,6 +971,17 @@ fn main() -> Result<()> {
                     "angles_45": r.angles_45.as_ref().map(|a| a.stats),
                     "length_tuning": r.tuned.as_ref().map(|t| &t.report),
                     "items_written": items,
+                    "alternatives": written.alternatives.iter().map(|a| serde_json::json!({
+                        "path": a.path.display().to_string(),
+                        "routed": a.stats.routed,
+                        "connections": a.stats.conns,
+                        "vias": a.stats.vias,
+                        "length_mm": a.stats.length,
+                        "clearance_spots": a.stats.violations,
+                    })).collect::<Vec<_>>(),
+                    "copied": written.copied.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                    "skipped_nets": outcome.skipped_nets,
+                    "cleared_corridors": outcome.cleared_corridors,
                     "violations": viol.iter().map(|v| serde_json::json!({
                         "what": v.what,
                         "x": v.at.x,

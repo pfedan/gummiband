@@ -313,6 +313,17 @@ impl RouteOptions {
         }
     }
 
+    /// How parts are placed for these options (`clear_corridors`, `placements`): the references
+    /// that stay, the seed and the plane layers.
+    pub fn place_options(&self) -> PlaceOptions {
+        PlaceOptions {
+            fixed: self.fixed.clone(),
+            seed: self.placement_seed,
+            plane_layers: self.plane_layers.clone(),
+            ..Default::default()
+        }
+    }
+
     fn substrate_config(&self) -> SubstrateConfig {
         SubstrateConfig {
             via_pitch: self.via_pitch,
@@ -745,7 +756,8 @@ impl Routed {
     }
 
     /// Write [`Routed::board_text`] to `path`; with `teardrops` the project next to it gets
-    /// them at track ends too (`input` is the file that was routed). Returns the number of items.
+    /// them at track ends too (`input` is the board file whose project it starts from). Returns
+    /// the number of items.
     pub fn write(&self, kb: &KicadBoard, geometry: &Geometry, input: &Path, path: &Path) -> Result<usize> {
         let (text, items) = self.board_text(kb, geometry)?;
         std::fs::write(path, text)?;
@@ -782,13 +794,39 @@ fn track_end_teardrops(input: &Path, output: &Path) -> Result<()> {
         }
     }
     std::fs::write(&target, serde_json::to_string_pretty(&pro)?)?;
-    if let Ok(dru) = std::fs::read(input.with_extension("kicad_dru")) {
-        let d = output.with_extension("kicad_dru");
-        if !d.exists() {
-            std::fs::write(d, dru)?;
+    copy_project_files(input, output);
+    Ok(())
+}
+
+/// Copy `<from>.kicad_pro` and `<from>.kicad_dru` next to the board file `to` (same base name)
+/// where they are missing: KiCad and the reader take net classes and custom rules from them. A
+/// file that is already there stays as it is. Returns the files copied.
+pub fn copy_project_files(from: &Path, to: &Path) -> Vec<PathBuf> {
+    let mut copied = Vec::new();
+    for ext in ["kicad_pro", "kicad_dru"] {
+        let s = from.with_extension(ext);
+        let d = to.with_extension(ext);
+        if s != d && s.is_file() && !d.exists() && std::fs::copy(&s, &d).is_ok() {
+            copied.push(d);
         }
     }
-    Ok(())
+    copied
+}
+
+/// Whether two paths name the same file, also when one of them does not exist yet.
+fn same_file(a: &Path, b: &Path) -> bool {
+    let full = |p: &Path| {
+        p.canonicalize().unwrap_or_else(|_| {
+            let dir = p
+                .parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            dir.canonicalize()
+                .unwrap_or_else(|_| dir.to_path_buf())
+                .join(p.file_name().unwrap_or_default())
+        })
+    };
+    full(a) == full(b)
 }
 
 /// Read a board file as `opts` ask: the copper to keep, planes, movable parts, then the options
@@ -954,68 +992,129 @@ fn copy_rules(from: &Path, to: &Path) -> Result<()> {
 
 /// A routed board file, see [`route_file`].
 pub struct RouteOutcome {
-    /// The file whose placement the route started from: the input, or its copy with the track
-    /// corridors cleared.
+    /// The board file that was given.
     pub input: PathBuf,
-    /// The file that was routed: `input`, or the placement kept.
+    /// The file [`RouteOutcome::write`] writes.
+    pub output: PathBuf,
+    /// The file that was routed: `input`, its copy with the track corridors cleared, or the
+    /// placement kept.
     pub source: PathBuf,
     /// That file, read.
     pub kb: KicadBoard,
     /// Nets left out of the route: skipped by their options, or not among `nets`.
     pub skipped_nets: Vec<String>,
+    /// `clear_corridors`: the parts that got new positions before the routing.
+    pub cleared_corridors: Vec<String>,
     /// The winner of `placements` with every trial.
     pub placement: Option<Placement>,
     pub routed: Routed,
-    /// The placements live here until the result is written and dropped.
-    placed_dir: PathBuf,
+    /// The copies with cleared corridors and the placements live here until the result is
+    /// written and dropped.
+    _temp: TempDirs,
 }
 
-impl RouteOutcome {
-    /// Write the result with `geometry` (its own or one of the alternatives) to `path`.
-    pub fn write(&self, geometry: &Geometry, path: &Path) -> Result<usize> {
-        self.routed.write(&self.kb, geometry, &self.source, path)
+/// Folders that go when the route is over, however it ends.
+struct TempDirs(Vec<PathBuf>);
+
+impl Drop for TempDirs {
+    fn drop(&mut self) {
+        for dir in &self.0 {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
-impl Drop for RouteOutcome {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.placed_dir);
+/// Another result of the open end, written next to the output.
+#[derive(Debug, Clone)]
+pub struct Alternative {
+    /// `<output>.altN.kicad_pcb`, N from 1.
+    pub path: PathBuf,
+    pub stats: gummiband_core::RunStats,
+}
+
+/// What [`RouteOutcome::write`] wrote.
+#[derive(Debug, Clone)]
+pub struct Written {
+    pub output: PathBuf,
+    /// Tracks, arcs, vias and tuning patterns in the output.
+    pub items: usize,
+    /// The results the open end leaves to choose from, those that differ from the output in
+    /// vias and length.
+    pub alternatives: Vec<Alternative>,
+    /// The project files copied next to the output ([`copy_project_files`]).
+    pub copied: Vec<PathBuf>,
+}
+
+impl RouteOutcome {
+    /// Write the result: the routed board to `output`, the project files of the input next to
+    /// it where they are missing, and every alternative of the open end next to it as
+    /// `<output>.altN.kicad_pcb`.
+    pub fn write(&self) -> Result<Written> {
+        let geometry = &self.routed.res.geometry;
+        let copied = copy_project_files(&self.input, &self.output);
+        let items = self.write_geometry(geometry, &self.output)?;
+        let mut alternatives = Vec::new();
+        for (i, (stats, geometry)) in self.routed.res.alternatives.iter().enumerate() {
+            let path = self.output.with_extension(format!("alt{}.kicad_pcb", i + 1));
+            self.write_geometry(geometry, &path)?;
+            alternatives.push(Alternative {
+                path,
+                stats: stats.clone(),
+            });
+        }
+        Ok(Written {
+            output: self.output.clone(),
+            items,
+            alternatives,
+            copied,
+        })
+    }
+
+    /// Write the board with `geometry` (the result's own or one of the alternatives) to `path`.
+    pub fn write_geometry(&self, geometry: &Geometry, path: &Path) -> Result<usize> {
+        self.routed
+            .write(&self.kb, geometry, &self.input, path)
+            .with_context(|| format!("writing {}", path.display()))
     }
 }
 
 /// Route the board file `board` with `opts`, everything from the file to the result that is
-/// ready to write: parts out of the track corridors (`clear_corridors`), the search over
-/// placements (`placements`), [`load_board`], then [`route_board`].
-pub fn route_file(board: &Path, opts: &RouteOptions, hooks: &Hooks) -> Result<RouteOutcome> {
+/// ready to write to `output` ([`RouteOutcome::write`]): the checks of the options, parts out of
+/// the track corridors (`clear_corridors`), the search over placements (`placements`),
+/// [`load_board`], then [`route_board`]. The input stays as it is: `output` must be another file.
+pub fn route_file(board: &Path, output: &Path, opts: &RouteOptions, hooks: &Hooks) -> Result<RouteOutcome> {
     let t0 = Instant::now();
     // fail on the options and the hints before any work
     opts.validate(hooks.stop.is_some()).map_err(anyhow::Error::msg)?;
+    if same_file(board, output) {
+        anyhow::bail!("the output must differ from the input file: the input stays as it is");
+    }
     let router_cfg = opts.router_config()?;
     let sub_cfg = opts.substrate_config();
-    let place = PlaceOptions {
-        fixed: opts.fixed.clone(),
-        seed: opts.placement_seed,
-        plane_layers: opts.plane_layers.clone(),
-        ..Default::default()
-    };
+    let place = opts.place_options();
+    let mut temp = TempDirs(Vec::new());
     // parts in the corridors of track groups move out of the way first
-    let mut input = board.to_path_buf();
+    let mut placed_from = board.to_path_buf();
+    let mut cleared_corridors = Vec::new();
     if opts.clear_corridors
         && let Some(cleared) = clear_corridors(board, &place, hooks)?
     {
         let dir = std::env::temp_dir().join(format!("gummiband-corridors-{}", std::process::id()));
+        temp.0.push(dir.clone());
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(board.file_name().unwrap_or_default());
         std::fs::write(&path, &cleared.text)?;
         copy_rules(board, &path)?;
-        input = path;
+        placed_from = path;
+        cleared_corridors = cleared.parts;
     }
-    let placed_dir = std::env::temp_dir().join(format!("gummiband-placements-{}", std::process::id()));
     let mut placement = None;
     let source = if opts.placements > 0 {
+        let placed_dir = std::env::temp_dir().join(format!("gummiband-placements-{}", std::process::id()));
+        temp.0.push(placed_dir.clone());
         let count = opts.placements;
         let place = PlaceOptions { starts: 1, ..place };
-        let found = try_placements(&input, &placed_dir, count, &place, hooks, &|path, seed, i| {
+        let found = try_placements(&placed_from, &placed_dir, count, &place, hooks, &|path, seed, i| {
             let kb = load_board(path, opts, hooks)?;
             let search = SearchConfig {
                 frames: false,
@@ -1034,25 +1133,24 @@ pub fn route_file(board: &Path, opts: &RouteOptions, hooks: &Hooks) -> Result<Ro
                 vias: res.stats.vias,
                 length: res.stats.length,
             })
-        })
-        .inspect_err(|_| {
-            let _ = std::fs::remove_dir_all(&placed_dir);
         })?;
         let path = found.path.clone();
         placement = Some(found);
         path
     } else {
-        input.clone()
+        placed_from
     };
     let (kb, skipped_nets) = load(&source, opts, hooks)?;
     let routed = route_from(t0, &kb.board, opts, hooks)?;
     Ok(RouteOutcome {
-        input,
+        input: board.to_path_buf(),
+        output: output.to_path_buf(),
         source,
         kb,
         skipped_nets,
+        cleared_corridors,
         placement,
         routed,
-        placed_dir,
+        _temp: temp,
     })
 }

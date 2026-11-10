@@ -83,20 +83,8 @@ pub fn temp_file(stem: &str, ext: &str) -> Result<PathBuf> {
     Ok(dir.join(format!("{stem}-{}.{ext}", N.fetch_add(1, Ordering::Relaxed))))
 }
 
-/// Copy `<src>.kicad_pro` and `<src>.kicad_dru` next to `dst` (same base name) if they are
-/// missing there: kicad-cli needs the project for net classes and rules, and the reader
-/// takes net classes and custom rules from them too. Returns the copied files.
-pub fn copy_project_files(src_pcb: &Path, dst_pcb: &Path) -> Vec<PathBuf> {
-    let mut copied = Vec::new();
-    for ext in ["kicad_pro", "kicad_dru"] {
-        let s = src_pcb.with_extension(ext);
-        let d = dst_pcb.with_extension(ext);
-        if s != d && s.is_file() && !d.exists() && std::fs::copy(&s, &d).is_ok() {
-            copied.push(d);
-        }
-    }
-    copied
-}
+// the project files next to a board are copied by the pipeline, the same way for every tool
+pub use gummiband_app::copy_project_files;
 
 /// Make sure `<pcb>.kicad_pro` exists: otherwise copy it from a project whose base name is a
 /// prefix of the board's (`x.routed.kicad_pcb` -> `x.kicad_pro`) or from the only project in

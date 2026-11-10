@@ -192,6 +192,8 @@ fn route_a_file_then_finish_a_net() {
     std::fs::create_dir_all(&dir).unwrap();
     let pcb = dir.join("tiny.kicad_pcb");
     std::fs::write(&pcb, tiny_board()).unwrap();
+    std::fs::write(pcb.with_extension("kicad_pro"), "{}").unwrap();
+    std::fs::write(pcb.with_extension("kicad_dru"), "(version 1)\n").unwrap();
 
     // net A alone, parts fixed
     let opts = RouteOptions {
@@ -212,14 +214,23 @@ fn route_a_file_then_finish_a_net() {
         event: Some(&event),
         ..Default::default()
     };
-    let out = route_file(&pcb, &opts, &hooks).unwrap();
+    let first = dir.join("a.kicad_pcb");
+    let out = route_file(&pcb, &first, &opts, &hooks).unwrap();
     assert_eq!(movable.get(), None, "parts are fixed");
     let st = &out.routed.res.stats;
     assert_eq!((st.conns, st.routed), (1, 1));
     assert!(out.routed.violations.is_empty() && out.routed.angles_45.is_none() && out.routed.tuned.is_none());
-    let first = dir.join("a.kicad_pcb");
-    let items = out.write(&out.routed.res.geometry, &first).unwrap();
+    let written = out.write().unwrap();
+    let items = written.items;
     assert!(items >= 1);
+    assert!(written.alternatives.is_empty(), "no open end, nothing to choose from");
+    assert_eq!(
+        written.copied,
+        vec![first.with_extension("kicad_pro"), first.with_extension("kicad_dru")],
+        "the project files of the input go next to the output"
+    );
+    // a second write leaves the project files that are there alone
+    assert!(out.write().unwrap().copied.is_empty());
     assert_eq!(
         std::fs::read_to_string(&first).unwrap().matches("(segment").count(),
         items
@@ -232,12 +243,12 @@ fn route_a_file_then_finish_a_net() {
         angles: gummiband_app::Angles::Deg45,
         ..opts
     };
-    let out = route_file(&first, &opts, &Hooks::default()).unwrap();
+    let second = dir.join("ab.kicad_pcb");
+    let out = route_file(&first, &second, &opts, &Hooks::default()).unwrap();
     assert!(out.routed.shove);
     assert_eq!(out.routed.res.stats.routed, 1);
     assert!(out.routed.angles_45.is_some());
-    let second = dir.join("ab.kicad_pcb");
-    let added = out.write(&out.routed.res.geometry, &second).unwrap();
+    let added = out.write().unwrap().items;
     let text = std::fs::read_to_string(&second).unwrap();
     assert!(
         added >= 1 && text.matches("(segment").count() >= items + added,
@@ -249,19 +260,28 @@ fn route_a_file_then_finish_a_net() {
         nets: vec!["nope".into()],
         ..Default::default()
     };
-    assert!(route_file(&pcb, &bad, &Hooks::default()).is_err());
+    assert!(route_file(&pcb, &second, &bad, &Hooks::default()).is_err());
     let bad = RouteOptions {
         patterns: "bogus".into(),
         ..Default::default()
     };
-    assert!(route_file(&pcb, &bad, &Hooks::default()).is_err());
+    assert!(route_file(&pcb, &second, &bad, &Hooks::default()).is_err());
     // the pipeline checks the options itself, whoever calls it
     let bad = RouteOptions {
         runs: 0,
         ..Default::default()
     };
-    let e = route_file(&pcb, &bad, &Hooks::default()).err().unwrap();
+    let e = route_file(&pcb, &second, &bad, &Hooks::default()).err().unwrap();
     assert_eq!(e.to_string(), "runs must be at least 1");
+    // the input is never the output, however the path is spelled
+    let same = dir.join(".").join("tiny.kicad_pcb");
+    let e = route_file(&pcb, &same, &RouteOptions::default(), &Hooks::default())
+        .err()
+        .unwrap();
+    assert!(
+        e.to_string().contains("the output must differ from the input file"),
+        "{e}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -301,7 +321,8 @@ fn net_options_from_a_file_and_from_the_front_end_agree() {
         net_widths: Some(file.clone()),
         ..base.clone()
     };
-    let out = route_file(&pcb, &from_file, &hooks).unwrap();
+    let routed = dir.join("routed.kicad_pcb");
+    let out = route_file(&pcb, &routed, &from_file, &hooks).unwrap();
     assert_eq!(counted.get(), Some(2), "the nets of the file that the board has");
     let (text, _) = out.routed.board_text(&out.kb, &out.routed.res.geometry).unwrap();
     assert!(text.contains("(width 0.4)") && text.contains("(width 0.3)"), "{text}");
@@ -333,7 +354,7 @@ fn net_options_from_a_file_and_from_the_front_end_agree() {
         .into(),
         ..base.clone()
     };
-    let again = route_file(&pcb, &held, &Hooks::default()).unwrap();
+    let again = route_file(&pcb, &routed, &held, &Hooks::default()).unwrap();
     let (same, _) = again.routed.board_text(&again.kb, &again.routed.res.geometry).unwrap();
     assert_eq!(text, same);
 
@@ -349,7 +370,7 @@ fn net_options_from_a_file_and_from_the_front_end_agree() {
         .into(),
         ..from_file
     };
-    let out = route_file(&pcb, &skipping, &Hooks::default()).unwrap();
+    let out = route_file(&pcb, &routed, &skipping, &Hooks::default()).unwrap();
     assert_eq!(out.skipped_nets, vec!["A".to_string()]);
     assert_eq!(out.routed.res.stats.conns, 1);
     let _ = std::fs::remove_dir_all(&dir);
