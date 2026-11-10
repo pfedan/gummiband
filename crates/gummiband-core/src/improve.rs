@@ -492,7 +492,7 @@ fn place_new_vias(tracks: &mut [Track], vias: &mut [Via], planes: &[crate::board
         }
         let Some(p) = to else { continue };
         // a via in the plane of its net must not leave it: a connection of the net may count as
-        // made through that plane, also one that only shares the via (GB_PLANE_HOLD; GB_PLANE_LOG
+        // made through that plane, also one that only shares the via (GB_PLANE_HOLD; GB_LOG=plane
         // says when it would happen)
         let r = v.diameter / 2.0;
         let home = planes.iter().find(|pl| pl.net == v.net && pl.covers(v.at));
@@ -1273,7 +1273,7 @@ pub(crate) fn make_room(
     }
     judge(board, &mut c);
     settle(board, sub, &mut c, &before, &cfg);
-    if knobs::OPEN_LOG.on() {
+    if knobs::log(knobs::Log::Open) {
         eprintln!(
             "room: {} violations, {} shorts, {:.0} mm",
             c.stats.violations.unwrap_or(0),
@@ -1302,7 +1302,7 @@ pub(crate) fn give_air(board: &Board, sub: &Substrate, best: &Candidate, air: f6
     };
     relax_all(board, sub, &mut c, &cfg);
     settle(board, sub, &mut c, &before, &cfg);
-    if knobs::OPEN_LOG.on() {
+    if knobs::log(knobs::Log::Open) {
         let probe = roomier(board, air / 2.0);
         eprintln!(
             "air {air}: {} violations, {} shorts, {:.0} mm; spots under {:.3} mm spare {} before, {} after",
@@ -1461,7 +1461,7 @@ pub(crate) fn run(
         ..Default::default()
     };
     let tighten_every = knobs::TIGHTEN.num::<f64>() as usize;
-    let log = knobs::OPEN_LOG.on();
+    let log = knobs::log(knobs::Log::Open);
     let t0 = std::time::Instant::now();
     let mut front = Front::default();
     front.offer(&best.cand, &best.cand);
@@ -1717,7 +1717,7 @@ struct Ideas {
     /// A new via that reaches the plane of its net stays in it when it is moved past a sleeping
     /// track (see `place_new_vias`). On by default; `GB_PLANE_HOLD=0` switches it off.
     plane_hold: bool,
-    /// `GB_PLANE_LOG`: say on stderr when such a via would leave its plane.
+    /// `GB_LOG=plane`: say on stderr when such a via would leave its plane.
     plane_log: bool,
 }
 
@@ -1733,7 +1733,7 @@ fn ideas() -> &'static Ideas {
         spot_fade: knobs::SPOT_FADE.on(),
         bold_aim: knobs::BOLD_AIM.num(),
         plane_hold: knobs::PLANE_HOLD.on(),
-        plane_log: knobs::PLANE_LOG.on(),
+        plane_log: knobs::log(knobs::Log::Plane),
     })
 }
 

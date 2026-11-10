@@ -83,7 +83,7 @@ violation count says little. Compare core seconds when other jobs run on the mac
 
 ## Profiling
 
-`GB_TIMING=1` prints cumulative phase timers of a route (search, relaxation rounds, taut, check;
+`GB_LOG=timing` prints cumulative phase timers of a route (search, relaxation rounds, taut, check;
 parallel calls add up, so the shares are of the work, not of the clock). For the functions
 behind them, record with [samply](https://github.com/mstange/samply) (`cargo install samply`;
 Instruments needs a full Xcode) and summarise with `profile.py`:

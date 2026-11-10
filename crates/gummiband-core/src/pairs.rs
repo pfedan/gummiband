@@ -494,7 +494,7 @@ fn merge(board: &Board, all: bool, breakouts: bool) -> Merged {
                 joins.extend(j);
             }
         }
-        if crate::knobs::PAIR_LOG.on() && !joins.is_empty() {
+        if crate::knobs::log(crate::knobs::Log::Pair) && !joins.is_empty() {
             eprintln!(
                 "second row {}: joins {:?}",
                 name(p),
@@ -527,7 +527,7 @@ fn merge(board: &Board, all: bool, breakouts: bool) -> Merged {
                 if let Some((c, z)) = breakout(&b, e.p, e.n, mids[1 - i], class.track_width, class.clearance) {
                     e.out = Some(c);
                     *o = z;
-                    if crate::knobs::PAIR_LOG.on() {
+                    if crate::knobs::log(crate::knobs::Log::Pair) {
                         eprintln!("breakout {} at {:.2},{:.2}", board.nets[p as usize].name, c.x, c.y);
                     }
                 }
@@ -1278,7 +1278,7 @@ fn split(real: &Board, m: &Merged, geo: &Geometry) -> Split {
                 // a band that turns back at the via comes out on the other side of itself: there
                 // vias side by side swap the tracks and vias in line keep them
                 let back = ua.dot(ub) < 0.0;
-                if crate::knobs::PAIR_LOG.on() {
+                if crate::knobs::log(crate::knobs::Log::Pair) {
                     eprintln!(
                         "joint {} at {:.2},{:.2}: capsule {} back {} swap {} turn {:.2}",
                         rep.p,
@@ -2396,7 +2396,7 @@ pub fn route_pairs(
             })
             .filter_map(|id| joins.iter().copied().find(|&(a, c)| b.nets[id].pins == [a, c]))
             .collect();
-        if crate::knobs::PAIR_LOG.on() && !failed_joins.is_empty() {
+        if crate::knobs::log(crate::knobs::Log::Pair) && !failed_joins.is_empty() {
             eprintln!("joins without a short way: {failed_joins:?}");
         }
         if !failed_joins.is_empty() {

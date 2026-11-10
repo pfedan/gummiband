@@ -605,14 +605,14 @@ fn debug_hooks(board: &Board, r: &mut Router) {
             );
         }
     }
-    if knobs::VALIDATE.on() {
+    if knobs::log(knobs::Log::Validate) {
         let v = r.validate();
         eprintln!("validate: {} problems", v.len());
         for l in v.iter().take(15) {
             eprintln!("  {l}");
         }
     }
-    if knobs::DEBUG_VIAS.on() {
+    if knobs::log(knobs::Log::Vias) {
         for l in r.debug_via_pairs() {
             eprintln!("{l}");
         }
@@ -620,12 +620,12 @@ fn debug_hooks(board: &Board, r: &mut Router) {
             eprintln!("{l}");
         }
     }
-    if knobs::DEBUG_CORRIDOR.on() {
+    if knobs::log(knobs::Log::Corridors) {
         for l in r.debug_corridors(15) {
             eprintln!("{l}");
         }
     }
-    if knobs::DEBUG_X.on() {
+    if knobs::log(knobs::Log::Intersections) {
         for l in r.debug_intersections(12) {
             eprintln!("{l}");
         }
@@ -1534,7 +1534,7 @@ fn search_fixed(
         // the pairs the search pulled together close up to their gap where nothing is between
         if base.pair_pull > 0.0 && knobs::ZIP.on() {
             let zipped = pairs::zip(board, &mut best.geo);
-            if knobs::ZIP_LOG.on() {
+            if knobs::log(knobs::Log::Zip) {
                 eprintln!("zip {zipped:?}");
             }
         }

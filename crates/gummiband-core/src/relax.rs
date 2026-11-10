@@ -1721,7 +1721,7 @@ pub fn relax_while(
             })
             .collect()
     };
-    if knobs::TIMING.on() {
+    if knobs::log(knobs::Log::Timing) {
         eprintln!(
             "relax rounds {:.2} s, taut {:.2} s",
             t_taut.duration_since(t_start).as_secs_f64(),

@@ -3566,7 +3566,7 @@ impl<'a> Router<'a> {
     /// legal topology; the rip-up passes of [`Router::run`] take over from there, with the
     /// history as a guide.
     pub fn negotiate(&mut self) {
-        let log = knobs::NEG_LOG.on();
+        let log = knobs::log(knobs::Log::Neg);
         let growth: f64 = knobs::NEG_GROWTH.num();
         let history: f64 = knobs::NEG_HISTORY.num();
         self.prices = Some(Prices {
@@ -3755,7 +3755,7 @@ impl<'a> Router<'a> {
             self.search_buf = buf;
             match found {
                 Some(chain) => {
-                    let validate = knobs::VALIDATE_EACH.on();
+                    let validate = knobs::log(knobs::Log::ValidateEach);
                     let before = if validate { self.validate().len() } else { 0 };
                     if self.commit(ci, &chain) {
                         if validate {

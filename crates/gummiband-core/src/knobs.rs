@@ -130,6 +130,152 @@ pub fn foreign(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
+/// A topic of `GB_LOG`: one kind of debug output on stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Log {
+    Open,
+    Pair,
+    Tune,
+    Neg,
+    Zip,
+    Plane,
+    Octo,
+    Vias,
+    Corridors,
+    Intersections,
+    Timing,
+    Validate,
+    ValidateEach,
+}
+
+/// A topic of `GB_LOG` with its name in the list.
+#[derive(Debug)]
+pub struct Topic {
+    pub log: Log,
+    pub name: &'static str,
+    /// The variable that switched this output on before 2026-11-10.
+    pub was: &'static str,
+    pub doc: &'static str,
+}
+
+/// The topics of `GB_LOG`, in the order of the documentation.
+pub static TOPICS: &[Topic] = &[
+    Topic {
+        log: Log::Open,
+        name: "open",
+        was: "GB_OPEN_LOG",
+        doc: "The open end: one line per generation, side branches, merges, the rounds that make room.",
+    },
+    Topic {
+        log: Log::Pair,
+        name: "pair",
+        was: "GB_PAIR_LOG",
+        doc: "Differential pairs: breakouts, joints, and joins of the two tracks that found no short way.",
+    },
+    Topic {
+        log: Log::Tune,
+        name: "tune",
+        was: "GB_TUNE_LOG",
+        doc: "Length tuning: the rounds that make room for the meanders.",
+    },
+    Topic {
+        log: Log::Neg,
+        name: "neg",
+        was: "GB_NEG_LOG",
+        doc: "Negotiated routing: conflicts and open connections round by round.",
+    },
+    Topic {
+        log: Log::Zip,
+        name: "zip",
+        was: "GB_ZIP_LOG",
+        doc: "What closing up the pairs at the end (`pairs::zip`) did.",
+    },
+    Topic {
+        log: Log::Plane,
+        name: "plane",
+        was: "GB_PLANE_LOG",
+        doc: "The open end says when a new via would leave the plane of its net.",
+    },
+    Topic {
+        log: Log::Octo,
+        name: "octo",
+        was: "GB_OCTO_DEBUG",
+        doc: "`--angles 45`: the pieces that stay at their angle, and what is in their way.",
+    },
+    Topic {
+        log: Log::Vias,
+        name: "vias",
+        was: "GB_DEBUG_VIAS",
+        doc: "After a router run: via pairs and vias of the topology.",
+    },
+    Topic {
+        log: Log::Corridors,
+        name: "corridors",
+        was: "GB_DEBUG_CORRIDOR",
+        doc: "After a router run: corridors of the topology.",
+    },
+    Topic {
+        log: Log::Intersections,
+        name: "intersections",
+        was: "GB_DEBUG_X",
+        doc: "After a router run: intersections in the topology.",
+    },
+    Topic {
+        log: Log::Timing,
+        name: "timing",
+        was: "GB_TIMING",
+        doc: "Cumulative phase timers and work counters at the end of a route, and the split of each relaxation.",
+    },
+    Topic {
+        log: Log::Validate,
+        name: "validate",
+        was: "GB_VALIDATE",
+        doc: "After a router run: check the inner state of the router and print the problems.",
+    },
+    Topic {
+        log: Log::ValidateEach,
+        name: "validate-each",
+        was: "GB_VALIDATE_EACH",
+        doc: "Check the inner state after every routed connection and print the one that broke it (slow).",
+    },
+];
+
+/// The topics a value of `GB_LOG` turns on, as a bit per [`Log`], and the names it has that are
+/// no topic. Topics are separated by commas; `all` is every topic.
+fn topics_of(raw: &str) -> (u32, Vec<&str>) {
+    let mut mask = 0;
+    let mut unknown = Vec::new();
+    for w in raw.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+        if w == "all" {
+            mask |= TOPICS.iter().fold(0, |m, t| m | 1 << t.log as u32);
+        } else if let Some(t) = TOPICS.iter().find(|t| t.name == w) {
+            mask |= 1 << t.log as u32;
+        } else {
+            unknown.push(w);
+        }
+    }
+    (mask, unknown)
+}
+
+/// Whether `GB_LOG` asks for this topic. A name in the list that is no topic gets one warning
+/// on stderr.
+pub fn log(topic: Log) -> bool {
+    static MASK: OnceLock<u32> = OnceLock::new();
+    let mask = *MASK.get_or_init(|| {
+        let (mask, unknown) = topics_of(LOG.text().unwrap_or_default());
+        if !unknown.is_empty() {
+            let names: Vec<&str> = TOPICS.iter().map(|t| t.name).collect();
+            eprintln!(
+                "warning: GB_LOG: no topic {} (topics: {}, all)",
+                unknown.join(", "),
+                names.join(", ")
+            );
+        }
+        mask
+    });
+    mask & (1 << topic as u32) != 0
+}
+
 macro_rules! knobs {
     ($($id:ident = $name:literal, $kind:ident, $read:ident, $default:literal, $doc:literal;)*) => {
         $(
@@ -143,32 +289,8 @@ macro_rules! knobs {
 
 knobs! {
     // logs
-    OPEN_LOG = "GB_OPEN_LOG", Log, Set, "off",
-        "The open end reports its generations, side branches and room rounds on stderr.";
-    PAIR_LOG = "GB_PAIR_LOG", Log, Set, "off",
-        "Differential pairs: joins of the two tracks that failed, and why.";
-    TUNE_LOG = "GB_TUNE_LOG", Log, Set, "off",
-        "Length tuning: what each meander attempt reached.";
-    NEG_LOG = "GB_NEG_LOG", Log, Set, "off",
-        "Negotiated routing: conflicts and prices round by round.";
-    ZIP_LOG = "GB_ZIP_LOG", Log, Set, "off",
-        "What closing up the pairs at the end (`pairs::zip`) did.";
-    PLANE_LOG = "GB_PLANE_LOG", Log, Set, "off",
-        "Says when a new via of the open end would leave the plane of its net.";
-    OCTO_DEBUG = "GB_OCTO_DEBUG", Log, Set, "off",
-        "`--angles 45`: the pieces that stay at their angle, and what is in their way.";
-    DEBUG_VIAS = "GB_DEBUG_VIAS", Log, Set, "off",
-        "After a router run: via pairs close to each other and the vias with the least use.";
-    DEBUG_CORRIDOR = "GB_DEBUG_CORRIDOR", Log, Set, "off",
-        "After a router run: the fullest corridors of the topology.";
-    DEBUG_X = "GB_DEBUG_X", Log, Set, "off",
-        "After a router run: intersections left in the topology.";
-    TIMING = "GB_TIMING", Log, Set, "off",
-        "Cumulative phase timers and work counters at the end of a route, and the split of a relaxation.";
-    VALIDATE = "GB_VALIDATE", Log, Set, "off",
-        "After a router run: check the inner state of the router and print the problems.";
-    VALIDATE_EACH = "GB_VALIDATE_EACH", Log, Set, "off",
-        "Check the inner state after every routed connection and print the one that broke it (slow).";
+    LOG = "GB_LOG", Log, Value, "none",
+        "Comma separated topics of debug output on stderr, see the list of topics; `all` turns every topic on.";
     WHY = "GB_WHY", Log, Value, "unset",
         "A pin name (`U1.3`): trace the search of the first open connection from this pin into `/tmp/gb-why.txt`; `--svg` draws it.";
     MUTANT_LOG = "GB_MUTANT_LOG", Log, Value, "unset",
@@ -309,6 +431,28 @@ mod tests {
         ] {
             let got = [None, Some(""), Some("0"), Some("1"), Some("x")].map(|raw| on(read, raw));
             assert_eq!(got, want, "{read:?}");
+        }
+    }
+
+    #[test]
+    fn log_topics() {
+        let bit = |l: Log| 1u32 << l as u32;
+        assert_eq!(topics_of(""), (0, vec![]));
+        assert_eq!(topics_of("open"), (bit(Log::Open), vec![]));
+        assert_eq!(
+            topics_of(" pair, timing ,"),
+            (bit(Log::Pair) | bit(Log::Timing), vec![])
+        );
+        assert_eq!(
+            topics_of("validate-each,1,Open"),
+            (bit(Log::ValidateEach), vec!["1", "Open"])
+        );
+        let all = topics_of("all").0;
+        assert_eq!(all.count_ones() as usize, TOPICS.len());
+        // every topic has its own bit and a name of its own
+        for (i, t) in TOPICS.iter().enumerate() {
+            assert_eq!(t.log as usize, i, "{}", t.name);
+            assert_eq!(topics_of(t.name), (bit(t.log), vec![]));
         }
     }
 
