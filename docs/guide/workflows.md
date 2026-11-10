@@ -79,7 +79,8 @@ gummiband route board.kicad_pcb -o out.kicad_pcb --net-priorities prio.json
 Lower numbers route first; nets not in the file keep their class priority. The MCP server has the
 same through `set_net_options` (`priority` per net, plus a `skip` flag that leaves a net out), so
 an agent can route the critical nets first, judge, then the rest. See
-[MCP.md](../MCP.md#set_net_options).
+[MCP.md](../MCP.md#set_net_options). The file of `--net-widths` takes the same fields per net
+(`width`, `min_width`, `neck_refs`, `priority`, `skip`), see [the CLI reference](cli.md).
 
 A hint from one measurement on one board (the Corne keyboard): routing USB and crystal first,
 then the other signals, then the key matrix, and the supply and GND last gave the best result,

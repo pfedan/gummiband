@@ -98,7 +98,8 @@ tool section below and the guide chapters on concepts and options.
   adds a hole where it is needed.
 - **Lock and unlock**: `lock` locks footprints by reference and the tracks and vias of nets (or all
   copper) in place, `unlock: true` releases them again.
-- **Rules per net**: `set_net_options` sets priority, width and skip for the next route.
+- **Rules per net**: `set_net_options` sets priority, width, minimum width, the parts to neck at
+  and skip for the next route.
 
 ### What the automatic tools do with it
 
@@ -145,7 +146,8 @@ or place everything itself and only let `route` finish; `place_parts` with `only
   `nets` and `reroute`. `lock` the nets that must not move first.
 - **Freeze a good result**: `lock` with `all_copper: true`, then route only what is left with
   `keep_all` and `nets`, or edit by hand without the router touching the rest.
-- **Necks and current**: widen with `set_net_options` `width` and route the net again, add a pour
+- **Necks and current**: widen with `set_net_options` `width` and `min_width` and route the net
+  again, add a pour
   over the neck (`add_zone`), or `power_copper` with `unlocked: "clear"` on the routed board and
   route its `reroute_nets` again.
 - **Copper after routing**: `ground_pour`, `add_zone`, `angles_45` for conventional 45 degree
@@ -187,9 +189,9 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `add_mounting_hole` | `board`, `x`, `y`, `diameter?`, `reference?` | id and path of the working copy with the new locked hole, `warnings` (courtyards it overlaps) |
 | `place_silk` | `board`, `parts?`, `min_size?`, `margin?`, `edge_margin?`, `reach?`, `hide_unplaced?`, `trim_edge?` | id and path of the working copy, references kept, moved, shrunk, hidden, left, footprints whose edge silk was trimmed |
 | `set_rules` | `board`, `rules`, `replace?` | id of the working copy, path of its `.kicad_dru`, rule count, what Gummiband understood of the rules, `warnings` |
-| `set_net_options` | `board`, `net`, `priority?`, `skip?`, `width?`, `reset?` | the net's options and effective priority |
+| `set_net_options` | `board`, `net`, `priority?`, `skip?`, `width?`, `min_width?`, `neck_refs?`, `reset?` | the net's options and effective priority |
 | `try_seeds` | `board`, `seeds?`, `place?`, `route?`, `drc?` | per seed (best first) the placed and routed files, unrouted, Gummiband violations, KiCad DRC errors and unconnected, vias, length; the best seed, the working copy now holding its placement and its routed board |
-| `route` | `board`, `runs?`, `seed?`, `generations?`, `geometry_generations?`, `keep_locked?`, `keep_all?`, `move_parts?`, `fixed?`, `reroute?`, `output?`, `nets?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `patterns?`, `clear_corridors?`, `pair_pull?`, `pairs?`, `pair_all?`, `pair_breakouts?`, `pair_via_pairs?`, `pair_skew?`, `pair_zdiff?`, `negotiate?`, `via_pass?`, `open_end_seconds?`, `open_via_cost?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `tune_spacing?`, `max_violations?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
+| `route` | `board`, `output?`, `max_violations?` and every option of the route pipeline under the name `gummiband route` has it (there as `--kebab-case`): `keep_locked?`, `keep_all?`, `nets?`, `reroute?`, `shove?`, `give?`, `move_parts?`, `fixed?`, `plane_layers?`, `runs?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `patterns?`, `via_pass?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `pair_all?`, `breakouts?`, `via_pairs?`, `negotiate?`, `generations?`, `geometry_generations?`, `seed?`, `frames?`, `open_end_seconds?`, `open_via_cost?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `tune_spacing?`, `placements?`, `placement_seed?`, `clear_corridors?`, `net_widths?`, `net_priorities?`, `teardrops?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
 | `angles_45` | `path`, `output?`, `nets?` | path of the written `<input>.45.kicad_pcb`, runs of track looked at and changed, length before and after, pieces off the grid, sharp corners, Gummiband's violations before and after |
 | `power_plan` | `board`, `currents? [{net, amps, short_amps?}]`, `temp_rise?`, `apply?` | per power net the IPC-2221 width per layer, the track width to route with, vias per layer change, planes and zones, advice; board notes (GND plane, reference planes); the widths as `.kicad_dru` rules; with `apply` the widths stored as net options |
 | `current_check` | `path`, `paths? [{net, amps, short_amps?, from?, to?, name?}]`, `temp_rise?`, `refill?`, `max_segments?` | per current path the narrow segments, the narrowest single band and the total cross-section between the terminals (pours and vias included) with their position, vias against the current, verdict `ok` or `FLAG` |
@@ -618,20 +620,31 @@ keeps the class clearance there, on the safe side.
 
 ### set_net_options
 
-Stored in the session by net name and applied on every following `route` of the board:
-`priority` overrides the net class priority (lower routes first), `skip: true` leaves the net
-out of routing (its pads stay obstacles; its old tracks are not kept, since the output replaces
-all unlocked copper). `width` (mm) gives the net its own track width, which is also its minimum
-width: it does not neck below it, except inside the courtyards of the parts whose pads are
-narrower than the width (fine pitch pins); `width: 0` clears it. Known gap: the router still
-lets such a net neck in places outside those courtyards (VBUS_F on the LED controller benchmark
-kept 0.25 to 0.6 mm pieces); `current_check` finds them. `power_plan` with `apply` sets
-the widths of the power nets this way. `reset: true` drops the net's options before applying the
-others.
+Stored in the session by net name and applied on every following `route` of the board. The
+fields are those of an entry in the file of `gummiband route --net-widths`, and both go through
+the same function:
+
+- `priority` overrides the net class priority (lower routes first).
+- `skip: true` leaves the net out of routing (its pads stay obstacles; its old tracks are not
+  kept, since the output replaces all unlocked copper).
+- `width` (mm) is the track width the net is routed with; `width: 0` clears it. On its own the
+  track may still neck as its class and the rules allow.
+- `min_width` (mm) is the minimum width: the track never necks below it, except inside the
+  courtyards of `neck_refs`; `min_width: 0` clears it. A larger minimum of the class or the
+  custom rules stays. For a track that has to carry its current everywhere, set it to the
+  width. It must not be above the width.
+- `neck_refs` names the parts in whose courtyard the track may neck below `min_width` (fine
+  pitch pins). Left out, these are the parts whose pad on this net is narrower than
+  `min_width`; an empty list allows it nowhere.
+- `reset: true` drops the net's options before applying the others.
+
+`power_plan` with `apply` sets `width` and `min_width` of the power nets this way. Known gap: the
+router still lets such a net neck in places outside those courtyards (VBUS_F on the LED
+controller benchmark kept 0.25 to 0.6 mm pieces); `current_check` finds them.
 
 ```json
 {"name": "set_net_options", "arguments": {"board": "b1", "net": "/MCU/SDA", "priority": -10}}
-{"name": "set_net_options", "arguments": {"board": "b1", "net": "VBUS_F", "width": 0.75}}
+{"name": "set_net_options", "arguments": {"board": "b1", "net": "VBUS_F", "width": 0.75, "min_width": 0.75}}
 {"name": "set_net_options", "arguments": {"board": "b1", "net": "VBUS_IN", "skip": true}}
 ```
 
@@ -658,26 +671,42 @@ a few seeds before it refines one.
 
 ### route
 
-Runs `gummiband_core::route_board` on the loaded board with the net options applied and writes
-the routed board (existing unlocked tracks and vias replaced; with `keep_locked` the locked ones
-stay). Defaults match the CLI: `runs` 14 (a constant, so results do not depend on the machine), `generations` 3,
+Runs the route pipeline of `gummiband-app` on the file of the loaded board, the same one
+`gummiband route` runs, with the net options of the session applied, and writes the routed board
+(existing unlocked tracks and vias replaced; with `keep_locked` the locked ones stay). Every
+option has the name, the default and the meaning it has on the command line (there as
+`--kebab-case`); a test fails when the two differ in what they offer. An argument that does not
+exist is refused. Options that contradict each other are refused too, with a message that says
+what to change (for example `move_parts` with `shove`, `reroute` without `keep_all` and `nets`,
+an open end with `pairs`, `runs` 0); nothing is adjusted silently. The defaults: `runs` 14 (a constant, so results do not depend on the machine), `generations` 3,
 `geometry_generations` 3, `via_pitch` 0.5 mm, `via_cost` 3.0, `layer_dirs` 0.5 (preferred
 directions per layer for every third run, 0 = off), `pair_pull` 0 (experimental pull between the
 nets of a differential pair: the search keeps the second net near the first one's way on the same
 layer, and the finished tracks close up to the pair's gap wherever they run within 1.5 mm of each
 other and nothing lies between; works for every recognised pair, also in the `Default` class), `pairs` false (experimental: a pair as one wide track that is split
 in two, see the CLI guide; only pairs with a pair rule or a net class of their own, `pair_all`
-true for every pair), `pair_breakouts` false (experimental: the wide track ends just outside the
-pads), `pair_via_pairs` false (experimental: vias side by side as one capsule), `pair_skew` 0.1 mm, `pair_zdiff` none, `tune` true (meanders for the
+true for every pair), `breakouts` false (experimental: the wide track ends just outside the
+pads), `via_pairs` false (experimental: vias side by side as one capsule), `pair_skew` 0.1 mm, `pair_zdiff` none, `tune` true (meanders for the
 `length` and `skew` rules of the `.kicad_dru`, written as KiCad tuning patterns),
 `tune_amplitude` 1 mm, `tune_spacing` 2 track widths between meander legs, `negotiate` 0
 (negotiated routing from the start, 20 rounds work well and take about twice the time; with 0
 the search negotiates on its own when it leaves a few connections open), `via_pass`
 4 (factor on the via cost in the pass that routes connections with vias again and keeps what has
 fewer vias, 0 = off), `open_end_seconds` 0 (off; a value keeps improving the result for that many
-seconds after the normal search, like `--until-stop` with a time budget, and `open_via_cost`,
-default 20 mm, is what a via is worth when it judges its results), `air` 0 mm, `prefer_width` 0
-(off), `angles` `"any"` (`"45"` turns the result into conventional 45 degree routing as a last
+seconds after the normal search, as `--open-end-seconds`; the clock starts when the open end
+starts, so a short budget never cuts the normal search; `open_via_cost`, default 20 mm, is what
+a via is worth when it judges its results; the results that differ from the output in vias and
+length are written next to it as `<output>.altN.kicad_pcb` and listed in `alternatives`), `air`
+(reserve on the clearances: 0.03 mm in an open ended route of the whole board, else 0),
+`prefer_width` 0 (off), `plane_layers` none (layers taken as planes for this route, as
+`--plane-layers`), `placements` 0 (a value tries that many placements from the netlist, routes
+each and goes on with the best, as `--placements`; first seed `placement_seed`, default 1; the
+output has the parts where the best placement put them and `placement` lists the tries; to keep
+and compare the placed boards use `try_seeds`), `net_widths` and `net_priorities` none (JSON
+files with options and priorities per net, as `--net-widths` and `--net-priorities`; what
+`set_net_options` holds for a net wins field by field), `teardrops` false (KiCad's teardrops
+switched on in the output and its project), `frames` none (a folder for one SVG of the best
+candidate per generation), `angles` `"any"` (`"45"` turns the result into conventional 45 degree routing as a last
 step, like `--angles 45`), `patterns` none (routing order hints, see
 [Choosing opt-in options](#choosing-opt-in-options)), `clear_corridors` false (experimental:
 before routing, the parts that `track_corridors` lists are placed again around the bands into the
@@ -694,9 +723,10 @@ its pins give way and are routed again (`give`, default 8, in steps of 2, 4, 8 m
 the fewest open connections, then the fewest violations is written). `shove: false` and `give: 0`
 leave the other nets where they are; locked copper and plane nets never move. With
 `open_end_seconds` the tries of `give` run without the open end, and the one kept goes on open
-ended for the rest of the time (the budget counts from the start of the call). `output` defaults to
-`<input>.routed.kicad_pcb` next to the input; the `.kicad_pro` and `.kicad_dru` are copied next
-to the output if missing, so `drc` and `load_board` work on it. `nets` routes only the listed
+ended for the budget. `output` defaults to `<input>.routed.kicad_pcb` next to the input and must
+not be the input file; the `.kicad_pro` and `.kicad_dru` are copied next to the output if
+missing (`copied`), so `drc` and `load_board` work on it. `keep_locked` defaults to what the
+board was loaded with. `nets` routes only the listed
 nets for this call.
 
 Without `keep_all` the geometry generations may shift parts next to clearance problems and open
@@ -704,9 +734,15 @@ connections, while the routed copper follows like rubber bands (`move_parts`, de
 without `keep_all`, as `--move-parts` of the CLI). Locked footprints, connectors, modules,
 mounting holes, buttons and test points stay, and so do the references in `fixed`. The output
 has the footprints at their new positions, and `moved` lists them with their shift in mm.
-`move_parts` does not go together with `shove`.
+`move_parts` does not go together with `shove`: finishing nets with `move_parts: true` needs
+`shove: false`, otherwise the route is refused.
 
-Result fields: `board`, `cleared_corridors`, `moved`, `input`, `output`, `seconds`, `threads`, `connections`, `routed`,
+Result fields: `board`, `cleared_corridors`, `placement` (with `placements`: `seed`, `moved`,
+`tried`), `moved`, `input`, `output`, `seed` (the seed the search ran with), `seconds` (wall time
+of the whole route, from reading the board to the checked result, the same number as in the
+CLI's report), `search_seconds` (the part up to the end of the search), `threads`,
+`alternatives` (with `open_end_seconds`: `path`, `routed`, `connections`, `vias`, `length_mm`,
+`clearance_spots`), `frames`, `connections`, `routed`,
 `unrouted` (list of `net: pad -> pad`), `vias`, `length_mm`, `items_written`, `skipped_nets`,
 `violations_total`, `violations_by_kind`, `violations` (first `max_violations`, default 50:
 `what`, `x`, `y`, `actual_mm`, `required_mm`, `nets` [routed net, other net or null]; the kinds
@@ -753,7 +789,7 @@ board: each helps one kind of board and costs on another. The full table with th
   with the corridors cleared.
 - **FPGA or BGA with pairs and buses**: `patterns` `pairs,groups` (best on Arty).
 - **DDR fan-out**: `patterns` `groups-short`; for pairs that change layers `pairs` with
-  `pair_via_pairs`. Leave `pair_breakouts` off there.
+  `via_pairs`. Leave `breakouts` off there.
 - **Placement fixed and the board already routes cleanly**: leave the hints off (they added
   clearance errors on such a board); `decaps` at most. Spend the time on seeds and
   `open_end_seconds` instead.
@@ -809,8 +845,8 @@ ground plane (missing, or on which layer), plane layers without a zone and, on b
 differential pairs, routing layers whose nearest plane is not ground. `dru_rules` holds the
 widths as KiCad custom rules (`track_width` min and opt, courtyards of fine pitch parts exempt)
 to append to the project's `.kicad_dru`: KiCad's DRC then enforces them, and Gummiband reads
-them on the next `load_board`. `apply: true` stores the widths as net options (`width`, see
-`set_net_options`) for the following routes.
+them on the next `load_board`. `apply: true` stores the widths as net options (`width` and
+`min_width`, see `set_net_options`) for the following routes.
 
 ```json
 {"name": "power_plan", "arguments": {"board": "b1", "apply": true, "currents": [
@@ -1168,8 +1204,8 @@ Shortened session on the LED controller benchmark (4 threads):
   `gummiband place`, knows no datasheet layouts (place and lock power stages with `move_part`;
   `semantic` keeps an inductor at its converter, but no via arrays or copper),
   and treats both board sides as one space.
-- Not reachable through MCP yet: per net widths and priorities from files (`--net-widths`,
-  `--net-priorities`; both go through `set_net_options`).
+- The open end can only be given a time budget (`open_end_seconds`); the stop by the user that
+  `--until-stop` has needs the cancellation below.
 - `create_board` reads rectangular outlines only, places every part on the front side and
   without rotation, and does not read footprint libraries of other types than KiCad (`.pretty`).
 - `power_copper` shapes a pour as a convex hull cut by straight lines (plus a narrow stub out of

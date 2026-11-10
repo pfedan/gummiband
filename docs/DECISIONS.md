@@ -103,6 +103,22 @@ Standing decisions of the project owner, kept here so that they survive any sess
   leaves a piece at its angle where no 45 degree path fits.
 - Follow-me stays "route the selected nets" for now; no live completion while drawing a track.
 
+## Interfaces
+
+- Highest quality standard with maximum usability (Daniel, 2026-11-10). Consolidation merges
+  switches that are duplicates or contradict each other; it never removes a way to tune. Each
+  knob has one name, one default and one description, the same in the CLI, the MCP server and
+  the plugin (`gummiband_app::OPTIONS` for a route; tests hold the front ends to it).
+- The MCP server is a toolbox, not an automaton. An agent brings its own knowledge of
+  electronics and must be able to do any part of a board by hand: place and lock parts, route
+  single nets itself, prescribe widths and currents. It leaves only the rest to the router,
+  which leaves existing work untouched when asked to. The KiCad plugin follows the same
+  principle for the person at the board.
+- Options that contradict each other are errors that say what to change; they are never
+  adjusted silently. An option that was left out does not contradict: its default follows from
+  the others. The rule lives in one place (`RouteOptions::validate`), so every front end gives
+  the same message.
+
 ## License
 
 - Unlicensed: proprietary, all rights reserved. No LICENSE file, crates are not published.

@@ -40,7 +40,7 @@ create_board parts_outside keeps the board empty for hand placement and copper d
 The tool guide returns the documentation: guide without topic for \
 this workflow and the topic list, guide with a tool name for its full reference. \
 From a schematic only: create_board turns a KiCad netlist into a board (footprints, nets, outline, stackup, net classes). The automatic loop: load_board (gives a board id) -> list_nets -> optionally \
-set_net_options (priority: lower routes first; skip: leave a net unrouted) -> route (writes a \
+set_net_options (priority: lower routes first; skip: leave a net unrouted; width, min_width and neck_refs prescribe the copper of a net) -> route (writes a \
 routed .kicad_pcb and returns stats, unrouted connections and clearance violations) -> drc on \
 the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board coordinates) to \
 look at problems. To pre-route a critical part by hand (datasheet layout): part_info -> \
@@ -3982,7 +3982,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Route a loaded board with Gummiband (topological any-angle router, portfolio plus evolutionary order search on all routing threads) and write the routed .kicad_pcb (default <input>.routed.kicad_pcb next to the input; unlocked tracks and vias of the input are replaced; with keep_all it adds to them, with keep_all + nets + reroute only those nets are redone). It complements manual routing: locked tracks and vias (add_locked_copper, lock) are kept and routed around, locked parts do not move, and the result can be refined afterwards with move_part, add_locked_copper, lock and another route of single nets. Returns routed/total connections, unrouted connections, vias, track length, Gummiband's clearance violations with nets and positions, and the portfolio. CPU heavy: seconds to minutes; one route at a time. Check the result with drc.",
+        description = "Route a loaded board with Gummiband (topological any-angle router, portfolio plus evolutionary order search on all routing threads) and write the routed .kicad_pcb (default <input>.routed.kicad_pcb next to the input; unlocked tracks and vias of the input are replaced; with keep_all it adds to them, with keep_all + nets + reroute only those nets are redone). It complements manual routing: locked tracks and vias (add_locked_copper, lock) are kept and routed around, locked parts do not move, and the result can be refined afterwards with move_part, add_locked_copper, lock and another route of single nets. Every option has the name, default and meaning of gummiband route (there as --kebab-case); options that contradict each other are refused with a message that says what to change, and so is an argument that does not exist. Returns routed/total connections, unrouted connections, vias, track length, Gummiband's clearance violations with nets and positions, the portfolio, and with open_end_seconds the alternatives written next to the output. CPU heavy: seconds to minutes; one route at a time. Check the result with drc.",
         output_schema = schema_for_output::<RouteOut>(),
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]

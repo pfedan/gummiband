@@ -61,8 +61,8 @@ negotiated congestion), not any existing product's code.
 | `gummiband-core` | geometry, board model, triangulation substrate, topological router, realization, checks. No I/O. |
 | `gummiband-kicad` | KiCad 9/10 s-expression reader and writer, net class and rule import from `.kicad_pro`. |
 | `gummiband-place` | placement: `auto` places any board from its netlist (`gummiband place`, MCP `place_parts`), a library without a program of its own. Its `variants` example (a benchmark tool, `bench/place`) makes the LED controller outline variants. |
-| `gummiband-app` | the pipelines behind the front ends: `RouteOptions` (every option of a route with its default, defined once), `route_board` and `route_file` (see [Route pipeline](#route-pipeline)). Prints nothing. |
-| `gummiband-cli` | `gummiband` binary: `info`, `place`, `route`, `angles45`, `move-part`, `lengths`, `strip`. Maps its arguments to `gummiband-app`, prints and writes the reports. The plugin calls this. |
+| `gummiband-app` | the pipelines behind the front ends: `RouteOptions` (every option of a route with its default, defined once, and the table `OPTIONS` of them), their checks, `NetOptions` per net, `route_board` and `route_file`, the writing of the result (see [Route pipeline](#route-pipeline)), and the debug SVG. Prints nothing. |
+| `gummiband-cli` | `gummiband` binary: `info`, `place`, `route`, `angles45`, `move-part`, `lengths`, `strip`. Maps its arguments to `gummiband-app`, prints the reports. The plugin calls this. |
 | `gummiband-mcp` | `gummiband-mcp` binary: the MCP server (stdio) for AI agents, see `docs/MCP.md`. Keeps the session (loaded boards, working copies, net options) and calls `gummiband-app` for `route` and `try_seeds`. |
 | `plugin/` | KiCad action plugin (Python, KiCad IPC API): exports the board, runs the CLI, imports the result. |
 
@@ -77,7 +77,9 @@ rounding and `mul_add` are exact everywhere and stay with the standard library.
 ## Route pipeline
 
 "Route a board with these options" exists once, in `gummiband-app::route`, and both front ends
-are adapters around it: they map their arguments to `RouteOptions`, call, and present the result.
+are adapters around it: they map their arguments to `RouteOptions`, call `route_file`, and
+present the result. A rule about options or about what is written belongs here, never in a
+front end.
 
 - `RouteOptions` has every option. `Default` gives the documented defaults from the constants in
   `gummiband_app::defaults`; the clap defaults of the CLI name these constants and the MCP server
@@ -85,24 +87,45 @@ are adapters around it: they map their arguments to `RouteOptions`, call, and pr
   method each that resolves them: `move_parts` (on unless `keep_all`), `shove` (on when finishing
   nets with fixed parts), `give` (8 mm when finishing nets), `air` (0.03 mm in an open ended run
   of the whole board).
+- `OPTIONS` is the table of them: name, kind of value, default in words and one sentence per
+  option. The CLI offers each as `--kebab-case`, the MCP tool `route` as an argument of the same
+  name. Three tests keep this true: the table against the fields of `RouteOptions`
+  (`options.rs`), the flags of `gummiband route` against the table (`gummiband-cli`), the
+  arguments of the tool against the table (`gummiband-mcp`). What a front end adds of its own
+  is listed in its test (`OWN`): where the result goes and how it is shown. Help texts are to
+  be generated from the table.
+- `RouteOptions::validate` checks the options against each other. Options that contradict each
+  other are errors that say what to change, and nothing is adjusted silently; `route_board` and
+  `route_file` call it first, so both front ends return the same message.
+- `NetOptions` (`nets.rs`) is what a user prescribes for one net: width, minimum width, the
+  parts to neck at, priority, skip. `apply_net_options` puts them on the board model. They come
+  from the file of `net_widths` (a width or an object per net), from `net_priorities` and from
+  `RouteOptions::net_options`, which the MCP server fills from its session.
 - `route_board(board, options, hooks)` takes a board model and returns `Routed`: the search
   (`finish_nets` around `route_pairs` or `route_board` of the core), then room for meanders, the
   45 degree step, length tuning, the length rules, the clearance check and the soft copper that
-  moved. `Routed::board_text` and `Routed::write` put a geometry (the result or an alternative of
-  the open end) into the board file. The reports of both front ends are built from `Routed`.
-- `route_file(path, options, hooks)` is the whole way from a file, as `gummiband route` goes it:
-  `clear_corridors`, the search over `placements`, `load_board` (copper to keep, movable parts,
-  widths and priorities per net from their JSON files), then `route_board`.
-- `Hooks` carry what differs between front ends while a route runs: the stop flag of the open end
-  (the CLI sets it on a line on stdin, the MCP server after a time budget), the progress callback
-  of the search and the `Event`s of the steps before it (the CLI prints them). The crate itself
-  prints nothing.
+  moved. `Routed::seconds` is the wall time of the route and `Routed::seed` the seed of the
+  search, the numbers every front end reports. The reports of both front ends are built from
+  `Routed`.
+- `route_file(board, output, options, hooks)` is the whole way from a file: the checks,
+  `clear_corridors`, the search over `placements`, `load_board` (copper to keep, planes, movable
+  parts, options per net), then `route_board`. `RouteOutcome::write` writes the result: the
+  routed board, the alternatives of the open end next to it (`<output>.altN.kicad_pcb`), the
+  project files of the input where they are missing, and the pictures of `frames`. The input is
+  never the output. Temporary copies (cleared corridors, placements) go when the outcome is
+  dropped.
+- The open end: `open_end_seconds` is a time budget whose clock starts when the search reports
+  the phase `open end`; `Hooks::stop` is the stop from outside (the CLI sets it on a line on
+  stdin). Either makes the run open ended.
+- `Hooks` carry what differs between front ends while a route runs: that stop flag, the progress
+  callback of the search and the `Event`s of the steps before it (the CLI prints them). The
+  crate itself prints nothing.
 
-The MCP server enters at `route_board`: its board comes from the session (the loaded file with
-the options of `set_net_options` applied), and placement and corridors are tools of their own
-that work on the working copy. The checks of the arguments stay in each front end, in its own
-words. The debugging switches of the environment that belong to the pipeline are read there
-(`GB_SHIFT`, `GB_NO_TUNE_ROOM`, `GB_CC_*`), so they act in both front ends.
+The MCP server keeps one thing of its own on this path: with `clear_corridors` it calls
+`gummiband_app::clear_corridors` itself and puts the placement into the working copy of the
+session, so that the agent can go on from it, then routes that file. The debugging switches of
+the environment that belong to the pipeline are read there (`GB_SHIFT`, `GB_NO_TUNE_ROOM`,
+`GB_CC_*`), so they act in both front ends.
 
 ## Board model
 

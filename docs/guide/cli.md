@@ -60,6 +60,19 @@ gummiband route board.kicad_pcb -o routed.kicad_pcb [options]
 
 Writes a copy of the board with the routed tracks, arcs and vias. Nothing but tracks and vias
 changes in the file but the footprints that `--move-parts` shifts (on by default, see below).
+The input stays as it is: an output that is the input file is refused. The `.kicad_pro` and
+`.kicad_dru` of the input are copied next to the output where they are missing (a `copied` line
+names them), so KiCad opens the result with its net classes and rules.
+
+The options of `route` are those of the route pipeline in `gummiband-app`, and the MCP tool
+`route` has every one of them under the same name (there in `snake_case`), with the same default
+and meaning; a test fails when the two differ. Options that contradict each other are refused
+before any work, with a message that says what to change, in the names of the pipeline
+(`move_parts does not work with shove: switch shove off, or leave move_parts out` asks for
+`--no-shove`). Nothing is adjusted silently. For example: `--until-stop` or `--open-end-seconds`
+with `--pairs`, `--reroute`, `--shove` or `--give` without `--keep-all --nets`, `--placements`
+with `--keep-all`, `--nets` or `--pairs`, `--clear-corridors` with `--keep-all`, `--pair-all`
+without `--pairs`, `--runs 0`.
 
 ### What is kept and what is replaced
 
@@ -68,8 +81,9 @@ changes in the file but the footprints that `--move-parts` shifts (on by default
 | `--keep-locked` | off | Keep locked tracks and vias as fixed copper and route around them; their ends count as connected. Without it **every** track and via is removed first, locked or not. The plugin passes this flag by default. |
 | `--keep-all` | off | Experimental. Keep every existing track and via, locked or not, and add to them: for completing a partly routed board or finishing a track you started. Pins that sit on one piece of kept copper count as connected, and the search rides along kept copper without drawing a new track there. New, so check the result with the DRC. |
 | `--nets A,B` | all | Experimental. Route only these nets (exact names, comma separated); the other nets stay as they are. Meant together with `--keep-all`. |
+| `--reroute` | off | With `--keep-all --nets`: the unlocked tracks and vias of those nets go first and the nets are routed anew. Without it a net that is already connected stays as it is. Locked copper of the nets stays. |
 | `--shove` | on with `--keep-all --nets` | The unlocked tracks of other nets become part of the topology, so a new connection is threaded between them and they shift aside a little instead of being rerouted. What the new track does not touch stays exactly as it was. Vias that moved lose their teardrop settings, and in very tight spots a short is still possible, so run the DRC. On by default when you finish nets with `--keep-all --nets`, except with `--move-parts`; the flag insists on it (and fails where it cannot work). The plugin's *Finish selected nets* passes it too. |
-| `--no-shove` | off | With `--keep-all --nets`: the tracks of other nets stay where they are, a new connection only goes around them. |
+| `--no-shove` | off | With `--keep-all --nets`: the tracks of other nets stay where they are, a new connection only goes around them. Needed together with `--move-parts`: parts that move and tracks that shift do not go together, and asking for both is refused. |
 | `--give R` | 8 with `--keep-all --nets`, else 0 | When a connection finds no way, unlocked tracks of other nets within R mm of its pins give way and are routed again, in growing steps (2, 4, 8 ... mm) up to R. Every step is a try of its own, and the try with the fewest open connections, then the fewest clearance violations is written; on a tie the earlier one, which moves less. So a net that gave way and found no way back costs nothing: that try loses. Locked copper and plane nets such as GND never move. `--give 0` keeps everything in place. With `--until-stop` the tries run without the open end, and the one kept runs again and goes on open ended (if it ends worse, after an early stop, the try stays). |
 
 Zones are never removed by `route`. Refill them in KiCad afterwards.
@@ -81,10 +95,11 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | `--runs N` | 14 | Portfolio size: routing attempts with different connection orders (and via costs) in every phase, spread over the worker threads. A constant by design, so results do not depend on the machine. |
 | `--generations N` | 3 | Rounds of the evolutionary order search after the portfolio. Each round mutates the best order (failed connections move forward, a few random moves) and tries `--runs` mutants. 0 means portfolio only. The search stops early when everything is routed. |
 | `--geometry-generations N` | 3 | Rounds that are judged after the tracks were drawn, by the clearance check. Each round draws and checks every candidate, so 3 rounds take about 2 to 3 times as long as 0, and leave far fewer violations (Arty 32 to 1, ULX3S 54 to 4, LED controller 18 to 4). 0 is the quick draft. The plugin and the MCP server use 3 as well. |
-| `--seed N` | `GB_EVO_SEED`, then fixed | Seed of the search. The same board, options and seed give the same result; another seed gives another attempt, often with a quite different violation count (Arty 32 or 1, LED controller 18 or 14 at `--geometry-generations 0`). |
+| `--seed N` | `GB_EVO_SEED`, then fixed | Seed of the search, named in the line `best: seed N` and as `seed` in the report. The same board, options and seed give the same result; another seed gives another attempt, often with a quite different violation count (Arty 32 or 1, LED controller 18 or 14 at `--geometry-generations 0`). |
 | `--negotiate N` | 0 (when needed) | Negotiated routing: connections may overfill channels and cross for a price that rises from round to round, until they have settled who goes where. Finds the last connections on dense boards, where the order alone does not. Without the option the search takes it up on its own: when the plain search leaves a few connections open (at most 15 %), a second one negotiates with 20 rounds and the better result counts, so such a board takes the time of both; `GB_AUTO_NEGOTIATE=0` switches that off. With N a negotiated search runs from the start, next to a plain one, and the better result counts, so a run takes about twice as long. 16 to 20 rounds work well; fewer leave conflicts that cost connections. |
 | `--until-stop` | off | Keeps improving the result after the search until a line arrives on stdin or stdin closes, then finishes the best result. A generation takes a few connections around one spot out (a violation, or a connection with vias or a long way) and lays them again, everything else stays; the longer nothing helps, the more it takes out, and side branches try bolder changes that may first make the result worse. It never gives up a connection, and it counts a problem as one spot, however many pieces of track it touches. Results that are as complete and clean but differ in vias and length are written next to the output as `.alt1.kicad_pcb`, `.alt2.kicad_pcb`, each with an `alternative:` line in the summary. The same seed stopped at the same generation gives the same result. Finishing nets (`--keep-all --nets`), the tracks of other nets shift aside and give way as without it (see `--shove` and `--give`), and the open end goes on from the try kept. Other limits: no placement rounds with `--move-parts`, no plain search next to `--negotiate`, and it does not go with `--pairs`. |
-| `--air MM` | 0, with `--until-stop` 0.03 | Reserve on top of the clearances that the finished copper gets where there is room. A rubber band lies right at the limit, this pushes it off and evens out the gaps in tight bundles. The result stays only if it brings no new violations. Finishing nets (`--keep-all --nets`) it stays 0 with `--until-stop` too, as it would move the tracks of other nets that the new ones do not touch (on Arty 270 of them); give it explicitly to have it there. |
+| `--open-end-seconds S` | 0 (off) | The open end of `--until-stop` with a time budget: after the normal search the result keeps improving for S seconds, then the best one is finished. The clock starts when the open end starts (the `progress` phase `open end`), so a short budget never cuts the normal search. For scripts and benchmarks; together with `--until-stop` the run ends on the line on stdin or after the budget, whichever comes first. |
+| `--air MM` | 0, in an open ended run (`--until-stop`, `--open-end-seconds`) 0.03 | Reserve on top of the clearances that the finished copper gets where there is room. A rubber band lies right at the limit, this pushes it off and evens out the gaps in tight bundles. The result stays only if it brings no new violations. Finishing nets (`--keep-all --nets`) it stays 0 with `--until-stop` too, as it would move the tracks of other nets that the new ones do not touch (on Arty 270 of them); give it explicitly to have it there. |
 | `--prefer-width W` | 0 (off) | At the very end tracks of the default net class first push aside what can give way, then grow up to W mm wherever there is room, with all clearances kept; tracks in a bundle share the room. Routing still works with the class width, so this costs no connections. They never get narrower than their class width, a short wider stretch is left out, and every change of width is a taper of 0.025 mm per piece. Other classes keep their width unless a `track_width` rule in the `.kicad_dru` gives them a target with `opt` (that also works without this option, see [Wider tracks where there is room](concepts.md#wider-tracks-where-there-is-room)); differential pairs always keep theirs. `--teardrops` can smooth that further. |
 | `--angles A` | `any` | `45` turns the result into conventional 45 degree routing as the very last step: straight pieces in the eight directions of the 45 degree grid, corners of 90 and 135 degrees chamfered, no arcs. Vias and track ends stay where they are. The step never adds a clearance violation: where no 45 degree path fits, mostly in tight bundles, a piece keeps its angle, and the output says how many (`45 degrees: ... pieces off the grid`). Tracks get about 4 % longer. Necks stay where the router had them. With `--pairs` the wide track of each pair goes onto the grid before the split (`45 degrees on the wide tracks: ...`), so both tracks stay parallel. The JSON report has the numbers under `angles_45`. See [Conventional 45 degree tracks](concepts.md#conventional-45-degree-tracks). |
 | `--via-pass F` | 4 | After the search, connections with vias are routed once more with the via cost multiplied by F, and the result is kept only if completion, violations and shorts do not get worse. 0 switches the pass off. |
@@ -97,7 +112,7 @@ Zones are never removed by `route`. Refill them in KiCad afterwards.
 | `--breakouts` | off | Experimental, with `--pairs`: end the wide track at a point just outside the pads, with two short single tracks into them and the room for them kept free of other nets. Helps at connector rows (`diff_pairs`, `matching`), but on DDR5 it is still worse than without (more pair gap errors and length errors over 6 seeds). Ends between the pads of a part (BGA) stay at their pads. |
 | `--pair-skew MM` | 0.1 | With `--pairs`: length difference left within a pair; the shorter track gets bumps where they fit. A `skew` rule with `(within_diff_pairs)` may ask for less. |
 | `--pair-zdiff OHM` | none | With `--pairs`: target differential impedance, sets the track width per layer from the stackup (estimate after IPC-2141), the gap stays. |
-| `--no-tune` | off | Leave the lengths as routed. By default, when the `.kicad_dru` has `length` or `skew` rules, the routing first makes room next to the nets that are too short and then gets meanders that bring them into range, see [Length matching](concepts.md#length-matching). |
+| `--tune` / `--no-tune` | on | `--no-tune` leaves the lengths as routed. By default, when the `.kicad_dru` has `length` or `skew` rules, the routing first makes room next to the nets that are too short and then gets meanders that bring them into range, see [Length matching](concepts.md#length-matching). |
 | `--tune-amplitude MM` | 1 | Highest meander bump (centre line above the original line). |
 | `--tune-spacing W` | 2 | Air between neighbouring meander legs, in track widths (at least the clearance). |
 | `--patterns LIST` | none | Hints from local patterns of the board (`gummiband info` lists them), comma separated: `decaps` connects a decoupling capacitor to its IC pin before everything else, `rows` lets the open end lay the connections of a pin row again in pin order, `shares` lets pins of a plane net next to each other reach the plane through one via, `pairs` routes differential pairs before the other signal connections (the longest first), `groups` routes the connections between the same two parts (bus, SPI, I2C, connector) as one block in pin order, the longest block first (`groups-long` is the same, `groups-short` puts the shortest first). `all` or `none`. Experimental, none wins on every board: see [Choosing the opt-in options](options.md). |
@@ -113,20 +128,20 @@ when the progress reports `converged`.
 | Option | Default | Effect |
 | --- | --- | --- |
 | `--move-parts` / `--no-move-parts` | on, off with `--keep-all` | During the geometry generations, parts next to clearance problems and next to the pins of open connections may shift a little to open a channel. At an open connection the part with that pin stays and its neighbours step aside. The routed copper goes along like rubber bands, as in [`move-part`](#gummiband-move-part): the parts move in small steps and the tracks give way; a shift stops where the copper cannot give way any more. Only if that keeps the problems does a new search on the shifted board follow (on boards up to 400 connections). Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay (by footprint library name and by reference prefix J, P, CN, USB, H, MH, SW, TP). The output file has the moved footprints at their new positions, with the footprint's own zones (a keepout drawn inside the footprint) moved along, and the console lists every move. Footprints in a KiCad group form a block that moves as a whole with its kept tracks and vias (zones in the group do not move yet); a block with one fixed member stays put. Blocks are new and untested on a real board. |
-| `--fixed R1,U3` | none | More references that never move under `--move-parts` and `--placements`. |
+| `--fixed R1,U3` | none | More references that never move under `--move-parts`, `--placements` and `--clear-corridors`. |
 | `--placements N` | 0 | Place the board N times from the netlist (see [`gummiband place`](#gummiband-place), default scope), route each result with the settings of this command and keep the best: fewest open connections, then clearance violations, vias and length. Takes N + 1 routes, the last one writes the winner; `--until-stop` applies to that last one only. Not with `--keep-all`, `--nets` or `--pairs`. The JSON report gets a `placement` block with every try. |
-| `--placement-seed S` | 1 | First seed of `--placements`. |
+| `--placement-seed S` | 1 | First seed of `--placements`, and the seed of `--clear-corridors`. |
 | `--clear-corridors` | off | Before the routing, parts that sit in the band of a group of tracks between two parts (ICs, connectors sharing at least two signal nets) and are not on its nets get new positions with `place --corridors`; everything else stays, and so do decoupling capacitors (a capacitor on a ground or supply). ICs and connectors in a band move at most 1.5 mm (`place --leash`, `GB_CC_LEASH` to change it). Pairs with `--patterns groups`. Experimental: `GB_CC_GAP`, `GB_CC_HALO` (mm), `GB_CC_ESCAPE=1` and `GB_CC_SEMANTIC=1` give the moved parts more room. When it pays: [options](options.md#room-for-track-groups). |
 | `--teardrops` | off | Switches on KiCad's teardrops for every via and connected pad in the output file, and the track end teardrops (the wedges where a track changes width, for example at a neck) in the output's project. KiCad builds the shapes itself: open the file and fill the zones once (B), then the teardrops appear. The plugin cannot set them through KiCad's API and opens *Edit Teardrops* instead. |
-| `--net-priorities prio.json` | none | Routing order per net from a JSON file `{"net name": priority, ...}`; lower numbers route first. Nets not in the file keep their net class priority. The MCP server does the same with `set_net_options`. |
-| `--net-widths widths.json` | none | Track width per net from a JSON file `{"net name": width_mm, ...}`, overriding the net class width. `bench/net_widths.py ORIGINAL.kicad_pcb --json widths.json` extracts the widths a designer used in an existing routing. |
+| `--net-priorities prio.json` | none | Routing order per net from a JSON file `{"net name": priority, ...}`; lower numbers route first. Nets not in the file keep their net class priority. Wins over a `priority` in `--net-widths`. |
+| `--net-widths widths.json` | none | Options per net from a JSON file with one entry per net name. A number is the track width in mm, overriding the net class width: `{"GND": 0.5}`; `bench/net_widths.py ORIGINAL.kicad_pcb --json widths.json` extracts the widths a designer used in an existing routing. An object prescribes more: `{"VBUS": {"width": 0.8, "min_width": 0.8, "neck_refs": ["U3"], "priority": 1}, "NC": {"skip": true}}`. `width` is the width the net is routed with, `min_width` the width it never necks below except in the courtyards of `neck_refs` (left out: the parts whose pad on the net is narrower than `min_width`), `priority` routes lower numbers first and `skip` leaves the net unrouted. These are the fields of the MCP tool `set_net_options`, and both go through the same function. Nets the board lacks are passed over; a field that does not exist or a minimum above the width is an error. |
 
 ### Output and reports
 
 | Option | Effect |
 | --- | --- |
-| `--report out.json` | Machine readable report, see below. |
-| `--progress` | Prints a `progress {json}` line after every phase: `phase`, `routed`, `conns`, `vias`, `length`, `violations` (null before the geometry step; in the open end these are spots, see `--until-stop`), `generation`, `seconds`, and for `--until-stop` `stale` (generations since the last noticeable gain), `level` (side branches that failed since then) `top` (how many have to fail) and `converged` (even bold changes do not help any more). The plugin's progress window reads these lines. |
+| `--report out.json` | Machine readable report, see below. Its `seconds` are the wall time of the whole route, the number the MCP tool `route` returns too. |
+| `--progress` | Prints a `progress {json}` line after every phase: `phase`, `routed`, `conns`, `vias`, `length`, `violations` (null before the geometry step; in the open end these are spots, see `--until-stop`), `generation`, `seconds`, and in the open end `stale` (generations since the last noticeable gain), `level` (side branches that failed since then) `top` (how many have to fail) and `converged` (even bold changes do not help any more). The plugin's progress window reads these lines. |
 | `--svg out.svg` | Debug drawing of the result: obstacles, tracks, vias and the violations. |
 | `--svg-tris` | Also draw the triangulation into that SVG. |
 | `--frames DIR` | One SVG (and PNG, if `rsvg-convert` is available) of the best candidate per generation into `DIR`, and `DIR/evolution.gif` if ImageMagick's `magick` is available. |
@@ -139,7 +154,7 @@ when the progress reports `converged`.
 substrate: 1012 vertices, 2012 triangles, 2402 via sites
   gen  0 seed  0 fanout_first true  via cost 3.0: 9/9 routed, 0 vias, 113 mm
   gen  0 seed  1 fanout_first false via cost 3.0: 9/9 routed, 0 vias, 109 mm, 0 violations (0 shorts)
-best: seed 1 9/9 routed, 0 vias, 109 mm, 0.15 s
+best: seed 24301 9/9 routed, 0 vias, 109 mm, 0.15 s
   length lower bound (signal nets, Steiner): 88 mm; signal length is at most 24% above the optimum
 clearance check: 0 violations
   {}
@@ -149,7 +164,12 @@ wrote 83 items to routed.kicad_pcb
 - One line per candidate of the portfolio and the generations: routed connections, vias, length,
   and after the geometry step the violations of the drawn tracks.
 - `best`: the winner. Fewest unrouted connections first, then fewest violations, then vias and
-  length.
+  length. `seed` is the seed of the search (`--seed`, else `GB_EVO_SEED`, else the constant
+  24301): the same seed on the same board gives this result again. The time is that of the whole
+  route, from reading the board to the checked result.
+- `alternative: FILE: ...` lines name the other results of an open ended run, those that differ
+  from the output in vias and length, written next to it as `<output>.altN.kicad_pcb`.
+- `copied FILE` names a project file copied next to the output.
 - `unrouted: NET: PAD -> PAD` lines name the connections the router gave up on. Route them by
   hand, or lock the rest and run again.
 - `diff pairs: N, X of Y mm coupled (Z%)` appears when the board has nets paired by name: how
@@ -193,7 +213,9 @@ wrote 83 items to routed.kicad_pcb
 {
   "board": "board.kicad_pcb",
   "output": "routed.kicad_pcb",
+  "seed": 24301,
   "seconds": 44.7,
+  "search_seconds": 43.9,
   "connections": 348,
   "routed": 346,
   "unrouted": ["VBUS_IN: U6.5 -> C12.1"],
@@ -220,6 +242,14 @@ With length rules the report has `matching` (every rule: `rule`, `kind`, `value`
 `opt`, `max`, `within_pairs`, and `nets` with `net`, `length`, `skew`, `target`, `ok`) and, unless
 `--no-tune`, `length_tuning` (`nets`: `net`, `before`, `after`, `aim`, `coupled`; `patterns`: one
 per meander with its nets, layer, base line and settings).
+
+`seconds` is the wall time of the whole route: from reading the board (with `--clear-corridors`
+and `--placements` their work too) to the result with every step after the search done and
+checked; writing the files is not included. `search_seconds` is the part up to the end of the
+search. `seed` is the seed the search ran with. The report also lists `alternatives` (the other
+results of an open ended run: `path`, `routed`, `connections`, `vias`, `length_mm`,
+`clearance_spots`), `copied` (project files copied next to the output), `skipped_nets` (left out
+by `--nets` or a `skip`) and `cleared_corridors` (the parts `--clear-corridors` placed again).
 
 `violations[].nets` is the routed net and the other net (or null for an obstacle without a net,
 such as the board edge or a hole). Positions are board millimetres as KiCad shows them. Scripts
