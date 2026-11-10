@@ -147,8 +147,8 @@ Effort knobs, from cheap to expensive:
 | finer via placement in tight spots | `--via-pitch 0.25` |
 | the last connections on a dense board | nothing: the search negotiates on its own when a few stay open; `--negotiate 20` does it from the start |
 
-The search is deterministic: the same board, options and `GB_EVO_SEED` give the same result on
-any machine and with any `--threads`; the thread count only changes the run time. Set a different
+The search is deterministic: the same board, options and `GB_EVO_SEED` give the same result with
+any `--threads` on the same build and operating system; the thread count only changes the run time. Set a different
 `GB_EVO_SEED` to get another attempt.
 
 ## Let parts move

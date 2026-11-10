@@ -3,9 +3,17 @@
 # Results without an open end are deterministic (same input and seed, any thread count), so the
 # list is a regression test: a refactoring must leave it unchanged.
 #
+# The reference files hold the hashes of the static musl build on x86_64 Linux
+# (cargo build --release -p gummiband-cli --target x86_64-unknown-linux-musl). The router calls
+# sin, cos, atan2, acos, exp, log, pow and hypot of the system's maths library, and their last bits
+# differ between glibc versions and macOS, which changes the routed file. musl brings its own, so
+# that build gives the same hashes on every x86_64 Linux. On another build compare two binaries
+# with --compare instead of --check.
+#
 # Usage: bench/hashes.sh [BIN] [board ...]      (default BIN: target/release/gummiband)
 #        bench/hashes.sh --check [BIN]          compare with bench/hashes.txt, exit 1 on a difference
 #        bench/hashes.sh --update [BIN]         rewrite bench/hashes.txt
+#        bench/hashes.sh --compare OLD NEW      route with both binaries, exit 1 on a difference
 # Environment: QUICK=1 routes only the boards that take a few seconds (the CI set).
 # No kicad-cli needed: only the router runs.
 set -u
@@ -15,9 +23,20 @@ MODE=print
 case "${1:-}" in
     --check) MODE=check; shift ;;
     --update) MODE=update; shift ;;
+    --compare) MODE=compare; shift ;;
 esac
-BIN=${1:-$ROOT/target/release/gummiband}
-[ $# -gt 0 ] && shift
+MUSL=$ROOT/target/x86_64-unknown-linux-musl/release/gummiband
+if [ $MODE = compare ]; then
+    [ $# -ge 2 ] || { echo "usage: bench/hashes.sh --compare OLD_BIN NEW_BIN [board ...]" >&2; exit 2; }
+    OLD=$1; BIN=$2; shift 2
+    [ -x "$OLD" ] || { echo "no router binary at $OLD" >&2; exit 2; }
+elif [ $# -gt 0 ]; then
+    BIN=$1; shift
+elif [ $MODE != print ] && [ -x "$MUSL" ]; then
+    BIN=$MUSL
+else
+    BIN=$ROOT/target/release/gummiband
+fi
 [ -x "$BIN" ] || { echo "no router binary at $BIN (cargo build --release -p gummiband-cli)" >&2; exit 2; }
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
@@ -69,6 +88,17 @@ REF=$BENCH/hashes.txt
 case $MODE in
     print) list "$@" ;;
     update) list >"$REF"; cat "$REF" ;;
+    compare)
+        NEW=$BIN
+        BIN=$OLD; list "$@" >"$OUT/old.txt"
+        BIN=$NEW; list "$@" >"$OUT/new.txt"
+        if diff "$OUT/old.txt" "$OUT/new.txt"; then
+            echo "hashes the same with both binaries ($(wc -l <"$OUT/new.txt" | tr -d ' ') runs)"
+        else
+            echo "hashes differ between $OLD and $NEW" >&2
+            exit 1
+        fi
+        ;;
     check)
         list >"$OUT/now.txt"
         if diff "$REF" "$OUT/now.txt"; then

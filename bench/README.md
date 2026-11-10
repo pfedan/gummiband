@@ -46,15 +46,28 @@ each board is in `boards/out/<board>.route.log`.
 
 `hashes.sh` routes the synthetic boards with fixed settings and prints one line per run: the name
 and the SHA-1 of the routed `.kicad_pcb`. Runs without an open end are deterministic (same input
-and seed, any thread count, any machine), so the list is a regression test: a refactoring or a
+and seed, any thread count), so the list is a regression test: a refactoring or a
 micro-optimisation must leave it unchanged. Only the router runs, no `kicad-cli` is needed.
 
+The same machine, that is. The router calls `sin`, `cos`, `atan2`, `acos`, `exp`, `log`, `pow` and
+`hypot` of the system's maths library, and their last bits differ between glibc versions and
+macOS: the first CI run (glibc of Ubuntu 26.04) changed 12 of 15 hashes of a reference made with
+glibc 2.39, with the same compiler. So the reference files hold the hashes of the static musl
+build, which brings its own maths library and gives the same hashes on every x86_64 Linux; CI
+checks that build. On a Mac, compare two binaries instead.
+
 ```sh
-cargo build --release -p gummiband-cli
+# x86_64 Linux: against the reference
+rustup target add x86_64-unknown-linux-musl
+cargo build --release -p gummiband-cli --target x86_64-unknown-linux-musl
 bench/hashes.sh --check             # all boards against hashes.txt, about 5 min at 2 threads
 QUICK=1 bench/hashes.sh --check     # the quick set against hashes.quick.txt, what CI runs
+
+# any machine: the build before a change against the build after it
+bench/hashes.sh --compare path/to/old/gummiband target/release/gummiband
+QUICK=1 bench/hashes.sh --compare OLD NEW
+
 bench/hashes.sh easy bus            # print the hashes of some boards, compare nothing
-bench/hashes.sh --check path/to/gummiband    # another binary
 ```
 
 Every board is routed with `--runs 4 --generations 1 --geometry-generations 0 --no-move-parts`.

@@ -304,8 +304,8 @@ the geometry step), then fewest vias and shortest length.
 
 ![The phases of a run: portfolio, generations, geometry, geometry generations, keep improving, finishing](img/search-pipeline.svg)
 
-Results are deterministic for the same input, options and seed, on any machine and with any
-thread count: the portfolio size is a constant (14 runs), and threads only change the run time.
+Results are deterministic for the same input, options and seed, with any thread count on the
+same build and operating system (another maths library can change the last bits and the result): the portfolio size is a constant (14 runs), and threads only change the run time.
 
 ## Judging and violations
 
