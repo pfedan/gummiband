@@ -127,7 +127,8 @@ outer pours removed, routed completely by Gummiband (`bench/run-ledctl.sh`).
 - Rule engine: more custom rule conditions (positions, footprints, layers).
 - More than two signal layers (pulled forward with the synthetic 4 layer benchmarks).
 - Alternative placements as portfolio variants (smaller, square, round outlines with the
-  connectors and the ESP32 module fixed), see `crates/gummiband-place`.
+  connectors and the ESP32 module fixed), see `bench/place` (the `variants` example of
+  `crates/gummiband-place`).
 - Placement from the netlist as a step of its own (`gummiband place`, plugin button, MCP
   `place_parts`): all unlocked, selected, or outside the board, with fixed parts respected.
 - Placements as a search around routing (`route --placements N`), judged by full routes. Open: a
@@ -839,3 +840,45 @@ LED controller (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
   working with an AI agent (`docs/guide/ai-agents.md`), result images from the benchmark boards and
   drawings of the principles in every chapter; the drawings come from
   `docs/guide/img/src/schematics.py`.
+
+## Consolidation: environment variables
+
+- 2026-11-10: experiment switches whose measurements above are concluded were removed with their
+  code: the via in a pad experiments `GB_VIP_NETS`, `GB_VIP_LEARN`, `GB_VIP_RETRY`, `GB_VIP_EARLY`
+  and `GB_PAD_REUSE` (the via in a pad stays the last resort of a run),
+  `GB_PRUNE_STARTS`, and the routing order `groups-inline` with `GB_GROUP_ORDER` (`groups`,
+  `groups-long` and `groups-short` stay). The texts above describe them as they were; the code is
+  in the git history up to 3a9d573. What is left is listed in `docs/ENVIRONMENT.md`.
+
+## Consolidation, phase 2a: one behaviour for the CLI and the MCP server
+
+- 2026-11-10: after the shared route pipeline (`gummiband-app`), the places where
+  `gummiband route` and the MCP tools `route` and `try_seeds` still behaved differently moved
+  into the pipeline, so neither front end carries a rule of its own:
+  - The checks of the options against each other are `RouteOptions::validate`. Contradictions
+    are errors that say what to change, in both front ends in the same words; the CLI no longer
+    turns `shove` off silently under `--move-parts`, the MCP server no longer takes the default
+    for `runs: 0`.
+  - `air` is left to the pipeline by both, so an open ended route of the whole board gets its
+    0.03 mm through the MCP server too.
+  - Options per net are one type, `NetOptions` (width, minimum width, parts to neck at,
+    priority, skip). The file of `--net-widths` takes an object per net next to the plain
+    width, and `set_net_options` has the same fields; its `width` no longer doubles as the
+    minimum width.
+  - The MCP server routes through `route_file`, as the CLI does: one way of reading the board
+    and collecting the movable parts, and `plane_layers` for `route` and `try_seeds`.
+  - The pipeline writes the output, the alternatives of the open end
+    (`<output>.altN.kicad_pcb`, now also from the MCP server, which lists them) and the project
+    files next to the output (now also from the CLI). An output that is the input is refused.
+  - The open end with a time budget is an option of the pipeline (`open_end_seconds`, new as
+    `--open-end-seconds`), and its clock starts with the open end, not with the route.
+    `seconds` is the wall time of the whole route in both reports; `seed` names the seed of
+    the search, as does the line `best: seed N`.
+  - `gummiband_app::OPTIONS` lists every option with name, default and one sentence. Tests hold
+    the fields of `RouteOptions`, the flags of the CLI and the arguments of the MCP tool to it.
+    New on the CLI: `--reroute`, `--tune`, `--open-end-seconds`. New in MCP `route`:
+    `plane_layers`, `placements`, `placement_seed`, `net_widths`, `net_priorities`,
+    `teardrops`, `frames`; `pair_breakouts` and `pair_via_pairs` are `breakouts` and
+    `via_pairs`; an argument that does not exist is refused.
+  - The CLI removes its folder `gummiband-corridors-<pid>` from the temp directory.
+  The route hashes did not change. Still to come: help texts generated from the table (2f).

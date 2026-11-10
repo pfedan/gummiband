@@ -6,8 +6,8 @@ export PATH=/opt/homebrew/opt/rustup/bin:$PATH
 export RAYON_NUM_THREADS=${RAYON_NUM_THREADS:-4}
 HERE=$(cd "$(dirname "$0")" && pwd)
 IN="$HERE/../work/ledctl/ledctl.kicad_pcb"
-(cd "$HERE/../.." && cargo build --release -q -p gummiband-place)
-BIN="$HERE/../../target/release/gummiband-place"
+(cd "$HERE/../.." && cargo build --release -q -p gummiband-place --example variants)
+BIN="$HERE/../../target/release/examples/variants"
 make() { # name args...
     name=$1
     shift

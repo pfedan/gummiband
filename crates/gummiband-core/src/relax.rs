@@ -4,11 +4,13 @@
 //! moves points a little per round, so tracks do not jump over each other; it shortens the bands,
 //! spreads them and removes clearance violations.
 
+use crate::math;
 use rayon::prelude::*;
 
 use crate::board::{Board, LayerId, LayerSet, ObstacleKind};
 use crate::geom::{Point, Rect, Shape, point_seg_dist, point_seg_offset, pt, seg_seg_dist, seg_seg_nearest};
 use crate::index::{GridIndex, PointGrid, axis_cell};
+use crate::knobs;
 use crate::prof::{self, Slot};
 use crate::realize::{Elem, Geometry, Track, Via};
 use crate::topo::Substrate;
@@ -43,15 +45,12 @@ pub struct RelaxConfig {
 impl Default for RelaxConfig {
     fn default() -> Self {
         RelaxConfig {
-            iterations: env_usize("GB_RELAX_IT", 400),
-            spacing: std::env::var("GB_SPACING")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.05),
+            iterations: knobs::RELAX_IT.num(),
+            spacing: knobs::SPACING.num(),
             tension: 0.25,
             margin: 0.008,
             max_step: 0.03,
-            gpu: std::env::var("GB_GPU").is_ok(),
+            gpu: knobs::GPU.on(),
             via_edge: false,
             taut: true,
         }
@@ -763,10 +762,7 @@ pub fn relax_while(
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
     let t_start = std::time::Instant::now();
     // coarse points while the bands move a lot, fine points for the final clearance work
-    let coarse = std::env::var("GB_COARSE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or((cfg.spacing * 2.0).max(0.1));
+    let coarse = knobs::COARSE.get().unwrap_or((cfg.spacing * 2.0).max(0.1));
     let mut tracks: Vec<Vec<Point>> = geo.tracks.iter().map(|t| resample(&t.pts, coarse)).collect();
     let taps = tap_targets(&geo.tracks);
     let rails: Vec<[Option<Rail>; 2]> = if cfg.via_edge {
@@ -1396,7 +1392,7 @@ pub fn relax_while(
                             // cheap reject on the bounding box before the polygon distance
                             let dx = max_of(max_of(0.0, o.bbox.min.x - p.x), p.x - o.bbox.max.x);
                             let dy = max_of(max_of(0.0, o.bbox.min.y - p.y), p.y - o.bbox.max.y);
-                            if surely_outside(dx, dy, need) || dx.hypot(dy) >= need {
+                            if surely_outside(dx, dy, need) || math::hypot(dx, dy) >= need {
                                 continue;
                             }
                             let poly = &sub.shared.obs_polys[oi as usize];
@@ -1726,7 +1722,7 @@ pub fn relax_while(
             })
             .collect()
     };
-    if std::env::var("GB_TIMING").is_ok() {
+    if knobs::log(knobs::Log::Timing) {
         eprintln!(
             "relax rounds {:.2} s, taut {:.2} s",
             t_taut.duration_since(t_start).as_secs_f64(),
@@ -2147,17 +2143,17 @@ fn taut(
                 let (a, c) = (out[i - 1], out[i + 1]);
                 let (u, v) = ((a - b).norm(), (c - b).norm());
                 let cos = u.dot(v).clamp(-1.0, 1.0);
-                let theta = cos.acos(); // interior angle
+                let theta = math::acos(cos); // interior angle
                 if theta < std::f64::consts::PI - 0.03 && theta > 0.05 {
                     let half = theta / 2.0;
                     let t_max = (a.dist(b) * 0.45).min(c.dist(b) * 0.45).min(b.dist(cur));
-                    let mut r = t_max * half.tan();
+                    let mut r = t_max * math::tan(half);
                     let mut done = false;
                     while r >= 0.1 && !done {
-                        let t = r / half.tan();
+                        let t = r / math::tan(half);
                         let (p1, p2) = (b + u * t, b + v * t);
                         let bis = (u + v).norm();
-                        let center = b + bis * (r / half.sin());
+                        let center = b + bis * (r / math::sin(half));
                         let mid = center - bis * r;
                         let arc = crate::geom::arc_polyline(p1, mid, p2, 0.002);
                         if arc.windows(2).all(|w| clear(w[0], w[1], &pieces, &idx)) {
@@ -2214,10 +2210,6 @@ fn nearest_on_poly(poly: &crate::geom::Polygon, p: Point) -> (f64, Point) {
 
 fn drills_max(geo: &Geometry) -> f64 {
     geo.vias.iter().map(|v| v.drill).fold(0.0, f64::max)
-}
-
-fn env_usize(k: &str, d: usize) -> usize {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 
 /// Uniform grid where each cell lists the boxes within `reach` of it, so a point query is a
@@ -2542,7 +2534,7 @@ pub fn stitch_vias(board: &Board, geo: &mut Geometry) -> usize {
         let mut dirs: Vec<(Point, f64)> = arms.iter().map(|a| (a.1, a.2)).collect();
         dirs.extend((0..8).map(|i| {
             let a = i as f64 * std::f64::consts::FRAC_PI_4;
-            (crate::geom::pt(a.cos(), a.sin()), f64::INFINITY)
+            (crate::geom::pt(math::cos(a), math::sin(a)), f64::INFINITY)
         }));
         // per direction: the pieces of copper from the via (layer, end) and the vias
         let mut rows: Vec<StitchRow> = Vec::new();

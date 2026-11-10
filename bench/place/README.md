@@ -2,7 +2,9 @@
 
 Extra boards for the router portfolio: the prepared benchmark board
 (`bench/work/ledctl`, see `bench/prepare-ledctl.sh`) with a new outline and a new
-placement, made by `gummiband-place` (`crates/gummiband-place`).
+placement, made by the `variants` example of the placement crate
+(`crates/gummiband-place/examples/variants.rs`, a benchmark tool and not an installed program;
+by hand: `cargo run --release -p gummiband-place --example variants -- BOARD -o OUT [options]`).
 
 ```sh
 bench/place/make-variants.sh      # placement + KiCad DRC of the unrouted board

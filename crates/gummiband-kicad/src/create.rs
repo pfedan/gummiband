@@ -3,12 +3,14 @@
 //! mounting holes, and the net classes in the `.kicad_pro`. Parts are laid out in rows inside
 //! the outline, unlocked, for `place_parts` / `move_part` to take over.
 
+use gummiband_core::math;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use gummiband_core::knobs;
 use serde_json::{Value, json};
 
 use crate::read::glob_match;
@@ -187,7 +189,7 @@ fn install_dirs() -> Vec<PathBuf> {
     .iter()
     .map(PathBuf::from)
     .collect();
-    if let Ok(home) = std::env::var("HOME") {
+    if let Some(home) = knobs::foreign("HOME") {
         v.push(
             PathBuf::from(home)
                 .join(".local/share/flatpak/app/org.kicad.KiCad/current/active/files/share/kicad/footprints"),
@@ -199,12 +201,12 @@ fn install_dirs() -> Vec<PathBuf> {
 
 fn global_table_files() -> Vec<PathBuf> {
     let mut bases = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
+    if let Some(home) = knobs::foreign("HOME") {
         let home = PathBuf::from(home);
         bases.push(home.join(".config/kicad"));
         bases.push(home.join("Library/Preferences/kicad"));
     }
-    if let Ok(app) = std::env::var("APPDATA") {
+    if let Some(app) = knobs::foreign("APPDATA") {
         bases.push(PathBuf::from(app).join("kicad"));
     }
     let mut out = Vec::new();
@@ -228,7 +230,7 @@ impl FootprintLibs {
         let env_dirs: Vec<PathBuf> = if system {
             ENV_VARS
                 .iter()
-                .filter_map(|v| std::env::var(v).ok())
+                .filter_map(|v| knobs::foreign(v))
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
                 .filter(|d| d.is_dir())
@@ -368,7 +370,7 @@ fn expand_vars(s: &str, prjmod: &Path, kicad_dir: Option<&Path>) -> Option<Strin
         let var = &after[1..end];
         let value = if var == "KIPRJMOD" {
             prjmod.display().to_string()
-        } else if let Ok(v) = std::env::var(var) {
+        } else if let Some(v) = knobs::foreign(var) {
             v
         } else if var.starts_with("KICAD") && var.ends_with("FOOTPRINT_DIR") {
             kicad_dir?.display().to_string()
@@ -442,7 +444,7 @@ fn footprint_bbox(root: &Node) -> [f64; 4] {
         }
         if h == "fp_circle" {
             if let (Some(c), Some(e)) = (xy(g, "center"), xy(g, "end")) {
-                let r = (e.0 - c.0).hypot(e.1 - c.1);
+                let r = math::hypot(e.0 - c.0, e.1 - c.1);
                 add(c.0, c.1, r, r);
                 any = true;
             }
@@ -475,8 +477,8 @@ fn footprint_bbox(root: &Node) -> [f64; 4] {
             add(
                 x,
                 y,
-                (w * a.cos()).abs() + (h * a.sin()).abs(),
-                (w * a.sin()).abs() + (h * a.cos()).abs(),
+                (w * math::cos(a)).abs() + (h * math::sin(a)).abs(),
+                (w * math::sin(a)).abs() + (h * math::cos(a)).abs(),
             );
             any = true;
         }
@@ -2234,7 +2236,10 @@ mod tests {
           (lib (name "Odd") (type "KiCad") (uri "${GB_SURELY_UNSET_VAR}/Odd.pretty") (options "") (descr "")))"#;
         let v = parse_lib_table(t, Path::new("/prj"), Some(Path::new("/kicad/fp")));
         assert_eq!(v[0], ("Mine".to_string(), PathBuf::from("/prj/libs/Mine.pretty")));
-        assert_eq!(v.len(), 2 + usize::from(std::env::var("GB_SURELY_UNSET_VAR").is_ok()));
+        assert_eq!(
+            v.len(),
+            2 + usize::from(knobs::foreign("GB_SURELY_UNSET_VAR").is_some())
+        );
     }
 
     #[test]

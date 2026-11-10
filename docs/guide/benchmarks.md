@@ -208,5 +208,6 @@ at all (-0.01). So `--placements` judges with the settings of the route itself.
 ## Placement variants
 
 `bench/place/make-variants.sh` and `route-variants.sh` build and route the LED controller
-controller in a smaller rectangle, a square and a circle with `gummiband-place`, as extra
-boards for the search. See [bench/place/README.md](../../bench/place/README.md).
+controller in a smaller rectangle, a square and a circle with the `variants` example of the
+`gummiband-place` crate, as extra boards for the search. See
+[bench/place/README.md](../../bench/place/README.md).

@@ -380,7 +380,10 @@ class OptInCommandTest(unittest.TestCase):
         c = self.cmd(hint_groups=True, group_order="short", hint_decaps=True, hint_shares=True)
         self.assertEqual(c[c.index("--patterns") + 1], "groups-short,decaps,shares")
         # the order alone is no hint
-        self.assertNotIn("--patterns", self.cmd(group_order="inline"))
+        self.assertNotIn("--patterns", self.cmd(group_order="short"))
+        # an order from older settings that is gone falls back to the default
+        c = self.cmd(hint_groups=True, group_order="inline")
+        self.assertEqual(c[c.index("--patterns") + 1], "groups")
         # rows acts only in the open end
         c = self.cmd(hint_rows=True)
         self.assertEqual(c[c.index("--patterns") + 1], "rows")

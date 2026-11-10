@@ -4,13 +4,12 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
-[[bin]]
-name = "gummiband-place"
-path = "src/main.rs"
-
 [dependencies]
 gummiband-core.workspace = true
 gummiband-kicad.workspace = true
 anyhow.workspace = true
-clap.workspace = true
 rayon.workspace = true
+
+[dev-dependencies]
+# only the `variants` example (bench/place) has a command line
+clap.workspace = true

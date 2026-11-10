@@ -34,7 +34,20 @@ Standing decisions of the project owner, kept here so that they survive any sess
 - Completion comes first: the geometry stage never trades a connection for cleaner geometry.
 - Results are deterministic: the same input and seed give the same output on every machine, at
   any thread count (fixed default portfolio, no decisions by the clock). This rule holds for runs
-  without an open end. An open ended run (`--until-stop`) ends when the user says so; there
+  without an open end. For it the workspace has its own maths (2026-11-10): `sin`, `cos`,
+  `atan2`, `acos`, `exp`, `ln`, `powf`, `hypot` and their kin come from `gummiband_core::math`
+  (the `libm` crate, pure Rust), never from the system's maths library, whose last bits differ
+  between glibc versions, musl and macOS and changed the routed file with them. `hypot` is the
+  exception: it is `(x * x + y * y).sqrt()`, exactly as written, so that a length agrees with
+  the squared distances the router compares elsewhere. A correctly rounded hypot differs from
+  that in the last bit at about one point in ten, which was enough to change clearance decisions
+  (Corne keyboard, 7 seeds, macOS: median 468 violations with the plain formula's bits, 797
+  with the library's). A test keeps
+  the methods of `f64` that go to the system out of the sources, `powi` too. Measured: the glibc
+  and the musl build on x86_64 Linux give the same files (`bench/README.md`, route hashes);
+  macOS on ARM is expected to, and still to be measured. The reference results stayed those of
+  the musl build (no hash changed); a new version of the crate that changes a bit may change
+  them. An open ended run (`--until-stop`) ends when the user says so; there
   keeping the cores busy comes first, and its results may change with the way the mutants are
   scheduled, also with the timing. Its present scheduling still repeats the same seed and last
   generation at any thread count.
@@ -90,6 +103,22 @@ Standing decisions of the project owner, kept here so that they survive any sess
   leaves a piece at its angle where no 45 degree path fits.
 - Follow-me stays "route the selected nets" for now; no live completion while drawing a track.
 
+## Interfaces
+
+- Highest quality standard with maximum usability (Daniel, 2026-11-10). Consolidation merges
+  switches that are duplicates or contradict each other; it never removes a way to tune. Each
+  knob has one name, one default and one description, the same in the CLI, the MCP server and
+  the plugin (`gummiband_app::OPTIONS` for a route; tests hold the front ends to it).
+- The MCP server is a toolbox, not an automaton. An agent brings its own knowledge of
+  electronics and must be able to do any part of a board by hand: place and lock parts, route
+  single nets itself, prescribe widths and currents. It leaves only the rest to the router,
+  which leaves existing work untouched when asked to. The KiCad plugin follows the same
+  principle for the person at the board.
+- Options that contradict each other are errors that say what to change; they are never
+  adjusted silently. An option that was left out does not contradict: its default follows from
+  the others. The rule lives in one place (`RouteOptions::validate`), so every front end gives
+  the same message.
+
 ## License
 
 - Unlicensed: proprietary, all rights reserved. No LICENSE file, crates are not published.
@@ -104,5 +133,8 @@ Standing decisions of the project owner, kept here so that they survive any sess
 - Order of work: converge the current state, then the roadmap at bird's eye level
   (`docs/MILESTONES.md`), then targeted new benchmarks. Micro-optimisation runs independently,
   also on newly added algorithms, and must preserve results byte for byte.
+- Refactorings must keep `bench/hashes.txt` unchanged (`bench/hashes.sh --check`, the quick set
+  runs in CI). The reference is only rewritten (`--update`) together with a change that is meant
+  to alter results, and the commit says so.
 - User documentation lives in the main README and `docs/`, user centred, in English.
 - Jetson Orin is not a test or benchmark board until the owner explicitly says so.

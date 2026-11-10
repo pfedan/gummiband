@@ -6,10 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
+use gummiband_app::{Angles, NetOptions, RouteOptions};
 use gummiband_core::board::Board;
-use gummiband_core::realize::Elem;
-use gummiband_core::route::RouterConfig;
-use gummiband_core::topo::SubstrateConfig;
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::schema_for_output;
@@ -42,7 +40,7 @@ create_board parts_outside keeps the board empty for hand placement and copper d
 The tool guide returns the documentation: guide without topic for \
 this workflow and the topic list, guide with a tool name for its full reference. \
 From a schematic only: create_board turns a KiCad netlist into a board (footprints, nets, outline, stackup, net classes). The automatic loop: load_board (gives a board id) -> list_nets -> optionally \
-set_net_options (priority: lower routes first; skip: leave a net unrouted) -> route (writes a \
+set_net_options (priority: lower routes first; skip: leave a net unrouted; width, min_width and neck_refs prescribe the copper of a net) -> route (writes a \
 routed .kicad_pcb and returns stats, unrouted connections and clearance violations) -> drc on \
 the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board coordinates) to \
 look at problems. To pre-route a critical part by hand (datasheet layout): part_info -> \
@@ -122,15 +120,32 @@ pub struct AddLockedOut {
     pub warnings: Vec<String>,
 }
 
+/// The options of one net as the tools return them (`gummiband_app::NetOptions`).
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct NetOption {
     /// Routing priority override (lower routes first).
     pub priority: Option<i32>,
     /// The net is left out of routing.
     pub skip: bool,
-    /// Track width in mm for this net, also its minimum width (no necking below it outside the
-    /// courtyards the custom rules name), from set_net_options or power_plan with apply.
+    /// Track width in mm the net is routed with.
     pub width: Option<f64>,
+    /// Minimum width in mm: no necking below it, except in the courtyards of neck_refs.
+    pub min_width: Option<f64>,
+    /// Parts in whose courtyard the track may neck below the minimum width; left out: the
+    /// parts whose pad on this net is narrower than min_width.
+    pub neck_refs: Option<Vec<String>>,
+}
+
+impl From<&NetOptions> for NetOption {
+    fn from(o: &NetOptions) -> Self {
+        NetOption {
+            priority: o.priority,
+            skip: o.skip,
+            width: o.width,
+            min_width: o.min_width,
+            neck_refs: o.neck_refs.clone(),
+        }
+    }
 }
 
 struct Entry {
@@ -138,7 +153,7 @@ struct Entry {
     keep_locked: bool,
     kb: Arc<KicadBoard>,
     /// Per net options by net name (survive reloads).
-    options: BTreeMap<String, NetOption>,
+    options: BTreeMap<String, NetOptions>,
 }
 
 #[derive(Clone)]
@@ -162,55 +177,6 @@ fn read(path: &Path, keep_locked: bool) -> Result<KicadBoard> {
             ..Default::default()
         },
     )
-}
-
-/// The board as the router sees it: net options applied (priorities, skipped nets have no
-/// pins left, so they get no connections; their pads stay obstacles).
-fn apply_options(b: &Board, options: &BTreeMap<String, NetOption>, only: &[String]) -> (Board, Vec<String>) {
-    let mut b = b.clone();
-    let mut skipped = Vec::new();
-    for (name, o) in options {
-        if let (Some(w), Some(id)) = (o.width, b.net_id(name)) {
-            set_width(&mut b, id, w);
-        }
-    }
-    for n in b.nets.iter_mut() {
-        let o = options.get(&n.name);
-        if let Some(p) = o.and_then(|o| o.priority) {
-            n.priority = p;
-        }
-        let skip = o.is_some_and(|o| o.skip) || (!only.is_empty() && !only.contains(&n.name));
-        if skip && n.pins.len() >= 2 {
-            n.pins.clear();
-            skipped.push(n.name.clone());
-        }
-    }
-    (b, skipped)
-}
-
-/// Give a net its own class with track width and minimum width `w`.
-fn set_width(b: &mut Board, net: gummiband_core::board::NetId, w: f64) {
-    let ci = b.nets[net as usize].class as usize;
-    let mut c = b.classes[ci].clone();
-    c.name = format!("{}@{w}", c.name);
-    c.track_width = w;
-    c.min_width = Some(c.min_width.map_or(w, |m| m.max(w)));
-    c.target_width = c.target_width.filter(|t| *t > w);
-    // pads narrower than the track: the track may neck inside their part's courtyard
-    for &pin in &b.nets[net as usize].pins {
-        let p = &b.pins[pin];
-        if p.size.0.min(p.size.1) < w && !c.neck_refs.contains(&p.footprint) {
-            c.neck_refs.push(p.footprint.clone());
-        }
-    }
-    let i = match b.classes.iter().position(|k| k.name == c.name) {
-        Some(i) => i,
-        None => {
-            b.classes.push(c);
-            b.classes.len() - 1
-        }
-    };
-    b.nets[net as usize].class = i as gummiband_core::board::ClassId;
 }
 
 fn connections(b: &Board) -> usize {
@@ -930,11 +896,23 @@ pub struct SetNetOptionsIn {
     pub skip: Option<bool>,
     /// true: drop all options of this net first.
     pub reset: Option<bool>,
-    /// Track width in mm for this net, also used as its minimum width (no necking); 0 clears it.
+    /// Track width in mm the net is routed with; 0 clears it. On its own the track may still
+    /// neck as its class allows: for a current path give min_width too.
     pub width: Option<f64>,
+    /// Minimum width in mm: the track never necks below it, except in the courtyards of
+    /// neck_refs (a larger minimum of the class or the custom rules stays); 0 clears it. Set it
+    /// to the width for a track that must carry its current everywhere.
+    pub min_width: Option<f64>,
+    /// References of the parts in whose courtyard the track may neck below min_width. Left out:
+    /// the parts whose pad on this net is narrower than min_width. An empty list: nowhere.
+    pub neck_refs: Option<Vec<String>>,
 }
 
+/// The arguments of `route`: the options of the pipeline (`gummiband_app::OPTIONS`, each under
+/// its name) and what the session adds (`board`, `output`, `max_violations`). An argument that
+/// does not exist is an error, not a typo that goes unnoticed.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RouteIn {
     /// Board id from load_board.
     pub board: String,
@@ -949,7 +927,8 @@ pub struct RouteIn {
     pub reroute: Option<bool>,
     /// With `keep_all` and `nets`: the unlocked tracks of the other nets are part of the topology,
     /// so a connection passes between them and they shift aside; what it does not touch stays as
-    /// it is in the file (default true; false keeps them where they are).
+    /// it is in the file (default true; false keeps them where they are). Not together with
+    /// move_parts: with both asked for, the route is refused.
     pub shove: Option<bool>,
     /// With `keep_all` and `nets`: if a connection finds no way, the unlocked tracks of other nets
     /// within this many mm of its pins give way and are routed again, in growing steps up to this
@@ -976,17 +955,16 @@ pub struct RouteIn {
     pub pair_all: Option<bool>,
     /// With pairs, experimental: the wide track ends just outside the pads, two single tracks
     /// connect them (default false).
-    pub pair_breakouts: Option<bool>,
+    pub breakouts: Option<bool>,
     /// With pairs, experimental: two vias side by side are one via pair, a capsule that turns
     /// with the wide track (default false).
-    pub pair_via_pairs: Option<bool>,
+    pub via_pairs: Option<bool>,
     /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
     pub layer_dirs: Option<f64>,
     /// Hints from the local patterns of board_patterns, comma separated (default none), as
     /// `gummiband route --patterns`. All are opt-in because none wins on every board:
     /// `groups` (connections between two chips or a chip and a connector as one block in pin
-    /// order, the longest block first; `groups-short` shortest first, `groups-inline` blocks in
-    /// place) saves vias on boards with several chips and buses; `pairs` (differential pairs
+    /// order, the longest block first; `groups-short` shortest first) saves vias on boards with several chips and buses; `pairs` (differential pairs
     /// first, longest first) couples pairs better at a few vias; `pairs,groups` was best on an
     /// FPGA board; `groups-short` suited a DDR fan-out; `decaps` (a decoupling capacitor to its IC
     /// pin first) helps boards with many decaps on one side; `rows` (the open end re-lays pin
@@ -1015,9 +993,13 @@ pub struct RouteIn {
     /// do the references in `fixed`. The output has the footprints at their new positions, and
     /// `moved` lists them.
     pub move_parts: Option<bool>,
-    /// References that never move under move_parts.
+    /// References that never move under move_parts and clear_corridors.
     #[serde(default)]
     pub fixed: Vec<String>,
+    /// Copper layers treated as planes besides those of KiCad type "power": not routed, their
+    /// zones stay (as `gummiband --plane-layers`). To make it lasting, use set_layer_type.
+    #[serde(default)]
+    pub plane_layers: Vec<String>,
     /// Output .kicad_pcb (default: `<input>.routed.kicad_pcb` next to the input). The
     /// .kicad_pro and .kicad_dru are copied next to it if missing.
     pub output: Option<String>,
@@ -1034,17 +1016,20 @@ pub struct RouteIn {
     /// Factor on the via cost in the pass that routes connections with vias again and keeps
     /// what has fewer vias (default 4; 0: off), as `gummiband route --via-pass`.
     pub via_pass: Option<f64>,
-    /// Open end: after the normal search keep improving for this many seconds, then finish the
-    /// best result (default 0: off), as `--until-stop` with a time budget instead of a stop line.
-    /// Mutants take a few connections around one spot out and lay them again; when that stops
-    /// helping, bolder side branches take over. No placement rounds while it runs.
+    /// Open end with a time budget: after the normal search keep improving for this many
+    /// seconds, then finish the best result (default 0: off), as `gummiband route
+    /// --open-end-seconds`. The budget starts when the open end starts, so it never cuts the
+    /// normal search short. Mutants take a few connections around one spot out and lay them
+    /// again; when that stops helping, bolder side branches take over. No placement rounds
+    /// while it runs. Results that differ in vias and length come back in `alternatives`.
     pub open_end_seconds: Option<f64>,
     /// With open_end_seconds: what a via is worth in mm of track when the open end judges its
     /// results (default 20). Lower gives more vias and shorter tracks, higher fewer vias and
     /// longer ones.
     pub open_via_cost: Option<f64>,
     /// Reserve in mm on top of the clearances that the finished copper gets where there is room
-    /// (default 0). The result stays only if it brings no new violation.
+    /// (default: 0.03 with open_end_seconds, but not when finishing nets with keep_all and nets,
+    /// else 0). The result stays only if it brings no new violation.
     pub air: Option<f64>,
     /// Tracks of the default net class grow up to this width in mm where there is room, at the
     /// end (default 0: off; a track_width rule with opt sets it per class).
@@ -1061,6 +1046,29 @@ pub struct RouteIn {
     pub tune_amplitude: Option<f64>,
     /// Air between neighbouring meander legs in track widths, at least the clearance (default 2).
     pub tune_spacing: Option<f64>,
+    /// Try this many placements from the netlist (as place_parts makes them), route each with
+    /// these settings and go on with the best: fewest open connections, then clearance
+    /// violations, vias and length (default 0: the placement stays). The output has the parts
+    /// where the best placement put them, `placement` lists every try; the working copy is not
+    /// touched. To keep and compare the placements themselves, use try_seeds. Not with
+    /// keep_all, nets or pairs.
+    pub placements: Option<usize>,
+    /// First seed of placements, and the seed of clear_corridors (default 1).
+    pub placement_seed: Option<u64>,
+    /// Path of a JSON file with options per net, one entry per net name: a track width in mm
+    /// ({"GND": 0.5}) or an object with width, min_width, neck_refs, priority and skip, the
+    /// fields of set_net_options (as `gummiband route --net-widths`). What set_net_options
+    /// holds for a net wins field by field. Nets the board lacks are passed over.
+    pub net_widths: Option<String>,
+    /// Path of a JSON file with a routing priority per net, {"net name": priority}; lower
+    /// routes first. Wins over a priority in net_widths, set_net_options over both.
+    pub net_priorities: Option<String>,
+    /// Switch on KiCad's teardrops for vias and pads in the output and for track ends in its
+    /// project (default false); KiCad builds them when it fills the zones.
+    pub teardrops: Option<bool>,
+    /// Folder for one SVG of the best candidate per generation (a PNG of each if rsvg-convert
+    /// is there, and evolution.gif if ImageMagick is), to look at how the search went.
+    pub frames: Option<String>,
     /// Maximum number of violations listed (default 50; the total is always given).
     pub max_violations: Option<usize>,
 }
@@ -1364,7 +1372,15 @@ pub struct RouteOut {
     pub moved: Vec<MovedOut>,
     pub input: String,
     pub output: String,
+    /// The seed the search ran with (`seed`, or the default): the same seed on the same board
+    /// gives this result again.
+    pub seed: u64,
+    /// Wall time of the whole route in seconds, from reading the board to the checked result
+    /// (writing the files not included); the same number as in the report of `gummiband route`.
     pub seconds: f64,
+    /// The part of `seconds` up to the end of the search, without the steps after it (room for
+    /// meanders, 45 degrees, length tuning, checks).
+    pub search_seconds: f64,
     pub threads: usize,
     pub connections: usize,
     pub routed: usize,
@@ -1392,8 +1408,13 @@ pub struct RouteOut {
     pub notes: Vec<String>,
     /// Per routed net: track length, vias and widths, longest first.
     pub nets: Vec<NetStatOut>,
-    /// Project files copied next to the output.
+    /// The .kicad_pro and .kicad_dru of the input, copied next to the output where they were
+    /// missing.
     pub copied: Vec<String>,
+    /// With open_end_seconds: the other results the open end leaves to choose from, those that
+    /// differ from the output in vias and length, written next to it as
+    /// <output>.altN.kicad_pcb. load_board one of them to go on with it.
+    pub alternatives: Vec<AlternativeOut>,
     /// What the 45 degree step did, with `angles` "45".
     pub angles_45: Option<AnglesOut>,
     /// The length tuning: every net it aimed at.
@@ -1402,6 +1423,47 @@ pub struct RouteOut {
     pub length_rules: Vec<LengthRuleOut>,
     /// With clear_corridors: the parts that were placed again before the routing.
     pub cleared_corridors: Vec<String>,
+    /// With placements: the seed of the placement kept and every placement tried.
+    pub placement: Option<PlacementOut>,
+    /// With frames: the folder, the number of pictures and the animation, if one was made.
+    pub frames: Option<FramesOut>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PlacementOut {
+    /// Seed of the placement the result is routed on.
+    pub seed: u64,
+    /// The parts it placed.
+    pub moved: Vec<String>,
+    pub tried: Vec<PlacementTriedOut>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PlacementTriedOut {
+    pub seed: u64,
+    pub routed: usize,
+    pub connections: usize,
+    pub violations: usize,
+    pub vias: usize,
+    pub length_mm: f64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FramesOut {
+    pub folder: String,
+    pub pictures: usize,
+    pub animation: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AlternativeOut {
+    pub path: String,
+    pub routed: usize,
+    pub connections: usize,
+    pub vias: usize,
+    pub length_mm: f64,
+    /// Spots with a clearance violation, as the open end counts them.
+    pub clearance_spots: usize,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1718,7 +1780,7 @@ impl Gummiband {
                 .collect(),
             custom_rules,
             custom_clearance_pairs: b.pair_clearance.len(),
-            net_options: options.clone(),
+            net_options: options.iter().map(|(n, o)| (n.clone(), o.into())).collect(),
             diff_pairs: b
                 .diff_pairs()
                 .into_iter()
@@ -2430,6 +2492,33 @@ impl Gummiband {
         ))
     }
 
+    /// Route a loaded board: the tool `route`, and every seed of `try_seeds`. The pipeline of
+    /// gummiband-app reads the file and does all of it; the session adds the options per net
+    /// and keeps the placement of `clear_corridors` in the working copy.
+    fn route_entry(&self, p: RouteIn) -> Result<(String, RouteOut)> {
+        let (options, loaded_keep) = self.with_entry(&p.board, |e| Ok((e.options.clone(), e.keep_locked)))?;
+        let mut opts = route_options(&p, p.keep_locked.unwrap_or(loaded_keep))?;
+        opts.net_options = options;
+        opts.validate(false).map_err(anyhow::Error::msg)?;
+        let (mut id, mut cleared) = (p.board.clone(), Vec::new());
+        if opts.clear_corridors {
+            (id, cleared) = self.clear_corridors(&p.board, &opts.place_options())?;
+            opts.clear_corridors = false;
+        }
+        let path = self.with_entry(&id, |e| Ok(e.path.clone()))?;
+        let (mut summary, mut out) = route_blocking(id, path, opts, p)?;
+        if !cleared.is_empty() {
+            summary = format!(
+                "placed again out of the track corridors: {}\n{summary}",
+                cleared.join(" ")
+            );
+        }
+        if !cleared.is_empty() {
+            out.cleared_corridors = cleared;
+        }
+        Ok((summary, out))
+    }
+
     fn do_try_seeds(&self, p: TrySeedsIn) -> Result<(String, TrySeedsOut)> {
         let seeds: Vec<u64> = if p.seeds.is_empty() {
             vec![1, 2, 3, 4]
@@ -2510,23 +2599,7 @@ impl Gummiband {
                 r.insert("board".into(), board.clone().into());
                 r.insert("output".into(), routed.display().to_string().into());
                 let rin: RouteIn = serde_json::from_value(serde_json::Value::Object(r)).context("route")?;
-                let (rpath, kb, opts, loaded_keep) = self.with_entry(&board, |e| {
-                    Ok((e.path.clone(), e.kb.clone(), e.options.clone(), e.keep_locked))
-                })?;
-                let keep_locked = rin.keep_locked.unwrap_or(loaded_keep);
-                let kb = if rin.keep_all == Some(true) {
-                    Arc::new(read_board(
-                        &rpath,
-                        &ReadOptions {
-                            keep: KeepCopper::All,
-                            ignore_nets: reroute_nets(&rin),
-                            ..Default::default()
-                        },
-                    )?)
-                } else {
-                    kb
-                };
-                let (_, ro) = route_blocking(board, rpath, kb, opts, keep_locked, rin)?;
+                let (_, ro) = self.route_entry(rin)?;
                 Ok(ro)
             };
             match run() {
@@ -2838,25 +2911,17 @@ impl Gummiband {
 
     /// `route --clear-corridors`: place the parts in the way of a track corridor again, into
     /// the working copy. Returns the board id to route and the parts that moved.
-    fn clear_corridors(&self, board: &str, fixed: Vec<String>) -> Result<(String, Vec<String>)> {
-        use gummiband_place::auto::{CLEAR_CORRIDORS_LEASH, PlaceOptions, Scope, corridor_intruders, place_board};
+    fn clear_corridors(
+        &self,
+        board: &str,
+        place: &gummiband_place::auto::PlaceOptions,
+    ) -> Result<(String, Vec<String>)> {
         let from = self.current_file(board)?;
-        let opts = PlaceOptions {
-            fixed,
-            ..Default::default()
+        let Some(cleared) = gummiband_app::clear_corridors(&from, place, &Default::default())? else {
+            return Ok((board.to_string(), Vec::new()));
         };
-        let intruders = corridor_intruders(&from, &opts)?;
-        if intruders.is_empty() {
-            return Ok((board.to_string(), intruders));
-        }
-        let place = PlaceOptions {
-            scope: Scope::Only(intruders.clone()),
-            corridors: true,
-            leash: CLEAR_CORRIDORS_LEASH,
-            ..opts
-        };
-        let (id, _) = self.edit_copy(board, |_, _| Ok(place_board(&from, &place)?.text))?;
-        Ok((id, intruders))
+        let (id, _) = self.edit_copy(board, |_, _| Ok(cleared.text))?;
+        Ok((id, cleared.parts))
     }
 
     fn do_place_parts(&self, p: PlacePartsIn) -> Result<(String, PlacePartsOut)> {
@@ -3110,7 +3175,7 @@ impl Gummiband {
                 bail!("no net named {:?}; similar: {}", p.net, close.join(", "))
             };
             let mut o = if p.reset.unwrap_or(false) {
-                NetOption::default()
+                NetOptions::default()
             } else {
                 e.options.get(&p.net).cloned().unwrap_or_default()
             };
@@ -3123,8 +3188,17 @@ impl Gummiband {
             if let Some(w) = p.width {
                 o.width = (w > 0.0).then_some(w);
             }
+            if let Some(m) = p.min_width {
+                o.min_width = (m > 0.0).then_some(m);
+            }
+            if let Some(refs) = &p.neck_refs {
+                o.neck_refs = Some(refs.clone());
+            }
+            // the same check as the route, now: on a copy of the board
+            let mut probe = b.clone();
+            gummiband_app::apply_net_options(&mut probe, &BTreeMap::from([(p.net.clone(), o.clone())]), &[])?;
             let priority = o.priority.unwrap_or(b.nets[id as usize].priority);
-            if o.priority.is_none() && !o.skip && o.width.is_none() {
+            if o.is_empty() {
                 e.options.remove(&p.net);
             } else {
                 e.options.insert(p.net.clone(), o.clone());
@@ -3140,13 +3214,16 @@ impl Gummiband {
                     " (class default)"
                 },
                 if o.skip { ", skipped" } else { "" }
-            ) + &o.width.map(|w| format!(" Width {w} mm.")).unwrap_or_default();
+            ) + &o.width.map(|w| format!(" Width {w} mm.")).unwrap_or_default()
+                + &o.min_width
+                    .map(|m| format!(" Minimum width {m} mm."))
+                    .unwrap_or_default();
             Ok((
                 summary,
                 SetNetOptionsOut {
                     board: p.board.clone(),
                     net: p.net.clone(),
-                    options: o,
+                    options: (&o).into(),
                     priority,
                 },
             ))
@@ -3154,22 +3231,62 @@ impl Gummiband {
     }
 }
 
-/// The nets whose copper goes before routing.
-fn reroute_nets(p: &RouteIn) -> Vec<String> {
-    match p.reroute {
-        Some(true) => p.nets.clone().unwrap_or_default(),
-        _ => Vec::new(),
-    }
+/// The options of a route call: what the caller gave, and the defaults of the pipeline for
+/// the rest. `keep_locked` is the caller's or the one the board was loaded with.
+fn route_options(p: &RouteIn, keep_locked: bool) -> Result<RouteOptions> {
+    let d = RouteOptions::default();
+    Ok(RouteOptions {
+        keep_locked,
+        keep_all: p.keep_all == Some(true),
+        nets: p.nets.clone().unwrap_or_default(),
+        reroute: p.reroute == Some(true),
+        shove: p.shove,
+        give: p.give,
+        move_parts: p.move_parts,
+        fixed: p.fixed.clone(),
+        plane_layers: p.plane_layers.clone(),
+        runs: p.runs.unwrap_or(d.runs),
+        via_pitch: p.via_pitch.unwrap_or(d.via_pitch),
+        via_cost: p.via_cost.unwrap_or(d.via_cost),
+        layer_dirs: p.layer_dirs.unwrap_or(d.layer_dirs),
+        patterns: p.patterns.clone().unwrap_or(d.patterns),
+        via_pass: p.via_pass.unwrap_or(d.via_pass),
+        pair_pull: p.pair_pull.unwrap_or(d.pair_pull),
+        pairs: p.pairs.unwrap_or(d.pairs),
+        pair_skew: p.pair_skew.unwrap_or(d.pair_skew),
+        pair_zdiff: p.pair_zdiff,
+        pair_all: p.pair_all.unwrap_or(d.pair_all),
+        breakouts: p.breakouts.unwrap_or(d.breakouts),
+        via_pairs: p.via_pairs.unwrap_or(d.via_pairs),
+        negotiate: p.negotiate.unwrap_or(d.negotiate),
+        generations: p.generations.unwrap_or(d.generations),
+        geometry_generations: p.geometry_generations.unwrap_or(d.geometry_generations),
+        seed: p.seed,
+        open_end_seconds: p.open_end_seconds.unwrap_or(d.open_end_seconds),
+        open_via_cost: p.open_via_cost.unwrap_or(d.open_via_cost),
+        air: p.air,
+        prefer_width: p.prefer_width.unwrap_or(d.prefer_width),
+        angles: match p.angles.as_deref() {
+            None | Some("any") => Angles::Any,
+            Some("45") => Angles::Deg45,
+            Some(other) => bail!("angles must be \"any\" or \"45\", not {other:?}"),
+        },
+        tune: p.tune.unwrap_or(d.tune),
+        tune_amplitude: p.tune_amplitude.unwrap_or(d.tune_amplitude),
+        tune_spacing: p.tune_spacing.unwrap_or(d.tune_spacing),
+        placements: p.placements.unwrap_or(d.placements),
+        placement_seed: p.placement_seed.unwrap_or(d.placement_seed),
+        clear_corridors: p.clear_corridors.unwrap_or(d.clear_corridors),
+        net_widths: p.net_widths.as_deref().map(abs_path),
+        net_priorities: p.net_priorities.as_deref().map(abs_path),
+        // the options per net of the session, filled in by the caller
+        net_options: d.net_options,
+        teardrops: p.teardrops.unwrap_or(d.teardrops),
+        frames: p.frames.as_deref().map(abs_path),
+    })
 }
 
-fn route_blocking(
-    id: String,
-    path: PathBuf,
-    kb: Arc<KicadBoard>,
-    options: BTreeMap<String, NetOption>,
-    keep_locked: bool,
-    p: RouteIn,
-) -> Result<(String, RouteOut)> {
+fn route_blocking(id: String, path: PathBuf, opts: RouteOptions, p: RouteIn) -> Result<(String, RouteOut)> {
     let output = match &p.output {
         Some(o) => abs_path(o),
         None => {
@@ -3177,260 +3294,20 @@ fn route_blocking(
             path.with_file_name(format!("{stem}.routed.kicad_pcb"))
         }
     };
-    if output == path {
-        bail!("output must differ from the input file");
-    }
-    let only = p.nets.clone().unwrap_or_default();
-    for n in &only {
-        if kb.board.net_id(n).is_none() {
-            bail!("no net named {n:?} (see list_nets)");
-        }
-    }
-    // finishing nets on a routed board: the unlocked tracks of the other nets shift aside and, if
-    // that is not enough, give way
-    let finishing = p.keep_all == Some(true) && !only.is_empty();
-    if !finishing && (p.shove == Some(true) || p.give.is_some_and(|g| g > 0.0)) {
-        bail!("shove and give need keep_all and nets");
-    }
-    let shove = finishing && p.shove != Some(false);
-    let give = if finishing {
-        p.give.unwrap_or(gummiband_core::DEFAULT_GIVE)
-    } else {
-        0.0
-    };
-    // the nets left out of this call, for the result
-    let (_, skipped) = apply_options(&kb.board, &options, &only);
-    let (mut board, _) = apply_options(&kb.board, &options, &[]);
-    // parts move by default when the whole board is routed
-    let move_parts = p.move_parts.unwrap_or(p.keep_all != Some(true));
-    if move_parts {
-        if finishing && shove {
-            bail!("move_parts does not work with shove: set shove false, or leave move_parts out");
-        }
-        let movable = read_board(
-            &path,
-            &ReadOptions {
-                keep: if keep_locked {
-                    KeepCopper::Locked
-                } else {
-                    KeepCopper::None
-                },
-                move_parts: true,
-                fixed: p.fixed.clone(),
-                ..Default::default()
-            },
-        )?;
-        board.movable = movable.board.movable;
-    }
-    let runs = p.runs.filter(|&r| r > 0).unwrap_or(gummiband_core::DEFAULT_RUNS);
-    let t0 = std::time::Instant::now();
-    if let (Some(z), Some(true)) = (p.pair_zdiff, p.pairs) {
-        gummiband_core::pairs::apply_zdiff(&mut board, z);
-    }
-    let angles_45 = match p.angles.as_deref() {
-        None | Some("any") => false,
-        Some("45") => true,
-        Some(other) => bail!("angles must be \"any\" or \"45\", not {other:?}"),
-    };
-    let sub_cfg = SubstrateConfig {
-        via_pitch: p.via_pitch.unwrap_or(0.5),
-        ..Default::default()
-    };
-    let hints = gummiband_core::patterns::hints(p.patterns.as_deref().unwrap_or("none")).map_err(anyhow::Error::msg)?;
-    let router_cfg = RouterConfig {
-        via_cost: p.via_cost.unwrap_or(3.0),
-        pair_pull: p.pair_pull.unwrap_or(0.0),
-        layer_dirs: p.layer_dirs.unwrap_or(0.5),
-        negotiate: p.negotiate.unwrap_or(0),
-        via_pass: p.via_pass.unwrap_or(4.0),
-        ..Default::default()
-    }
-    .with_hints(&hints);
-    // the open end of the CLI stops on a line on stdin; here a time budget sets the stop flag
-    let open_end = p.open_end_seconds.filter(|&s| s > 0.0).map(|secs| {
-        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let set = flag.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs_f64(secs));
-            set.store(true, std::sync::atomic::Ordering::Relaxed);
-        });
-        flag
+    let outcome = gummiband_app::route_file(&path, &output, &opts, &Default::default())?;
+    let routed = &outcome.routed;
+    let seconds = routed.seconds;
+    let (b, res, viol, pair_reports) = (&routed.board, &routed.res, &routed.violations, &routed.pairs);
+    let angles_45 = routed.angles_45.as_ref().map(|a| AnglesOut {
+        length_before_mm: r3(a.stats.length_before),
+        length_after_mm: r3(a.stats.length_after),
+        off_grid_pieces: a.stats.any_angle,
+        off_grid_mm: r3(a.stats.any_angle_length),
+        sharp_corners: a.stats.sharp_corners,
     });
-    let search_cfg = gummiband_core::SearchConfig {
-        population: runs,
-        generations: p.generations.unwrap_or(3),
-        geometry_generations: p.geometry_generations.unwrap_or(3),
-        frames: false,
-        progress: None,
-        seed: p.seed,
-        open_end,
-        air: p.air.unwrap_or(0.0),
-        prefer_width: p.prefer_width.unwrap_or(0.0),
-        open_via_cost: p.open_via_cost.unwrap_or(gummiband_core::DEFAULT_OPEN_VIA_COST),
-    };
-    let tune_cfg = gummiband_core::tune::TuneConfig {
-        style: if p.angles.as_deref() == Some("45") {
-            gummiband_core::tune::Style::Chamfer
-        } else {
-            gummiband_core::tune::Style::Round
-        },
-        amplitude: p.tune_amplitude.unwrap_or(1.0),
-        spacing: p.tune_spacing.unwrap_or(2.0),
-    };
-    let tune = p.tune != Some(false);
-    let finished = gummiband_core::finish_nets(&board, &only, shove, give, &search_cfg, |b, search| {
-        if p.pairs == Some(true) {
-            let cfg = gummiband_core::pairs::PairConfig {
-                skew: p.pair_skew.unwrap_or(0.1),
-                zdiff: p.pair_zdiff,
-                all: p.pair_all.unwrap_or(false),
-                room: tune.then(|| tune_cfg.clone()),
-                angles45: angles_45,
-                breakouts: p.pair_breakouts.unwrap_or(false),
-                via_pairs: p.pair_via_pairs.unwrap_or(false),
-            };
-            gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, search, &cfg)
-        } else {
-            let (sub, res) = gummiband_core::route_board(b, &sub_cfg, &router_cfg, search);
-            (sub, res, Vec::new())
-        }
-    });
-    let gummiband_core::Finished {
-        board: routed,
-        sub,
-        res,
-        extra: pair_reports,
-        given,
-        ..
-    } = finished;
-    // the copper was routed on the board with the parts where they ended up
-    let shifted;
-    let b = if res.offsets.is_empty() {
-        &routed
-    } else {
-        shifted = routed.with_offsets(&res.offsets);
-        &shifted
-    };
-    let mut res = res;
-    // room for the meanders (the pairs make it while they are one wide track)
-    if tune && p.pairs != Some(true) && !b.match_rules.is_empty() {
-        let want = gummiband_core::tune::room_wanted(b, &res.geometry, &tune_cfg, &[]);
-        if let Some(g) = gummiband_core::tune::make_room(b, &sub, &res.geometry, &want) {
-            res.geometry = g;
-        }
-    }
-    let angles_45 = angles_45.then(|| {
-        let wide: Vec<gummiband_core::board::NetId> = pair_reports
-            .iter()
-            .filter(|r| r.wide)
-            .flat_map(|r| [b.net_id(&r.p), b.net_id(&r.n)])
-            .flatten()
-            .collect();
-        let st = gummiband_core::octo::octilinear_only(
-            b,
-            &mut res.geometry,
-            &|t| !(wide.contains(&t.net) && t.seg == u32::MAX),
-            &|_, _| false,
-        );
-        AnglesOut {
-            length_before_mm: r3(st.length_before),
-            length_after_mm: r3(st.length_after),
-            off_grid_pieces: st.any_angle,
-            off_grid_mm: r3(st.any_angle_length),
-            sharp_corners: st.sharp_corners,
-        }
-    });
-    let tuned =
-        (tune && !b.match_rules.is_empty()).then(|| gummiband_core::tune::tune(b, &mut res.geometry, &tune_cfg));
-    let seconds = t0.elapsed().as_secs_f64();
-    let viol = gummiband_core::check::check(b, &res.geometry);
-
-    // with shove: what rests of the other nets stays in the file as it is
-    let changes = gummiband_core::import::soft_changes(b, &res.geometry);
-    let rests = |origin: Option<u32>, list: &[bool]| origin.is_some_and(|o| !list[o as usize]);
-    let mut items = Vec::new();
-    let mut of_track: Vec<std::ops::Range<usize>> = Vec::with_capacity(res.geometry.tracks.len());
-    for t in &res.geometry.tracks {
-        let start = items.len();
-        if rests(t.origin, &changes.chains) {
-            of_track.push(start..start);
-            continue;
-        }
-        for e in &t.elems {
-            items.push(match *e {
-                Elem::Line(a, bb) => write::Item::Track {
-                    width: t.piece_width(a, bb),
-                    a,
-                    b: bb,
-                    layer: t.layer,
-                    net: t.net,
-                },
-                Elem::Arc(a, mid, bb) => write::Item::Arc {
-                    width: t.piece_width(a, bb),
-                    a,
-                    mid,
-                    b: bb,
-                    layer: t.layer,
-                    net: t.net,
-                },
-            });
-        }
-        of_track.push(start..items.len());
-    }
-    for pat in tuned.iter().flat_map(|r| &r.patterns) {
-        let members: Vec<usize> = pat
-            .tracks
-            .iter()
-            .filter_map(|&i| of_track.get(i))
-            .flat_map(|r| r.clone())
-            .collect();
-        if members.is_empty() {
-            continue;
-        }
-        items.push(write::Item::Pattern(Box::new(write::PatternItem {
-            layer: pat.layer,
-            net: pat.nets[0],
-            base: pat.base[0],
-            base_coupled: pat.base.get(1).copied(),
-            rounded: pat.rounded,
-            width: pat.width,
-            gap: pat.gap,
-            amplitude: pat.amplitude,
-            spacing: pat.spacing,
-            target: pat.aim,
-            length: gummiband_core::matching::net_length(b, &res.geometry, pat.nets[0]).total(),
-            members,
-        })));
-    }
-    for v in &res.geometry.vias {
-        if v.drill == 0.0 || rests(v.origin, &changes.nodes) {
-            continue;
-        }
-        items.push(write::Item::Via {
-            at: v.at,
-            diameter: v.diameter,
-            drill: v.drill,
-            net: v.net,
-        });
-    }
-    let keep_all = p.keep_all == Some(true);
-    let mut strip_nets = reroute_nets(&p);
-    strip_nets.extend(given.iter().cloned());
-    let opts = write::StripOptions {
-        unlocked: !keep_all,
-        locked: !keep_locked && !keep_all,
-        zone_layers: vec![],
-        nets: strip_nets,
-        items: changes.strip.clone(),
-    };
-    let ranges = write::strip_ranges(&kb, &opts);
-    let text = write::patch(&kb, &ranges, &items);
-    let text = if res.offsets.is_empty() {
-        text
-    } else {
-        write::move_footprints(&text, &res.offsets, &kb.board.blocks)?
-    };
-    std::fs::write(&output, text).with_context(|| format!("writing {}", output.display()))?;
+    let tuned = routed.tuned.as_ref().map(|t| &t.report);
+    let written = outcome.write()?;
+    let items = written.items;
     let mut moved: Vec<MovedOut> = res
         .offsets
         .iter()
@@ -3441,7 +3318,6 @@ fn route_blocking(
         })
         .collect();
     moved.sort_by(|a, b| a.reference.cmp(&b.reference));
-    let copied = external::copy_project_files(&path, &output);
 
     let net = |n: u32| b.nets[n as usize].name.clone();
     let mut per_net: BTreeMap<u32, NetStatOut> = BTreeMap::new();
@@ -3475,7 +3351,7 @@ fn route_blocking(
     }
     nets_out.sort_by(|a, b| b.length_mm.total_cmp(&a.length_mm));
     let mut by_kind = BTreeMap::new();
-    for v in &viol {
+    for v in viol {
         *by_kind
             .entry(v.what.split(' ').next().unwrap_or("").to_string())
             .or_insert(0) += 1;
@@ -3485,7 +3361,7 @@ fn route_blocking(
         let (w, g, _) = b.pair_shape(a, c, 0);
         let (coupled, total) = gummiband_core::pair_coupling_of(&res.geometry, a, c, w + g + 0.1);
         let vias = |n| res.geometry.vias.iter().filter(|v| v.net == n).count();
-        let asked = p.pair_pull.unwrap_or(0.0) > 0.0 || p.pairs == Some(true);
+        let asked = opts.pair_pull > 0.0 || opts.pairs;
         let uncoupled = if asked {
             gummiband_core::uncoupled_stretches(&res.geometry, a, c, w + g + 0.1, 0.5)
                 .into_iter()
@@ -3522,7 +3398,7 @@ fn route_blocking(
             x.p, x.n, x.coupled_mm, x.length_mm
         ));
     }
-    if !coupling.is_empty() && p.pair_pull.unwrap_or(0.0) == 0.0 && p.pairs != Some(true) {
+    if !coupling.is_empty() && opts.pair_pull == 0.0 && !opts.pairs {
         let names: Vec<String> = coupling.iter().map(|x| format!("{}/{}", x.p, x.n)).collect();
         notes.push(format!(
             "differential pairs {} were routed as independent nets: set pair_pull (1 to 4) or pairs to couple them",
@@ -3540,8 +3416,9 @@ fn route_blocking(
             as_pair: n.coupled,
         })
         .collect();
-    let length_rules: Vec<LengthRuleOut> = gummiband_core::matching::check(b, &res.geometry)
-        .into_iter()
+    let length_rules: Vec<LengthRuleOut> = routed
+        .matching
+        .iter()
         .map(|r| {
             use gummiband_core::board::MatchKind;
             LengthRuleOut {
@@ -3567,13 +3444,34 @@ fn route_blocking(
                         skew_mm: n.skew.map(r3),
                     })
                     .collect(),
-                rule: r.rule,
+                rule: r.rule.clone(),
             }
         })
         .collect();
     let st = &res.stats;
     let out = RouteOut {
-        cleared_corridors: Vec::new(),
+        cleared_corridors: outcome.cleared_corridors.clone(),
+        placement: outcome.placement.as_ref().map(|p| PlacementOut {
+            seed: p.seed,
+            moved: p.report.moved.clone(),
+            tried: p
+                .trials
+                .iter()
+                .map(|t| PlacementTriedOut {
+                    seed: t.seed,
+                    routed: t.routed,
+                    connections: t.connections,
+                    violations: t.violations,
+                    vias: t.vias,
+                    length_mm: r3(t.length),
+                })
+                .collect(),
+        }),
+        frames: written.frames.as_ref().map(|f| FramesOut {
+            folder: f.dir.display().to_string(),
+            pictures: f.svgs,
+            animation: f.animation.as_ref().map(|a| a.display().to_string()),
+        }),
         moved,
         angles_45,
         length_tuning,
@@ -3584,7 +3482,9 @@ fn route_blocking(
         board: id,
         input: path.display().to_string(),
         output: output.display().to_string(),
+        seed: routed.seed,
         seconds,
+        search_seconds: routed.search_seconds,
         threads: rayon::current_num_threads(),
         connections: st.conns,
         routed: st.routed,
@@ -3599,8 +3499,20 @@ fn route_blocking(
             .collect(),
         vias: st.vias,
         length_mm: st.length,
-        items_written: items.len(),
-        skipped_nets: skipped,
+        items_written: items,
+        skipped_nets: outcome.skipped_nets.clone(),
+        alternatives: written
+            .alternatives
+            .iter()
+            .map(|a| AlternativeOut {
+                path: a.path.display().to_string(),
+                routed: a.stats.routed,
+                connections: a.stats.conns,
+                vias: a.stats.vias,
+                length_mm: r3(a.stats.length),
+                clearance_spots: a.stats.violations.unwrap_or(0),
+            })
+            .collect(),
         pairs: pair_reports
             .iter()
             .map(|r| PairOut {
@@ -3647,7 +3559,7 @@ fn route_blocking(
                 shorts: r.shorts,
             })
             .collect(),
-        copied: copied.iter().map(|p| p.display().to_string()).collect(),
+        copied: written.copied.iter().map(|p| p.display().to_string()).collect(),
     };
     let summary = format!(
         "Routed {}/{} connections ({} unrouted), {} vias, {:.0} mm of track, {} clearance violations (Gummiband check), {:.1} s on {} threads. Wrote {} items to {}.{}",
@@ -3659,14 +3571,34 @@ fn route_blocking(
         viol.len(),
         seconds,
         out.threads,
-        items.len(),
+        items,
         output.display(),
         if out.skipped_nets.is_empty() {
             String::new()
         } else {
             format!(" Skipped nets: {}.", out.skipped_nets.len())
         }
-    ) + &out.notes.iter().map(|n| format!(" Note: {n}.")).collect::<String>();
+    ) + &match out.alternatives.len() {
+        0 => String::new(),
+        n => format!(
+            " The open end left {n} more results that differ in vias and length: {}.",
+            out.alternatives
+                .iter()
+                .map(|a| format!("{} ({} vias, {:.0} mm)", a.path, a.vias, a.length_mm))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    } + &out
+        .placement
+        .as_ref()
+        .map(|p| format!(" Placement of seed {} kept, of {} tried.", p.seed, p.tried.len()))
+        .unwrap_or_default()
+        + &out
+            .frames
+            .as_ref()
+            .map(|f| format!(" {} pictures of the search in {}.", f.pictures, f.folder))
+            .unwrap_or_default()
+        + &out.notes.iter().map(|n| format!(" Note: {n}.")).collect::<String>();
     Ok((summary, out))
 }
 
@@ -4038,7 +3970,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Set per net options in the session, applied on the next route: priority (lower routes first, overrides the net class priority) and skip (leave the net unrouted). reset=true clears the net's options first.",
+        description = "Set per net options in the session, applied on the next route: priority (lower routes first, overrides the net class priority), skip (leave the net unrouted), width (the track width to route with), min_width (no necking below it; set it to the width for a current path) and neck_refs (the parts in whose courtyard the track may neck all the same). The same fields as an entry of the CLI's --net-widths file. reset=true clears the net's options first.",
         output_schema = schema_for_output::<SetNetOptionsOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
@@ -4050,65 +3982,15 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Route a loaded board with Gummiband (topological any-angle router, portfolio plus evolutionary order search on all routing threads) and write the routed .kicad_pcb (default <input>.routed.kicad_pcb next to the input; unlocked tracks and vias of the input are replaced; with keep_all it adds to them, with keep_all + nets + reroute only those nets are redone). It complements manual routing: locked tracks and vias (add_locked_copper, lock) are kept and routed around, locked parts do not move, and the result can be refined afterwards with move_part, add_locked_copper, lock and another route of single nets. Returns routed/total connections, unrouted connections, vias, track length, Gummiband's clearance violations with nets and positions, and the portfolio. CPU heavy: seconds to minutes; one route at a time. Check the result with drc.",
+        description = "Route a loaded board with Gummiband (topological any-angle router, portfolio plus evolutionary order search on all routing threads) and write the routed .kicad_pcb (default <input>.routed.kicad_pcb next to the input; unlocked tracks and vias of the input are replaced; with keep_all it adds to them, with keep_all + nets + reroute only those nets are redone). It complements manual routing: locked tracks and vias (add_locked_copper, lock) are kept and routed around, locked parts do not move, and the result can be refined afterwards with move_part, add_locked_copper, lock and another route of single nets. Every option has the name, default and meaning of gummiband route (there as --kebab-case); options that contradict each other are refused with a message that says what to change, and so is an argument that does not exist. Returns routed/total connections, unrouted connections, vias, track length, Gummiband's clearance violations with nets and positions, the portfolio, and with open_end_seconds the alternatives written next to the output. CPU heavy: seconds to minutes; one route at a time. Check the result with drc.",
         output_schema = schema_for_output::<RouteOut>(),
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
-    async fn route(&self, Parameters(mut p): Parameters<RouteIn>) -> Result<CallToolResult, ErrorData> {
+    async fn route(&self, Parameters(p): Parameters<RouteIn>) -> Result<CallToolResult, ErrorData> {
         let _guard = self.route_lock.lock().await;
-        let mut cleared = Vec::new();
-        if p.clear_corridors == Some(true) {
-            if p.keep_all == Some(true) {
-                return fail("clear_corridors places parts before routing the whole board: not with keep_all");
-            }
-            let me = self.clone();
-            let (board, fixed) = (p.board.clone(), p.fixed.clone());
-            match blocking(move || me.clear_corridors(&board, fixed)).await {
-                Ok((id, moved)) => {
-                    p.board = id;
-                    cleared = moved;
-                }
-                Err(e) => return fail(format!("{e:#}")),
-            }
-        }
-        let keep =
-            |e: &mut Entry| -> Result<_> { Ok((e.path.clone(), e.kb.clone(), e.options.clone(), e.keep_locked)) };
-        let (path, kb, options, loaded_keep) = match self.with_entry(&p.board, keep) {
-            Ok(x) => x,
-            Err(e) => return fail(format!("{e:#}")),
-        };
-        let keep_locked = p.keep_locked.unwrap_or(loaded_keep);
-        let id = p.board.clone();
-        let res = blocking(move || {
-            if p.reroute == Some(true) && (p.keep_all != Some(true) || p.nets.as_ref().is_none_or(Vec::is_empty)) {
-                bail!("reroute needs keep_all and nets");
-            }
-            // the copper to keep changes the board model (locked track ends become pins)
-            let kb = if p.keep_all == Some(true) {
-                Arc::new(read_board(
-                    &path,
-                    &ReadOptions {
-                        keep: KeepCopper::All,
-                        ignore_nets: reroute_nets(&p),
-                        ..Default::default()
-                    },
-                )?)
-            } else if keep_locked == loaded_keep {
-                kb
-            } else {
-                Arc::new(read(&path, keep_locked)?)
-            };
-            route_blocking(id, path, kb, options, keep_locked, p)
-        })
-        .await;
-        match res {
-            Ok((mut s, mut out)) => {
-                if !cleared.is_empty() {
-                    s = format!("placed again out of the track corridors: {}\n{s}", cleared.join(" "));
-                }
-                out.cleared_corridors = cleared;
-                ok(s, &out)
-            }
+        let me = self.clone();
+        match blocking(move || me.route_entry(p)).await {
+            Ok((s, out)) => ok(s, &out),
             Err(e) => fail(format!("{e:#}")),
         }
     }
@@ -4148,7 +4030,10 @@ impl Gummiband {
         let res = self.with_entry(&p.board, |e| {
             let (out, applied) = practice::power_plan(&e.kb, &p.board, &p)?;
             for (net, w) in &applied {
-                e.options.entry(net.clone()).or_default().width = Some(*w);
+                // a current path: the width is its minimum too
+                let o = e.options.entry(net.clone()).or_default();
+                o.width = Some(*w);
+                o.min_width = Some(*w);
             }
             Ok(out)
         });
@@ -4464,4 +4349,59 @@ impl ServerHandler for Gummiband {
 
 fn b_has_kicad_pro(pcb: &std::path::Path) -> bool {
     pcb.with_extension("kicad_pro").is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gummiband_app::OPTIONS;
+
+    /// Arguments of `route` that are the session's own. Everything else has to be an option of
+    /// the pipeline.
+    const OWN: &[&str] = &["board", "output", "max_violations"];
+
+    /// Every option of the pipeline is an argument of `route` under its name, and `route` has no
+    /// option of the pipeline that the table lacks. The CLI has the same test against the same
+    /// table, so the two front ends offer the same.
+    #[test]
+    fn route_offers_the_options_of_the_pipeline() {
+        let schema = serde_json::to_value(schemars::schema_for!(RouteIn)).unwrap();
+        let args: Vec<&String> = schema["properties"].as_object().expect("properties").keys().collect();
+        for o in OPTIONS {
+            assert!(args.iter().any(|a| *a == o.name), "route lacks {}", o.name);
+        }
+        for a in args {
+            assert!(
+                OWN.contains(&a.as_str()) || gummiband_app::option_doc(a).is_some(),
+                "{a} is neither in gummiband_app::OPTIONS nor one of the session's own arguments"
+            );
+        }
+        // an argument that does not exist is refused
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert!(serde_json::from_value::<RouteIn>(serde_json::json!({"board": "b1", "pair_breakouts": true})).is_err());
+    }
+
+    /// With nothing given the tool routes with the defaults of the pipeline, and what is given
+    /// arrives under its name.
+    #[test]
+    fn arguments_become_the_options_of_the_pipeline() {
+        let args = |v: serde_json::Value| -> RouteOptions {
+            route_options(&serde_json::from_value::<RouteIn>(v).unwrap(), false).unwrap()
+        };
+        let opts = args(serde_json::json!({"board": "b1"}));
+        assert_eq!(format!("{opts:?}"), format!("{:?}", RouteOptions::default()));
+        let opts = args(serde_json::json!({
+            "board": "b1", "keep_all": true, "nets": ["A", "B"], "reroute": true, "shove": false,
+            "give": 2, "tune": false, "open_end_seconds": 30, "plane_layers": ["In1.Cu"],
+            "breakouts": true, "placements": 3, "teardrops": true, "angles": "45",
+        }));
+        assert!(opts.keep_all && opts.reroute && !opts.tune && opts.breakouts && opts.teardrops);
+        assert_eq!(opts.nets, ["A", "B"]);
+        assert_eq!((opts.shove, opts.give, opts.move_parts), (Some(false), Some(2.0), None));
+        assert_eq!((opts.open_end_seconds, opts.placements), (30.0, 3));
+        assert_eq!(opts.plane_layers, ["In1.Cu"]);
+        assert_eq!(opts.angles, Angles::Deg45);
+        // contradictions are the pipeline's to refuse, in its words
+        assert!(opts.validate(false).unwrap_err().contains("breakouts needs pairs"));
+    }
 }

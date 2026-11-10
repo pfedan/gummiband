@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# a newer push to the same branch or pull request cancels the run it supersedes
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust tests and route hashes
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      # No kicad-cli or rsvg-convert on the runner: the tests do not call them.
+      - name: Tests
+        run: cargo test --workspace
+      # The router brings its own maths (gummiband_core::math), so the hashes do not depend on the
+      # runner's C library.
+      - name: Release build of the router
+        run: cargo build --release -p gummiband-cli
+      # Routes the quick synthetic boards and compares the SHA-1 of every result with
+      # bench/hashes.quick.txt (see bench/README.md). Deterministic at any thread count.
+      - name: Route hashes (quick set)
+        run: QUICK=1 bench/hashes.sh --check
+
+  plugin:
+    name: KiCad plugin tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # kicad-python (kipy) makes the conversion tests run; without wxPython the dialog tests skip.
+      - name: Install kicad-python
+        run: pip install -r plugin/requirements.txt
+      - name: Tests
+        working-directory: plugin
+        run: python -m unittest

@@ -218,6 +218,56 @@ fn initialize_list_load_route() {
         "the open end did not stop: {:?}",
         t0.elapsed()
     );
+    // what the open end leaves to choose from is written next to the output and listed
+    for a in r["alternatives"].as_array().expect("alternatives") {
+        let path = a["path"].as_str().unwrap();
+        assert!(path.contains(".alt") && std::path::Path::new(path).is_file(), "{a}");
+    }
+    // the input is never the output, in the words of the pipeline
+    assert_eq!(
+        s.call_err("route", json!({"board": "b1", "output": pcb})),
+        "error: the output must differ from the input file: the input stays as it is"
+    );
+    // a layer taken as a plane for this route only: nothing is routed on it
+    let r = s.call(
+        "route",
+        json!({"board": "b1", "runs": 1, "generations": 0, "plane_layers": ["B.Cu"]}),
+    );
+    assert_eq!((&r["routed"], &r["vias"]), (&json!(1), &json!(0)), "{r}");
+    // the options the CLI had alone: placements tried by the route, pictures of the search, and
+    // the file with options per net, which the options of the session win over
+    let widths = dir.join("widths.json");
+    std::fs::write(
+        &widths,
+        r#"{"A": {"width": 0.4, "min_width": 0.4}, "B": {"skip": false}}"#,
+    )
+    .unwrap();
+    let pictures = dir.join("frames");
+    // (this board has no part the placer may move: the placements get as far as the placer)
+    assert_eq!(
+        s.call_err(
+            "route",
+            json!({"board": "b1", "runs": 1, "placements": 2, "placement_seed": 3})
+        ),
+        "error: nothing to place: all parts are fixed"
+    );
+    let r = s.call(
+        "route",
+        json!({"board": "b1", "runs": 1, "generations": 0, "geometry_generations": 0, "frames": pictures,
+            "net_widths": widths}),
+    );
+    assert_eq!(r["routed"], 1, "{r}");
+    assert_eq!(r["skipped_nets"], json!(["B"]));
+    assert!(r["placement"].is_null(), "{r}");
+    assert!(r["frames"]["pictures"].as_u64().unwrap() >= 1 && pictures.join("frame-000.svg").is_file());
+    let a = r["nets"].as_array().unwrap().iter().find(|n| n["net"] == "A").unwrap();
+    assert_eq!(a["max_width_mm"], 0.4, "{r}");
+    // an argument that does not exist is refused, not ignored
+    let bad = s.request(
+        "tools/call",
+        json!({"name": "route", "arguments": {"board": "b1", "pair_breakouts": true}}),
+    );
+    assert!(bad["error"].is_object() || bad["isError"] == true, "{bad}");
 
     // pre-routing: look at a part, lock copper in a working copy, route around it
     let part = s.call("part_info", json!({"board": "b1", "reference": "R1"}));
@@ -355,9 +405,21 @@ fn initialize_list_load_route() {
                "generations": 0, "shove": false, "give": 0, "output": still}),
     );
     assert_eq!(r["routed"], 1, "{r}");
-    assert!(
-        s.call_err("route", json!({"board": kept["board"], "shove": true}))
-            .contains("keep_all")
+    // contradictions come back in the words of the pipeline, the same as from the CLI
+    assert_eq!(
+        s.call_err("route", json!({"board": kept["board"], "shove": true})),
+        "error: shove needs keep_all and nets"
+    );
+    assert_eq!(
+        s.call_err("route", json!({"board": kept["board"], "runs": 0})),
+        "error: runs must be at least 1"
+    );
+    assert_eq!(
+        s.call_err(
+            "route",
+            json!({"board": kept["board"], "keep_all": true, "nets": ["B"], "move_parts": true})
+        ),
+        "error: move_parts does not work with shove: switch shove off, or leave move_parts out"
     );
 
     // placement and zones go into the same working copy

@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use crate::board::{Board, NetId, ObstacleKind};
 use crate::geom::{Point, Rect, Shape, orient, point_seg_dist, pt, segs_intersect};
 use crate::index::FastMap;
+use crate::knobs;
 use crate::topo::{Mesh, NONE, OUTSIDE, PAD_SITE, STEINER, Substrate};
 
 mod shut;
@@ -56,9 +57,6 @@ pub struct RouterConfig {
     /// Hot spots (centre, extra clearance in mm) where an earlier geometry had violations: the
     /// capacity model asks for more room there, so the topology spreads out.
     pub hotspots: std::sync::Arc<Vec<(Point, f64)>>,
-    /// Nets that may leave or enter a pad through a via in it at any time, not only as the last
-    /// resort (empty by default; the experiment `GB_VIP_RETRY` fills it).
-    pub vip_nets: std::sync::Arc<Vec<NetId>>,
     /// Local patterns of the board (see [`crate::patterns`]), for the hints below.
     pub patterns: Option<std::sync::Arc<crate::patterns::Patterns>>,
     /// Pins of a plane net close to each other reach the plane through one via: the leader fans
@@ -87,30 +85,26 @@ pub enum GroupOrder {
     Short,
     /// Groups before the other signal connections of their priority, the longest group first.
     Long,
-    /// Each group at the place of its shortest connection among the others, as one block.
-    Inline,
 }
 
 impl Default for RouterConfig {
     fn default() -> Self {
-        let env = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         RouterConfig {
             via_cost: 3.0,
             layer_dirs: 0.0,
             pair_pull: 0.0,
             via_pass: 4.0,
             fanout_first: true,
-            max_expansions: env("GB_MAXEXP", 400_000.0) as usize,
+            max_expansions: knobs::MAXEXP.num::<f64>() as usize,
             seed: 0,
-            ripup_passes: env("GB_RIPUP", 3.0) as usize,
+            ripup_passes: knobs::RIPUP.num::<f64>() as usize,
             negotiate: 0,
             sites_per_tri: 3,
             margin: 0.01,
             via_in_pad: false,
-            escape_cost: env("GB_ESCAPE", 0.0),
+            escape_cost: knobs::ESCAPE.num(),
             taps: false,
             hotspots: Default::default(),
-            vip_nets: Default::default(),
             patterns: None,
             share_fanouts: false,
             decaps_first: false,
@@ -128,20 +122,11 @@ impl RouterConfig {
         self.decaps_first = hints.contains(&"decaps");
         self.row_moves = if hints.contains(&"rows") { 0.15 } else { 0.0 };
         self.pairs_first = hints.contains(&"pairs");
-        // `groups-short` and `groups-inline` pick the place of the blocks; plain `groups` is long,
-        // unless `GB_GROUP_ORDER` (short, inline) says otherwise, as in earlier measurements
+        // `groups-short` puts the shortest block first; plain `groups` is `groups-long`
         self.groups = if hints.contains(&"groups-short") {
             GroupOrder::Short
-        } else if hints.contains(&"groups-inline") {
-            GroupOrder::Inline
-        } else if hints.contains(&"groups-long") {
+        } else if hints.contains(&"groups-long") || hints.contains(&"groups") {
             GroupOrder::Long
-        } else if hints.contains(&"groups") {
-            match std::env::var("GB_GROUP_ORDER").as_deref() {
-                Ok("short") => GroupOrder::Short,
-                Ok("inline") => GroupOrder::Inline,
-                _ => GroupOrder::Long,
-            }
         } else {
             GroupOrder::Off
         };
@@ -394,7 +379,7 @@ fn goal_check_at() -> usize {
     if let Some(at) = GOAL_CHECK_TEST.with(|c| c.get()) {
         return at;
     }
-    if *ON.get_or_init(|| std::env::var("GB_GOAL_CHECK").map_or(true, |v| v != "0")) {
+    if *ON.get_or_init(|| knobs::GOAL_CHECK.on()) {
         GOAL_CHECK_AT
     } else {
         0
@@ -2185,13 +2170,8 @@ impl<'a> Router<'a> {
             Some((g.as_slice(), w + gap))
         });
         let net = conn.net;
-        // a via in a pad is a last resort, except for the nets of `GB_VIP_NETS`, with
-        // `GB_VIP_LEARN` the nets that needed one before, and the nets of `cfg.vip_nets`
-        // (experiments)
-        let via_in_pad = self.cfg.via_in_pad
-            || vip_net(&self.board.nets[net as usize].name)
-            || vip_learned(net)
-            || self.cfg.vip_nets.contains(&net);
+        // a via in a pad is a last resort
+        let via_in_pad = self.cfg.via_in_pad;
         let cls = self.board.class_of(net);
         // a layer change on a current path takes as many vias as carry the current
         let via_cost = self.cfg.via_cost * self.via_factor(ci);
@@ -2646,28 +2626,6 @@ impl<'a> Router<'a> {
                     {
                         for &site in list {
                             let q = self.site_point(site);
-                            if pad_reuse() && conn.goal != Goal::Plane && !self.sub.site_usable(site) {
-                                // a via in this pad was placed and ripped up: the site stays split,
-                                // but its vertices on the other layers can take a via again
-                                let ok = *vertex_ok.entry(site).or_insert_with(|| self.via_ok_vertex(site, net));
-                                if let Some(existing) = ok {
-                                    let vc = if existing { 0.1 } else { via_cost * 2.0 };
-                                    for l2 in 0..nl {
-                                        if l2 != lu && self.m(l2).site_vert.contains_key(&site) {
-                                            push(
-                                                best,
-                                                nodes,
-                                                open,
-                                                NK::Vert { site, li: l2 as u8 },
-                                                q,
-                                                node.g + node.pos.dist(q) + vc,
-                                                idx,
-                                            );
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
                             let ok = *site_ok.entry(site).or_insert_with(|| self.via_ok_site(site, net));
                             if !self.sub.site_usable(site) || !ok {
                                 continue;
@@ -3088,14 +3046,6 @@ impl<'a> Router<'a> {
             g.retain(|x| x.conn != ci);
             g.push(Guide::of(ci, &chain));
         }
-        if vip_learn()
-            && self.conns[ci].goal != Goal::Plane
-            && self.conn_vias[ci]
-                .iter()
-                .any(|&s| self.sub.shared.sites[s as usize].pad.is_some())
-        {
-            learn_vip(net, &self.board.nets[net as usize].name);
-        }
         true
     }
 
@@ -3233,12 +3183,8 @@ impl<'a> Router<'a> {
         let mut decap_pair: HashSet<(usize, usize)> = HashSet::new();
         if let Some(pat) = &self.cfg.patterns {
             if self.cfg.share_fanouts {
-                let only = std::env::var("GB_SHARE_KIND").ok();
-                for s in pat
-                    .shares
-                    .iter()
-                    .filter(|s| only.as_deref().is_none_or(|k| k == s.kind))
-                {
+                let only = knobs::SHARE_KIND.text();
+                for s in pat.shares.iter().filter(|s| only.is_none_or(|k| k == s.kind)) {
                     for &o in &s.others {
                         leader.insert(o, (s.leader, s.kind == "decap" && self.cfg.decaps_first));
                     }
@@ -3477,12 +3423,11 @@ impl<'a> Router<'a> {
                 .collect();
             let block = match self.cfg.groups {
                 GroupOrder::Long => -lens.iter().copied().fold(0.0, f64::max),
-                GroupOrder::Inline => lens.iter().copied().fold(f64::MAX, f64::min),
                 _ => lens.iter().copied().fold(f64::MAX, f64::min),
             };
             for &(i, a) in members {
                 let k = &mut keys[i];
-                k.tier = if self.cfg.groups == GroupOrder::Inline { 2 } else { 1 };
+                k.tier = 1;
                 k.block = block;
                 k.group = gi;
                 k.sweep = side * (b.pins[a].pos - ca).dot(normal);
@@ -3621,17 +3566,16 @@ impl<'a> Router<'a> {
     /// legal topology; the rip-up passes of [`Router::run`] take over from there, with the
     /// history as a guide.
     pub fn negotiate(&mut self) {
-        let env = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
-        let log = std::env::var("GB_NEG_LOG").is_ok();
-        let growth = env("GB_NEG_GROWTH", 1.5);
-        let history = env("GB_NEG_HISTORY", 1.0);
+        let log = knobs::log(knobs::Log::Neg);
+        let growth: f64 = knobs::NEG_GROWTH.num();
+        let history: f64 = knobs::NEG_HISTORY.num();
         self.prices = Some(Prices {
             soft: true,
-            overflow: env("GB_NEG_OVERFLOW", 2.0),
-            crossing: env("GB_NEG_CROSSING", 1.5),
+            overflow: knobs::NEG_OVERFLOW.num(),
+            crossing: knobs::NEG_CROSSING.num(),
             history: self.cross.iter().map(|l| vec![0.0; l.len()]).collect(),
-            tight: env("GB_NEG_TIGHT", 3.0),
-            reserve: env("GB_NEG_RESERVE", 0.05),
+            tight: knobs::NEG_TIGHT.num(),
+            reserve: knobs::NEG_RESERVE.num(),
             solid: false,
         });
         for ci in 0..self.conns.len() {
@@ -3804,34 +3748,6 @@ impl<'a> Router<'a> {
         }
     }
 
-    /// Experiment `GB_VIP_EARLY=empty`: the nets of the connections that find no way on the
-    /// empty board without a via in a pad, and one with it. Such a pad lies in a pocket on its
-    /// layer that fixed copper closes, not the tracks of a run, so no routing order gets it out.
-    /// Plane fan-outs are left out. Call it after [`Router::plan`], before anything is routed.
-    pub fn pocket_nets(&mut self) -> Vec<NetId> {
-        let vip = self.cfg.via_in_pad;
-        let mut buf = std::mem::take(&mut self.search_buf);
-        let mut nets: Vec<NetId> = Vec::new();
-        for ci in 0..self.conns.len() {
-            let net = self.conns[ci].net;
-            if self.conns[ci].goal == Goal::Plane || nets.contains(&net) {
-                continue;
-            }
-            self.cfg.via_in_pad = false;
-            if self.search(ci, &mut buf).is_some() {
-                continue;
-            }
-            self.cfg.via_in_pad = true;
-            if self.search(ci, &mut buf).is_some() {
-                nets.push(net);
-            }
-        }
-        self.cfg.via_in_pad = vip;
-        self.search_buf = buf;
-        nets.sort_unstable();
-        nets
-    }
-
     pub fn route_one(&mut self, ci: usize) -> bool {
         for _ in 0..3 {
             let mut buf = std::mem::take(&mut self.search_buf);
@@ -3839,7 +3755,7 @@ impl<'a> Router<'a> {
             self.search_buf = buf;
             match found {
                 Some(chain) => {
-                    let validate = std::env::var("GB_VALIDATE_EACH").is_ok();
+                    let validate = knobs::log(knobs::Log::ValidateEach);
                     let before = if validate { self.validate().len() } else { 0 };
                     if self.commit(ci, &chain) {
                         if validate {
@@ -4262,57 +4178,6 @@ fn jitter(seed: u64, x: u64) -> f64 {
     0.5 + (z % 1000) as f64 / 1000.0
 }
 
-/// Experiment: the nets named in `GB_VIP_NETS` (comma separated) may leave or enter a pad through
-/// a via in it at any time, not only as the last resort of a run. Off when the variable is unset.
-fn vip_net(name: &str) -> bool {
-    static NETS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    NETS.get_or_init(|| {
-        std::env::var("GB_VIP_NETS")
-            .map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
-    })
-    .iter()
-    .any(|n| n == name)
-}
-
-/// Experiment: with `GB_PAD_REUSE=1` a via in the source pad that was ripped up can come back.
-/// Its site stays split after the rip-up and is no longer usable as a site, so without this the
-/// pad has no via-in-pad candidate left (see docs/MILESTONES.md, Corne `rR4.1`).
-fn pad_reuse() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("GB_PAD_REUSE").is_ok_and(|v| v == "1"))
-}
-
-/// `GB_VIP_LEARN=1` (experiment): a net whose connection got through with a via in a pad, the
-/// last resort, may take one at any time from then on, as if `GB_VIP_NETS` named it. A pad in a
-/// pocket then gets its via while the board around it is still open. Plane fan-outs are left out.
-/// The nets are shared by all runs of the process, so with it on the normal search depends on
-/// which run learns first and is no longer the same from run to run.
-fn vip_learn() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("GB_VIP_LEARN").is_ok_and(|v| v == "1"))
-}
-
-fn learned_vips() -> &'static std::sync::Mutex<HashSet<NetId>> {
-    static NETS: std::sync::OnceLock<std::sync::Mutex<HashSet<NetId>>> = std::sync::OnceLock::new();
-    NETS.get_or_init(Default::default)
-}
-
-fn vip_learned(net: NetId) -> bool {
-    vip_learn() && learned_vips().lock().unwrap().contains(&net)
-}
-
-fn learn_vip(net: NetId, name: &str) {
-    if learned_vips().lock().unwrap().insert(net) {
-        eprintln!("via in pad learned: {name}");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4419,11 +4284,6 @@ mod tests {
         };
         // the bus as one block before the rest, in pin order across it
         assert_eq!(planned_nets(&b, groups), ["A", "B", "C", "D", "E", "F", "L_P", "L_N"]);
-        let inline = RouterConfig {
-            groups: GroupOrder::Inline,
-            ..Default::default()
-        };
-        assert_eq!(planned_nets(&b, inline), ["E", "F", "A", "B", "C", "D", "L_P", "L_N"]);
         let pairs = RouterConfig {
             pairs_first: true,
             ..Default::default()

@@ -5,6 +5,7 @@
 //! IPC-2221: I = k * dT^0.44 * A^0.725 with A in mil², k = 0.048 for outer and 0.024 for inner
 //! layers. A via barrel counts as an inner conductor with the plating as its thickness.
 
+use gummiband_core::math;
 use std::collections::{HashMap, VecDeque};
 
 use gummiband_core::board::{Board, LayerId, NetId, ObstacleKind};
@@ -28,20 +29,20 @@ pub fn ipc_width(amps: f64, copper_mm: f64, outer: bool, dt: f64) -> f64 {
     if amps <= 0.0 {
         return 0.0;
     }
-    let area_mil2 = (amps / (k(outer) * dt.powf(0.44))).powf(1.0 / 0.725);
+    let area_mil2 = math::powf(amps / (k(outer) * math::powf(dt, 0.44)), 1.0 / 0.725);
     area_mil2 / (copper_mm / MIL) * MIL
 }
 
 /// Current in A that a track of `width` mm carries at a rise of `dt` kelvin.
 pub fn ipc_amps(width: f64, copper_mm: f64, outer: bool, dt: f64) -> f64 {
     let area_mil2 = (width / MIL) * (copper_mm / MIL);
-    k(outer) * dt.powf(0.44) * area_mil2.max(0.0).powf(0.725)
+    k(outer) * math::powf(dt, 0.44) * math::powf(area_mil2.max(0.0), 0.725)
 }
 
 /// Current in A that one via barrel of `drill` mm carries at a rise of `dt` kelvin.
 pub fn via_amps(drill: f64, dt: f64) -> f64 {
     let area_mm2 = std::f64::consts::PI * (drill + VIA_PLATING_MM) * VIA_PLATING_MM;
-    k(false) * dt.powf(0.44) * (area_mm2 / (MIL * MIL)).powf(0.725)
+    k(false) * math::powf(dt, 0.44) * math::powf(area_mm2 / (MIL * MIL), 0.725)
 }
 
 /// Copper thickness of a layer from the stackup, 35 um without one.
@@ -293,7 +294,8 @@ fn edt(m: &[bool], nx: usize, ny: usize) -> Vec<f32> {
                 k += 1;
             }
             let p = v[k];
-            d[q] = (q as f64 - p as f64).powi(2) + f[p];
+            let dq = q as f64 - p as f64;
+            d[q] = dq * dq + f[p];
         }
     }
     // pad by one false cell on every side
@@ -648,7 +650,7 @@ pub fn neck(
             for &(_, i) in src_cells.iter().flatten().chain(sink_cells.iter()) {
                 bb.add(g.center(i));
             }
-            let diag = (bb.width().powi(2) + bb.height().powi(2)).sqrt();
+            let diag = (bb.width() * bb.width() + bb.height() * bb.height()).sqrt();
             let mut grow = (0.3 * diag).max(5.0);
             while grow >= 1.0 {
                 let win = bb.grow(grow);

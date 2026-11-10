@@ -18,7 +18,8 @@ negotiated congestion), not any existing product's code.
 - Nets are routed by priority (net class priority, overridable per net).
 - Use all cores: independent work (portfolio search over net orders, per layer realization,
   per net checks) runs in parallel with rayon.
-- Deterministic: the same input and seed give the same board.
+- Deterministic: the same input and seed give the same board, on every machine. Transcendental
+  functions come from `gummiband_core::math` (pure Rust), not from the system's maths library.
 - First target: two signal layers (F.Cu, B.Cu); inner plane layers are only crossed by vias.
 
 ## Overview
@@ -59,11 +60,72 @@ negotiated congestion), not any existing product's code.
 | --- | --- |
 | `gummiband-core` | geometry, board model, triangulation substrate, topological router, realization, checks. No I/O. |
 | `gummiband-kicad` | KiCad 9/10 s-expression reader and writer, net class and rule import from `.kicad_pro`. |
-| `gummiband-place` | placement: `auto` places any board from its netlist (`gummiband place`, MCP `place_parts`), the `gummiband-place` program makes the LED controller outline variants. |
-| `gummiband-cli` | `gummiband` binary: `info`, `place`, `route`, `svg`. The plugin calls this. |
+| `gummiband-place` | placement: `auto` places any board from its netlist (`gummiband place`, MCP `place_parts`), a library without a program of its own. Its `variants` example (a benchmark tool, `bench/place`) makes the LED controller outline variants. |
+| `gummiband-app` | the pipelines behind the front ends: `RouteOptions` (every option of a route with its default, defined once, and the table `OPTIONS` of them), their checks, `NetOptions` per net, `route_board` and `route_file`, the writing of the result (see [Route pipeline](#route-pipeline)), and the debug SVG. Prints nothing. |
+| `gummiband-cli` | `gummiband` binary: `info`, `place`, `route`, `angles45`, `move-part`, `lengths`, `strip`. Maps its arguments to `gummiband-app`, prints the reports. The plugin calls this. |
+| `gummiband-mcp` | `gummiband-mcp` binary: the MCP server (stdio) for AI agents, see `docs/MCP.md`. Keeps the session (loaded boards, working copies, net options) and calls `gummiband-app` for `route` and `try_seeds`. |
 | `plugin/` | KiCad action plugin (Python, KiCad IPC API): exports the board, runs the CLI, imports the result. |
 
 Units: millimetres as `f64` in the core. The writer rounds to KiCad's nanometre grid.
+
+Maths: every crate takes `sin`, `cos`, `atan2`, `exp`, `ln`, `powf`, `hypot` and the like from
+`gummiband_core::math` (free functions, `math::atan2(y, x)`), which wraps the `libm` crate. The
+methods of `f64` call the system's maths library, whose last bits differ between systems; a test
+in that module fails when one of them, or `powi`, appears in a source file. `sqrt`, `abs`,
+rounding and `mul_add` are exact everywhere and stay with the standard library.
+
+## Route pipeline
+
+"Route a board with these options" exists once, in `gummiband-app::route`, and both front ends
+are adapters around it: they map their arguments to `RouteOptions`, call `route_file`, and
+present the result. A rule about options or about what is written belongs here, never in a
+front end.
+
+- `RouteOptions` has every option. `Default` gives the documented defaults from the constants in
+  `gummiband_app::defaults`; the clap defaults of the CLI name these constants and the MCP server
+  falls back to `RouteOptions::default()`. Options that follow from others are `Option`s with one
+  method each that resolves them: `move_parts` (on unless `keep_all`), `shove` (on when finishing
+  nets with fixed parts), `give` (8 mm when finishing nets), `air` (0.03 mm in an open ended run
+  of the whole board).
+- `OPTIONS` is the table of them: name, kind of value, default in words and one sentence per
+  option. The CLI offers each as `--kebab-case`, the MCP tool `route` as an argument of the same
+  name. Three tests keep this true: the table against the fields of `RouteOptions`
+  (`options.rs`), the flags of `gummiband route` against the table (`gummiband-cli`), the
+  arguments of the tool against the table (`gummiband-mcp`). What a front end adds of its own
+  is listed in its test (`OWN`): where the result goes and how it is shown. Help texts are to
+  be generated from the table.
+- `RouteOptions::validate` checks the options against each other. Options that contradict each
+  other are errors that say what to change, and nothing is adjusted silently; `route_board` and
+  `route_file` call it first, so both front ends return the same message.
+- `NetOptions` (`nets.rs`) is what a user prescribes for one net: width, minimum width, the
+  parts to neck at, priority, skip. `apply_net_options` puts them on the board model. They come
+  from the file of `net_widths` (a width or an object per net), from `net_priorities` and from
+  `RouteOptions::net_options`, which the MCP server fills from its session.
+- `route_board(board, options, hooks)` takes a board model and returns `Routed`: the search
+  (`finish_nets` around `route_pairs` or `route_board` of the core), then room for meanders, the
+  45 degree step, length tuning, the length rules, the clearance check and the soft copper that
+  moved. `Routed::seconds` is the wall time of the route and `Routed::seed` the seed of the
+  search, the numbers every front end reports. The reports of both front ends are built from
+  `Routed`.
+- `route_file(board, output, options, hooks)` is the whole way from a file: the checks,
+  `clear_corridors`, the search over `placements`, `load_board` (copper to keep, planes, movable
+  parts, options per net), then `route_board`. `RouteOutcome::write` writes the result: the
+  routed board, the alternatives of the open end next to it (`<output>.altN.kicad_pcb`), the
+  project files of the input where they are missing, and the pictures of `frames`. The input is
+  never the output. Temporary copies (cleared corridors, placements) go when the outcome is
+  dropped.
+- The open end: `open_end_seconds` is a time budget whose clock starts when the search reports
+  the phase `open end`; `Hooks::stop` is the stop from outside (the CLI sets it on a line on
+  stdin). Either makes the run open ended.
+- `Hooks` carry what differs between front ends while a route runs: that stop flag, the progress
+  callback of the search and the `Event`s of the steps before it (the CLI prints them). The
+  crate itself prints nothing.
+
+The MCP server keeps one thing of its own on this path: with `clear_corridors` it calls
+`gummiband_app::clear_corridors` itself and puts the placement into the working copy of the
+session, so that the agent can go on from it, then routes that file. The debugging switches of
+the environment that belong to the pipeline are read there (`GB_SHIFT`, `GB_NO_TUNE_ROOM`,
+`GB_CC_*`), so they act in both front ends.
 
 ## Board model
 
@@ -195,7 +257,7 @@ the portals, where a wrap around a far pivot could swing past a neighbour.
 
 For finishing nets on a routed board (`--keep-all --nets`, shove on by default) the unlocked
 tracks and vias of the other nets are no obstacles but part of the topology
-(`gummiband-core::import`). `finish_nets` drives it for the CLI and the MCP server: when a
+(`gummiband-core::import`). `finish_nets` drives it in the route pipeline: when a
 connection still finds no way, the nets near its pins give way in growing circles, and the try
 with the fewest open connections, then violations is kept. With an open end (`--until-stop`,
 MCP `open_end_seconds`, since 2026-11-01) the tries run without it, and the one kept runs again:
@@ -462,7 +524,7 @@ seeds), with fewer vias and a little more length. `GB_BANDIT=0`, `GB_AIM_COST=0`
 switch them off; runs without an open end are untouched by them. The bold moves that start a side
 branch are not pruned: they may start worse than their parent on purpose. Pruned as well, nearly every
 start on a board without clearance spots came to nothing, and the level climbed by one per
-generation up to "converged" (`GB_PRUNE_STARTS=1` prunes them again, as before 2026-11-02).
+generation up to "converged" (they are left out since 2026-11-02).
 
 The open end does not count violations but spots: all violations of one pair of nets within 2 mm
 are one spot (`check::spots`), because the check reports every short piece of track, so that one
@@ -539,10 +601,9 @@ hints on, all off by default (and then byte for byte the same as without them):
   (`Router::order_keys`).
 - `groups`: the connections between the same two parts (ICs or connectors, at least 4 pins on
   nets: a bus, SPI, I2C; a pull-up on the way does not count) form a block of at least two, laid in pin
-  order across the block, from one side or the other by seed. Where the block goes is the
-  experiment `GB_GROUP_ORDER`: `long` (default) all blocks before the other signal connections
-  of their priority, the longest block first; `short` the same, the shortest first; `inline` each
-  block at the place of its shortest connection. The evolutionary search may still move single
+  order across the block, from one side or the other by seed. All blocks go before the other signal
+  connections of their priority: the longest block first (`groups`, `groups-long`) or the
+  shortest first (`groups-short`). The evolutionary search may still move single
   connections out of a block.
 
 Pockets (a pad that can only be left through a via in it) are not a pattern: the tracks of its

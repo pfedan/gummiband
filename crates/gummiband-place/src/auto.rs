@@ -3,6 +3,7 @@
 //! netlist, the outline, the planes and the fixed parts alone. Where a movable part sits in the
 //! input does not matter, so a pile of freshly imported footprints works as well as a placed board.
 
+use gummiband_core::math;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -1501,7 +1502,7 @@ pub fn corridor_groups(path: &Path, opts: &PlaceOptions) -> Result<Vec<CorridorG
         };
         let (a, b) = (centre(g.a), centre(g.b));
         let ab = b - a;
-        let len = ab.x.hypot(ab.y);
+        let len = math::hypot(ab.x, ab.y);
         if len < 1e-6 {
             continue;
         }
@@ -2907,7 +2908,7 @@ mod tests {
             } else {
                 pose(&p.report, ic)
             };
-            let d = ((x - ix).powi(2) + (y - iy).powi(2)).sqrt();
+            let d = ((x - ix) * (x - ix) + (y - iy) * (y - iy)).sqrt();
             assert!(d < 6.0, "{c} is {d} mm from {ic}");
         }
     }
@@ -2932,7 +2933,7 @@ mod tests {
         };
         let dist = |p: &Placed| {
             let (x, y) = pose(&p.report, "U2");
-            ((x - 122.0).powi(2) + (y - 110.0).powi(2)).sqrt()
+            ((x - 122.0) * (x - 122.0) + (y - 110.0) * (y - 110.0)).sqrt()
         };
         // free, U2 goes to U1, which it shares all its nets with
         let free = place(&board(spot), "free", &only(0.0)).unwrap();
@@ -3301,7 +3302,7 @@ mod tests {
         // the regulator goes to the MCU it feeds
         assert!(tie("U3", "U1"), "{ties:?}");
         let (x, y) = pose(&p.report, "R1");
-        let d = ((x - 104.4).powi(2) + (y - 125.0).powi(2)).sqrt();
+        let d = ((x - 104.4) * (x - 104.4) + (y - 125.0) * (y - 125.0)).sqrt();
         assert!(d < 4.0, "R1 is {d} mm from its pin");
         // without semantic there are no ties
         let p = place(&affinity_board(), "noties", &quick()).unwrap();
@@ -3371,7 +3372,7 @@ mod tests {
         assert_eq!(p.report.coils, vec![("L1".to_string(), "U1".to_string())]);
         let (lx, ly) = pose(&p.report, "L1");
         let (ux, uy) = pose(&p.report, "U1");
-        let d = ((lx - ux).powi(2) + (ly - uy).powi(2)).sqrt();
+        let d = ((lx - ux) * (lx - ux) + (ly - uy) * (ly - uy)).sqrt();
         assert!(d < 4.0, "L1 is {d} mm from U1");
     }
 
@@ -3440,8 +3441,12 @@ mod tests {
 
     #[test]
     fn two_sided_puts_what_does_not_fit_on_the_back() {
+        // More moves than `quick`: with 60 000 the board is on the edge, 2 of 8 seeds leave a part
+        // or two without a spot (seed 1 among them since the maths is our own); with 200 000
+        // all 8 place.
         let opts = PlaceOptions {
             two_sided: true,
+            iters: 200_000,
             ..quick()
         };
         let p = place(&crowded(), "crowd2", &opts).unwrap();

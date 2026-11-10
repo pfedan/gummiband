@@ -138,7 +138,8 @@ class. A wide power track through a gap that is just too narrow is a matter of w
 way. Only classes with such a rule have this freedom, and the result counts only with fewer
 violations. `GB_TAPER=0` switches it off.
 
-`--net-widths` overrides the class width per net.
+`--net-widths` overrides the class width per net, and can give a net a minimum width of its own
+and the parts in whose courtyard it may neck below it (MCP: `set_net_options`).
 
 ## Wider tracks where there is room
 
@@ -304,8 +305,11 @@ the geometry step), then fewest vias and shortest length.
 
 ![The phases of a run: portfolio, generations, geometry, geometry generations, keep improving, finishing](img/search-pipeline.svg)
 
-Results are deterministic for the same input, options and seed, on any machine and with any
-thread count: the portfolio size is a constant (14 runs), and threads only change the run time.
+Results are deterministic for the same input, options and seed, with any thread count: the
+portfolio size is a constant (14 runs), and threads only change the run time. The router is built
+to give the same file on every machine too: it brings its own maths functions and does not use
+the ones of the operating system, whose last bits differ. That is verified on x86_64 Linux
+(with two different C libraries); other platforms are expected to agree.
 
 ## Judging and violations
 
@@ -365,12 +369,13 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
   does not open. Vias count as tented: a board that leaves them open gets no room around them for
   the openings of pads. Which net may enter an opening is settled when the board is read, also if
   `--move-parts` moves a part below it later. Zones on mask layers are not read.
-- **Teardrops.** Gummiband draws none itself. `--teardrops` (command line only) switches on
+- **Teardrops.** Gummiband draws none itself. `--teardrops` (MCP: `teardrops`) switches on
   KiCad's own teardrop feature for the vias and pads of the output and for the track ends at
   width changes; fill the zones once (B) after opening the file and KiCad builds the shapes.
-- **Per net options in one file.** Priorities (`--net-priorities`) and widths (`--net-widths`)
-  come from separate JSON files; a single `gummiband.toml` next to the board is planned. The MCP
-  server has per net priority and skip.
+- **Per net options in one file.** The file of `--net-widths` holds every option per net (width,
+  minimum width, parts to neck at, priority, skip), and the MCP server has the same fields in
+  `set_net_options`; `--net-priorities` stays as the short form for priorities alone. A single
+  `gummiband.toml` next to the board is planned.
 - **More rule conditions.** Only the clearance and minimum width rules above; no rules by
   position, footprint or layer.
 - **Clean DRC on dense boards.** Expect a few clearance items and the occasional crossing in

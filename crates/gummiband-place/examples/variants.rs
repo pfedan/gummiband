@@ -1,5 +1,8 @@
-//! `gummiband-place`: alternative placements of the LED controller (new outline, fixed
-//! mechanical parts on the edge, the rest placed by simulated annealing, inner planes regenerated).
+//! Benchmark tool, not part of the product: alternative placements of the LED controller (new
+//! outline, fixed mechanical parts on the edge, the rest placed by simulated annealing, inner
+//! planes regenerated). Used by `bench/place/make-variants.sh`.
+//!
+//! `cargo run --release -p gummiband-place --example variants -- BOARD -o OUT [options]`
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,10 +27,7 @@ enum ShapeArg {
 }
 
 #[derive(Parser)]
-#[command(
-    name = "gummiband-place",
-    about = "Alternative placements of the LED controller"
-)]
+#[command(name = "variants", about = "Alternative placements of the LED controller")]
 struct Cli {
     /// Input board (placed, unrouted).
     board: PathBuf,

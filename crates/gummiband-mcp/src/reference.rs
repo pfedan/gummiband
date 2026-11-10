@@ -7,6 +7,7 @@
 //! differential pair it costs common mode rejection. The check rasters the filled zones of the
 //! layers next to each routing layer and walks the centre line of every track over them.
 
+use gummiband_core::math;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
@@ -460,7 +461,7 @@ pub fn reference_check(p: &ReferenceCheckIn) -> Result<ReferenceCheckOut> {
                     let seen = splits.iter().any(|s| {
                         s.net == b.nets[net as usize].name
                             && s.reference_layer == b.layers[m as usize].name
-                            && (s.x - q.x).hypot(s.y - q.y) < 0.5
+                            && math::hypot(s.x - q.x, s.y - q.y) < 0.5
                     });
                     if !other_holds && !seen {
                         splits.push(ReferenceIssueOut {

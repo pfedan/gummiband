@@ -10,6 +10,7 @@ name = "gummiband-mcp"
 path = "src/main.rs"
 
 [dependencies]
+gummiband-app.workspace = true
 gummiband-core.workspace = true
 gummiband-kicad.workspace = true
 gummiband-place.workspace = true

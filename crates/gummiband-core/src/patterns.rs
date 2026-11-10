@@ -514,7 +514,7 @@ pub const HINTS: [&str; 5] = ["shares", "decaps", "rows", "pairs", "groups"];
 
 /// `groups` with another place for the blocks in the routing order (see
 /// [`crate::route::GroupOrder`]): `groups` alone is `long`, the longest block first.
-pub const GROUP_VARIANTS: [&str; 3] = ["groups-long", "groups-short", "groups-inline"];
+pub const GROUP_VARIANTS: [&str; 2] = ["groups-long", "groups-short"];
 
 /// Parse a comma separated list of hints: names of [`HINTS`] or [`GROUP_VARIANTS`], `all` or
 /// `none`.
@@ -529,7 +529,7 @@ pub fn hints(arg: &str) -> Result<Vec<&'static str>, String> {
                 None => {
                     return Err(format!(
                         "unknown hint {w:?} (shares, decaps, rows, pairs, groups, groups-long, \
-                         groups-short, groups-inline, all, none)"
+                         groups-short, all, none)"
                     ));
                 }
             },
@@ -727,8 +727,9 @@ mod tests {
         assert_eq!(order("decaps"), GroupOrder::Off);
         assert_eq!(order("groups-long"), GroupOrder::Long);
         assert_eq!(order("pairs,groups-short"), GroupOrder::Short);
-        assert_eq!(order("all,groups-inline"), GroupOrder::Inline);
-        assert!(hints("groups-short,groups-inline").is_err());
+        assert_eq!(order("all,groups-short"), GroupOrder::Short);
+        assert!(hints("groups-short,groups-long").is_err());
+        assert!(hints("groups-inline").is_err());
         assert!(hints("groups-sideways").is_err());
     }
 

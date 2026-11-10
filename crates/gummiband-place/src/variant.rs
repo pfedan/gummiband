@@ -2,6 +2,7 @@
 
 use anyhow::{Result, bail};
 use gummiband_core::geom::{Point, pt};
+use gummiband_core::math;
 use gummiband_kicad::place_write::kicad_rot;
 
 use crate::model::{Design, R};
@@ -40,7 +41,7 @@ impl Outline {
             Outline::Circle { c, r } => (0..180)
                 .map(|i| {
                     let a = i as f64 * std::f64::consts::TAU / 180.0;
-                    c + pt(a.cos(), a.sin()) * r
+                    c + pt(math::cos(a), math::sin(a)) * r
                 })
                 .collect(),
         }
@@ -376,7 +377,7 @@ pub fn arrange(d: &Design, fx: &FixedSet, shape: &Shape, gap: f64) -> Result<Arr
             let c = ORIGIN + pt(r, r);
             let outline = Outline::Circle { c, r };
             // polar placement: angle phi counter-clockwise from +x on screen (y down)
-            let at = |phi: f64, rad: f64| c + pt(phi.to_radians().cos(), -phi.to_radians().sin()) * rad;
+            let at = |phi: f64, rad: f64| c + pt(math::cos(phi.to_radians()), -math::sin(phi.to_radians())) * rad;
             let sag = |half: f64| r - (r * r - half * half).max(0.0).sqrt();
             // module on the right (0 deg), its antenna corners on the circle
             set_pose(
@@ -478,8 +479,8 @@ pub fn arrange(d: &Design, fx: &FixedSet, shape: &Shape, gap: f64) -> Result<Arr
             }
             check_fixed(d, &placed, gap)?;
             // the original 100 x 60 placement (5:3) mapped into the inscribed rectangle
-            let a = (3.0f64 / 5.0).atan();
-            let (hw, hh) = (r * a.cos() * 0.98, r * a.sin() * 0.98);
+            let a = math::atan(3.0 / 5.0);
+            let (hw, hh) = (r * math::cos(a) * 0.98, r * math::sin(a) * 0.98);
             Ok(Arrangement {
                 outline,
                 units: placed,

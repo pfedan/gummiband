@@ -59,7 +59,7 @@ over the same two or three search seeds: one run says little.
 | Option | Default | CLI | What it does |
 | --- | --- | --- | --- |
 | Route buses between parts as blocks | off | `--patterns groups` | The connections between two parts that share at least two nets are routed as one block in pin order. Fewer vias on boards with several chips; leave it off on a placement that already routes cleanly. |
-| Order of the blocks | Longest first | `groups-short`, `groups-inline` | *Shortest first* suited a DDR fan-out and hurt elsewhere; *In place* is for experiments. |
+| Order of the blocks | Longest first | `groups-short` | *Shortest first* suited a DDR fan-out and hurt elsewhere. |
 | Differential pairs first | off | `--patterns pairs` | Pairs before the rest, longest first. With the blocks the best result on an FPGA board with many pairs. |
 | Decoupling capacitors first | off | `--patterns decaps` | A capacitor to its IC pin first, one via for both. Helps boards with many decaps. |
 | Lay pin rows again in pin order | off | `--patterns rows` | Only with *Keep improving*. |
@@ -78,7 +78,7 @@ over the same two or three search seeds: one run says little.
 | Relax on the GPU | off | `GB_GPU=1` | Experimental, macOS only: runs most of the track relaxation as a compute shader. Needs a binary built with `--features gpu`; with a normal binary the run stays on the CPU and the message box says so. Results differ between GPUs, so use the CPU for a final run. |
 | 45 degree tracks | off | `--angles 45` | Turns the any-angle tracks and arcs into conventional 45 degree routing at the end, with chamfered corners. A few percent more length, no new clearance violations; where no 45 degree path fits, a piece keeps its angle. See [Conventional 45 degree tracks](concepts.md#conventional-45-degree-tracks). |
 | Plane layers | | `--plane-layers` | Copper layers to treat as planes, on top of those of KiCad type *power*. |
-| Net widths file | | `--net-widths` | JSON file with a track width per net. |
+| Net widths file | | `--net-widths` | JSON file with a track width per net, or an object of options per net (see the CLI reference). |
 | Net priorities file | | `--net-priorities` | JSON file with a routing priority per net; lower routes first. |
 | Route pairs as one wide track | off | `--pairs` | Experimental: routes each differential pair as one wide track and splits it into two. Costs connections on dense boards. |
 | Length difference | 0.1 mm | `--pair-skew` | With pairs: length difference left within a pair. |

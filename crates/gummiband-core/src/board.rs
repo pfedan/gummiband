@@ -1,5 +1,6 @@
 //! Board model: everything the router needs to know, independent of the file format.
 
+use crate::math;
 use serde::{Deserialize, Serialize};
 
 use crate::geom::{Point, Polygon, Rect, Shape};
@@ -573,12 +574,12 @@ impl Board {
             (Some((h1, e1)), Some((h2, e2))) => {
                 let b = h1 + h2 + t;
                 let er = (h1 * e1 + h2 * e2) / (h1 + h2);
-                let z0 = 60.0 / er.sqrt() * (1.9 * b / (0.8 * w + t)).ln();
-                Some(2.0 * z0 * (1.0 - 0.347 * (-2.9 * g / b).exp()))
+                let z0 = 60.0 / er.sqrt() * math::ln(1.9 * b / (0.8 * w + t));
+                Some(2.0 * z0 * (1.0 - 0.347 * math::exp(-2.9 * g / b)))
             }
             (Some((h, er)), None) | (None, Some((h, er))) => {
-                let z0 = 87.0 / (er + 1.41).sqrt() * (5.98 * h / (0.8 * w + t)).ln();
-                Some(2.0 * z0 * (1.0 - 0.48 * (-0.96 * g / h).exp()))
+                let z0 = 87.0 / (er + 1.41).sqrt() * math::ln(5.98 * h / (0.8 * w + t));
+                Some(2.0 * z0 * (1.0 - 0.48 * math::exp(-0.96 * g / h)))
             }
             (None, None) => None,
         }
@@ -839,20 +840,20 @@ impl Board {
     pub fn current_width(&self, layer: LayerId, w: f64) -> f64 {
         let outer = layer == 0 || layer as usize + 1 == self.layers.len();
         let k: f64 = if outer { 1.0 } else { 0.5 };
-        k.powf(1.0 / 0.725) * w * self.copper_thickness(layer) / self.reference_copper()
+        math::powf(k, 1.0 / 0.725) * w * self.copper_thickness(layer) / self.reference_copper()
     }
 
     /// What vias of these drills carry together, as the width of a track on the outer copper:
     /// a barrel is an inner conductor with the plating as its thickness, and parallel barrels
     /// add their currents.
     pub fn via_current_width(&self, drills: impl IntoIterator<Item = f64>) -> f64 {
-        let sum: f64 = drills.into_iter().map(|d| 0.5 * barrel_mm2(d).powf(0.725)).sum();
-        sum.powf(1.0 / 0.725) / self.reference_copper()
+        let sum: f64 = drills.into_iter().map(|d| 0.5 * math::powf(barrel_mm2(d), 0.725)).sum();
+        math::powf(sum, 1.0 / 0.725) / self.reference_copper()
     }
 
     /// How many vias of `drill` carry what `w` mm of outer copper carry (at least one).
     pub fn vias_for(&self, w: f64, drill: f64) -> usize {
-        let n = 2.0 * (w * self.reference_copper() / barrel_mm2(drill)).powf(0.725);
+        let n = 2.0 * math::powf(w * self.reference_copper() / barrel_mm2(drill), 0.725);
         ((n - 1e-9).ceil() as usize).max(1)
     }
 

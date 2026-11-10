@@ -79,7 +79,8 @@ gummiband route board.kicad_pcb -o out.kicad_pcb --net-priorities prio.json
 Lower numbers route first; nets not in the file keep their class priority. The MCP server has the
 same through `set_net_options` (`priority` per net, plus a `skip` flag that leaves a net out), so
 an agent can route the critical nets first, judge, then the rest. See
-[MCP.md](../MCP.md#set_net_options).
+[MCP.md](../MCP.md#set_net_options). The file of `--net-widths` takes the same fields per net
+(`width`, `min_width`, `neck_refs`, `priority`, `skip`), see [the CLI reference](cli.md).
 
 A hint from one measurement on one board (the Corne keyboard): routing USB and crystal first,
 then the other signals, then the key matrix, and the supply and GND last gave the best result,
@@ -147,9 +148,10 @@ Effort knobs, from cheap to expensive:
 | finer via placement in tight spots | `--via-pitch 0.25` |
 | the last connections on a dense board | nothing: the search negotiates on its own when a few stay open; `--negotiate 20` does it from the start |
 
-The search is deterministic: the same board, options and `GB_EVO_SEED` give the same result on
-any machine and with any `--threads`; the thread count only changes the run time. Set a different
-`GB_EVO_SEED` to get another attempt.
+The search is deterministic: the same board, options and `GB_EVO_SEED` give the same result with
+any `--threads`; the thread count only changes the run time. It is designed to give the same
+result on every machine as well (verified on x86_64 Linux with glibc and with musl, see
+[Concepts](concepts.md)). Set a different `GB_EVO_SEED` to get another attempt.
 
 ## Let parts move
 
@@ -234,10 +236,11 @@ dialog. An agent loops over `place_parts` and `route` itself.
 
 ## Try placement variants
 
-`gummiband-place` (`cargo build --release -p gummiband-place`) rebuilds the LED controller
-controller in another outline (smaller rectangle, square, circle) with the connectors and the
-module fixed and the inner planes regenerated, so the router can be tried on alternatives of the
-same design. It is specific to that board's part roles today; the scripts and parameters are in
+The `variants` example of the placement crate
+(`cargo run --release -p gummiband-place --example variants -- BOARD -o OUT`) rebuilds the LED
+controller controller in another outline (smaller rectangle, square, circle) with the connectors
+and the module fixed and the inner planes regenerated, so the router can be tried on alternatives
+of the same design. It is specific to that board's part roles today; the scripts and parameters are in
 [bench/place/README.md](../../bench/place/README.md).
 
 ## Drive the router from an AI agent

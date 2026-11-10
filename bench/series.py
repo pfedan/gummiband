@@ -14,7 +14,7 @@ can be added while the series runs. A job:
 - `board`: arty, corne, ulx3s or ledctl (prepared under bench/work of `--repo`), or a
   path to a .kicad_pcb.
 - The run is `route --until-stop --progress --seed SEED ARGS` with RAYON_NUM_THREADS=threads and
-  GB_OPEN_LOG=1. It is stopped after `limit` seconds of wall time, or when it reports
+  GB_LOG=open (and GB_OPEN_LOG=1, its name in commits before 2026-11-10). It is stopped after `limit` seconds of wall time, or when it reports
   convergence if `stop_converged` is true, or ends by itself with GB_OPEN_GENERATIONS in `env`.
 
 Per job QUEUE_DIR/runs/<id>/ gets progress.jsonl (every progress line with its wall time),
@@ -154,6 +154,8 @@ class Queue:
         cmd += [str(a) for a in job.get("args", [])]
         env = dict(os.environ)
         env["RAYON_NUM_THREADS"] = str(job.get("threads", 4))
+        # the log of the open end; the second name is for binaries of commits before 2026-11-10
+        env["GB_LOG"] = "open"
         env["GB_OPEN_LOG"] = "1"
         env.update({k: str(v) for k, v in job.get("env", {}).items()})
         json.dump({"job": job, "cmd": cmd}, open(os.path.join(d, "job.json"), "w"), indent=1)

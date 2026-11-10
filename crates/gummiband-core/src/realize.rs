@@ -4,6 +4,7 @@
 //! the edge end vertex of its portal, so the bends are replaced with arcs around those pivots and
 //! straight tangents between them: neighbours around one pivot become concentric arcs.
 
+use crate::math;
 use rayon::prelude::*;
 
 use crate::board::{LayerId, NetId, ObstacleKind};
@@ -347,7 +348,7 @@ impl Router<'_> {
             p.windows(2).map(|w| Elem::Line(w[0], w[1])).collect()
         };
         // arcs around the edge ends know nothing of the imported tracks in the way
-        if std::env::var("GB_NO_ARCS").is_ok() || self.soft_on {
+        if crate::knobs::NO_ARCS.on() || self.soft_on {
             return polyline();
         }
         // wraps with the portal index they belong to
@@ -678,8 +679,8 @@ fn band(start: Point, end: Point, wraps: &[Wrap]) -> Option<Vec<Elem>> {
             let (prev_b, c) = (tangents[i - 1].1, circles[i]);
             if prev_b.dist(a) > 1e-6 {
                 // arc around c from prev_b to a, turning to c.side
-                let a0 = (prev_b - c.c).y.atan2((prev_b - c.c).x);
-                let a1 = (a - c.c).y.atan2((a - c.c).x);
+                let a0 = math::atan2((prev_b - c.c).y, (prev_b - c.c).x);
+                let a1 = math::atan2((a - c.c).y, (a - c.c).x);
                 let mut sweep = a1 - a0;
                 if c.side > 0.0 {
                     while sweep < 0.0 {

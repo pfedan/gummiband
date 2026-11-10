@@ -42,13 +42,66 @@ types ignored). A crash or timeout on one board is reported in the table and the
 not stop the suite. The table is also written to `boards/out/results.txt`; the router output of
 each board is in `boards/out/<board>.route.log`.
 
+## Route hashes (regression test)
+
+`hashes.sh` routes the synthetic boards with fixed settings and prints one line per run: the name
+and the SHA-1 of the routed `.kicad_pcb`. Runs without an open end are deterministic (same input
+and seed, any thread count), so the list is a regression test: a refactoring or a
+micro-optimisation must leave it unchanged. Only the router runs, no `kicad-cli` is needed.
+
+The reference holds for every build. The router used to call `sin`, `cos`, `atan2`, `acos`, `exp`,
+`log`, `pow` and `hypot` of the system's maths library, whose last bits differ between glibc
+versions, musl and macOS: the first CI run (glibc of Ubuntu 26.04) changed 12 of 15 hashes of a
+reference made with glibc 2.39, with the same compiler. Since 2026-11-10 these functions come from
+`gummiband_core::math` (the `libm` crate, pure Rust, compiled in), and the binary asks the system's
+maths library for nothing. Measured on x86_64 Linux: the glibc build and the static musl build give
+the same hash on all 27 runs, where before they agreed on 6. The reference did not change with it:
+the hashes are the ones the musl build had before. (The crate is a port of musl's maths library; its
+`sin`, `cos`, `tan`, `atan2`, `acos` and `hypot` give the bits of today's musl, its `exp`, `ln` and
+`powf` are an older version and differ in some last bits, which no run of the list noticed.) Another
+processor (macOS on ARM) is expected to give the same hashes, because only operations that IEEE 754
+fixes to the last bit are left to the hardware; that is not measured yet. `cargo test -p
+gummiband-core math` compares the bits of every function with fixed numbers, on any machine.
+
+```sh
+cargo build --release -p gummiband-cli
+bench/hashes.sh --check             # all boards against hashes.txt, about 2 min at 4 threads
+QUICK=1 bench/hashes.sh --check     # the quick set against hashes.quick.txt, what CI runs
+
+# two binaries against each other: the build before a change and the one after it, or two
+# builds of the same source (glibc and musl, two compilers)
+bench/hashes.sh --compare path/to/old/gummiband target/release/gummiband
+QUICK=1 bench/hashes.sh --compare OLD NEW
+
+bench/hashes.sh easy bus            # print the hashes of some boards, compare nothing
+```
+
+Every board is routed with `--runs 4 --generations 1 --geometry-generations 0 --no-move-parts`.
+A few extra runs on small boards cover option paths the plain run does not touch (the defaults,
+`--angles 45`, `--pairs`, `--pair-pull`, `--patterns groups`, `--negotiate`); their names carry a
+`+`, as in `medium+45`. `--check` prints a diff and exits with 1 when a hash differs, and a run
+that fails shows up as `FAILED` in place of its hash. `RAYON_NUM_THREADS` sets the threads
+(default 4) and changes the time only.
+
+A change that is meant to alter results (a new heuristic, a changed default) is judged with
+`compare.py` and the KiCad DRC as before, and then the reference is updated deliberately, in the
+same commit as the change and with the reason in its message:
+
+```sh
+bench/hashes.sh --update            # rewrites hashes.txt
+QUICK=1 bench/hashes.sh --update    # rewrites hashes.quick.txt
+```
+
+Never update the reference to make a refactoring pass: there a changed hash is a bug. A new board
+from `gen_boards.py` needs `--update` too, since the full list covers every board in `boards/`.
+
 ## Two sided placement
 
 `gen_two_sided.py` writes four synthetic boards into `boards/two_sided/` for `gummiband place
 --two-sided` (placement only, no routing): `ts_som` (4 layers, 42 x 30 mm, BGA SoC and memory,
 PMIC, about 120 0402 parts, a board to board connector locked on the back; the parts need about
 1.4 times the front), `ts_sensor` (34 x 23 mm, a coin cell holder locked on the back, an antenna
-keepout on the front: one sided nothing fits, two sided the front holds it all), `ts_roomy` (a
+keepout on the front: one sided nothing fits, two sided the front holds nearly all), `ts_roomy` (a
 control with room to spare) and `ts_tht` (through hole electrolytics and a terminal block between
 SMD converters). `check_sides.py PLACED [--input ORIGINAL]` checks a result from the file alone:
 courtyard overlaps per side, the holes of through hole parts against parts on the other side, SMD
@@ -56,14 +109,15 @@ pads and courtyards on the layers of their side, mirrored texts on the back, and
 that every part that changed sides keeps its pad distances and is mirrored. `draw_sides.py PLACED
 OUT.svg` draws front and back next to each other.
 
-With `--iters 1000000`, one start, seed 1:
+With `--iters 1000000`, one start, seed 1 (counts of 2026-11-10, with the maths of
+`gummiband_core::math`; the system's maths gave 0 and 10 on `ts_sensor` and `ts_tht`):
 
 | Board | One sided | Two sided: parts on the back | Wall time |
 | --- | --- | --- | --- |
 | `ts_som` | fails before the search, 321 mm2 missing | 105 | 20 s |
-| `ts_sensor` | fails before the search, 275 mm2 missing | 0 (the front holds it all once the holder only takes the back) | 6 s |
+| `ts_sensor` | fails before the search, 275 mm2 missing | 1 (the front holds the rest once the holder only takes the back) | 6 s |
 | `ts_roomy` | places | 9 (decoupling capacitors under their IC) | 3 s |
-| `ts_tht` | places | 10, some under the electrolytics | 3 s |
+| `ts_tht` | places | 11, some under the electrolytics | 3 s |
 
 `check_sides.py` finds no problem on any of them.
 
@@ -83,7 +137,7 @@ violation count says little. Compare core seconds when other jobs run on the mac
 
 ## Profiling
 
-`GB_TIMING=1` prints cumulative phase timers of a route (search, relaxation rounds, taut, check;
+`GB_LOG=timing` prints cumulative phase timers of a route (search, relaxation rounds, taut, check;
 parallel calls add up, so the shares are of the work, not of the clock). For the functions
 behind them, record with [samply](https://github.com/mstange/samply) (`cargo install samply`;
 Instruments needs a full Xcode) and summarise with `profile.py`:
@@ -131,3 +185,10 @@ First results (2026-10-29, `--runs 14 --generations 1`, no geometry generations)
 holds the length rules (the board has none of its own). `run-ddr5.sh [route args]` prints the
 lengths of the reference routing, routes the stripped board into `work/ddr5/routed/`, prints its
 lengths and the KiCad DRC summary.
+
+## Repository housekeeping
+
+`merged-branches.sh [REMOTE] [MAIN]` lists the branches of the remote (default `origin`) whose
+head is an ancestor of its main branch, and prints the `git push origin --delete ...` command for
+them. It is read-only: it asks the remote for its heads, fetches nothing and deletes nothing. A
+head whose commit is not in the local clone is listed as unknown, never as merged.
