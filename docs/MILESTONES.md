@@ -127,7 +127,8 @@ outer pours removed, routed completely by Gummiband (`bench/run-ledctl.sh`).
 - Rule engine: more custom rule conditions (positions, footprints, layers).
 - More than two signal layers (pulled forward with the synthetic 4 layer benchmarks).
 - Alternative placements as portfolio variants (smaller, square, round outlines with the
-  connectors and the ESP32 module fixed), see `crates/gummiband-place`.
+  connectors and the ESP32 module fixed), see `bench/place` (the `variants` example of
+  `crates/gummiband-place`).
 - Placement from the netlist as a step of its own (`gummiband place`, plugin button, MCP
   `place_parts`): all unlocked, selected, or outside the board, with fixed parts respected.
 - Placements as a search around routing (`route --placements N`), judged by full routes. Open: a

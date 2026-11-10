@@ -234,10 +234,11 @@ dialog. An agent loops over `place_parts` and `route` itself.
 
 ## Try placement variants
 
-`gummiband-place` (`cargo build --release -p gummiband-place`) rebuilds the LED controller
-controller in another outline (smaller rectangle, square, circle) with the connectors and the
-module fixed and the inner planes regenerated, so the router can be tried on alternatives of the
-same design. It is specific to that board's part roles today; the scripts and parameters are in
+The `variants` example of the placement crate
+(`cargo run --release -p gummiband-place --example variants -- BOARD -o OUT`) rebuilds the LED
+controller controller in another outline (smaller rectangle, square, circle) with the connectors
+and the module fixed and the inner planes regenerated, so the router can be tried on alternatives
+of the same design. It is specific to that board's part roles today; the scripts and parameters are in
 [bench/place/README.md](../../bench/place/README.md).
 
 ## Drive the router from an AI agent

@@ -59,7 +59,7 @@ negotiated congestion), not any existing product's code.
 | --- | --- |
 | `gummiband-core` | geometry, board model, triangulation substrate, topological router, realization, checks. No I/O. |
 | `gummiband-kicad` | KiCad 9/10 s-expression reader and writer, net class and rule import from `.kicad_pro`. |
-| `gummiband-place` | placement: `auto` places any board from its netlist (`gummiband place`, MCP `place_parts`), the `gummiband-place` program makes the LED controller outline variants. |
+| `gummiband-place` | placement: `auto` places any board from its netlist (`gummiband place`, MCP `place_parts`), a library without a program of its own. Its `variants` example (a benchmark tool, `bench/place`) makes the LED controller outline variants. |
 | `gummiband-cli` | `gummiband` binary: `info`, `place`, `route`, `svg`. The plugin calls this. |
 | `plugin/` | KiCad action plugin (Python, KiCad IPC API): exports the board, runs the CLI, imports the result. |
 
