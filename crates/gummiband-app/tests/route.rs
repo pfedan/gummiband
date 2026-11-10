@@ -65,6 +65,127 @@ fn options_follow_from_each_other() {
     assert_eq!((fixed.give(), fixed.air(true)), (2.0, 0.01));
 }
 
+/// Options that contradict each other are refused with a message that says what to change;
+/// options that were left out never contradict.
+#[test]
+fn contradictions_are_errors() {
+    let d = RouteOptions::default();
+    assert_eq!(d.validate(false), Ok(()));
+    assert_eq!(d.validate(true), Ok(()));
+    let finishing = RouteOptions {
+        keep_all: true,
+        nets: vec!["A".into()],
+        ..Default::default()
+    };
+    assert_eq!(finishing.validate(true), Ok(()));
+    let refused = |o: RouteOptions, open_end: bool, word: &str| {
+        let e = o.validate(open_end).expect_err(word);
+        assert!(e.contains(word), "{e}");
+    };
+    refused(RouteOptions { runs: 0, ..d.clone() }, false, "runs must be at least 1");
+    refused(
+        RouteOptions {
+            pairs: true,
+            ..d.clone()
+        },
+        true,
+        "pairs",
+    );
+    assert_eq!(
+        RouteOptions {
+            pairs: true,
+            ..d.clone()
+        }
+        .validate(false),
+        Ok(())
+    );
+    refused(
+        RouteOptions {
+            reroute: true,
+            ..d.clone()
+        },
+        false,
+        "reroute needs keep_all and nets",
+    );
+    refused(
+        RouteOptions {
+            shove: Some(true),
+            ..d.clone()
+        },
+        false,
+        "shove needs keep_all and nets",
+    );
+    refused(
+        RouteOptions {
+            give: Some(4.0),
+            ..d.clone()
+        },
+        false,
+        "give needs keep_all and nets",
+    );
+    // switching off what is off anyway is no contradiction
+    let off = RouteOptions {
+        shove: Some(false),
+        give: Some(0.0),
+        ..d.clone()
+    };
+    assert_eq!(off.validate(false), Ok(()));
+    // parts that move and tracks that shift: one of them has to be asked off
+    let moving = RouteOptions {
+        move_parts: Some(true),
+        ..finishing.clone()
+    };
+    refused(moving.clone(), false, "switch shove off, or leave move_parts out");
+    refused(
+        RouteOptions {
+            shove: Some(true),
+            ..moving.clone()
+        },
+        false,
+        "move_parts does not work with shove",
+    );
+    assert_eq!(
+        RouteOptions {
+            shove: Some(false),
+            ..moving
+        }
+        .validate(false),
+        Ok(())
+    );
+    refused(
+        RouteOptions {
+            pair_all: true,
+            ..d.clone()
+        },
+        false,
+        "pair_all needs pairs",
+    );
+    refused(
+        RouteOptions {
+            pair_zdiff: Some(90.0),
+            ..d.clone()
+        },
+        false,
+        "pair_zdiff needs pairs",
+    );
+    refused(
+        RouteOptions {
+            placements: 2,
+            ..finishing.clone()
+        },
+        false,
+        "placements routes the whole board",
+    );
+    refused(
+        RouteOptions {
+            clear_corridors: true,
+            ..finishing
+        },
+        false,
+        "clear_corridors",
+    );
+}
+
 #[test]
 fn route_a_file_then_finish_a_net() {
     let dir = std::env::temp_dir().join(format!("gummiband-app-test-{}", std::process::id()));
@@ -134,5 +255,12 @@ fn route_a_file_then_finish_a_net() {
         ..Default::default()
     };
     assert!(route_file(&pcb, &bad, &Hooks::default()).is_err());
+    // the pipeline checks the options itself, whoever calls it
+    let bad = RouteOptions {
+        runs: 0,
+        ..Default::default()
+    };
+    let e = route_file(&pcb, &bad, &Hooks::default()).err().unwrap();
+    assert_eq!(e.to_string(), "runs must be at least 1");
     let _ = std::fs::remove_dir_all(&dir);
 }

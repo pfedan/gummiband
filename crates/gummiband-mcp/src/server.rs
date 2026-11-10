@@ -947,7 +947,8 @@ pub struct RouteIn {
     pub reroute: Option<bool>,
     /// With `keep_all` and `nets`: the unlocked tracks of the other nets are part of the topology,
     /// so a connection passes between them and they shift aside; what it does not touch stays as
-    /// it is in the file (default true; false keeps them where they are).
+    /// it is in the file (default true; false keeps them where they are). Not together with
+    /// move_parts: with both asked for, the route is refused.
     pub shove: Option<bool>,
     /// With `keep_all` and `nets`: if a connection finds no way, the unlocked tracks of other nets
     /// within this many mm of its pins give way and are routed again, in growing steps up to this
@@ -1041,7 +1042,8 @@ pub struct RouteIn {
     /// longer ones.
     pub open_via_cost: Option<f64>,
     /// Reserve in mm on top of the clearances that the finished copper gets where there is room
-    /// (default 0). The result stays only if it brings no new violation.
+    /// (default: 0.03 with open_end_seconds, but not when finishing nets with keep_all and nets,
+    /// else 0). The result stays only if it brings no new violation.
     pub air: Option<f64>,
     /// Tracks of the default net class grow up to this width in mm where there is room, at the
     /// end (default 0: off; a track_width rule with opt sets it per class).
@@ -2434,10 +2436,9 @@ impl Gummiband {
             Ok((e.path.clone(), e.kb.clone(), e.options.clone(), e.keep_locked))
         })?;
         let keep_locked = p.keep_locked.unwrap_or(loaded_keep);
-        if p.reroute == Some(true) && (p.keep_all != Some(true) || p.nets.as_ref().is_none_or(Vec::is_empty)) {
-            bail!("reroute needs keep_all and nets");
-        }
         let opts = route_options(&p, keep_locked)?;
+        opts.validate(p.open_end_seconds.is_some_and(|s| s > 0.0))
+            .map_err(anyhow::Error::msg)?;
         // the copper to keep changes the board model (locked track ends become pins)
         let kb = if opts.keep_all {
             Arc::new(read_board(
@@ -3169,7 +3170,7 @@ fn route_options(p: &RouteIn, keep_locked: bool) -> Result<RouteOptions> {
         give: p.give,
         move_parts: p.move_parts,
         fixed: p.fixed.clone(),
-        runs: p.runs.filter(|&r| r > 0).unwrap_or(d.runs),
+        runs: p.runs.unwrap_or(d.runs),
         via_pitch: p.via_pitch.unwrap_or(d.via_pitch),
         via_cost: p.via_cost.unwrap_or(d.via_cost),
         layer_dirs: p.layer_dirs.unwrap_or(d.layer_dirs),
@@ -3187,9 +3188,7 @@ fn route_options(p: &RouteIn, keep_locked: bool) -> Result<RouteOptions> {
         geometry_generations: p.geometry_generations.unwrap_or(d.geometry_generations),
         seed: p.seed,
         open_via_cost: p.open_via_cost.unwrap_or(d.open_via_cost),
-        // no reserve unless asked, also with open_end_seconds (the CLI gives an open ended
-        // route of the whole board 0.03 mm)
-        air: Some(p.air.unwrap_or(0.0)),
+        air: p.air,
         prefer_width: p.prefer_width.unwrap_or(d.prefer_width),
         angles: match p.angles.as_deref() {
             None | Some("any") => Angles::Any,
@@ -3199,8 +3198,9 @@ fn route_options(p: &RouteIn, keep_locked: bool) -> Result<RouteOptions> {
         tune: p.tune.unwrap_or(d.tune),
         tune_amplitude: p.tune_amplitude.unwrap_or(d.tune_amplitude),
         tune_spacing: p.tune_spacing.unwrap_or(d.tune_spacing),
-        // the session has its own tools for these: place_parts and try_seeds, the working copy
-        // for clear_corridors, set_net_options for widths and priorities
+        clear_corridors: p.clear_corridors == Some(true),
+        // the session has its own tools for these: place_parts and try_seeds, set_net_options
+        // for widths and priorities
         ..d
     })
 }
@@ -3228,19 +3228,10 @@ fn route_blocking(
             bail!("no net named {n:?} (see list_nets)");
         }
     }
-    // finishing nets on a routed board: the unlocked tracks of the other nets shift aside and, if
-    // that is not enough, give way
-    let finishing = opts.finishing();
-    if !finishing && (p.shove == Some(true) || p.give.is_some_and(|g| g > 0.0)) {
-        bail!("shove and give need keep_all and nets");
-    }
     // the nets left out of this call, for the result
     let (_, skipped) = apply_options(&kb.board, &options, &opts.nets);
     let (mut board, _) = apply_options(&kb.board, &options, &[]);
     if opts.move_parts() {
-        if finishing && p.shove != Some(false) {
-            bail!("move_parts does not work with shove: set shove false, or leave move_parts out");
-        }
         let movable = read_board(
             &path,
             &ReadOptions {
@@ -3912,8 +3903,14 @@ impl Gummiband {
         let _guard = self.route_lock.lock().await;
         let mut cleared = Vec::new();
         if p.clear_corridors == Some(true) {
-            if p.keep_all == Some(true) {
-                return fail("clear_corridors places parts before routing the whole board: not with keep_all");
+            // the corridor step comes before the route: its options are checked first
+            let checked = self.with_entry(&p.board, |e| Ok(e.keep_locked)).and_then(|keep| {
+                let opts = route_options(&p, p.keep_locked.unwrap_or(keep))?;
+                opts.validate(p.open_end_seconds.is_some_and(|s| s > 0.0))
+                    .map_err(anyhow::Error::msg)
+            });
+            if let Err(e) = checked {
+                return fail(format!("{e:#}"));
             }
             let me = self.clone();
             let (board, fixed) = (p.board.clone(), p.fixed.clone());

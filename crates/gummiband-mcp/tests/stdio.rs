@@ -355,9 +355,21 @@ fn initialize_list_load_route() {
                "generations": 0, "shove": false, "give": 0, "output": still}),
     );
     assert_eq!(r["routed"], 1, "{r}");
-    assert!(
-        s.call_err("route", json!({"board": kept["board"], "shove": true}))
-            .contains("keep_all")
+    // contradictions come back in the words of the pipeline, the same as from the CLI
+    assert_eq!(
+        s.call_err("route", json!({"board": kept["board"], "shove": true})),
+        "error: shove needs keep_all and nets"
+    );
+    assert_eq!(
+        s.call_err("route", json!({"board": kept["board"], "runs": 0})),
+        "error: runs must be at least 1"
+    );
+    assert_eq!(
+        s.call_err(
+            "route",
+            json!({"board": kept["board"], "keep_all": true, "nets": ["B"], "move_parts": true})
+        ),
+        "error: move_parts does not work with shove: switch shove off, or leave move_parts out"
     );
 
     // placement and zones go into the same working copy

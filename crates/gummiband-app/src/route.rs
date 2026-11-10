@@ -223,6 +223,58 @@ impl RouteOptions {
         })
     }
 
+    /// Check the options against each other, for a run that is open ended or not. Options that
+    /// contradict each other are an error that says what to change; nothing is adjusted
+    /// silently. An option that was left out never contradicts: its default follows from the
+    /// others. [`route_board`] and [`route_file`] call this first, so every front end gets the
+    /// same message. It names the options as the fields here; the CLI spells them `--kebab-case`.
+    pub fn validate(&self, open_end: bool) -> Result<(), String> {
+        let finishing = self.finishing();
+        let err = |m: &str| Err(m.to_string());
+        if self.runs == 0 {
+            return err("runs must be at least 1");
+        }
+        if self.via_pitch.is_nan() || self.via_pitch <= 0.0 {
+            return err("via_pitch must be above 0");
+        }
+        if self.give.is_some_and(|g| g.is_nan() || g < 0.0) {
+            return err("give must not be negative");
+        }
+        if self.reroute && !finishing {
+            return err("reroute needs keep_all and nets");
+        }
+        if self.shove == Some(true) && !finishing {
+            return err("shove needs keep_all and nets");
+        }
+        if self.give.is_some_and(|g| g > 0.0) && !finishing {
+            return err("give needs keep_all and nets");
+        }
+        if finishing && self.move_parts == Some(true) && self.shove != Some(false) {
+            return err("move_parts does not work with shove: switch shove off, or leave move_parts out");
+        }
+        if !self.pairs {
+            let given = [
+                ("pair_zdiff", self.pair_zdiff.is_some()),
+                ("pair_all", self.pair_all),
+                ("breakouts", self.breakouts),
+                ("via_pairs", self.via_pairs),
+            ];
+            if let Some((name, _)) = given.iter().find(|(_, on)| *on) {
+                return Err(format!("{name} needs pairs"));
+            }
+        }
+        if open_end && self.pairs {
+            return err("an open ended run does not work with pairs: leave out pairs or the open end");
+        }
+        if self.placements > 0 && (self.keep_all || !self.nets.is_empty() || self.pairs) {
+            return err("placements routes the whole board: not with keep_all, nets or pairs");
+        }
+        if self.clear_corridors && self.keep_all {
+            return err("clear_corridors places parts before the whole board is routed: not with keep_all");
+        }
+        Ok(())
+    }
+
     /// The copper of the input that stays.
     pub fn keep(&self) -> KeepCopper {
         if self.keep_all {
@@ -425,6 +477,7 @@ pub fn route_board(board: &Board, opts: &RouteOptions, hooks: &Hooks) -> Result<
 }
 
 fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) -> Result<Routed> {
+    opts.validate(hooks.stop.is_some()).map_err(anyhow::Error::msg)?;
     let sub_cfg = opts.substrate_config();
     let router_cfg = opts.router_config()?;
     let search_cfg = opts.search_config(hooks);
@@ -919,7 +972,8 @@ impl Drop for RouteOutcome {
 /// placements (`placements`), [`load_board`], then [`route_board`].
 pub fn route_file(board: &Path, opts: &RouteOptions, hooks: &Hooks) -> Result<RouteOutcome> {
     let t0 = Instant::now();
-    // fail on the hints before any work
+    // fail on the options and the hints before any work
+    opts.validate(hooks.stop.is_some()).map_err(anyhow::Error::msg)?;
     let router_cfg = opts.router_config()?;
     let sub_cfg = opts.substrate_config();
     let place = PlaceOptions {

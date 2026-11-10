@@ -583,9 +583,6 @@ fn main() -> Result<()> {
             tune_spacing,
         } => {
             use gummiband_app::Event;
-            if until_stop && pairs {
-                anyhow::bail!("--until-stop does not work with --pairs");
-            }
             let opts = RouteOptions {
                 keep_locked,
                 keep_all,
@@ -643,12 +640,8 @@ fn main() -> Result<()> {
                 net_priorities,
                 teardrops,
             };
-            if shove && (!opts.finishing() || opts.move_parts()) {
-                anyhow::bail!("--shove needs --keep-all and --nets, and fixed parts");
-            }
-            if placements > 0 && (keep_all || !opts.nets.is_empty() || pairs) {
-                anyhow::bail!("--placements routes the whole board: not with --keep-all, --nets or --pairs");
-            }
+            // the options against each other, before a word is printed
+            opts.validate(until_stop).map_err(anyhow::Error::msg)?;
             if gummiband_core::knobs::GPU.on() && !cfg!(feature = "gpu") {
                 println!("warning: GB_GPU has no effect, this binary is built without the gpu feature");
             }
