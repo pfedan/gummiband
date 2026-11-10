@@ -2,6 +2,7 @@
 
 pub mod board;
 pub mod check;
+pub mod fill;
 pub mod follow;
 pub mod geom;
 pub mod import;

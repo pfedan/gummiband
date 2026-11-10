@@ -1,5 +1,6 @@
 //! KiCad file support for Gummiband.
 
+pub mod area;
 pub mod create;
 pub mod dru;
 pub mod edit;
