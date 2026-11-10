@@ -6,10 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
+use gummiband_app::{Angles, RouteOptions};
 use gummiband_core::board::Board;
-use gummiband_core::realize::Elem;
-use gummiband_core::route::RouterConfig;
-use gummiband_core::topo::SubstrateConfig;
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::schema_for_output;
@@ -2430,6 +2428,35 @@ impl Gummiband {
         ))
     }
 
+    /// Route a loaded board: the tool `route` after its corridor step, and every seed of
+    /// `try_seeds`.
+    fn route_entry(&self, p: RouteIn) -> Result<(String, RouteOut)> {
+        let (path, kb, options, loaded_keep) = self.with_entry(&p.board, |e| {
+            Ok((e.path.clone(), e.kb.clone(), e.options.clone(), e.keep_locked))
+        })?;
+        let keep_locked = p.keep_locked.unwrap_or(loaded_keep);
+        if p.reroute == Some(true) && (p.keep_all != Some(true) || p.nets.as_ref().is_none_or(Vec::is_empty)) {
+            bail!("reroute needs keep_all and nets");
+        }
+        let opts = route_options(&p, keep_locked)?;
+        // the copper to keep changes the board model (locked track ends become pins)
+        let kb = if opts.keep_all {
+            Arc::new(read_board(
+                &path,
+                &ReadOptions {
+                    keep: KeepCopper::All,
+                    ignore_nets: opts.reroute_nets(),
+                    ..Default::default()
+                },
+            )?)
+        } else if keep_locked == loaded_keep {
+            kb
+        } else {
+            Arc::new(read(&path, keep_locked)?)
+        };
+        route_blocking(p.board.clone(), path, kb, options, opts, p)
+    }
+
     fn do_try_seeds(&self, p: TrySeedsIn) -> Result<(String, TrySeedsOut)> {
         let seeds: Vec<u64> = if p.seeds.is_empty() {
             vec![1, 2, 3, 4]
@@ -2510,23 +2537,7 @@ impl Gummiband {
                 r.insert("board".into(), board.clone().into());
                 r.insert("output".into(), routed.display().to_string().into());
                 let rin: RouteIn = serde_json::from_value(serde_json::Value::Object(r)).context("route")?;
-                let (rpath, kb, opts, loaded_keep) = self.with_entry(&board, |e| {
-                    Ok((e.path.clone(), e.kb.clone(), e.options.clone(), e.keep_locked))
-                })?;
-                let keep_locked = rin.keep_locked.unwrap_or(loaded_keep);
-                let kb = if rin.keep_all == Some(true) {
-                    Arc::new(read_board(
-                        &rpath,
-                        &ReadOptions {
-                            keep: KeepCopper::All,
-                            ignore_nets: reroute_nets(&rin),
-                            ..Default::default()
-                        },
-                    )?)
-                } else {
-                    kb
-                };
-                let (_, ro) = route_blocking(board, rpath, kb, opts, keep_locked, rin)?;
+                let (_, ro) = self.route_entry(rin)?;
                 Ok(ro)
             };
             match run() {
@@ -2839,24 +2850,16 @@ impl Gummiband {
     /// `route --clear-corridors`: place the parts in the way of a track corridor again, into
     /// the working copy. Returns the board id to route and the parts that moved.
     fn clear_corridors(&self, board: &str, fixed: Vec<String>) -> Result<(String, Vec<String>)> {
-        use gummiband_place::auto::{CLEAR_CORRIDORS_LEASH, PlaceOptions, Scope, corridor_intruders, place_board};
         let from = self.current_file(board)?;
-        let opts = PlaceOptions {
+        let opts = gummiband_place::auto::PlaceOptions {
             fixed,
             ..Default::default()
         };
-        let intruders = corridor_intruders(&from, &opts)?;
-        if intruders.is_empty() {
-            return Ok((board.to_string(), intruders));
-        }
-        let place = PlaceOptions {
-            scope: Scope::Only(intruders.clone()),
-            corridors: true,
-            leash: CLEAR_CORRIDORS_LEASH,
-            ..opts
+        let Some(cleared) = gummiband_app::clear_corridors(&from, &opts, &Default::default())? else {
+            return Ok((board.to_string(), Vec::new()));
         };
-        let (id, _) = self.edit_copy(board, |_, _| Ok(place_board(&from, &place)?.text))?;
-        Ok((id, intruders))
+        let (id, _) = self.edit_copy(board, |_, _| Ok(cleared.text))?;
+        Ok((id, cleared.parts))
     }
 
     fn do_place_parts(&self, p: PlacePartsIn) -> Result<(String, PlacePartsOut)> {
@@ -3154,12 +3157,53 @@ impl Gummiband {
     }
 }
 
-/// The nets whose copper goes before routing.
-fn reroute_nets(p: &RouteIn) -> Vec<String> {
-    match p.reroute {
-        Some(true) => p.nets.clone().unwrap_or_default(),
-        _ => Vec::new(),
-    }
+/// The options of a route call: what the caller gave, and the defaults of the pipeline for
+/// the rest. `keep_locked` is the caller's or the one the board was loaded with.
+fn route_options(p: &RouteIn, keep_locked: bool) -> Result<RouteOptions> {
+    let d = RouteOptions::default();
+    Ok(RouteOptions {
+        keep_locked,
+        keep_all: p.keep_all == Some(true),
+        nets: p.nets.clone().unwrap_or_default(),
+        reroute: p.reroute == Some(true),
+        shove: p.shove,
+        give: p.give,
+        move_parts: p.move_parts,
+        fixed: p.fixed.clone(),
+        runs: p.runs.filter(|&r| r > 0).unwrap_or(d.runs),
+        via_pitch: p.via_pitch.unwrap_or(d.via_pitch),
+        via_cost: p.via_cost.unwrap_or(d.via_cost),
+        layer_dirs: p.layer_dirs.unwrap_or(d.layer_dirs),
+        patterns: p.patterns.clone().unwrap_or(d.patterns),
+        via_pass: p.via_pass.unwrap_or(d.via_pass),
+        pair_pull: p.pair_pull.unwrap_or(d.pair_pull),
+        pairs: p.pairs.unwrap_or(d.pairs),
+        pair_skew: p.pair_skew.unwrap_or(d.pair_skew),
+        pair_zdiff: p.pair_zdiff,
+        pair_all: p.pair_all.unwrap_or(d.pair_all),
+        breakouts: p.pair_breakouts.unwrap_or(d.breakouts),
+        via_pairs: p.pair_via_pairs.unwrap_or(d.via_pairs),
+        negotiate: p.negotiate.unwrap_or(d.negotiate),
+        generations: p.generations.unwrap_or(d.generations),
+        geometry_generations: p.geometry_generations.unwrap_or(d.geometry_generations),
+        seed: p.seed,
+        open_via_cost: p.open_via_cost.unwrap_or(d.open_via_cost),
+        // no reserve unless asked, also with open_end_seconds (the CLI gives an open ended
+        // route of the whole board 0.03 mm)
+        air: Some(p.air.unwrap_or(0.0)),
+        prefer_width: p.prefer_width.unwrap_or(d.prefer_width),
+        angles: match p.angles.as_deref() {
+            None | Some("any") => Angles::Any,
+            Some("45") => Angles::Deg45,
+            Some(other) => bail!("angles must be \"any\" or \"45\", not {other:?}"),
+        },
+        tune: p.tune.unwrap_or(d.tune),
+        tune_amplitude: p.tune_amplitude.unwrap_or(d.tune_amplitude),
+        tune_spacing: p.tune_spacing.unwrap_or(d.tune_spacing),
+        // the session has its own tools for these: place_parts and try_seeds, the working copy
+        // for clear_corridors, set_net_options for widths and priorities
+        ..d
+    })
 }
 
 fn route_blocking(
@@ -3167,7 +3211,7 @@ fn route_blocking(
     path: PathBuf,
     kb: Arc<KicadBoard>,
     options: BTreeMap<String, NetOption>,
-    keep_locked: bool,
+    opts: RouteOptions,
     p: RouteIn,
 ) -> Result<(String, RouteOut)> {
     let output = match &p.output {
@@ -3180,72 +3224,40 @@ fn route_blocking(
     if output == path {
         bail!("output must differ from the input file");
     }
-    let only = p.nets.clone().unwrap_or_default();
-    for n in &only {
+    for n in &opts.nets {
         if kb.board.net_id(n).is_none() {
             bail!("no net named {n:?} (see list_nets)");
         }
     }
     // finishing nets on a routed board: the unlocked tracks of the other nets shift aside and, if
     // that is not enough, give way
-    let finishing = p.keep_all == Some(true) && !only.is_empty();
+    let finishing = opts.finishing();
     if !finishing && (p.shove == Some(true) || p.give.is_some_and(|g| g > 0.0)) {
         bail!("shove and give need keep_all and nets");
     }
-    let shove = finishing && p.shove != Some(false);
-    let give = if finishing {
-        p.give.unwrap_or(gummiband_core::DEFAULT_GIVE)
-    } else {
-        0.0
-    };
     // the nets left out of this call, for the result
-    let (_, skipped) = apply_options(&kb.board, &options, &only);
+    let (_, skipped) = apply_options(&kb.board, &options, &opts.nets);
     let (mut board, _) = apply_options(&kb.board, &options, &[]);
-    // parts move by default when the whole board is routed
-    let move_parts = p.move_parts.unwrap_or(p.keep_all != Some(true));
-    if move_parts {
-        if finishing && shove {
+    if opts.move_parts() {
+        if finishing && p.shove != Some(false) {
             bail!("move_parts does not work with shove: set shove false, or leave move_parts out");
         }
         let movable = read_board(
             &path,
             &ReadOptions {
-                keep: if keep_locked {
+                keep: if opts.keep_locked {
                     KeepCopper::Locked
                 } else {
                     KeepCopper::None
                 },
                 move_parts: true,
-                fixed: p.fixed.clone(),
+                fixed: opts.fixed.clone(),
                 ..Default::default()
             },
         )?;
         board.movable = movable.board.movable;
     }
-    let runs = p.runs.filter(|&r| r > 0).unwrap_or(gummiband_core::DEFAULT_RUNS);
     let t0 = std::time::Instant::now();
-    if let (Some(z), Some(true)) = (p.pair_zdiff, p.pairs) {
-        gummiband_core::pairs::apply_zdiff(&mut board, z);
-    }
-    let angles_45 = match p.angles.as_deref() {
-        None | Some("any") => false,
-        Some("45") => true,
-        Some(other) => bail!("angles must be \"any\" or \"45\", not {other:?}"),
-    };
-    let sub_cfg = SubstrateConfig {
-        via_pitch: p.via_pitch.unwrap_or(0.5),
-        ..Default::default()
-    };
-    let hints = gummiband_core::patterns::hints(p.patterns.as_deref().unwrap_or("none")).map_err(anyhow::Error::msg)?;
-    let router_cfg = RouterConfig {
-        via_cost: p.via_cost.unwrap_or(3.0),
-        pair_pull: p.pair_pull.unwrap_or(0.0),
-        layer_dirs: p.layer_dirs.unwrap_or(0.5),
-        negotiate: p.negotiate.unwrap_or(0),
-        via_pass: p.via_pass.unwrap_or(4.0),
-        ..Default::default()
-    }
-    .with_hints(&hints);
     // the open end of the CLI stops on a line on stdin; here a time budget sets the stop flag
     let open_end = p.open_end_seconds.filter(|&s| s > 0.0).map(|secs| {
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3256,180 +3268,22 @@ fn route_blocking(
         });
         flag
     });
-    let search_cfg = gummiband_core::SearchConfig {
-        population: runs,
-        generations: p.generations.unwrap_or(3),
-        geometry_generations: p.geometry_generations.unwrap_or(3),
-        frames: false,
-        progress: None,
-        seed: p.seed,
-        open_end,
-        air: p.air.unwrap_or(0.0),
-        prefer_width: p.prefer_width.unwrap_or(0.0),
-        open_via_cost: p.open_via_cost.unwrap_or(gummiband_core::DEFAULT_OPEN_VIA_COST),
+    let hooks = gummiband_app::Hooks {
+        stop: open_end.as_ref(),
+        ..Default::default()
     };
-    let tune_cfg = gummiband_core::tune::TuneConfig {
-        style: if p.angles.as_deref() == Some("45") {
-            gummiband_core::tune::Style::Chamfer
-        } else {
-            gummiband_core::tune::Style::Round
-        },
-        amplitude: p.tune_amplitude.unwrap_or(1.0),
-        spacing: p.tune_spacing.unwrap_or(2.0),
-    };
-    let tune = p.tune != Some(false);
-    let finished = gummiband_core::finish_nets(&board, &only, shove, give, &search_cfg, |b, search| {
-        if p.pairs == Some(true) {
-            let cfg = gummiband_core::pairs::PairConfig {
-                skew: p.pair_skew.unwrap_or(0.1),
-                zdiff: p.pair_zdiff,
-                all: p.pair_all.unwrap_or(false),
-                room: tune.then(|| tune_cfg.clone()),
-                angles45: angles_45,
-                breakouts: p.pair_breakouts.unwrap_or(false),
-                via_pairs: p.pair_via_pairs.unwrap_or(false),
-            };
-            gummiband_core::pairs::route_pairs(b, &sub_cfg, &router_cfg, search, &cfg)
-        } else {
-            let (sub, res) = gummiband_core::route_board(b, &sub_cfg, &router_cfg, search);
-            (sub, res, Vec::new())
-        }
-    });
-    let gummiband_core::Finished {
-        board: routed,
-        sub,
-        res,
-        extra: pair_reports,
-        given,
-        ..
-    } = finished;
-    // the copper was routed on the board with the parts where they ended up
-    let shifted;
-    let b = if res.offsets.is_empty() {
-        &routed
-    } else {
-        shifted = routed.with_offsets(&res.offsets);
-        &shifted
-    };
-    let mut res = res;
-    // room for the meanders (the pairs make it while they are one wide track)
-    if tune && p.pairs != Some(true) && !b.match_rules.is_empty() {
-        let want = gummiband_core::tune::room_wanted(b, &res.geometry, &tune_cfg, &[]);
-        if let Some(g) = gummiband_core::tune::make_room(b, &sub, &res.geometry, &want) {
-            res.geometry = g;
-        }
-    }
-    let angles_45 = angles_45.then(|| {
-        let wide: Vec<gummiband_core::board::NetId> = pair_reports
-            .iter()
-            .filter(|r| r.wide)
-            .flat_map(|r| [b.net_id(&r.p), b.net_id(&r.n)])
-            .flatten()
-            .collect();
-        let st = gummiband_core::octo::octilinear_only(
-            b,
-            &mut res.geometry,
-            &|t| !(wide.contains(&t.net) && t.seg == u32::MAX),
-            &|_, _| false,
-        );
-        AnglesOut {
-            length_before_mm: r3(st.length_before),
-            length_after_mm: r3(st.length_after),
-            off_grid_pieces: st.any_angle,
-            off_grid_mm: r3(st.any_angle_length),
-            sharp_corners: st.sharp_corners,
-        }
-    });
-    let tuned =
-        (tune && !b.match_rules.is_empty()).then(|| gummiband_core::tune::tune(b, &mut res.geometry, &tune_cfg));
+    let routed = gummiband_app::route_board(&board, &opts, &hooks)?;
     let seconds = t0.elapsed().as_secs_f64();
-    let viol = gummiband_core::check::check(b, &res.geometry);
-
-    // with shove: what rests of the other nets stays in the file as it is
-    let changes = gummiband_core::import::soft_changes(b, &res.geometry);
-    let rests = |origin: Option<u32>, list: &[bool]| origin.is_some_and(|o| !list[o as usize]);
-    let mut items = Vec::new();
-    let mut of_track: Vec<std::ops::Range<usize>> = Vec::with_capacity(res.geometry.tracks.len());
-    for t in &res.geometry.tracks {
-        let start = items.len();
-        if rests(t.origin, &changes.chains) {
-            of_track.push(start..start);
-            continue;
-        }
-        for e in &t.elems {
-            items.push(match *e {
-                Elem::Line(a, bb) => write::Item::Track {
-                    width: t.piece_width(a, bb),
-                    a,
-                    b: bb,
-                    layer: t.layer,
-                    net: t.net,
-                },
-                Elem::Arc(a, mid, bb) => write::Item::Arc {
-                    width: t.piece_width(a, bb),
-                    a,
-                    mid,
-                    b: bb,
-                    layer: t.layer,
-                    net: t.net,
-                },
-            });
-        }
-        of_track.push(start..items.len());
-    }
-    for pat in tuned.iter().flat_map(|r| &r.patterns) {
-        let members: Vec<usize> = pat
-            .tracks
-            .iter()
-            .filter_map(|&i| of_track.get(i))
-            .flat_map(|r| r.clone())
-            .collect();
-        if members.is_empty() {
-            continue;
-        }
-        items.push(write::Item::Pattern(Box::new(write::PatternItem {
-            layer: pat.layer,
-            net: pat.nets[0],
-            base: pat.base[0],
-            base_coupled: pat.base.get(1).copied(),
-            rounded: pat.rounded,
-            width: pat.width,
-            gap: pat.gap,
-            amplitude: pat.amplitude,
-            spacing: pat.spacing,
-            target: pat.aim,
-            length: gummiband_core::matching::net_length(b, &res.geometry, pat.nets[0]).total(),
-            members,
-        })));
-    }
-    for v in &res.geometry.vias {
-        if v.drill == 0.0 || rests(v.origin, &changes.nodes) {
-            continue;
-        }
-        items.push(write::Item::Via {
-            at: v.at,
-            diameter: v.diameter,
-            drill: v.drill,
-            net: v.net,
-        });
-    }
-    let keep_all = p.keep_all == Some(true);
-    let mut strip_nets = reroute_nets(&p);
-    strip_nets.extend(given.iter().cloned());
-    let opts = write::StripOptions {
-        unlocked: !keep_all,
-        locked: !keep_locked && !keep_all,
-        zone_layers: vec![],
-        nets: strip_nets,
-        items: changes.strip.clone(),
-    };
-    let ranges = write::strip_ranges(&kb, &opts);
-    let text = write::patch(&kb, &ranges, &items);
-    let text = if res.offsets.is_empty() {
-        text
-    } else {
-        write::move_footprints(&text, &res.offsets, &kb.board.blocks)?
-    };
+    let (b, res, viol, pair_reports) = (&routed.board, &routed.res, &routed.violations, &routed.pairs);
+    let angles_45 = routed.angles_45.as_ref().map(|a| AnglesOut {
+        length_before_mm: r3(a.stats.length_before),
+        length_after_mm: r3(a.stats.length_after),
+        off_grid_pieces: a.stats.any_angle,
+        off_grid_mm: r3(a.stats.any_angle_length),
+        sharp_corners: a.stats.sharp_corners,
+    });
+    let tuned = routed.tuned.as_ref().map(|t| &t.report);
+    let (text, items) = routed.board_text(&kb, &res.geometry)?;
     std::fs::write(&output, text).with_context(|| format!("writing {}", output.display()))?;
     let mut moved: Vec<MovedOut> = res
         .offsets
@@ -3475,7 +3329,7 @@ fn route_blocking(
     }
     nets_out.sort_by(|a, b| b.length_mm.total_cmp(&a.length_mm));
     let mut by_kind = BTreeMap::new();
-    for v in &viol {
+    for v in viol {
         *by_kind
             .entry(v.what.split(' ').next().unwrap_or("").to_string())
             .or_insert(0) += 1;
@@ -3485,7 +3339,7 @@ fn route_blocking(
         let (w, g, _) = b.pair_shape(a, c, 0);
         let (coupled, total) = gummiband_core::pair_coupling_of(&res.geometry, a, c, w + g + 0.1);
         let vias = |n| res.geometry.vias.iter().filter(|v| v.net == n).count();
-        let asked = p.pair_pull.unwrap_or(0.0) > 0.0 || p.pairs == Some(true);
+        let asked = opts.pair_pull > 0.0 || opts.pairs;
         let uncoupled = if asked {
             gummiband_core::uncoupled_stretches(&res.geometry, a, c, w + g + 0.1, 0.5)
                 .into_iter()
@@ -3522,7 +3376,7 @@ fn route_blocking(
             x.p, x.n, x.coupled_mm, x.length_mm
         ));
     }
-    if !coupling.is_empty() && p.pair_pull.unwrap_or(0.0) == 0.0 && p.pairs != Some(true) {
+    if !coupling.is_empty() && opts.pair_pull == 0.0 && !opts.pairs {
         let names: Vec<String> = coupling.iter().map(|x| format!("{}/{}", x.p, x.n)).collect();
         notes.push(format!(
             "differential pairs {} were routed as independent nets: set pair_pull (1 to 4) or pairs to couple them",
@@ -3540,8 +3394,9 @@ fn route_blocking(
             as_pair: n.coupled,
         })
         .collect();
-    let length_rules: Vec<LengthRuleOut> = gummiband_core::matching::check(b, &res.geometry)
-        .into_iter()
+    let length_rules: Vec<LengthRuleOut> = routed
+        .matching
+        .iter()
         .map(|r| {
             use gummiband_core::board::MatchKind;
             LengthRuleOut {
@@ -3567,7 +3422,7 @@ fn route_blocking(
                         skew_mm: n.skew.map(r3),
                     })
                     .collect(),
-                rule: r.rule,
+                rule: r.rule.clone(),
             }
         })
         .collect();
@@ -3599,7 +3454,7 @@ fn route_blocking(
             .collect(),
         vias: st.vias,
         length_mm: st.length,
-        items_written: items.len(),
+        items_written: items,
         skipped_nets: skipped,
         pairs: pair_reports
             .iter()
@@ -3659,7 +3514,7 @@ fn route_blocking(
         viol.len(),
         seconds,
         out.threads,
-        items.len(),
+        items,
         output.display(),
         if out.skipped_nets.is_empty() {
             String::new()
@@ -4071,36 +3926,8 @@ impl Gummiband {
                 Err(e) => return fail(format!("{e:#}")),
             }
         }
-        let keep =
-            |e: &mut Entry| -> Result<_> { Ok((e.path.clone(), e.kb.clone(), e.options.clone(), e.keep_locked)) };
-        let (path, kb, options, loaded_keep) = match self.with_entry(&p.board, keep) {
-            Ok(x) => x,
-            Err(e) => return fail(format!("{e:#}")),
-        };
-        let keep_locked = p.keep_locked.unwrap_or(loaded_keep);
-        let id = p.board.clone();
-        let res = blocking(move || {
-            if p.reroute == Some(true) && (p.keep_all != Some(true) || p.nets.as_ref().is_none_or(Vec::is_empty)) {
-                bail!("reroute needs keep_all and nets");
-            }
-            // the copper to keep changes the board model (locked track ends become pins)
-            let kb = if p.keep_all == Some(true) {
-                Arc::new(read_board(
-                    &path,
-                    &ReadOptions {
-                        keep: KeepCopper::All,
-                        ignore_nets: reroute_nets(&p),
-                        ..Default::default()
-                    },
-                )?)
-            } else if keep_locked == loaded_keep {
-                kb
-            } else {
-                Arc::new(read(&path, keep_locked)?)
-            };
-            route_blocking(id, path, kb, options, keep_locked, p)
-        })
-        .await;
+        let me = self.clone();
+        let res = blocking(move || me.route_entry(p)).await;
         match res {
             Ok((mut s, mut out)) => {
                 if !cleared.is_empty() {
