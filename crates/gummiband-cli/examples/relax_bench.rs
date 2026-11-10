@@ -32,6 +32,9 @@ fn cpu_seconds() -> f64 {
 }
 
 fn main() -> anyhow::Result<()> {
+    // the router reads its variables once (`gummiband_core::knobs`), so this comes before
+    // anything else, also before any thread starts
+    unsafe { std::env::set_var("GB_NO_RELAX", "1") };
     let args: Vec<String> = std::env::args().collect();
     let flag = |name: &str, d: &str| -> String {
         args.iter()
@@ -45,7 +48,6 @@ fn main() -> anyhow::Result<()> {
     // the same relaxation with a margin changed by next to nothing shows how chaotic it is
     let ensemble: usize = flag("--ensemble", "0").parse()?;
     let kb = gummiband_kicad::read_board(std::path::Path::new(&args[1]), &Default::default())?;
-    unsafe { std::env::set_var("GB_NO_RELAX", "1") };
     let search = SearchConfig {
         population: 4,
         generations: 1,

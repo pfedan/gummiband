@@ -295,7 +295,7 @@ pub fn make_room_judged(
         let part: HashMap<NetId, f64> = set.iter().map(|n| (*n, extra[n])).collect();
         let g = push_aside(board, sub, &cur, &part);
         let after = count(&spots(&g));
-        if std::env::var("GB_TUNE_LOG").is_ok() {
+        if crate::knobs::TUNE_LOG.on() {
             eprintln!("room: {} nets, spots {before:?} before, {after:?} after", set.len());
         }
         if after.0 <= before.0 && after.1 <= before.1 {
@@ -383,7 +383,7 @@ fn push_aside(board: &Board, sub: &crate::topo::Substrate, geo: &Geometry, extra
         let t0 = std::time::Instant::now();
         crate::relax::relax(board, sub, &mut g, &cfg);
         let left = crate::check::spots(&crate::check::check(board, &g));
-        if std::env::var("GB_TUNE_LOG").is_ok() {
+        if crate::knobs::TUNE_LOG.on() {
             eprintln!("room round: {} spots, {:.1} s", left.len(), t0.elapsed().as_secs_f64());
         }
         if left.is_empty() {

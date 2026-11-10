@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use crate::board::{Board, NetId, ObstacleKind};
 use crate::geom::{Point, Rect, Shape, orient, point_seg_dist, pt, segs_intersect};
 use crate::index::FastMap;
+use crate::knobs;
 use crate::topo::{Mesh, NONE, OUTSIDE, PAD_SITE, STEINER, Substrate};
 
 mod shut;
@@ -93,21 +94,20 @@ pub enum GroupOrder {
 
 impl Default for RouterConfig {
     fn default() -> Self {
-        let env = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         RouterConfig {
             via_cost: 3.0,
             layer_dirs: 0.0,
             pair_pull: 0.0,
             via_pass: 4.0,
             fanout_first: true,
-            max_expansions: env("GB_MAXEXP", 400_000.0) as usize,
+            max_expansions: knobs::MAXEXP.num::<f64>() as usize,
             seed: 0,
-            ripup_passes: env("GB_RIPUP", 3.0) as usize,
+            ripup_passes: knobs::RIPUP.num::<f64>() as usize,
             negotiate: 0,
             sites_per_tri: 3,
             margin: 0.01,
             via_in_pad: false,
-            escape_cost: env("GB_ESCAPE", 0.0),
+            escape_cost: knobs::ESCAPE.num(),
             taps: false,
             hotspots: Default::default(),
             vip_nets: Default::default(),
@@ -137,9 +137,9 @@ impl RouterConfig {
         } else if hints.contains(&"groups-long") {
             GroupOrder::Long
         } else if hints.contains(&"groups") {
-            match std::env::var("GB_GROUP_ORDER").as_deref() {
-                Ok("short") => GroupOrder::Short,
-                Ok("inline") => GroupOrder::Inline,
+            match knobs::GROUP_ORDER.text() {
+                Some("short") => GroupOrder::Short,
+                Some("inline") => GroupOrder::Inline,
                 _ => GroupOrder::Long,
             }
         } else {
@@ -394,7 +394,7 @@ fn goal_check_at() -> usize {
     if let Some(at) = GOAL_CHECK_TEST.with(|c| c.get()) {
         return at;
     }
-    if *ON.get_or_init(|| std::env::var("GB_GOAL_CHECK").map_or(true, |v| v != "0")) {
+    if *ON.get_or_init(|| knobs::GOAL_CHECK.on()) {
         GOAL_CHECK_AT
     } else {
         0
@@ -3233,12 +3233,8 @@ impl<'a> Router<'a> {
         let mut decap_pair: HashSet<(usize, usize)> = HashSet::new();
         if let Some(pat) = &self.cfg.patterns {
             if self.cfg.share_fanouts {
-                let only = std::env::var("GB_SHARE_KIND").ok();
-                for s in pat
-                    .shares
-                    .iter()
-                    .filter(|s| only.as_deref().is_none_or(|k| k == s.kind))
-                {
+                let only = knobs::SHARE_KIND.text();
+                for s in pat.shares.iter().filter(|s| only.is_none_or(|k| k == s.kind)) {
                     for &o in &s.others {
                         leader.insert(o, (s.leader, s.kind == "decap" && self.cfg.decaps_first));
                     }
@@ -3621,17 +3617,16 @@ impl<'a> Router<'a> {
     /// legal topology; the rip-up passes of [`Router::run`] take over from there, with the
     /// history as a guide.
     pub fn negotiate(&mut self) {
-        let env = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
-        let log = std::env::var("GB_NEG_LOG").is_ok();
-        let growth = env("GB_NEG_GROWTH", 1.5);
-        let history = env("GB_NEG_HISTORY", 1.0);
+        let log = knobs::NEG_LOG.on();
+        let growth: f64 = knobs::NEG_GROWTH.num();
+        let history: f64 = knobs::NEG_HISTORY.num();
         self.prices = Some(Prices {
             soft: true,
-            overflow: env("GB_NEG_OVERFLOW", 2.0),
-            crossing: env("GB_NEG_CROSSING", 1.5),
+            overflow: knobs::NEG_OVERFLOW.num(),
+            crossing: knobs::NEG_CROSSING.num(),
             history: self.cross.iter().map(|l| vec![0.0; l.len()]).collect(),
-            tight: env("GB_NEG_TIGHT", 3.0),
-            reserve: env("GB_NEG_RESERVE", 0.05),
+            tight: knobs::NEG_TIGHT.num(),
+            reserve: knobs::NEG_RESERVE.num(),
             solid: false,
         });
         for ci in 0..self.conns.len() {
@@ -3839,7 +3834,7 @@ impl<'a> Router<'a> {
             self.search_buf = buf;
             match found {
                 Some(chain) => {
-                    let validate = std::env::var("GB_VALIDATE_EACH").is_ok();
+                    let validate = knobs::VALIDATE_EACH.on();
                     let before = if validate { self.validate().len() } else { 0 };
                     if self.commit(ci, &chain) {
                         if validate {
@@ -4267,7 +4262,8 @@ fn jitter(seed: u64, x: u64) -> f64 {
 fn vip_net(name: &str) -> bool {
     static NETS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     NETS.get_or_init(|| {
-        std::env::var("GB_VIP_NETS")
+        knobs::VIP_NETS
+            .text()
             .map(|v| {
                 v.split(',')
                     .map(|s| s.trim().to_string())
@@ -4285,7 +4281,7 @@ fn vip_net(name: &str) -> bool {
 /// pad has no via-in-pad candidate left (see docs/MILESTONES.md, Corne `rR4.1`).
 fn pad_reuse() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("GB_PAD_REUSE").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| knobs::PAD_REUSE.on())
 }
 
 /// `GB_VIP_LEARN=1` (experiment): a net whose connection got through with a via in a pad, the
@@ -4295,7 +4291,7 @@ fn pad_reuse() -> bool {
 /// which run learns first and is no longer the same from run to run.
 fn vip_learn() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("GB_VIP_LEARN").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| knobs::VIP_LEARN.on())
 }
 
 fn learned_vips() -> &'static std::sync::Mutex<HashSet<NetId>> {

@@ -347,7 +347,7 @@ impl Router<'_> {
             p.windows(2).map(|w| Elem::Line(w[0], w[1])).collect()
         };
         // arcs around the edge ends know nothing of the imported tracks in the way
-        if std::env::var("GB_NO_ARCS").is_ok() || self.soft_on {
+        if crate::knobs::NO_ARCS.on() || self.soft_on {
             return polyline();
         }
         // wraps with the portal index they belong to

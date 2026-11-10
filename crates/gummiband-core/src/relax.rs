@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use crate::board::{Board, LayerId, LayerSet, ObstacleKind};
 use crate::geom::{Point, Rect, Shape, point_seg_dist, point_seg_offset, pt, seg_seg_dist, seg_seg_nearest};
 use crate::index::{GridIndex, PointGrid, axis_cell};
+use crate::knobs;
 use crate::prof::{self, Slot};
 use crate::realize::{Elem, Geometry, Track, Via};
 use crate::topo::Substrate;
@@ -43,15 +44,12 @@ pub struct RelaxConfig {
 impl Default for RelaxConfig {
     fn default() -> Self {
         RelaxConfig {
-            iterations: env_usize("GB_RELAX_IT", 400),
-            spacing: std::env::var("GB_SPACING")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.05),
+            iterations: knobs::RELAX_IT.num(),
+            spacing: knobs::SPACING.num(),
             tension: 0.25,
             margin: 0.008,
             max_step: 0.03,
-            gpu: std::env::var("GB_GPU").is_ok(),
+            gpu: knobs::GPU.on(),
             via_edge: false,
             taut: true,
         }
@@ -763,10 +761,7 @@ pub fn relax_while(
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
     let t_start = std::time::Instant::now();
     // coarse points while the bands move a lot, fine points for the final clearance work
-    let coarse = std::env::var("GB_COARSE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or((cfg.spacing * 2.0).max(0.1));
+    let coarse = knobs::COARSE.get().unwrap_or((cfg.spacing * 2.0).max(0.1));
     let mut tracks: Vec<Vec<Point>> = geo.tracks.iter().map(|t| resample(&t.pts, coarse)).collect();
     let taps = tap_targets(&geo.tracks);
     let rails: Vec<[Option<Rail>; 2]> = if cfg.via_edge {
@@ -1726,7 +1721,7 @@ pub fn relax_while(
             })
             .collect()
     };
-    if std::env::var("GB_TIMING").is_ok() {
+    if knobs::TIMING.on() {
         eprintln!(
             "relax rounds {:.2} s, taut {:.2} s",
             t_taut.duration_since(t_start).as_secs_f64(),
@@ -2214,10 +2209,6 @@ fn nearest_on_poly(poly: &crate::geom::Polygon, p: Point) -> (f64, Point) {
 
 fn drills_max(geo: &Geometry) -> f64 {
     geo.vias.iter().map(|v| v.drill).fold(0.0, f64::max)
-}
-
-fn env_usize(k: &str, d: usize) -> usize {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 
 /// Uniform grid where each cell lists the boxes within `reach` of it, so a point query is a

@@ -231,10 +231,7 @@ impl Mesh {
         // long obstacle sides get extra vertices: a channel between a pin and the long side of
         // an exposed pad (or the board edge) is then measured across, by a short mesh edge,
         // and not by the long diagonals to the far corners
-        let refine = std::env::var("GB_REFINE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.6f64);
+        let refine = crate::knobs::REFINE.num::<f64>();
         let mut add_poly = |cdt: &mut ConstrainedDelaunayTriangulation<Point2<f64>>, poly: &Polygon, split: bool| {
             let mut pts = Vec::with_capacity(poly.pts.len());
             for i in 0..poly.pts.len() {

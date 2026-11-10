@@ -7,6 +7,7 @@ pub mod geom;
 pub mod import;
 mod improve;
 pub mod index;
+pub mod knobs;
 pub mod matching;
 pub mod octo;
 pub mod pairs;
@@ -82,12 +83,7 @@ impl RunStats {
 /// `GB_SKEW_WEIGHT` sets another one.
 fn skew_weight() -> f64 {
     static W: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
-    *W.get_or_init(|| {
-        std::env::var("GB_SKEW_WEIGHT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.5)
-    })
+    *W.get_or_init(|| knobs::SKEW_WEIGHT.num())
 }
 
 /// What length tuning would have to add: per skew rule (not within pairs), for each net with
@@ -589,7 +585,7 @@ fn candidate(
 
 /// Environment controlled debugging output of a finished router run.
 fn debug_hooks(board: &Board, r: &mut Router) {
-    if let Ok(pin) = std::env::var("GB_WHY") {
+    if let Some(pin) = knobs::WHY.text() {
         // trace the search of the first unrouted connection from this pin
         if let Some(ci) = r
             .unrouted()
@@ -609,14 +605,14 @@ fn debug_hooks(board: &Board, r: &mut Router) {
             );
         }
     }
-    if std::env::var("GB_VALIDATE").is_ok() {
+    if knobs::VALIDATE.on() {
         let v = r.validate();
         eprintln!("validate: {} problems", v.len());
         for l in v.iter().take(15) {
             eprintln!("  {l}");
         }
     }
-    if std::env::var("GB_DEBUG_VIAS").is_ok() {
+    if knobs::DEBUG_VIAS.on() {
         for l in r.debug_via_pairs() {
             eprintln!("{l}");
         }
@@ -624,12 +620,12 @@ fn debug_hooks(board: &Board, r: &mut Router) {
             eprintln!("{l}");
         }
     }
-    if std::env::var("GB_DEBUG_CORRIDOR").is_ok() {
+    if knobs::DEBUG_CORRIDOR.on() {
         for l in r.debug_corridors(15) {
             eprintln!("{l}");
         }
     }
-    if std::env::var("GB_DEBUG_X").is_ok() {
+    if knobs::DEBUG_X.on() {
         for l in r.debug_intersections(12) {
             eprintln!("{l}");
         }
@@ -819,7 +815,7 @@ pub fn route_board(
     search: &SearchConfig,
 ) -> (Substrate, RouteResult) {
     let (sub, mut res) = place_and_route(board, sub_cfg, base, search);
-    if std::env::var("GB_STITCH").map_or(true, |v| v != "0") {
+    if knobs::STITCH.on() {
         let moved;
         let b = if res.offsets.is_empty() {
             board
@@ -863,10 +859,7 @@ fn place_and_route(
     if board.movable.is_empty() || search.geometry_generations == 0 {
         return (sub, res);
     }
-    let rounds = std::env::var("GB_PLACE_ROUNDS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2);
+    let rounds: i32 = knobs::PLACE_ROUNDS.num();
     let mut best_score = score(board, &res);
     let mut best = (sub, res);
     let mut offsets: HashMap<String, geom::Point> = HashMap::new();
@@ -874,7 +867,7 @@ fn place_and_route(
     let mut rng = Rng(0x91ace);
     for round in 1..=rounds {
         // GB_PLACE_AFTER_STOP: an open end that was stopped still gets the fast rounds below
-        let after_stop = search.open_end.is_some() && std::env::var("GB_PLACE_AFTER_STOP").is_ok();
+        let after_stop = search.open_end.is_some() && knobs::PLACE_AFTER_STOP.on();
         if (hot.is_empty() && best.1.stats.unrouted.is_empty()) || (search.stopped() && !after_stop) {
             break;
         }
@@ -999,7 +992,7 @@ fn route_search(
         return route_fixed(board, sub_cfg, base, search);
     }
     let negotiated = search_fixed(board, sub_cfg, base, search);
-    if std::env::var("GB_NEG_ONLY").is_ok() || search.stopped() {
+    if knobs::NEG_ONLY.on() || search.stopped() {
         return negotiated;
     }
     let plain = RouterConfig {
@@ -1047,10 +1040,7 @@ pub const AUTO_NEGOTIATE: usize = 20;
 /// `GB_AUTO_NEGOTIATE=0` switches it off.
 fn auto_negotiate(base: &RouterConfig, stats: &RunStats) -> bool {
     let open = stats.conns - stats.routed;
-    base.negotiate == 0
-        && std::env::var("GB_AUTO_NEGOTIATE").map_or(true, |v| v != "0")
-        && open > 0
-        && open * 20 <= stats.conns * 3
+    base.negotiate == 0 && knobs::AUTO_NEGOTIATE.on() && open > 0 && open * 20 <= stats.conns * 3
 }
 
 /// One full search on a fixed placement, see `search_fixed`. Where it leaves a few connections
@@ -1102,7 +1092,7 @@ fn search_fixed(
     // experiment `GB_VIP_EARLY`: a via in a pad at any time, decided before the generations, for
     // the nets that need one; `=empty` asks the empty board (see `Router::pocket_nets`), `=1` the
     // best of the portfolio (below)
-    let early_mode = std::env::var("GB_VIP_EARLY").unwrap_or_default();
+    let early_mode = knobs::VIP_EARLY.text().unwrap_or_default();
     let pocket;
     let base = if early_mode == "empty" && base.vip_nets.is_empty() {
         let mut r = Router::new(board, &sub, base.clone());
@@ -1129,9 +1119,7 @@ fn search_fixed(
             via_pass: 0.0,
             // and so are the layer directions: every third run uses them, if there is a
             // choice of layers
-            layer_dirs: if (i % 3 == 2 || std::env::var("GB_DIRS_ALL").is_ok())
-                && board.routing_layers().iter().count() > 1
-            {
+            layer_dirs: if (i % 3 == 2 || knobs::DIRS_ALL.on()) && board.routing_layers().iter().count() > 1 {
                 base.layer_dirs
             } else {
                 0.0
@@ -1159,10 +1147,7 @@ fn search_fixed(
         )
     };
     // the best few candidates go through the geometry step at the end
-    let keep = std::env::var("GB_FINALISTS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(24);
+    let keep: usize = knobs::FINALISTS.num();
     let mut finalists: Vec<Candidate> = Vec::new();
     let offer = |finalists: &mut Vec<Candidate>, c: Candidate| {
         finalists.push(c);
@@ -1240,10 +1225,7 @@ fn search_fixed(
     if search.frames {
         frames.push((label(&best, "portfolio"), best.geo.clone(), false));
     }
-    let mut rng = Rng(search
-        .seed
-        .or_else(|| std::env::var("GB_EVO_SEED").ok().and_then(|v| v.parse().ok()))
-        .unwrap_or(0x5eed));
+    let mut rng = Rng(search.seed.or_else(|| knobs::EVO_SEED.get()).unwrap_or(0x5eed));
     for generation in 1..=search.generations {
         if best.failed.is_empty() && generation > 2 {
             // complete: a few generations for vias and length are enough
@@ -1281,7 +1263,7 @@ fn search_fixed(
         }
     }
     offer(&mut finalists, best);
-    if std::env::var("GB_NO_RELAX").is_ok() {
+    if knobs::NO_RELAX.on() {
         let best = finalists.swap_remove(0);
         return (
             sub,
@@ -1332,10 +1314,7 @@ fn search_fixed(
     // successive halving: the topology cost predicts the finished geometry only weakly, so
     // many finalists get a short relaxation first and only the best quarter the full one
     let top = finalists[0].stats.routed;
-    let full_n = std::env::var("GB_FULL")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(6usize);
+    let full_n: usize = knobs::FULL.num();
     let pool: Vec<Candidate> = finalists.into_iter().filter(|c| c.stats.routed == top).collect();
     let pool = if pool.len() > full_n {
         let screen = relax::RelaxConfig {
@@ -1388,7 +1367,7 @@ fn search_fixed(
     // the router of the winner's run, where the geometry generations found it
     let mut best_router: Option<Router> = None;
     let mut hotspots: Vec<(geom::Point, f64)> = Vec::new();
-    let geo_screen: Option<usize> = std::env::var("GB_GEO_SCREEN").ok().and_then(|v| v.parse().ok());
+    let geo_screen: Option<usize> = knobs::GEO_SCREEN.get();
     let mut done = 0;
     for generation in 1..=search.geometry_generations {
         if search.stopped() || (best.stats.violations == Some(0) && best.failed.is_empty()) {
@@ -1518,7 +1497,7 @@ fn search_fixed(
     // `GB_VIP_RETRY=each` first routes the winner once per such net, with a via in a pad for that
     // net alone, and keeps only the nets that then route more: a net that does not need a via in
     // a pad does not get one.
-    let retry = std::env::var("GB_VIP_RETRY").unwrap_or_default();
+    let retry = knobs::VIP_RETRY.text().unwrap_or_default();
     if (retry == "1" || retry == "each") && !best.failed.is_empty() {
         let mut nets: Vec<NetId> = best.failed.iter().map(|&(n, _)| n).collect();
         nets.sort_unstable();
@@ -1577,7 +1556,7 @@ fn search_fixed(
     // It does not change the order and configuration of the winner, so the via pass is the
     // same after it: both run side by side (the route of the via pass takes one core), and the
     // via pass is judged against the polished winner as before.
-    let do_polish = best.stats.violations.unwrap_or(0) > 0 && std::env::var("GB_NO_POLISH").is_err();
+    let do_polish = best.stats.violations.unwrap_or(0) > 0 && !knobs::NO_POLISH.on();
     let (polished, via_passed) = rayon::join(
         || {
             do_polish.then(|| {
@@ -1693,13 +1672,13 @@ fn search_fixed(
             }
         }
         // the pairs the search pulled together close up to their gap where nothing is between
-        if base.pair_pull > 0.0 && std::env::var("GB_ZIP").map_or(true, |v| v != "0") {
+        if base.pair_pull > 0.0 && knobs::ZIP.on() {
             let zipped = pairs::zip(board, &mut best.geo);
-            if std::env::var("GB_ZIP_LOG").is_ok() {
+            if knobs::ZIP_LOG.on() {
                 eprintln!("zip {zipped:?}");
             }
         }
-        if std::env::var("GB_TAPER").map_or(true, |v| v != "0")
+        if knobs::TAPER.on()
             && let Some(g) = improve::taper_spots(board, &best.geo)
         {
             best.geo = g;

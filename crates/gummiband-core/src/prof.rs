@@ -64,7 +64,7 @@ pub fn snapshot() -> Vec<u64> {
 
 /// Print everything collected so far, if asked for.
 pub fn report() {
-    if std::env::var("GB_TIMING").is_err() {
+    if !crate::knobs::TIMING.on() {
         return;
     }
     let v: Vec<u64> = SLOTS.iter().map(|s| s.load(Ordering::Relaxed)).collect();

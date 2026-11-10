@@ -820,7 +820,7 @@ pub fn octilinear_only(
         t.elems = elems.into_iter().map(|(e, _)| e).collect();
         t.pts = crate::realize::flatten(&t.elems);
     }
-    if std::env::var("GB_OCTO_DEBUG").is_ok() {
+    if crate::knobs::OCTO_DEBUG.on() {
         for &ti in &todo {
             let t = &geo.tracks[ti];
             for w in t.pts.windows(2) {

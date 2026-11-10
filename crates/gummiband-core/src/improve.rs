@@ -12,6 +12,7 @@
 use crate::board::Board;
 use crate::geom::{Point, Rect};
 use crate::index::FastMap;
+use crate::knobs;
 use crate::realize::{Geometry, Track, Via};
 use crate::route::{End, Goal, Router, seg_param_intersection};
 use crate::topo::Substrate;
@@ -63,10 +64,6 @@ struct Aim {
     seed: u64,
     /// The connection is routed and the move is for its cost, see [`aim_at_cost`].
     improve: bool,
-}
-
-fn env(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 fn shuffle<T>(v: &mut [T], rng: &mut Rng) {
@@ -1002,7 +999,7 @@ impl Trace {
 fn mutant_log() -> Option<&'static std::sync::Mutex<std::fs::File>> {
     static LOG: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
     LOG.get_or_init(|| {
-        let path = std::env::var("GB_MUTANT_LOG").ok()?;
+        let path = knobs::MUTANT_LOG.text()?;
         std::fs::File::create(path).ok().map(std::sync::Mutex::new)
     })
     .as_ref()
@@ -1140,7 +1137,7 @@ fn relax_all(board: &Board, sub: &Substrate, c: &mut Candidate, cfg: &relax::Rel
 /// rest stays as it is.
 fn settle(board: &Board, sub: &Substrate, c: &mut Candidate, best: &Candidate, cfg: &relax::RelaxConfig) {
     let cfg = relax::RelaxConfig {
-        iterations: env("GB_AIR_IT", 120.0) as usize,
+        iterations: knobs::AIR_IT.num::<f64>() as usize,
         margin: relax::RelaxConfig::default().margin,
         ..cfg.clone()
     };
@@ -1171,7 +1168,7 @@ fn clean_spots(board: &Board, sub: &Substrate, best: &Candidate, log: bool) -> O
         return None;
     }
     let cfg = relax::RelaxConfig {
-        iterations: env("GB_AIR_IT", 120.0) as usize,
+        iterations: knobs::AIR_IT.num::<f64>() as usize,
         tension: 0.0,
         via_edge: true,
         ..Default::default()
@@ -1239,14 +1236,14 @@ pub(crate) fn make_room(
         .for_each(|t| t.width = t.width.max(target(t.net)));
     let base = relax::RelaxConfig::default();
     let cfg = relax::RelaxConfig {
-        iterations: env("GB_AIR_IT", 120.0) as usize,
+        iterations: knobs::AIR_IT.num::<f64>() as usize,
         tension: 0.0,
         margin: base.margin + reserve,
         via_edge: true,
         taut: false,
         ..base.clone()
     };
-    for _ in 0..env("GB_ROOM_ROUNDS", 6.0) as usize {
+    for _ in 0..knobs::ROOM_ROUNDS.num::<f64>() as usize {
         relax_all(board, sub, &mut c, &cfg);
         let left = check::check(board, &c.geo);
         if left.is_empty() {
@@ -1276,7 +1273,7 @@ pub(crate) fn make_room(
     }
     judge(board, &mut c);
     settle(board, sub, &mut c, &before, &cfg);
-    if std::env::var("GB_OPEN_LOG").is_ok() {
+    if knobs::OPEN_LOG.on() {
         eprintln!(
             "room: {} violations, {} shorts, {:.0} mm",
             c.stats.violations.unwrap_or(0),
@@ -1297,7 +1294,7 @@ pub(crate) fn give_air(board: &Board, sub: &Substrate, best: &Candidate, air: f6
     let mut c = before.clone();
     let base = relax::RelaxConfig::default();
     let cfg = relax::RelaxConfig {
-        iterations: env("GB_AIR_IT", 120.0) as usize,
+        iterations: knobs::AIR_IT.num::<f64>() as usize,
         tension: 0.0,
         margin: base.margin + air,
         via_edge: true,
@@ -1305,7 +1302,7 @@ pub(crate) fn give_air(board: &Board, sub: &Substrate, best: &Candidate, air: f6
     };
     relax_all(board, sub, &mut c, &cfg);
     settle(board, sub, &mut c, &before, &cfg);
-    if std::env::var("GB_OPEN_LOG").is_ok() {
+    if knobs::OPEN_LOG.on() {
         let probe = roomier(board, air / 2.0);
         eprintln!(
             "air {air}: {} violations, {} shorts, {:.0} mm; spots under {:.3} mm spare {} before, {} after",
@@ -1450,9 +1447,12 @@ pub(crate) fn run(
         return (start, Vec::new());
     };
     // GB_OPEN_POP: mutants per generation, by default the size of the portfolio
-    let pop = env("GB_OPEN_POP", search.population.max(1) as f64).max(1.0) as usize;
+    let pop = knobs::OPEN_POP
+        .get()
+        .unwrap_or(search.population.max(1) as f64)
+        .max(1.0) as usize;
     let local = relax::RelaxConfig {
-        iterations: env("GB_LOCAL_IT", 160.0) as usize,
+        iterations: knobs::LOCAL_IT.num::<f64>() as usize,
         via_edge: true,
         ..Default::default()
     };
@@ -1460,8 +1460,8 @@ pub(crate) fn run(
         via_edge: true,
         ..Default::default()
     };
-    let tighten_every = env("GB_TIGHTEN", 24.0) as usize;
-    let log = std::env::var("GB_OPEN_LOG").is_ok();
+    let tighten_every = knobs::TIGHTEN.num::<f64>() as usize;
+    let log = knobs::OPEN_LOG.on();
     let t0 = std::time::Instant::now();
     let mut front = Front::default();
     front.offer(&best.cand, &best.cand);
@@ -1469,14 +1469,14 @@ pub(crate) fn run(
     let mut stale = 0;
     let mut generation = first;
     // a side branch and the generations it has left; every one that fails makes the next bolder
-    let branch_after = env("GB_BRANCH_AFTER", 24.0) as usize;
-    let branch_life = env("GB_BRANCH_LIFE", 32.0) as usize;
+    let branch_after = knobs::BRANCH_AFTER.num::<f64>() as usize;
+    let branch_life = knobs::BRANCH_LIFE.num::<f64>() as usize;
     let mut side: Option<(State, usize)> = None;
     let mut level = 0;
     let mut bandit = Bandit::new();
     let ideas = *ideas();
     // benchmarks: a fixed number of generations instead of a stop from outside
-    let limit = env("GB_OPEN_GENERATIONS", f64::INFINITY);
+    let limit = knobs::OPEN_GENERATIONS.get().unwrap_or(f64::INFINITY);
     while !search.stopped() && ((generation - first) as f64) < limit {
         generation += 1;
         if side.is_none() && stale >= branch_after {
@@ -1726,17 +1726,17 @@ struct Ideas {
 fn ideas() -> &'static Ideas {
     static IDEAS: std::sync::OnceLock<Ideas> = std::sync::OnceLock::new();
     IDEAS.get_or_init(|| Ideas {
-        via_price: std::env::var("GB_VIA_PRICE").is_ok(),
-        bandit: std::env::var("GB_BANDIT").map_or(true, |v| v != "0"),
-        aim_cost: env("GB_AIM_COST", 0.25),
-        prune: std::env::var("GB_PRUNE").map_or(true, |v| v != "0"),
-        prune_starts: std::env::var("GB_PRUNE_STARTS").is_ok_and(|v| v != "0"),
-        merge: std::env::var("GB_MERGE").is_ok(),
-        window: env("GB_WINDOW", 0.0),
-        spot_fade: std::env::var("GB_SPOT_FADE").is_ok(),
-        bold_aim: env("GB_BOLD_AIM", 0.8),
-        plane_hold: std::env::var("GB_PLANE_HOLD").map_or(true, |v| v != "0"),
-        plane_log: std::env::var("GB_PLANE_LOG").is_ok(),
+        via_price: knobs::VIA_PRICE.on(),
+        bandit: knobs::BANDIT.on(),
+        aim_cost: knobs::AIM_COST.num(),
+        prune: knobs::PRUNE.on(),
+        prune_starts: knobs::PRUNE_STARTS.on(),
+        merge: knobs::MERGE.on(),
+        window: knobs::WINDOW.num(),
+        spot_fade: knobs::SPOT_FADE.on(),
+        bold_aim: knobs::BOLD_AIM.num(),
+        plane_hold: knobs::PLANE_HOLD.on(),
+        plane_log: knobs::PLANE_LOG.on(),
     })
 }
 
