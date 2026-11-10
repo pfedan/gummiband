@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use gummiband_app::{Hooks, RouteOptions, defaults};
 use gummiband_core::board::ObstacleKind;
 use gummiband_kicad::{KeepCopper, ReadOptions, read_board, write};
+use gummiband_place::auto::PlaceOptions;
 
 /// Track angles of a routed result.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -265,23 +266,23 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         free: Vec<String>,
         /// Another seed gives another set of starts.
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = PlaceOptions::default().seed)]
         seed: u64,
         /// Independent runs in parallel; the one with the fewest crossings is kept. The crossings
         /// hardly predict the routed result, so for another attempt change --seed instead.
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = PlaceOptions::default().starts)]
         starts: usize,
         /// Annealing moves per run.
-        #[arg(long, default_value_t = 3_000_000)]
+        #[arg(long, default_value_t = PlaceOptions::default().iters)]
         iters: usize,
         /// Spacing between courtyards in mm.
-        #[arg(long, default_value_t = 0.3)]
+        #[arg(long, default_value_t = PlaceOptions::default().gap)]
         gap: f64,
         /// Courtyards keep this distance from the outline in mm.
-        #[arg(long, default_value_t = 0.5)]
+        #[arg(long, default_value_t = PlaceOptions::default().margin)]
         margin: f64,
         /// Extra room around parts with five or more pads in mm, for their escape.
-        #[arg(long, default_value_t = 0.3)]
+        #[arg(long, default_value_t = PlaceOptions::default().halo)]
         halo: f64,
         /// Use the schematic beyond the netlist: sheets and clusters around ICs stay together,
         /// inductors sit at their converter, decoupling capacitors prefer an IC of their sheet,
@@ -300,7 +301,7 @@ enum Cmd {
         escape_halo: bool,
         /// Parts with 4 or more pads (ICs, connectors) stay within this distance of where they
         /// sit (mm, 0 = free): a local change instead of a new placement, e.g. with --only.
-        #[arg(long, default_value_t = 0.0)]
+        #[arg(long, default_value_t = PlaceOptions::default().leash)]
         leash: f64,
         /// Place on both sides: each side has its own room; a through hole part takes its holes
         /// on the other side (the room under its body stays free). SMD parts with at most
@@ -311,12 +312,12 @@ enum Cmd {
         #[arg(long)]
         two_sided: bool,
         /// With --two-sided: parts with more pads keep their side.
-        #[arg(long, default_value_t = gummiband_place::auto::BACK_MAX_PADS)]
+        #[arg(long, default_value_t = PlaceOptions::default().back_max_pads)]
         back_max_pads: usize,
         /// With --two-sided: cost of a part on the back in mm of wire. A part goes to the back
         /// if the front has no room for it or the back saves at least this much (0: both sides
         /// alike).
-        #[arg(long, default_value_t = gummiband_place::auto::BACK_COST)]
+        #[arg(long, default_value_t = PlaceOptions::default().back_cost)]
         back_cost: f64,
         /// With --two-sided: these parts go on the front, whatever their pads (comma separated).
         #[arg(long, value_delimiter = ',')]
@@ -1016,7 +1017,7 @@ fn main() -> Result<()> {
             on_back,
             report,
         } => {
-            use gummiband_place::auto::{PlaceOptions, Scope};
+            use gummiband_place::auto::Scope;
             let scope = if !only.is_empty() {
                 Scope::Only(only)
             } else if outside {
