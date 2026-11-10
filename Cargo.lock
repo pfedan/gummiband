@@ -469,6 +469,7 @@ dependencies = [
  "gummiband-core",
  "gummiband-kicad",
  "gummiband-place",
+ "serde",
  "serde_json",
 ]
 

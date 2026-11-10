@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
-use gummiband_app::{Angles, RouteOptions};
+use gummiband_app::{Angles, NetOptions, RouteOptions};
 use gummiband_core::board::Board;
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -120,15 +120,32 @@ pub struct AddLockedOut {
     pub warnings: Vec<String>,
 }
 
+/// The options of one net as the tools return them (`gummiband_app::NetOptions`).
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct NetOption {
     /// Routing priority override (lower routes first).
     pub priority: Option<i32>,
     /// The net is left out of routing.
     pub skip: bool,
-    /// Track width in mm for this net, also its minimum width (no necking below it outside the
-    /// courtyards the custom rules name), from set_net_options or power_plan with apply.
+    /// Track width in mm the net is routed with.
     pub width: Option<f64>,
+    /// Minimum width in mm: no necking below it, except in the courtyards of neck_refs.
+    pub min_width: Option<f64>,
+    /// Parts in whose courtyard the track may neck below the minimum width; left out: the
+    /// parts whose pad on this net is narrower than min_width.
+    pub neck_refs: Option<Vec<String>>,
+}
+
+impl From<&NetOptions> for NetOption {
+    fn from(o: &NetOptions) -> Self {
+        NetOption {
+            priority: o.priority,
+            skip: o.skip,
+            width: o.width,
+            min_width: o.min_width,
+            neck_refs: o.neck_refs.clone(),
+        }
+    }
 }
 
 struct Entry {
@@ -136,7 +153,7 @@ struct Entry {
     keep_locked: bool,
     kb: Arc<KicadBoard>,
     /// Per net options by net name (survive reloads).
-    options: BTreeMap<String, NetOption>,
+    options: BTreeMap<String, NetOptions>,
 }
 
 #[derive(Clone)]
@@ -160,55 +177,6 @@ fn read(path: &Path, keep_locked: bool) -> Result<KicadBoard> {
             ..Default::default()
         },
     )
-}
-
-/// The board as the router sees it: net options applied (priorities, skipped nets have no
-/// pins left, so they get no connections; their pads stay obstacles).
-fn apply_options(b: &Board, options: &BTreeMap<String, NetOption>, only: &[String]) -> (Board, Vec<String>) {
-    let mut b = b.clone();
-    let mut skipped = Vec::new();
-    for (name, o) in options {
-        if let (Some(w), Some(id)) = (o.width, b.net_id(name)) {
-            set_width(&mut b, id, w);
-        }
-    }
-    for n in b.nets.iter_mut() {
-        let o = options.get(&n.name);
-        if let Some(p) = o.and_then(|o| o.priority) {
-            n.priority = p;
-        }
-        let skip = o.is_some_and(|o| o.skip) || (!only.is_empty() && !only.contains(&n.name));
-        if skip && n.pins.len() >= 2 {
-            n.pins.clear();
-            skipped.push(n.name.clone());
-        }
-    }
-    (b, skipped)
-}
-
-/// Give a net its own class with track width and minimum width `w`.
-fn set_width(b: &mut Board, net: gummiband_core::board::NetId, w: f64) {
-    let ci = b.nets[net as usize].class as usize;
-    let mut c = b.classes[ci].clone();
-    c.name = format!("{}@{w}", c.name);
-    c.track_width = w;
-    c.min_width = Some(c.min_width.map_or(w, |m| m.max(w)));
-    c.target_width = c.target_width.filter(|t| *t > w);
-    // pads narrower than the track: the track may neck inside their part's courtyard
-    for &pin in &b.nets[net as usize].pins {
-        let p = &b.pins[pin];
-        if p.size.0.min(p.size.1) < w && !c.neck_refs.contains(&p.footprint) {
-            c.neck_refs.push(p.footprint.clone());
-        }
-    }
-    let i = match b.classes.iter().position(|k| k.name == c.name) {
-        Some(i) => i,
-        None => {
-            b.classes.push(c);
-            b.classes.len() - 1
-        }
-    };
-    b.nets[net as usize].class = i as gummiband_core::board::ClassId;
 }
 
 fn connections(b: &Board) -> usize {
@@ -928,8 +896,16 @@ pub struct SetNetOptionsIn {
     pub skip: Option<bool>,
     /// true: drop all options of this net first.
     pub reset: Option<bool>,
-    /// Track width in mm for this net, also used as its minimum width (no necking); 0 clears it.
+    /// Track width in mm the net is routed with; 0 clears it. On its own the track may still
+    /// neck as its class allows: for a current path give min_width too.
     pub width: Option<f64>,
+    /// Minimum width in mm: the track never necks below it, except in the courtyards of
+    /// neck_refs (a larger minimum of the class or the custom rules stays); 0 clears it. Set it
+    /// to the width for a track that must carry its current everywhere.
+    pub min_width: Option<f64>,
+    /// References of the parts in whose courtyard the track may neck below min_width. Left out:
+    /// the parts whose pad on this net is narrower than min_width. An empty list: nowhere.
+    pub neck_refs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1717,7 +1693,7 @@ impl Gummiband {
                 .collect(),
             custom_rules,
             custom_clearance_pairs: b.pair_clearance.len(),
-            net_options: options.clone(),
+            net_options: options.iter().map(|(n, o)| (n.clone(), o.into())).collect(),
             diff_pairs: b
                 .diff_pairs()
                 .into_iter()
@@ -3113,7 +3089,7 @@ impl Gummiband {
                 bail!("no net named {:?}; similar: {}", p.net, close.join(", "))
             };
             let mut o = if p.reset.unwrap_or(false) {
-                NetOption::default()
+                NetOptions::default()
             } else {
                 e.options.get(&p.net).cloned().unwrap_or_default()
             };
@@ -3126,8 +3102,17 @@ impl Gummiband {
             if let Some(w) = p.width {
                 o.width = (w > 0.0).then_some(w);
             }
+            if let Some(m) = p.min_width {
+                o.min_width = (m > 0.0).then_some(m);
+            }
+            if let Some(refs) = &p.neck_refs {
+                o.neck_refs = Some(refs.clone());
+            }
+            // the same check as the route, now: on a copy of the board
+            let mut probe = b.clone();
+            gummiband_app::apply_net_options(&mut probe, &BTreeMap::from([(p.net.clone(), o.clone())]), &[])?;
             let priority = o.priority.unwrap_or(b.nets[id as usize].priority);
-            if o.priority.is_none() && !o.skip && o.width.is_none() {
+            if o.is_empty() {
                 e.options.remove(&p.net);
             } else {
                 e.options.insert(p.net.clone(), o.clone());
@@ -3143,13 +3128,16 @@ impl Gummiband {
                     " (class default)"
                 },
                 if o.skip { ", skipped" } else { "" }
-            ) + &o.width.map(|w| format!(" Width {w} mm.")).unwrap_or_default();
+            ) + &o.width.map(|w| format!(" Width {w} mm.")).unwrap_or_default()
+                + &o.min_width
+                    .map(|m| format!(" Minimum width {m} mm."))
+                    .unwrap_or_default();
             Ok((
                 summary,
                 SetNetOptionsOut {
                     board: p.board.clone(),
                     net: p.net.clone(),
-                    options: o,
+                    options: (&o).into(),
                     priority,
                 },
             ))
@@ -3209,7 +3197,7 @@ fn route_blocking(
     id: String,
     path: PathBuf,
     kb: Arc<KicadBoard>,
-    options: BTreeMap<String, NetOption>,
+    options: BTreeMap<String, NetOptions>,
     opts: RouteOptions,
     p: RouteIn,
 ) -> Result<(String, RouteOut)> {
@@ -3228,9 +3216,9 @@ fn route_blocking(
             bail!("no net named {n:?} (see list_nets)");
         }
     }
-    // the nets left out of this call, for the result
-    let (_, skipped) = apply_options(&kb.board, &options, &opts.nets);
-    let (mut board, _) = apply_options(&kb.board, &options, &[]);
+    // the options per net, and the nets left out of this call for the result
+    let mut board = kb.board.clone();
+    let skipped = gummiband_app::apply_net_options(&mut board, &options, &opts.nets)?.skipped;
     if opts.move_parts() {
         let movable = read_board(
             &path,
@@ -3883,7 +3871,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Set per net options in the session, applied on the next route: priority (lower routes first, overrides the net class priority) and skip (leave the net unrouted). reset=true clears the net's options first.",
+        description = "Set per net options in the session, applied on the next route: priority (lower routes first, overrides the net class priority), skip (leave the net unrouted), width (the track width to route with), min_width (no necking below it; set it to the width for a current path) and neck_refs (the parts in whose courtyard the track may neck all the same). The same fields as an entry of the CLI's --net-widths file. reset=true clears the net's options first.",
         output_schema = schema_for_output::<SetNetOptionsOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
@@ -3971,7 +3959,10 @@ impl Gummiband {
         let res = self.with_entry(&p.board, |e| {
             let (out, applied) = practice::power_plan(&e.kb, &p.board, &p)?;
             for (net, w) in &applied {
-                e.options.entry(net.clone()).or_default().width = Some(*w);
+                // a current path: the width is its minimum too
+                let o = e.options.entry(net.clone()).or_default();
+                o.width = Some(*w);
+                o.min_width = Some(*w);
             }
             Ok(out)
         });

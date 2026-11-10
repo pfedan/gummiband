@@ -264,3 +264,93 @@ fn route_a_file_then_finish_a_net() {
     assert_eq!(e.to_string(), "runs must be at least 1");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The options per net are one thing, whichever way they come: the file of `net_widths` in its
+/// two forms, and the map a front end holds itself.
+#[test]
+fn net_options_from_a_file_and_from_the_front_end_agree() {
+    use gummiband_app::NetOptions;
+    let dir = std::env::temp_dir().join(format!("gummiband-app-nets-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pcb = dir.join("tiny.kicad_pcb");
+    std::fs::write(&pcb, tiny_board()).unwrap();
+    let file = dir.join("nets.json");
+    std::fs::write(
+        &file,
+        r#"{"A": 0.4, "B": {"width": 0.3, "min_width": 0.3, "priority": 0}, "not on the board": 1}"#,
+    )
+    .unwrap();
+    let base = RouteOptions {
+        runs: 1,
+        generations: 0,
+        geometry_generations: 0,
+        move_parts: Some(false),
+        ..Default::default()
+    };
+    let counted = std::cell::Cell::new(None);
+    let event = |e: Event<'_>| {
+        if let Event::NetWidths { nets } = e {
+            counted.set(Some(nets));
+        }
+    };
+    let hooks = Hooks {
+        event: Some(&event),
+        ..Default::default()
+    };
+    let from_file = RouteOptions {
+        net_widths: Some(file.clone()),
+        ..base.clone()
+    };
+    let out = route_file(&pcb, &from_file, &hooks).unwrap();
+    assert_eq!(counted.get(), Some(2), "the nets of the file that the board has");
+    let (text, _) = out.routed.board_text(&out.kb, &out.routed.res.geometry).unwrap();
+    assert!(text.contains("(width 0.4)") && text.contains("(width 0.3)"), "{text}");
+    let b = &out.kb.board;
+    let class = |net: &str| &b.classes[b.nets[b.net_id(net).unwrap() as usize].class as usize];
+    assert_eq!((class("A").track_width, class("A").min_width), (0.4, None));
+    assert_eq!((class("B").track_width, class("B").min_width), (0.3, Some(0.3)));
+    assert_eq!(b.nets[b.net_id("B").unwrap() as usize].priority, 0);
+
+    let held = RouteOptions {
+        net_options: [
+            (
+                "A".to_string(),
+                NetOptions {
+                    width: Some(0.4),
+                    ..Default::default()
+                },
+            ),
+            (
+                "B".to_string(),
+                NetOptions {
+                    width: Some(0.3),
+                    min_width: Some(0.3),
+                    priority: Some(0),
+                    ..Default::default()
+                },
+            ),
+        ]
+        .into(),
+        ..base.clone()
+    };
+    let again = route_file(&pcb, &held, &Hooks::default()).unwrap();
+    let (same, _) = again.routed.board_text(&again.kb, &again.routed.res.geometry).unwrap();
+    assert_eq!(text, same);
+
+    // a skipped net is left out and named; what the front end holds wins over the file
+    let skipping = RouteOptions {
+        net_options: [(
+            "A".to_string(),
+            NetOptions {
+                skip: true,
+                ..Default::default()
+            },
+        )]
+        .into(),
+        ..from_file
+    };
+    let out = route_file(&pcb, &skipping, &Hooks::default()).unwrap();
+    assert_eq!(out.skipped_nets, vec!["A".to_string()]);
+    assert_eq!(out.routed.res.stats.conns, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

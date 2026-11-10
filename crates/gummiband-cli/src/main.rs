@@ -186,8 +186,12 @@ enum Cmd {
         /// groups`. Experimental.
         #[arg(long)]
         clear_corridors: bool,
-        /// Track width per net from a JSON file {"net name": width_mm, ...} (e.g. the widths
-        /// of an existing routing, see bench/net_widths.py).
+        /// Options per net from a JSON file, one entry per net name: a track width in mm
+        /// ({"GND": 0.5}, e.g. the widths of an existing routing, see bench/net_widths.py) or
+        /// an object with any of `width`, `min_width` (no necking below it), `neck_refs` (the
+        /// parts in whose courtyard the track may neck all the same; left out: those with a
+        /// narrower pad), `priority` (lower routes first) and `skip` (leave the net unrouted),
+        /// the fields of the MCP tool set_net_options. Nets the board lacks are passed over.
         #[arg(long)]
         net_widths: Option<PathBuf>,
         /// Switch on KiCad's teardrops for vias and pads in the output; KiCad builds them when
@@ -195,7 +199,7 @@ enum Cmd {
         #[arg(long)]
         teardrops: bool,
         /// Routing priority per net from a JSON file {"net name": priority, ...}; lower routes
-        /// first, unnamed nets keep their class priority.
+        /// first, unnamed nets keep their class priority. Wins over a priority in --net-widths.
         #[arg(long)]
         net_priorities: Option<PathBuf>,
         /// Print a "progress {json}" line after every phase of the search (best candidate so
@@ -638,6 +642,7 @@ fn main() -> Result<()> {
                 clear_corridors,
                 net_widths,
                 net_priorities,
+                net_options: Default::default(),
                 teardrops,
             };
             // the options against each other, before a word is printed

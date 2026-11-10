@@ -6,6 +6,7 @@
 //! (progress of the search, [`Event`]s of the steps before it), everything else is data in
 //! [`Routed`] and [`RouteOutcome`].
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -19,6 +20,8 @@ use gummiband_core::topo::{Substrate, SubstrateConfig};
 use gummiband_core::{GiveTry, ProgressFn, RouteResult, SearchConfig};
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
 use gummiband_place::auto::{PlaceOptions, PlaceReport};
+
+use crate::nets::{NetOptions, apply_net_options, read_net_options, read_net_priorities};
 
 /// The defaults of [`RouteOptions`], each defined once: `RouteOptions::default()` is built from
 /// them, the CLI names them as its clap defaults and the MCP server falls back to them.
@@ -135,10 +138,16 @@ pub struct RouteOptions {
     pub placement_seed: u64,
     /// [`route_file`]: parts in the band of a group of tracks get new positions first.
     pub clear_corridors: bool,
-    /// [`load_board`]: track width per net from a JSON file {"net name": width_mm}.
+    /// [`load_board`]: options per net from a JSON file, `{"net name": width_mm}` or
+    /// `{"net name": {"width": .., "min_width": .., "neck_refs": [..], "priority": .., "skip": ..}}`
+    /// ([`NetOptions`]).
     pub net_widths: Option<PathBuf>,
-    /// [`load_board`]: routing priority per net from a JSON file {"net name": priority}.
+    /// [`load_board`]: routing priority per net from a JSON file {"net name": priority}; it
+    /// wins over a priority in `net_widths`.
     pub net_priorities: Option<PathBuf>,
+    /// [`load_board`]: options per net that the front end holds itself (the session of the MCP
+    /// server). Field by field they win over the two files.
+    pub net_options: BTreeMap<String, NetOptions>,
     /// Switch on KiCad's teardrops in the written board.
     pub teardrops: bool,
 }
@@ -185,6 +194,7 @@ impl Default for RouteOptions {
             clear_corridors: false,
             net_widths: None,
             net_priorities: None,
+            net_options: BTreeMap::new(),
             teardrops: false,
         }
     }
@@ -781,35 +791,39 @@ fn track_end_teardrops(input: &Path, output: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Read a board file as `opts` ask: the copper to keep, planes, movable parts, then the widths
-/// and priorities per net from their files. Fails for a net of `opts.nets` the board lacks.
+/// Read a board file as `opts` ask: the copper to keep, planes, movable parts, then the options
+/// per net (`net_widths`, `net_priorities`, `net_options`). Fails for a net of `opts.nets` the
+/// board lacks.
 pub fn load_board(path: &Path, opts: &RouteOptions, hooks: &Hooks) -> Result<KicadBoard> {
+    Ok(load(path, opts, hooks)?.0)
+}
+
+/// [`load_board`], and the nets left out of the route.
+fn load(path: &Path, opts: &RouteOptions, hooks: &Hooks) -> Result<(KicadBoard, Vec<String>)> {
     let mut kb = read_board(path, &opts.read_options())?;
     for n in &opts.nets {
         if kb.board.net_id(n).is_none() {
             anyhow::bail!("no net named {n:?}");
         }
     }
-    if let Some(path) = &opts.net_widths {
-        let map: std::collections::HashMap<String, f64> = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-        let mut n = 0;
-        for (name, w) in map {
-            if let Some(net) = kb.board.net_id(&name) {
-                kb.board.set_net_width(net, w);
-                n += 1;
-            }
+    let mut per_net: BTreeMap<String, NetOptions> = BTreeMap::new();
+    let mut add = |more: &BTreeMap<String, NetOptions>| {
+        for (net, o) in more {
+            per_net.entry(net.clone()).or_default().merge(o);
         }
-        hooks.emit(Event::NetWidths { nets: n });
+    };
+    if let Some(path) = &opts.net_widths {
+        let file = read_net_options(path)?;
+        let on_board = file.keys().filter(|n| kb.board.net_id(n).is_some()).count();
+        hooks.emit(Event::NetWidths { nets: on_board });
+        add(&file);
     }
     if let Some(path) = &opts.net_priorities {
-        let map: std::collections::HashMap<String, i32> = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-        for n in kb.board.nets.iter_mut() {
-            if let Some(&p) = map.get(&n.name) {
-                n.priority = p;
-            }
-        }
+        add(&read_net_priorities(path)?);
     }
-    Ok(kb)
+    add(&opts.net_options);
+    let applied = apply_net_options(&mut kb.board, &per_net, &opts.nets)?;
+    Ok((kb, applied.skipped))
 }
 
 /// The parts that [`clear_corridors`] placed again.
@@ -947,6 +961,8 @@ pub struct RouteOutcome {
     pub source: PathBuf,
     /// That file, read.
     pub kb: KicadBoard,
+    /// Nets left out of the route: skipped by their options, or not among `nets`.
+    pub skipped_nets: Vec<String>,
     /// The winner of `placements` with every trial.
     pub placement: Option<Placement>,
     pub routed: Routed,
@@ -1028,12 +1044,13 @@ pub fn route_file(board: &Path, opts: &RouteOptions, hooks: &Hooks) -> Result<Ro
     } else {
         input.clone()
     };
-    let kb = load_board(&source, opts, hooks)?;
+    let (kb, skipped_nets) = load(&source, opts, hooks)?;
     let routed = route_from(t0, &kb.board, opts, hooks)?;
     Ok(RouteOutcome {
         input,
         source,
         kb,
+        skipped_nets,
         placement,
         routed,
         placed_dir,

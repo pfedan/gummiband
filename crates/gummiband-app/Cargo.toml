@@ -10,4 +10,5 @@ gummiband-core.workspace = true
 gummiband-kicad.workspace = true
 gummiband-place.workspace = true
 anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
