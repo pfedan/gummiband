@@ -4090,49 +4090,91 @@ impl<'a> Router<'a> {
         self.net_pieces(net).saturating_sub(open.count())
     }
 
-    /// The segments connection `ci` may end on: of its net, and not on its side of the gap it
-    /// closes. That goes for plane fan-outs too: a track of the net leads to a via into the plane.
+    /// The segments connection `ci` may end on: of its net, not on its side of the gap it closes,
+    /// and hanging together with its goal, be that one of its goal pins or, for a plane fan-out,
+    /// a via or pin that reaches the plane. Other copper of the net leads nowhere it has to go:
+    /// a connection that ended there counted as routed and left its goal pins an island. So
+    /// while nothing is laid on the goal's side, nothing can be ended on.
     /// Pairs stay out, their tracks must run together to the end.
     fn tappable(&self, ci: usize) -> HashSet<u32> {
         let c = &self.conns[ci];
         if !self.cfg.taps || self.partner.contains_key(&c.net) {
             return HashSet::new();
         }
-        let mine = self.net_side(c.net, c.from);
+        let mine = self.net_side(c.net, &[c.from]);
+        let goal = match &c.goal {
+            Goal::Pins(p) => self.net_side(c.net, p),
+            Goal::Plane => self.net_side(c.net, &self.plane_pins(c.net)),
+        };
+        let on = |side: &[End], e: End| side.iter().any(|&x| self.same_end(x, e));
         (0..self.conns.len())
             .filter(|&cj| cj != ci && self.conns[cj].net == c.net)
             .flat_map(|cj| self.conn_segs[cj].iter().copied())
             .filter(|&sid| {
                 let s = self.segs[sid as usize].as_ref().unwrap();
-                !mine.contains(&s.start) && !mine.contains(&s.end)
+                let end = self.held_end(s.end);
+                !on(&mine, s.start) && !on(&mine, end) && (on(&goal, s.start) || on(&goal, end))
             })
             .collect()
     }
 
-    /// The ends of the routed segments of `net` that hang together with pin `from`.
-    fn net_side(&self, net: NetId, from: usize) -> Vec<End> {
+    /// The pins of `net` that reach one of its planes: those that stand in it, and those whose
+    /// fan-out is laid and ends in the plane itself and not on another track.
+    fn plane_pins(&self, net: NetId) -> Vec<usize> {
+        let b = self.board;
+        let stands_in = |p: usize| {
+            let pn = &b.pins[p];
+            b.planes
+                .iter()
+                .any(|pl| pl.net == net && pn.layers.has(pl.layer) && pl.covers(pn.pos))
+        };
+        let mut pins: Vec<usize> = b.nets[net as usize]
+            .pins
+            .iter()
+            .copied()
+            .filter(|&p| stands_in(p))
+            .collect();
+        for (cj, c) in self.conns.iter().enumerate() {
+            let last = self.conn_segs[cj]
+                .last()
+                .and_then(|&sid| self.segs[sid as usize].as_ref());
+            if c.net == net && c.goal == Goal::Plane && last.is_some_and(|s| !matches!(s.end, End::Tap(..))) {
+                pins.push(c.from);
+            }
+        }
+        pins
+    }
+
+    /// Two ends at the same place: pins of one group, or the same via.
+    fn same_end(&self, a: End, b: End) -> bool {
+        match (a, b) {
+            (End::Pin(a), End::Pin(b)) => self.pin_group[a] == self.pin_group[b],
+            (End::Via(a), End::Via(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// What ends on a segment hangs together with that segment: its start stands for it.
+    fn held_end(&self, e: End) -> End {
+        match e {
+            End::Tap(sid, _) => self.segs[sid as usize].as_ref().map_or(e, |o| o.start),
+            e => e,
+        }
+    }
+
+    /// The ends of the routed segments of `net` that hang together with one of the pins `from`.
+    fn net_side(&self, net: NetId, from: &[usize]) -> Vec<End> {
         let segs: Vec<&Seg> = (0..self.conns.len())
             .filter(|&cj| self.conns[cj].net == net)
             .flat_map(|cj| self.conn_segs[cj].iter())
             .filter_map(|&sid| self.segs[sid as usize].as_ref())
             .collect();
-        let group = self.pin_group[from];
-        let mut side: Vec<End> = vec![End::Pin(from)];
+        let mut side: Vec<End> = from.iter().map(|&p| End::Pin(p)).collect();
         loop {
-            let holds = |side: &[End], e: End| {
-                side.iter().any(|&x| match (x, e) {
-                    (End::Pin(a), End::Pin(b)) => self.pin_group[a] == self.pin_group[b],
-                    (End::Via(a), End::Via(b)) => a == b,
-                    _ => false,
-                }) || matches!(e, End::Pin(p) if self.pin_group[p] == group)
-            };
+            let holds = |side: &[End], e: End| side.iter().any(|&x| self.same_end(x, e));
             let before = side.len();
             for s in &segs {
-                let end = match s.end {
-                    // what ends on a segment hangs together with that segment
-                    End::Tap(sid, _) => self.segs[sid as usize].as_ref().map_or(s.end, |o| o.start),
-                    e => e,
-                };
+                let end = self.held_end(s.end);
                 match (holds(&side, s.start), holds(&side, end)) {
                     (true, false) => side.push(end),
                     (false, true) => side.push(s.start),
@@ -4360,6 +4402,40 @@ mod tests {
             });
         }
         b
+    }
+
+    /// Four pins of one net. P1 is to reach P0, and the track from P3 to P2 lies across its
+    /// way: ending on that track would count as routed and leave P0 an island. A connection
+    /// may only end on copper that hangs on one of its goal pins.
+    #[test]
+    fn a_connection_ends_only_on_copper_of_its_goal() {
+        let b = pad_board(&[
+            ("P0", "A", 10.0, 4.0),
+            ("P1", "A", 10.0, 10.0),
+            ("P2", "A", 3.0, 7.0),
+            ("P3", "A", 17.0, 7.0),
+        ]);
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        let conn = |r: &Router, from: usize| (0..r.conns.len()).find(|&ci| r.conns[ci].from == from).unwrap();
+        let (a, mid, far) = (conn(&r, 1), conn(&r, 2), conn(&r, 3));
+        assert_eq!(r.conns[a].goal, Goal::Pins(vec![0]));
+        // the tree as another placement would have planned it: P3 hangs on P2
+        r.conns[far].goal = Goal::Pins(vec![2]);
+        r.cfg.taps = true;
+        assert!(r.route_one(far));
+        // only P3 to P2 is laid: nothing of it hangs on P0
+        assert!(r.tappable(a).is_empty(), "{:?}", r.tappable(a));
+        assert!(r.route_one(a));
+        let end = r.segs[*r.conn_segs[a].last().unwrap() as usize].as_ref().unwrap().end;
+        assert_eq!(end, End::Pin(0));
+        assert_eq!(r.net_pieces(0), 2);
+        // P2 may end on the track from P1 to P0, its goal pins, and not on its own side
+        let on_goal: HashSet<u32> = r.conn_segs[a].iter().copied().collect();
+        assert_eq!(r.tappable(mid), on_goal);
+        assert!(r.route_one(mid));
+        assert_eq!(r.net_pieces(0), 1);
     }
 
     fn planned_nets(b: &Board, cfg: RouterConfig) -> Vec<String> {
