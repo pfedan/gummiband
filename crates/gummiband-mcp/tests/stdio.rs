@@ -234,6 +234,40 @@ fn initialize_list_load_route() {
         json!({"board": "b1", "runs": 1, "generations": 0, "plane_layers": ["B.Cu"]}),
     );
     assert_eq!((&r["routed"], &r["vias"]), (&json!(1), &json!(0)), "{r}");
+    // the options the CLI had alone: placements tried by the route, pictures of the search, and
+    // the file with options per net, which the options of the session win over
+    let widths = dir.join("widths.json");
+    std::fs::write(
+        &widths,
+        r#"{"A": {"width": 0.4, "min_width": 0.4}, "B": {"skip": false}}"#,
+    )
+    .unwrap();
+    let pictures = dir.join("frames");
+    // (this board has no part the placer may move: the placements get as far as the placer)
+    assert_eq!(
+        s.call_err(
+            "route",
+            json!({"board": "b1", "runs": 1, "placements": 2, "placement_seed": 3})
+        ),
+        "error: nothing to place: all parts are fixed"
+    );
+    let r = s.call(
+        "route",
+        json!({"board": "b1", "runs": 1, "generations": 0, "geometry_generations": 0, "frames": pictures,
+            "net_widths": widths}),
+    );
+    assert_eq!(r["routed"], 1, "{r}");
+    assert_eq!(r["skipped_nets"], json!(["B"]));
+    assert!(r["placement"].is_null(), "{r}");
+    assert!(r["frames"]["pictures"].as_u64().unwrap() >= 1 && pictures.join("frame-000.svg").is_file());
+    let a = r["nets"].as_array().unwrap().iter().find(|n| n["net"] == "A").unwrap();
+    assert_eq!(a["max_width_mm"], 0.4, "{r}");
+    // an argument that does not exist is refused, not ignored
+    let bad = s.request(
+        "tools/call",
+        json!({"name": "route", "arguments": {"board": "b1", "pair_breakouts": true}}),
+    );
+    assert!(bad["error"].is_object() || bad["isError"] == true, "{bad}");
 
     // pre-routing: look at a part, lock copper in a working copy, route around it
     let part = s.call("part_info", json!({"board": "b1", "reference": "R1"}));

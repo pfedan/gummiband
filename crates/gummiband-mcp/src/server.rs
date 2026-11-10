@@ -908,7 +908,11 @@ pub struct SetNetOptionsIn {
     pub neck_refs: Option<Vec<String>>,
 }
 
+/// The arguments of `route`: the options of the pipeline (`gummiband_app::OPTIONS`, each under
+/// its name) and what the session adds (`board`, `output`, `max_violations`). An argument that
+/// does not exist is an error, not a typo that goes unnoticed.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RouteIn {
     /// Board id from load_board.
     pub board: String,
@@ -951,10 +955,10 @@ pub struct RouteIn {
     pub pair_all: Option<bool>,
     /// With pairs, experimental: the wide track ends just outside the pads, two single tracks
     /// connect them (default false).
-    pub pair_breakouts: Option<bool>,
+    pub breakouts: Option<bool>,
     /// With pairs, experimental: two vias side by side are one via pair, a capsule that turns
     /// with the wide track (default false).
-    pub pair_via_pairs: Option<bool>,
+    pub via_pairs: Option<bool>,
     /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
     pub layer_dirs: Option<f64>,
     /// Hints from the local patterns of board_patterns, comma separated (default none), as
@@ -1042,6 +1046,29 @@ pub struct RouteIn {
     pub tune_amplitude: Option<f64>,
     /// Air between neighbouring meander legs in track widths, at least the clearance (default 2).
     pub tune_spacing: Option<f64>,
+    /// Try this many placements from the netlist (as place_parts makes them), route each with
+    /// these settings and go on with the best: fewest open connections, then clearance
+    /// violations, vias and length (default 0: the placement stays). The output has the parts
+    /// where the best placement put them, `placement` lists every try; the working copy is not
+    /// touched. To keep and compare the placements themselves, use try_seeds. Not with
+    /// keep_all, nets or pairs.
+    pub placements: Option<usize>,
+    /// First seed of placements, and the seed of clear_corridors (default 1).
+    pub placement_seed: Option<u64>,
+    /// Path of a JSON file with options per net, one entry per net name: a track width in mm
+    /// ({"GND": 0.5}) or an object with width, min_width, neck_refs, priority and skip, the
+    /// fields of set_net_options (as `gummiband route --net-widths`). What set_net_options
+    /// holds for a net wins field by field. Nets the board lacks are passed over.
+    pub net_widths: Option<String>,
+    /// Path of a JSON file with a routing priority per net, {"net name": priority}; lower
+    /// routes first. Wins over a priority in net_widths, set_net_options over both.
+    pub net_priorities: Option<String>,
+    /// Switch on KiCad's teardrops for vias and pads in the output and for track ends in its
+    /// project (default false); KiCad builds them when it fills the zones.
+    pub teardrops: Option<bool>,
+    /// Folder for one SVG of the best candidate per generation (a PNG of each if rsvg-convert
+    /// is there, and evolution.gif if ImageMagick is), to look at how the search went.
+    pub frames: Option<String>,
     /// Maximum number of violations listed (default 50; the total is always given).
     pub max_violations: Option<usize>,
 }
@@ -1396,6 +1423,36 @@ pub struct RouteOut {
     pub length_rules: Vec<LengthRuleOut>,
     /// With clear_corridors: the parts that were placed again before the routing.
     pub cleared_corridors: Vec<String>,
+    /// With placements: the seed of the placement kept and every placement tried.
+    pub placement: Option<PlacementOut>,
+    /// With frames: the folder, the number of pictures and the animation, if one was made.
+    pub frames: Option<FramesOut>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PlacementOut {
+    /// Seed of the placement the result is routed on.
+    pub seed: u64,
+    /// The parts it placed.
+    pub moved: Vec<String>,
+    pub tried: Vec<PlacementTriedOut>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PlacementTriedOut {
+    pub seed: u64,
+    pub routed: usize,
+    pub connections: usize,
+    pub violations: usize,
+    pub vias: usize,
+    pub length_mm: f64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FramesOut {
+    pub folder: String,
+    pub pictures: usize,
+    pub animation: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2456,7 +2513,9 @@ impl Gummiband {
                 cleared.join(" ")
             );
         }
-        out.cleared_corridors = cleared;
+        if !cleared.is_empty() {
+            out.cleared_corridors = cleared;
+        }
         Ok((summary, out))
     }
 
@@ -3197,8 +3256,8 @@ fn route_options(p: &RouteIn, keep_locked: bool) -> Result<RouteOptions> {
         pair_skew: p.pair_skew.unwrap_or(d.pair_skew),
         pair_zdiff: p.pair_zdiff,
         pair_all: p.pair_all.unwrap_or(d.pair_all),
-        breakouts: p.pair_breakouts.unwrap_or(d.breakouts),
-        via_pairs: p.pair_via_pairs.unwrap_or(d.via_pairs),
+        breakouts: p.breakouts.unwrap_or(d.breakouts),
+        via_pairs: p.via_pairs.unwrap_or(d.via_pairs),
         negotiate: p.negotiate.unwrap_or(d.negotiate),
         generations: p.generations.unwrap_or(d.generations),
         geometry_generations: p.geometry_generations.unwrap_or(d.geometry_generations),
@@ -3215,10 +3274,15 @@ fn route_options(p: &RouteIn, keep_locked: bool) -> Result<RouteOptions> {
         tune: p.tune.unwrap_or(d.tune),
         tune_amplitude: p.tune_amplitude.unwrap_or(d.tune_amplitude),
         tune_spacing: p.tune_spacing.unwrap_or(d.tune_spacing),
-        clear_corridors: p.clear_corridors == Some(true),
-        // the session has its own tools for these: place_parts and try_seeds, set_net_options
-        // for widths and priorities
-        ..d
+        placements: p.placements.unwrap_or(d.placements),
+        placement_seed: p.placement_seed.unwrap_or(d.placement_seed),
+        clear_corridors: p.clear_corridors.unwrap_or(d.clear_corridors),
+        net_widths: p.net_widths.as_deref().map(abs_path),
+        net_priorities: p.net_priorities.as_deref().map(abs_path),
+        // the options per net of the session, filled in by the caller
+        net_options: d.net_options,
+        teardrops: p.teardrops.unwrap_or(d.teardrops),
+        frames: p.frames.as_deref().map(abs_path),
     })
 }
 
@@ -3386,7 +3450,28 @@ fn route_blocking(id: String, path: PathBuf, opts: RouteOptions, p: RouteIn) -> 
         .collect();
     let st = &res.stats;
     let out = RouteOut {
-        cleared_corridors: Vec::new(),
+        cleared_corridors: outcome.cleared_corridors.clone(),
+        placement: outcome.placement.as_ref().map(|p| PlacementOut {
+            seed: p.seed,
+            moved: p.report.moved.clone(),
+            tried: p
+                .trials
+                .iter()
+                .map(|t| PlacementTriedOut {
+                    seed: t.seed,
+                    routed: t.routed,
+                    connections: t.connections,
+                    violations: t.violations,
+                    vias: t.vias,
+                    length_mm: r3(t.length),
+                })
+                .collect(),
+        }),
+        frames: written.frames.as_ref().map(|f| FramesOut {
+            folder: f.dir.display().to_string(),
+            pictures: f.svgs,
+            animation: f.animation.as_ref().map(|a| a.display().to_string()),
+        }),
         moved,
         angles_45,
         length_tuning,
@@ -3503,7 +3588,17 @@ fn route_blocking(id: String, path: PathBuf, opts: RouteOptions, p: RouteIn) -> 
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-    } + &out.notes.iter().map(|n| format!(" Note: {n}.")).collect::<String>();
+    } + &out
+        .placement
+        .as_ref()
+        .map(|p| format!(" Placement of seed {} kept, of {} tried.", p.seed, p.tried.len()))
+        .unwrap_or_default()
+        + &out
+            .frames
+            .as_ref()
+            .map(|f| format!(" {} pictures of the search in {}.", f.pictures, f.folder))
+            .unwrap_or_default()
+        + &out.notes.iter().map(|n| format!(" Note: {n}.")).collect::<String>();
     Ok((summary, out))
 }
 
@@ -4254,4 +4349,59 @@ impl ServerHandler for Gummiband {
 
 fn b_has_kicad_pro(pcb: &std::path::Path) -> bool {
     pcb.with_extension("kicad_pro").is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gummiband_app::OPTIONS;
+
+    /// Arguments of `route` that are the session's own. Everything else has to be an option of
+    /// the pipeline.
+    const OWN: &[&str] = &["board", "output", "max_violations"];
+
+    /// Every option of the pipeline is an argument of `route` under its name, and `route` has no
+    /// option of the pipeline that the table lacks. The CLI has the same test against the same
+    /// table, so the two front ends offer the same.
+    #[test]
+    fn route_offers_the_options_of_the_pipeline() {
+        let schema = serde_json::to_value(schemars::schema_for!(RouteIn)).unwrap();
+        let args: Vec<&String> = schema["properties"].as_object().expect("properties").keys().collect();
+        for o in OPTIONS {
+            assert!(args.iter().any(|a| *a == o.name), "route lacks {}", o.name);
+        }
+        for a in args {
+            assert!(
+                OWN.contains(&a.as_str()) || gummiband_app::option_doc(a).is_some(),
+                "{a} is neither in gummiband_app::OPTIONS nor one of the session's own arguments"
+            );
+        }
+        // an argument that does not exist is refused
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert!(serde_json::from_value::<RouteIn>(serde_json::json!({"board": "b1", "pair_breakouts": true})).is_err());
+    }
+
+    /// With nothing given the tool routes with the defaults of the pipeline, and what is given
+    /// arrives under its name.
+    #[test]
+    fn arguments_become_the_options_of_the_pipeline() {
+        let args = |v: serde_json::Value| -> RouteOptions {
+            route_options(&serde_json::from_value::<RouteIn>(v).unwrap(), false).unwrap()
+        };
+        let opts = args(serde_json::json!({"board": "b1"}));
+        assert_eq!(format!("{opts:?}"), format!("{:?}", RouteOptions::default()));
+        let opts = args(serde_json::json!({
+            "board": "b1", "keep_all": true, "nets": ["A", "B"], "reroute": true, "shove": false,
+            "give": 2, "tune": false, "open_end_seconds": 30, "plane_layers": ["In1.Cu"],
+            "breakouts": true, "placements": 3, "teardrops": true, "angles": "45",
+        }));
+        assert!(opts.keep_all && opts.reroute && !opts.tune && opts.breakouts && opts.teardrops);
+        assert_eq!(opts.nets, ["A", "B"]);
+        assert_eq!((opts.shove, opts.give, opts.move_parts), (Some(false), Some(2.0), None));
+        assert_eq!((opts.open_end_seconds, opts.placements), (30.0, 3));
+        assert_eq!(opts.plane_layers, ["In1.Cu"]);
+        assert_eq!(opts.angles, Angles::Deg45);
+        // contradictions are the pipeline's to refuse, in its words
+        assert!(opts.validate(false).unwrap_err().contains("breakouts needs pairs"));
+    }
 }

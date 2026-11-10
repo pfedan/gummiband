@@ -1,5 +1,3 @@
-mod svg;
-
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -33,6 +31,293 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// The arguments of `route`: the options of the pipeline ([`gummiband_app::OPTIONS`], each as
+/// `--kebab-case`) and what the CLI itself does with the result.
+#[derive(clap::Args)]
+struct RouteArgs {
+    board: PathBuf,
+    #[arg(short, long)]
+    output: PathBuf,
+    /// Keep only locked tracks and vias as fixed copper (default: remove all).
+    #[arg(long)]
+    keep_locked: bool,
+    /// Keep all existing tracks and vias as fixed copper and add to them (for completing
+    /// a partly routed board or finishing a started track).
+    #[arg(long)]
+    keep_all: bool,
+    /// With --keep-all --nets: if a connection finds no way, let the unlocked tracks of other
+    /// nets within this many mm of its pin give way (they are routed again), growing in
+    /// steps up to this radius; the try with the fewest open connections is kept. 0: nothing
+    /// gives way [default: 8 with --keep-all --nets, else 0]
+    #[arg(long)]
+    give: Option<f64>,
+    /// With --keep-all --nets: the unlocked tracks of other nets are threaded into the
+    /// topology, so a connection passes between them and they shift aside. What it does not
+    /// touch stays as it is in the file. On by default with --keep-all --nets (not with
+    /// --move-parts); this flag insists on it.
+    #[arg(long, conflicts_with = "no_shove")]
+    shove: bool,
+    /// With --keep-all --nets: the tracks of other nets stay where they are (no shove).
+    #[arg(long)]
+    no_shove: bool,
+    /// Route only these nets, comma separated (the others stay as they are).
+    #[arg(long, value_delimiter = ',')]
+    nets: Vec<String>,
+    /// With --keep-all --nets: remove the unlocked tracks and vias of those nets first and route
+    /// them anew. Without it a net that is already connected stays as it is.
+    #[arg(long)]
+    reroute: bool,
+    /// Portfolio size (router runs with different orders). A constant, so that results do
+    /// not depend on the machine.
+    #[arg(long, default_value_t = defaults::RUNS)]
+    runs: usize,
+    /// Via site grid pitch in mm.
+    #[arg(long, default_value_t = defaults::VIA_PITCH)]
+    via_pitch: f64,
+    /// Via cost in mm of track (the search varies it around this value).
+    #[arg(long, default_value_t = defaults::VIA_COST)]
+    via_cost: f64,
+    /// Weight of the preferred layer directions (horizontal and vertical in turn) for
+    /// every third run of the portfolio; 0 = off.
+    #[arg(long, default_value_t = defaults::LAYER_DIRS)]
+    layer_dirs: f64,
+    /// Hints from local patterns of the board, comma separated: `shares` (pins of a plane net
+    /// next to each other share one fan-out via), `decaps` (a decoupling capacitor is
+    /// connected to its IC pin first, its via serves both), `rows` (the open end re-lays the
+    /// connections of a pin row in pin order), `pairs` (differential pairs before the other
+    /// signal connections, the longest first), `groups` (the connections between two parts
+    /// as one block in pin order, the longest block first; `groups-short` puts the shortest
+    /// first), `all` or
+    /// `none`. `gummiband info` lists the patterns it finds. When to use which: see
+    /// docs/guide/options.md.
+    #[arg(long, default_value = defaults::PATTERNS)]
+    patterns: String,
+    /// Factor on the via cost in the pass that routes connections with vias again and
+    /// keeps what has fewer vias (0 = off).
+    #[arg(long, default_value_t = defaults::VIA_PASS)]
+    via_pass: f64,
+    /// Weight of the pull between the nets of differential pairs (0 = off).
+    #[arg(long, default_value_t = defaults::PAIR_PULL)]
+    pair_pull: f64,
+    /// Experimental: route differential pairs as one wide track and split it into two parallel
+    /// tracks. Check the result with the KiCad DRC; on dense boards it costs connections.
+    #[arg(long)]
+    pairs: bool,
+    /// With --pairs: length difference left within a pair in mm; the shorter track gets
+    /// bumps down to this (a `skew` rule in the .kicad_dru may ask for less).
+    #[arg(long, default_value_t = defaults::PAIR_SKEW)]
+    pair_skew: f64,
+    /// With --pairs: target differential impedance in ohm. Sets the track width per layer
+    /// from the board's stackup; the gap stays.
+    #[arg(long)]
+    pair_zdiff: Option<f64>,
+    /// With --pairs: couple every pair recognised by name. Without it only pairs that a
+    /// `diff_pair_gap` rule or a net class of their own marks as differential pairs.
+    #[arg(long)]
+    pair_all: bool,
+    /// Experimental, with --pairs: let the wide track end at a point just outside the pads,
+    /// with two single tracks to the pads (breakout zones).
+    #[arg(long)]
+    breakouts: bool,
+    /// Experimental, with --pairs: two vias side by side are one via pair, a capsule that
+    /// turns with the wide track, in place of the circle around both.
+    #[arg(long)]
+    via_pairs: bool,
+    /// Rounds of negotiated routing from the start, in a second search next to the plain one.
+    /// Connections may overfill edges and cross for a rising price, see docs/ARCHITECTURE.md.
+    /// With 0 the search negotiates on its own when the plain one leaves a few connections
+    /// open (GB_AUTO_NEGOTIATE=0 switches that off).
+    #[arg(long, default_value_t = defaults::NEGOTIATE)]
+    negotiate: usize,
+    /// Generations of the evolutionary order search after the portfolio.
+    #[arg(long, default_value_t = defaults::GENERATIONS)]
+    generations: usize,
+    /// Generations that select by clearance violations after the geometry step. Each costs
+    /// about one routing pass; 0 is fastest and leaves many more violations.
+    #[arg(long, default_value_t = defaults::GEOMETRY_GENERATIONS)]
+    geometry_generations: usize,
+    /// Seed of the search (default: GB_EVO_SEED, then a constant). The same seed gives the
+    /// same result, another one a different try. The line "best: seed N" and the report
+    /// name the seed that was used.
+    #[arg(long)]
+    seed: Option<u64>,
+    /// Write a debug SVG.
+    #[arg(long)]
+    svg: Option<PathBuf>,
+    /// Draw the triangulation into the SVG.
+    #[arg(long)]
+    svg_tris: bool,
+    /// Write one SVG per generation (best candidate) into this folder, and an animated GIF
+    /// if ImageMagick is available.
+    #[arg(long)]
+    frames: Option<PathBuf>,
+    /// Write a machine readable JSON report (stats, unrouted connections, violations,
+    /// portfolio) for scripts and AI agents. Its `seconds` are the wall time of the whole
+    /// route, from reading the board to the checked result (writing the files not
+    /// included), the same number the MCP tool route returns; `search_seconds` is the part
+    /// up to the end of the search.
+    #[arg(long)]
+    report: Option<PathBuf>,
+    /// Let the geometry generations shift parts next to clearance problems and open
+    /// connections; the routed copper follows like rubber bands (locked footprints,
+    /// connectors, modules and mounting holes stay). On by default when the whole board is
+    /// routed (not with --keep-all); this flag insists on it.
+    #[arg(long, conflicts_with = "no_move_parts")]
+    move_parts: bool,
+    /// Parts stay where they are.
+    #[arg(long)]
+    no_move_parts: bool,
+    /// References that never move under --move-parts, --placements and --clear-corridors,
+    /// comma separated.
+    #[arg(long, value_delimiter = ',')]
+    fixed: Vec<String>,
+    /// Try this many placements from the netlist (see `gummiband place`), route each one with
+    /// these settings and keep the best: fewest open connections, then clearance violations,
+    /// vias and length. Parts that are not locked or mechanical get new positions.
+    #[arg(long, default_value_t = defaults::PLACEMENTS)]
+    placements: usize,
+    /// First seed of --placements, and the seed of --clear-corridors.
+    #[arg(long, default_value_t = defaults::PLACEMENT_SEED)]
+    placement_seed: u64,
+    /// Before the routing, parts that sit in the band of a group of tracks between two parts
+    /// (ICs, connectors sharing at least two signal nets) and are not on its nets get new
+    /// positions with `place --corridors`; everything else stays. Pairs with `--patterns
+    /// groups`. Experimental.
+    #[arg(long)]
+    clear_corridors: bool,
+    /// Options per net from a JSON file, one entry per net name: a track width in mm
+    /// ({"GND": 0.5}, e.g. the widths of an existing routing, see bench/net_widths.py) or
+    /// an object with any of `width`, `min_width` (no necking below it), `neck_refs` (the
+    /// parts in whose courtyard the track may neck all the same; left out: those with a
+    /// narrower pad), `priority` (lower routes first) and `skip` (leave the net unrouted),
+    /// the fields of the MCP tool set_net_options. Nets the board lacks are passed over.
+    #[arg(long)]
+    net_widths: Option<PathBuf>,
+    /// Switch on KiCad's teardrops for vias and pads in the output; KiCad builds them when
+    /// it fills the zones.
+    #[arg(long)]
+    teardrops: bool,
+    /// Routing priority per net from a JSON file {"net name": priority, ...}; lower routes
+    /// first, unnamed nets keep their class priority. Wins over a priority in --net-widths.
+    #[arg(long)]
+    net_priorities: Option<PathBuf>,
+    /// Print a "progress {json}" line after every phase of the search (best candidate so
+    /// far, elapsed seconds), for the KiCad plugin and other front ends.
+    #[arg(long)]
+    progress: bool,
+    /// Keep improving after the normal search until a line arrives on stdin or stdin closes,
+    /// then finish the best result. Mutants take a few connections around one spot out and
+    /// lay them again, the rest of the result stays; when that stops helping, bolder side
+    /// branches take over. Results that differ in vias and length are written next to the
+    /// output as alt1, alt2, ... No placement rounds, and no plain search next to --negotiate.
+    /// Finishing nets, the tries of --give run first and the one kept goes on open ended.
+    #[arg(long)]
+    until_stop: bool,
+    /// Open end with a time budget: after the normal search keep improving for this many
+    /// seconds, then finish the best result (0: off). The budget starts when the open end
+    /// starts, so it never cuts the normal search short. With --until-stop as well, the
+    /// run ends on the line on stdin or after the budget, whichever comes first.
+    #[arg(long, default_value_t = defaults::OPEN_END_SECONDS)]
+    open_end_seconds: f64,
+    /// In the open end (--until-stop, --open-end-seconds): what a via is worth in mm of track when the open end judges its
+    /// results. Lower gives more vias and shorter tracks, higher fewer vias and longer ones.
+    #[arg(long, default_value_t = defaults::OPEN_VIA_COST)]
+    open_via_cost: f64,
+    /// Give the finished copper this reserve in mm on top of the clearances where there is
+    /// room, instead of leaving it at the limit [default: 0.03 in an open ended run
+    /// (--until-stop, --open-end-seconds), but not when finishing nets with --keep-all
+    /// --nets, else 0]
+    #[arg(long)]
+    air: Option<f64>,
+    /// At the end tracks of the default net class push aside what can give way and grow up
+    /// to this width in mm wherever there is room, with a taper at every change; routing
+    /// still works with the class width. A class with a track width rule in the .kicad_dru
+    /// that has an `opt` value grows to that one, also without this flag
+    #[arg(long, default_value_t = defaults::PREFER_WIDTH)]
+    prefer_width: f64,
+    /// Track angles of the result: `any` keeps the tight any-angle tracks with arcs, `45`
+    /// turns them into conventional 45 degree routing as a last step (straight pieces in
+    /// eight directions, chamfered corners). The step never adds a clearance violation;
+    /// where a 45 degree path does not fit, a piece keeps its angle.
+    #[arg(long, value_enum, default_value_t = Angles::Any)]
+    angles: Angles,
+    /// Meanders for the length and skew rules of the .kicad_dru; each is written as a KiCad
+    /// tuning pattern. On by default (without such rules nothing is tuned anyway); this flag
+    /// insists on it.
+    #[arg(long, conflicts_with = "no_tune")]
+    tune: bool,
+    /// Leave the lengths as routed: no meanders for the length and skew rules of the
+    /// .kicad_dru
+    #[arg(long)]
+    no_tune: bool,
+    /// Highest meander bump in mm (centre line above the original line)
+    #[arg(long, default_value_t = defaults::TUNE_AMPLITUDE)]
+    tune_amplitude: f64,
+    /// Air between neighbouring meander legs in track widths (at least the clearance)
+    #[arg(long, default_value_t = defaults::TUNE_SPACING)]
+    tune_spacing: f64,
+}
+
+impl RouteArgs {
+    /// The options of the pipeline these arguments ask for. What was not given is the default
+    /// of `RouteOptions`, through the clap defaults that name the same constants.
+    fn options(&self, plane_layers: &[String]) -> RouteOptions {
+        // `--name` insists, `--no-name` switches off, neither leaves the default to the pipeline
+        let on_off = |on: bool, off: bool| match (on, off) {
+            (true, _) => Some(true),
+            (false, true) => Some(false),
+            (false, false) => None,
+        };
+        RouteOptions {
+            keep_locked: self.keep_locked,
+            keep_all: self.keep_all,
+            nets: self.nets.clone(),
+            reroute: self.reroute,
+            shove: on_off(self.shove, self.no_shove),
+            give: self.give,
+            move_parts: on_off(self.move_parts, self.no_move_parts),
+            fixed: self.fixed.clone(),
+            plane_layers: plane_layers.to_vec(),
+            runs: self.runs,
+            via_pitch: self.via_pitch,
+            via_cost: self.via_cost,
+            layer_dirs: self.layer_dirs,
+            patterns: self.patterns.clone(),
+            via_pass: self.via_pass,
+            pair_pull: self.pair_pull,
+            pairs: self.pairs,
+            pair_skew: self.pair_skew,
+            pair_zdiff: self.pair_zdiff,
+            pair_all: self.pair_all,
+            breakouts: self.breakouts,
+            via_pairs: self.via_pairs,
+            negotiate: self.negotiate,
+            generations: self.generations,
+            geometry_generations: self.geometry_generations,
+            seed: self.seed,
+            frames: self.frames.clone(),
+            open_end_seconds: self.open_end_seconds,
+            open_via_cost: self.open_via_cost,
+            air: self.air,
+            prefer_width: self.prefer_width,
+            angles: match self.angles {
+                Angles::Any => gummiband_app::Angles::Any,
+                Angles::Deg45 => gummiband_app::Angles::Deg45,
+            },
+            tune: !self.no_tune,
+            tune_amplitude: self.tune_amplitude,
+            tune_spacing: self.tune_spacing,
+            placements: self.placements,
+            placement_seed: self.placement_seed,
+            clear_corridors: self.clear_corridors,
+            net_widths: self.net_widths.clone(),
+            net_priorities: self.net_priorities.clone(),
+            net_options: Default::default(),
+            teardrops: self.teardrops,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)] // parsed once
 enum Cmd {
@@ -44,219 +329,7 @@ enum Cmd {
         keep_all: bool,
     },
     /// Route a board and write the result.
-    Route {
-        board: PathBuf,
-        #[arg(short, long)]
-        output: PathBuf,
-        /// Keep only locked tracks and vias as fixed copper (default: remove all).
-        #[arg(long)]
-        keep_locked: bool,
-        /// Keep all existing tracks and vias as fixed copper and add to them (for completing
-        /// a partly routed board or finishing a started track).
-        #[arg(long)]
-        keep_all: bool,
-        /// With --keep-all --nets: if a connection finds no way, let the unlocked tracks of other
-        /// nets within this many mm of its pin give way (they are routed again), growing in
-        /// steps up to this radius; the try with the fewest open connections is kept. 0: nothing
-        /// gives way [default: 8 with --keep-all --nets, else 0]
-        #[arg(long)]
-        give: Option<f64>,
-        /// With --keep-all --nets: the unlocked tracks of other nets are threaded into the
-        /// topology, so a connection passes between them and they shift aside. What it does not
-        /// touch stays as it is in the file. On by default with --keep-all --nets (not with
-        /// --move-parts); this flag insists on it.
-        #[arg(long, conflicts_with = "no_shove")]
-        shove: bool,
-        /// With --keep-all --nets: the tracks of other nets stay where they are (no shove).
-        #[arg(long)]
-        no_shove: bool,
-        /// Route only these nets, comma separated (the others stay as they are).
-        #[arg(long, value_delimiter = ',')]
-        nets: Vec<String>,
-        /// Portfolio size (router runs with different orders). A constant, so that results do
-        /// not depend on the machine.
-        #[arg(long, default_value_t = defaults::RUNS)]
-        runs: usize,
-        /// Via site grid pitch in mm.
-        #[arg(long, default_value_t = defaults::VIA_PITCH)]
-        via_pitch: f64,
-        /// Via cost in mm of track (the search varies it around this value).
-        #[arg(long, default_value_t = defaults::VIA_COST)]
-        via_cost: f64,
-        /// Weight of the preferred layer directions (horizontal and vertical in turn) for
-        /// every third run of the portfolio; 0 = off.
-        #[arg(long, default_value_t = defaults::LAYER_DIRS)]
-        layer_dirs: f64,
-        /// Hints from local patterns of the board, comma separated: `shares` (pins of a plane net
-        /// next to each other share one fan-out via), `decaps` (a decoupling capacitor is
-        /// connected to its IC pin first, its via serves both), `rows` (the open end re-lays the
-        /// connections of a pin row in pin order), `pairs` (differential pairs before the other
-        /// signal connections, the longest first), `groups` (the connections between two parts
-        /// as one block in pin order, the longest block first; `groups-short` puts the shortest
-        /// first), `all` or
-        /// `none`. `gummiband info` lists the patterns it finds. When to use which: see
-        /// docs/guide/options.md.
-        #[arg(long, default_value = defaults::PATTERNS)]
-        patterns: String,
-        /// Factor on the via cost in the pass that routes connections with vias again and
-        /// keeps what has fewer vias (0 = off).
-        #[arg(long, default_value_t = defaults::VIA_PASS)]
-        via_pass: f64,
-        /// Weight of the pull between the nets of differential pairs (0 = off).
-        #[arg(long, default_value_t = defaults::PAIR_PULL)]
-        pair_pull: f64,
-        /// Experimental: route differential pairs as one wide track and split it into two parallel
-        /// tracks. Check the result with the KiCad DRC; on dense boards it costs connections.
-        #[arg(long)]
-        pairs: bool,
-        /// With --pairs: length difference left within a pair in mm; the shorter track gets
-        /// bumps down to this (a `skew` rule in the .kicad_dru may ask for less).
-        #[arg(long, default_value_t = defaults::PAIR_SKEW)]
-        pair_skew: f64,
-        /// With --pairs: target differential impedance in ohm. Sets the track width per layer
-        /// from the board's stackup; the gap stays.
-        #[arg(long)]
-        pair_zdiff: Option<f64>,
-        /// With --pairs: couple every pair recognised by name. Without it only pairs that a
-        /// `diff_pair_gap` rule or a net class of their own marks as differential pairs.
-        #[arg(long)]
-        pair_all: bool,
-        /// Experimental, with --pairs: let the wide track end at a point just outside the pads,
-        /// with two single tracks to the pads (breakout zones).
-        #[arg(long)]
-        breakouts: bool,
-        /// Experimental, with --pairs: two vias side by side are one via pair, a capsule that
-        /// turns with the wide track, in place of the circle around both.
-        #[arg(long)]
-        via_pairs: bool,
-        /// Rounds of negotiated routing from the start, in a second search next to the plain one.
-        /// Connections may overfill edges and cross for a rising price, see docs/ARCHITECTURE.md.
-        /// With 0 the search negotiates on its own when the plain one leaves a few connections
-        /// open (GB_AUTO_NEGOTIATE=0 switches that off).
-        #[arg(long, default_value_t = defaults::NEGOTIATE)]
-        negotiate: usize,
-        /// Generations of the evolutionary order search after the portfolio.
-        #[arg(long, default_value_t = defaults::GENERATIONS)]
-        generations: usize,
-        /// Generations that select by clearance violations after the geometry step. Each costs
-        /// about one routing pass; 0 is fastest and leaves many more violations.
-        #[arg(long, default_value_t = defaults::GEOMETRY_GENERATIONS)]
-        geometry_generations: usize,
-        /// Seed of the search (default: GB_EVO_SEED, then a constant). The same seed gives the
-        /// same result, another one a different try. The line "best: seed N" and the report
-        /// name the seed that was used.
-        #[arg(long)]
-        seed: Option<u64>,
-        /// Write a debug SVG.
-        #[arg(long)]
-        svg: Option<PathBuf>,
-        /// Draw the triangulation into the SVG.
-        #[arg(long)]
-        svg_tris: bool,
-        /// Write one SVG per generation (best candidate) into this folder, and an animated GIF
-        /// if ImageMagick is available.
-        #[arg(long)]
-        frames: Option<PathBuf>,
-        /// Write a machine readable JSON report (stats, unrouted connections, violations,
-        /// portfolio) for scripts and AI agents. Its `seconds` are the wall time of the whole
-        /// route, from reading the board to the checked result (writing the files not
-        /// included), the same number the MCP tool route returns; `search_seconds` is the part
-        /// up to the end of the search.
-        #[arg(long)]
-        report: Option<PathBuf>,
-        /// Let the geometry generations shift parts next to clearance problems and open
-        /// connections; the routed copper follows like rubber bands (locked footprints,
-        /// connectors, modules and mounting holes stay). On by default when the whole board is
-        /// routed (not with --keep-all); this flag insists on it.
-        #[arg(long, conflicts_with = "no_move_parts")]
-        move_parts: bool,
-        /// Parts stay where they are.
-        #[arg(long)]
-        no_move_parts: bool,
-        /// References that never move under --move-parts and --placements, comma separated.
-        #[arg(long, value_delimiter = ',')]
-        fixed: Vec<String>,
-        /// Try this many placements from the netlist (see `gummiband place`), route each one with
-        /// these settings and keep the best: fewest open connections, then clearance violations,
-        /// vias and length. Parts that are not locked or mechanical get new positions.
-        #[arg(long, default_value_t = defaults::PLACEMENTS)]
-        placements: usize,
-        /// First seed of --placements.
-        #[arg(long, default_value_t = defaults::PLACEMENT_SEED)]
-        placement_seed: u64,
-        /// Before the routing, parts that sit in the band of a group of tracks between two parts
-        /// (ICs, connectors sharing at least two signal nets) and are not on its nets get new
-        /// positions with `place --corridors`; everything else stays. Pairs with `--patterns
-        /// groups`. Experimental.
-        #[arg(long)]
-        clear_corridors: bool,
-        /// Options per net from a JSON file, one entry per net name: a track width in mm
-        /// ({"GND": 0.5}, e.g. the widths of an existing routing, see bench/net_widths.py) or
-        /// an object with any of `width`, `min_width` (no necking below it), `neck_refs` (the
-        /// parts in whose courtyard the track may neck all the same; left out: those with a
-        /// narrower pad), `priority` (lower routes first) and `skip` (leave the net unrouted),
-        /// the fields of the MCP tool set_net_options. Nets the board lacks are passed over.
-        #[arg(long)]
-        net_widths: Option<PathBuf>,
-        /// Switch on KiCad's teardrops for vias and pads in the output; KiCad builds them when
-        /// it fills the zones.
-        #[arg(long)]
-        teardrops: bool,
-        /// Routing priority per net from a JSON file {"net name": priority, ...}; lower routes
-        /// first, unnamed nets keep their class priority. Wins over a priority in --net-widths.
-        #[arg(long)]
-        net_priorities: Option<PathBuf>,
-        /// Print a "progress {json}" line after every phase of the search (best candidate so
-        /// far, elapsed seconds), for the KiCad plugin and other front ends.
-        #[arg(long)]
-        progress: bool,
-        /// Keep improving after the normal search until a line arrives on stdin or stdin closes,
-        /// then finish the best result. Mutants take a few connections around one spot out and
-        /// lay them again, the rest of the result stays; when that stops helping, bolder side
-        /// branches take over. Results that differ in vias and length are written next to the
-        /// output as alt1, alt2, ... No placement rounds, and no plain search next to --negotiate.
-        /// Finishing nets, the tries of --give run first and the one kept goes on open ended.
-        #[arg(long)]
-        until_stop: bool,
-        /// Open end with a time budget: after the normal search keep improving for this many
-        /// seconds, then finish the best result (0: off). The budget starts when the open end
-        /// starts, so it never cuts the normal search short. With --until-stop as well, the
-        /// run ends on the line on stdin or after the budget, whichever comes first.
-        #[arg(long, default_value_t = defaults::OPEN_END_SECONDS)]
-        open_end_seconds: f64,
-        /// In the open end (--until-stop, --open-end-seconds): what a via is worth in mm of track when the open end judges its
-        /// results. Lower gives more vias and shorter tracks, higher fewer vias and longer ones.
-        #[arg(long, default_value_t = defaults::OPEN_VIA_COST)]
-        open_via_cost: f64,
-        /// Give the finished copper this reserve in mm on top of the clearances where there is
-        /// room, instead of leaving it at the limit [default: 0.03 in an open ended run
-        /// (--until-stop, --open-end-seconds), but not when finishing nets with --keep-all
-        /// --nets, else 0]
-        #[arg(long)]
-        air: Option<f64>,
-        /// At the end tracks of the default net class push aside what can give way and grow up
-        /// to this width in mm wherever there is room, with a taper at every change; routing
-        /// still works with the class width. A class with a track width rule in the .kicad_dru
-        /// that has an `opt` value grows to that one, also without this flag
-        #[arg(long, default_value_t = defaults::PREFER_WIDTH)]
-        prefer_width: f64,
-        /// Track angles of the result: `any` keeps the tight any-angle tracks with arcs, `45`
-        /// turns them into conventional 45 degree routing as a last step (straight pieces in
-        /// eight directions, chamfered corners). The step never adds a clearance violation;
-        /// where a 45 degree path does not fit, a piece keeps its angle.
-        #[arg(long, value_enum, default_value_t = Angles::Any)]
-        angles: Angles,
-        /// Leave the lengths as routed: no meanders for the length and skew rules of the
-        /// .kicad_dru (without such rules nothing is tuned anyway)
-        #[arg(long)]
-        no_tune: bool,
-        /// Highest meander bump in mm (centre line above the original line)
-        #[arg(long, default_value_t = defaults::TUNE_AMPLITUDE)]
-        tune_amplitude: f64,
-        /// Air between neighbouring meander legs in track widths (at least the clearance)
-        #[arg(long, default_value_t = defaults::TUNE_SPACING)]
-        tune_spacing: f64,
-    },
+    Route(Box<RouteArgs>),
     /// Place parts from the netlist: locked footprints, connectors, modules, mounting holes,
     /// buttons and test points stay, everything else gets a new position. Its current position
     /// does not matter. --only, --outside and --all-unlocked change which parts move. Route the
@@ -548,116 +621,19 @@ fn main() -> Result<()> {
             println!("rules: {:?}", b.rules);
             println!("custom track clearances: {} net pairs", b.pair_clearance.len());
         }
-        Cmd::Route {
-            board,
-            output,
-            keep_locked,
-            keep_all,
-            give,
-            shove,
-            no_shove,
-            nets,
-            runs,
-            via_pitch,
-            via_cost,
-            layer_dirs,
-            patterns,
-            pair_pull,
-            via_pass,
-            negotiate,
-            pairs,
-            pair_skew,
-            pair_zdiff,
-            pair_all,
-            breakouts,
-            via_pairs,
-            generations,
-            geometry_generations,
-            seed,
-            svg,
-            svg_tris,
-            report,
-            frames,
-            move_parts,
-            no_move_parts,
-            fixed,
-            placements,
-            placement_seed,
-            clear_corridors,
-            progress,
-            until_stop,
-            open_end_seconds,
-            open_via_cost,
-            air,
-            prefer_width,
-            net_widths,
-            teardrops,
-            net_priorities,
-            angles,
-            no_tune,
-            tune_amplitude,
-            tune_spacing,
-        } => {
+        Cmd::Route(args) => {
             use gummiband_app::Event;
-            let opts = RouteOptions {
-                keep_locked,
-                keep_all,
-                nets,
-                reroute: false,
-                shove: if shove {
-                    Some(true)
-                } else if no_shove {
-                    Some(false)
-                } else {
-                    None
-                },
-                give,
-                move_parts: if move_parts {
-                    Some(true)
-                } else if no_move_parts {
-                    Some(false)
-                } else {
-                    None
-                },
-                fixed,
-                plane_layers: cli.plane_layers.clone(),
-                runs,
-                via_pitch,
-                via_cost,
-                layer_dirs,
-                patterns,
-                via_pass,
-                pair_pull,
-                pairs,
-                pair_skew,
-                pair_zdiff,
-                pair_all,
-                breakouts,
-                via_pairs,
-                negotiate,
-                generations,
-                geometry_generations,
-                seed,
-                frames: frames.is_some(),
-                open_end_seconds,
-                open_via_cost,
-                air,
-                prefer_width,
-                angles: match angles {
-                    Angles::Any => gummiband_app::Angles::Any,
-                    Angles::Deg45 => gummiband_app::Angles::Deg45,
-                },
-                tune: !no_tune,
-                tune_amplitude,
-                tune_spacing,
-                placements,
-                placement_seed,
-                clear_corridors,
-                net_widths,
-                net_priorities,
-                net_options: Default::default(),
-                teardrops,
-            };
+            let opts = args.options(&cli.plane_layers);
+            let RouteArgs {
+                board,
+                output,
+                svg,
+                svg_tris,
+                report,
+                progress,
+                until_stop,
+                ..
+            } = *args;
             // the options against each other, before a word is printed
             opts.validate(until_stop).map_err(anyhow::Error::msg)?;
             if gummiband_core::knobs::GPU.on() && !cfg!(feature = "gpu") {
@@ -891,50 +867,11 @@ fn main() -> Result<()> {
                     );
                 }
             }
-            if let Some(dir) = &frames {
-                std::fs::create_dir_all(dir)?;
-                let mut pngs = Vec::new();
-                for (i, (label, geo, relaxed)) in res.frames.iter().enumerate() {
-                    let v = if *relaxed {
-                        gummiband_core::check::check(b, geo)
-                    } else {
-                        Vec::new()
-                    };
-                    let svg_text = svg::render(b, None, geo, &v, false).replace(
-                        "</svg>",
-                        &format!(
-                            r##"<text x="{}" y="{}" font-size="2.2" font-family="Helvetica" fill="#eee">{}</text></svg>"##,
-                            b.bbox().min.x,
-                            b.bbox().min.y - 0.6,
-                            label
-                        ),
-                    );
-                    let f = dir.join(format!("frame-{i:03}.svg"));
-                    std::fs::write(&f, svg_text)?;
-                    let png = dir.join(format!("frame-{i:03}.png"));
-                    let ok = std::process::Command::new("rsvg-convert")
-                        .args(["-w", "1200", "-o"])
-                        .arg(&png)
-                        .arg(&f)
-                        .status()
-                        .map(|s| s.success())
-                        .unwrap_or(false);
-                    if ok {
-                        pngs.push(png);
-                    }
-                }
-                if !pngs.is_empty() {
-                    let gif = dir.join("evolution.gif");
-                    let _ = std::process::Command::new("magick")
-                        .args(["-delay", "120", "-loop", "0"])
-                        .args(&pngs)
-                        .arg(&gif)
-                        .status();
-                    println!("frames: {} images, animation {}", pngs.len(), gif.display());
-                }
-            }
             if let Some(path) = svg {
-                std::fs::write(&path, svg::render(b, Some(sub), &res.geometry, viol, svg_tris))?;
+                std::fs::write(
+                    &path,
+                    gummiband_app::svg::render(b, Some(sub), &res.geometry, viol, svg_tris),
+                )?;
             }
             let changes = &r.soft;
             if r.shove {
@@ -960,6 +897,12 @@ fn main() -> Result<()> {
                     st.length,
                     st.violations.unwrap_or(0)
                 );
+            }
+            if let Some(f) = &written.frames {
+                match &f.animation {
+                    Some(gif) => println!("frames: {} images, animation {}", f.pngs, gif.display()),
+                    None => println!("frames: {} pictures in {}", f.svgs, f.dir.display()),
+                }
             }
             for path in &written.copied {
                 println!("copied {}", path.display());
@@ -1282,7 +1225,7 @@ fn main() -> Result<()> {
                 ob.soften(&[]);
                 let geo = gummiband_core::follow::soft_geometry(&ob);
                 let viol = gummiband_core::check::check(&ob, &geo);
-                std::fs::write(&path, svg::render(&ob, None, &geo, &viol, false))?;
+                std::fs::write(&path, gummiband_app::svg::render(&ob, None, &geo, &viol, false))?;
             }
             if let Some(path) = report {
                 let json = serde_json::json!({
@@ -1436,4 +1379,113 @@ fn placement_json(p: &gummiband_app::Placement) -> serde_json::Value {
             "length_mm": t.length,
         })).collect::<Vec<_>>(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+    use gummiband_app::{Kind, OPTIONS};
+
+    /// Arguments of `route` that are the CLI's own: where the result and its reports go, and
+    /// the stop line of the open end. Everything else has to be an option of the pipeline.
+    const OWN: &[&str] = &["board", "output", "svg", "svg-tris", "report", "progress", "until-stop"];
+
+    /// The long names of `route`, with the global ones.
+    fn route_flags() -> Vec<(String, Vec<String>)> {
+        let cli = Cli::command();
+        let route = cli.find_subcommand("route").expect("route");
+        cli.get_arguments()
+            .chain(route.get_arguments())
+            .filter(|a| a.get_id() != "threads")
+            .map(|a| {
+                let name = a.get_long().map(str::to_string).unwrap_or(a.get_id().to_string());
+                let defaults = a
+                    .get_default_values()
+                    .iter()
+                    .map(|v| v.to_string_lossy().into_owned())
+                    .collect();
+                (name, defaults)
+            })
+            .collect()
+    }
+
+    /// Every option of the pipeline is a flag of `route` under its name, with the default of
+    /// the table, and `route` has no option of the pipeline that the table lacks. The MCP server
+    /// has the same test against the same table, so the two front ends offer the same.
+    #[test]
+    fn route_offers_the_options_of_the_pipeline() {
+        let flags = route_flags();
+        let has = |name: &str| flags.iter().any(|(f, _)| f == name);
+        for o in OPTIONS {
+            let flag = o.flag();
+            let Some((_, defaults)) = flags.iter().find(|(f, _)| *f == flag) else {
+                panic!("route lacks --{flag}");
+            };
+            if o.kind == Kind::OnOff {
+                assert!(has(&format!("no-{flag}")), "route lacks --no-{flag}");
+            }
+            // a default clap prints is the default of the table
+            if let [d] = defaults.as_slice()
+                && o.kind != Kind::Switch
+                && o.kind != Kind::OnOff
+            {
+                assert_eq!(d, o.default, "default of --{flag}");
+            }
+        }
+        for (flag, _) in &flags {
+            let name = flag.strip_prefix("no-").unwrap_or(flag).replace('-', "_");
+            assert!(
+                OWN.contains(&flag.as_str()) || gummiband_app::option_doc(&name).is_some(),
+                "--{flag} is neither in gummiband_app::OPTIONS nor one of the CLI's own arguments"
+            );
+        }
+    }
+
+    fn route_args(extra: &[&str]) -> (RouteOptions, bool) {
+        let mut argv = vec!["gummiband", "route", "in.kicad_pcb", "-o", "out.kicad_pcb"];
+        argv.extend(extra);
+        let cli = Cli::try_parse_from(argv).unwrap();
+        let Cmd::Route(args) = cli.cmd else {
+            panic!("route");
+        };
+        (args.options(&cli.plane_layers), args.until_stop)
+    }
+
+    /// With nothing given the CLI routes with the defaults of the pipeline, and what is given
+    /// arrives under its name.
+    #[test]
+    fn arguments_become_the_options_of_the_pipeline() {
+        let (opts, until_stop) = route_args(&[]);
+        assert_eq!(format!("{opts:?}"), format!("{:?}", RouteOptions::default()));
+        assert!(!until_stop);
+        let (opts, _) = route_args(&[
+            "--keep-all",
+            "--nets",
+            "A,B",
+            "--reroute",
+            "--no-shove",
+            "--give",
+            "2",
+            "--no-tune",
+            "--open-end-seconds",
+            "30",
+            "--plane-layers",
+            "In1.Cu",
+            "--frames",
+            "pictures",
+        ]);
+        assert!(opts.keep_all && opts.reroute && !opts.tune);
+        assert_eq!(opts.nets, ["A", "B"]);
+        assert_eq!((opts.shove, opts.give, opts.move_parts), (Some(false), Some(2.0), None));
+        assert_eq!(opts.open_end_seconds, 30.0);
+        assert_eq!(opts.plane_layers, ["In1.Cu"]);
+        assert_eq!(opts.frames, Some(PathBuf::from("pictures")));
+        assert_eq!(opts.validate(false), Ok(()));
+        // contradictions are the pipeline's to refuse, in its words
+        let (opts, until_stop) = route_args(&["--until-stop", "--pairs"]);
+        assert!(opts.validate(until_stop).unwrap_err().contains("pairs"));
+        let (opts, _) = route_args(&["--runs", "0"]);
+        assert_eq!(opts.validate(false), Err("runs must be at least 1".to_string()));
+    }
 }

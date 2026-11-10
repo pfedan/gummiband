@@ -3,10 +3,13 @@
 //! option, its default and what it does exist once.
 
 pub mod nets;
+pub mod options;
 pub mod route;
+pub mod svg;
 
 pub use nets::{AppliedNetOptions, NetOptions, apply_net_options, parse_net_options, read_net_options};
+pub use options::{Kind, OPTIONS, OptionDoc, option_doc};
 pub use route::{
-    Alternative, Angles, Angles45, Cleared, Event, Hooks, Placement, Room, RouteOptions, RouteOutcome, Routed, Trial,
-    Tuned, Written, clear_corridors, copy_project_files, defaults, load_board, route_board, route_file,
+    Alternative, Angles, Angles45, Cleared, Event, Frames, Hooks, Placement, Room, RouteOptions, RouteOutcome, Routed,
+    Trial, Tuned, Written, clear_corridors, copy_project_files, defaults, load_board, route_board, route_file,
 };

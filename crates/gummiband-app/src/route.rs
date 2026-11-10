@@ -122,8 +122,9 @@ pub struct RouteOptions {
     pub generations: usize,
     pub geometry_generations: usize,
     pub seed: Option<u64>,
-    /// Keep the best candidate of every generation in the result (for an animation).
-    pub frames: bool,
+    /// Keep the best candidate of every generation, and [`RouteOutcome::write`] draws them into
+    /// this folder ([`Routed::write_frames`]).
+    pub frames: Option<PathBuf>,
     /// Open end with a time budget: after the normal search the result keeps improving for
     /// this many seconds, then the best one is finished (0: off). The budget starts when the
     /// open end starts, so it never cuts the normal search short. [`Hooks::stop`] is the open
@@ -188,7 +189,7 @@ impl Default for RouteOptions {
             generations: defaults::GENERATIONS,
             geometry_generations: defaults::GEOMETRY_GENERATIONS,
             seed: None,
-            frames: false,
+            frames: None,
             open_end_seconds: defaults::OPEN_END_SECONDS,
             open_via_cost: defaults::OPEN_VIA_COST,
             air: None,
@@ -381,7 +382,7 @@ impl RouteOptions {
             population: self.runs,
             generations: self.generations,
             geometry_generations: self.geometry_generations,
-            frames: self.frames,
+            frames: self.frames.is_some(),
             seed: self.seed,
             open_end: stop,
             air: self.air(open_end),
@@ -833,6 +834,82 @@ impl Routed {
     }
 }
 
+/// The pictures of a search, see [`Routed::write_frames`].
+#[derive(Debug, Clone)]
+pub struct Frames {
+    pub dir: PathBuf,
+    /// One SVG per generation, `frame-NNN.svg`.
+    pub svgs: usize,
+    /// As many PNGs next to them, if `rsvg-convert` is there.
+    pub pngs: usize,
+    /// `evolution.gif` of the PNGs, if ImageMagick's `magick` is there.
+    pub animation: Option<PathBuf>,
+}
+
+impl Routed {
+    /// Draw the best candidate of every generation into `dir` (the search kept them with
+    /// `frames` set): `frame-NNN.svg`, a PNG of each if `rsvg-convert` is there, and
+    /// `evolution.gif` if ImageMagick's `magick` is.
+    pub fn write_frames(&self, dir: &Path) -> Result<Frames> {
+        use std::process::{Command, Stdio};
+        let b = &self.board;
+        std::fs::create_dir_all(dir)?;
+        let mut pngs = Vec::new();
+        for (i, (label, geo, relaxed)) in self.res.frames.iter().enumerate() {
+            let v = if *relaxed {
+                gummiband_core::check::check(b, geo)
+            } else {
+                Vec::new()
+            };
+            let svg_text = crate::svg::render(b, None, geo, &v, false).replace(
+                "</svg>",
+                &format!(
+                    r##"<text x="{}" y="{}" font-size="2.2" font-family="Helvetica" fill="#eee">{}</text></svg>"##,
+                    b.bbox().min.x,
+                    b.bbox().min.y - 0.6,
+                    label
+                ),
+            );
+            let f = dir.join(format!("frame-{i:03}.svg"));
+            std::fs::write(&f, svg_text)?;
+            let png = dir.join(format!("frame-{i:03}.png"));
+            // a front end may speak a protocol on its standard output: the tools stay silent
+            let ok = Command::new("rsvg-convert")
+                .args(["-w", "1200", "-o"])
+                .arg(&png)
+                .arg(&f)
+                .stdin(Stdio::null())
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if ok {
+                pngs.push(png);
+            }
+        }
+        let mut animation = None;
+        if !pngs.is_empty() {
+            let gif = dir.join("evolution.gif");
+            let made = Command::new("magick")
+                .args(["-delay", "120", "-loop", "0"])
+                .args(&pngs)
+                .arg(&gif)
+                .stdin(Stdio::null())
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if made {
+                animation = Some(gif);
+            }
+        }
+        Ok(Frames {
+            dir: dir.to_path_buf(),
+            svgs: self.res.frames.len(),
+            pngs: pngs.len(),
+            animation,
+        })
+    }
+}
+
 /// Teardrops at track width changes are a project setting: the output's .kicad_pro (a copy of
 /// the input's if it has none yet) switches them on. The input's project stays as it is.
 fn track_end_teardrops(input: &Path, output: &Path) -> Result<()> {
@@ -1073,6 +1150,8 @@ pub struct RouteOutcome {
     /// The winner of `placements` with every trial.
     pub placement: Option<Placement>,
     pub routed: Routed,
+    /// The folder of `frames`.
+    frames: Option<PathBuf>,
     /// The copies with cleared corridors and the placements live here until the result is
     /// written and dropped.
     _temp: TempDirs,
@@ -1108,6 +1187,8 @@ pub struct Written {
     pub alternatives: Vec<Alternative>,
     /// The project files copied next to the output ([`copy_project_files`]).
     pub copied: Vec<PathBuf>,
+    /// The pictures of the search, with `frames`.
+    pub frames: Option<Frames>,
 }
 
 impl RouteOutcome {
@@ -1127,11 +1208,16 @@ impl RouteOutcome {
                 stats: stats.clone(),
             });
         }
+        let frames = match &self.frames {
+            Some(dir) => Some(self.routed.write_frames(dir)?),
+            None => None,
+        };
         Ok(Written {
             output: self.output.clone(),
             items,
             alternatives,
             copied,
+            frames,
         })
     }
 
@@ -1216,6 +1302,7 @@ pub fn route_file(board: &Path, output: &Path, opts: &RouteOptions, hooks: &Hook
         cleared_corridors,
         placement,
         routed,
+        frames: opts.frames.clone(),
         _temp: temp,
     })
 }
