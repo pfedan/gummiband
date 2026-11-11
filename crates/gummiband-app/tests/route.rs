@@ -128,6 +128,15 @@ fn contradictions_are_errors() {
         true,
         "areas fill does not work with an open ended run yet",
     );
+    refused(
+        RouteOptions {
+            area_stitch: Some(true),
+            ..d.clone()
+        },
+        false,
+        "area_stitch needs areas fill",
+    );
+    assert!(fill.area_stitch() && !d.area_stitch());
     // finishing nets shoves by default
     refused(
         RouteOptions {

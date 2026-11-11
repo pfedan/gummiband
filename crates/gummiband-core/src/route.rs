@@ -3988,7 +3988,7 @@ impl<'a> Router<'a> {
             crate::relax::relax(self.board, &self.sub, &mut geo, &short);
         }
         let goals = crate::prof::time(crate::prof::Slot::AreaModel, || {
-            crate::fill::goals(self.board, plan, &geo, AREA_PASS_STEP, AREA_PASS_SLACK)
+            crate::fill::goals(self.board, plan, &geo, AREA_PASS_STEP, AREA_PASS_SLACK, true)
         });
         crate::prof::add(crate::prof::Slot::AreaModels, 1);
         self.area_goals = std::sync::Arc::new(goals);
@@ -4000,11 +4000,16 @@ impl<'a> Router<'a> {
     fn area_conns(&mut self) -> Vec<usize> {
         let first = self.conns.len();
         let goals = self.area_goals.clone();
+        let stitch = self.board.areas.as_ref().is_some_and(|p| p.stitch);
         self.area_base = 0;
         for g in goals.iter() {
             let has = |r: &Router, pins: &[usize]| r.conns.iter().any(|c| c.net == g.net && pins.contains(&c.from));
             if g.has_fill() {
-                for pins in &g.apart {
+                for (pins, &site) in g.apart.iter().zip(&g.site) {
+                    // an island with a spot for a via gets that via on the finished copper
+                    if stitch && site {
+                        continue;
+                    }
                     if !has(self, pins) {
                         self.conns.push(Conn {
                             net: g.net,

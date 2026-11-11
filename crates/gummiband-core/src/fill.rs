@@ -142,6 +142,9 @@ pub struct AreaPlan {
     /// The nets the fill connects: those with an area on a layer that is routed. They are not
     /// laid as tracks.
     pub nets: Vec<NetId>,
+    /// An island of fill with pads gets one via where the model finds the spot, set on the
+    /// finished copper, and no connection of its own before that.
+    pub stitch: bool,
 }
 
 impl AreaPlan {
@@ -165,7 +168,15 @@ pub struct AreaGoal {
     pub reached: Vec<usize>,
     /// The pads it does not reach, by the group of copper they hang on.
     pub apart: Vec<Vec<usize>>,
+    /// Per group of `apart`: it is an island of fill that one via joins to the area, at a spot
+    /// with at least [`SITE_ROOM`] to spare.
+    pub site: Vec<bool>,
 }
+
+/// Room in mm that a spot for the via of an island must have beyond what the via needs, for the
+/// search to count on that via and lay no connection: the via is set on the finished copper,
+/// and tracks still move a little until then.
+pub const SITE_ROOM: f64 = 0.1;
 
 impl AreaGoal {
     /// The goal that the fill `f` of a net is, with `areas` as given to the model.
@@ -208,13 +219,19 @@ impl AreaGoal {
                 None => apart.push((p.group, vec![p.pin])),
             }
         }
+        let apart: Vec<Vec<usize>> = apart.into_iter().map(|(_, pins)| pins).collect();
+        let has_site = |pins: &Vec<usize>| {
+            let island = f.islands.iter().find(|i| i.pins.contains(&pins[0]));
+            island.and_then(|i| i.via.as_ref()).is_some_and(|v| v.room >= SITE_ROOM)
+        };
         AreaGoal {
             net: f.net,
             raster: g.clone(),
             inside,
             fill: of_the_area,
             reached,
-            apart: apart.into_iter().map(|(_, pins)| pins).collect(),
+            site: apart.iter().map(has_site).collect(),
+            apart,
         }
     }
 
@@ -256,17 +273,36 @@ impl AreaGoal {
 
 /// The goals of the nets of `plan` on `board` with the copper of `geo`: the model once per net,
 /// with a raster step of `step` or the one of the plan, whichever is coarser, and with `slack`
-/// more on every clearance of the fill.
-pub fn goals(board: &Board, plan: &AreaPlan, geo: &crate::realize::Geometry, step: f64, slack: f64) -> Vec<AreaGoal> {
-    let work = with_copper(board, geo);
+/// more on every clearance of the fill. With `bare` each net is judged without its own tracks
+/// and vias of `geo`: what its area joins by the fill alone. The search asks that way, because
+/// a pad that hangs on the area through a connection stops doing so when the connection is
+/// taken out, and the model is not asked again each time.
+pub fn goals(
+    board: &Board,
+    plan: &AreaPlan,
+    geo: &crate::realize::Geometry,
+    step: f64,
+    slack: f64,
+    bare: bool,
+) -> Vec<AreaGoal> {
     let options = Options {
         step: plan.options.step.max(step),
         slack: plan.options.slack + slack,
         ..plan.options.clone()
     };
+    let goal = |work: &Board, net: NetId| AreaGoal::of(&plan.areas, &fill_net(work, &plan.areas, net, &options));
+    if !bare {
+        let work = with_copper(board, geo);
+        return plan.nets.iter().map(|&net| goal(&work, net)).collect();
+    }
     plan.nets
         .iter()
-        .map(|&net| AreaGoal::of(&plan.areas, &fill_net(&work, &plan.areas, net, &options)))
+        .map(|&net| {
+            let mut others = geo.clone();
+            others.tracks.retain(|t| t.net != net);
+            others.vias.retain(|v| v.net != net);
+            goal(&with_copper(board, &others), net)
+        })
         .collect()
 }
 

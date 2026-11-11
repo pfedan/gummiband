@@ -392,8 +392,9 @@ pub struct Planned {
 /// (entries as [`crate::parse_pour`] reads them) as they will be laid after the route, with the
 /// fill rules a pour gets by default. The nets the fill connects are those with an area on a
 /// routed layer; the small `gb:` pours of `power_copper` are copper, not areas, and a net with
-/// planes only keeps its fan-outs. `nets` are the nets of the route (empty: all).
-pub fn route_plan(kb: &KicadBoard, pour: &[String], nets: &[String]) -> Result<Planned> {
+/// planes only keeps its fan-outs. `nets` are the nets of the route (empty: all). With `stitch`
+/// the islands of fill get their via at the end of the route ([`stitch_route`]).
+pub fn route_plan(kb: &KicadBoard, pour: &[String], nets: &[String], stitch: bool) -> Result<Planned> {
     let b = &kb.board;
     let from_file = gummiband_kicad::area::areas(kb);
     let mut areas = from_file.areas;
@@ -489,6 +490,7 @@ pub fn route_plan(kb: &KicadBoard, pour: &[String], nets: &[String]) -> Result<P
                 ..Default::default()
             },
             nets: plan_nets,
+            stitch,
         },
         notes,
     })
@@ -596,6 +598,11 @@ pub fn add_via(board: &mut Board, net: NetId, at: Point, diameter: f64, drill: f
 /// area; none is set where the model finds nothing to join. The vias are added to `board` and
 /// returned.
 pub fn stitch_islands(board: &mut Board, areas: &[Area], net: NetId, o: &fill::Options) -> Vec<Point> {
+    stitch_islands_with(board, areas, net, o, 0.0)
+}
+
+/// [`stitch_islands`] with spots only that have `room` mm to spare beyond what the via needs.
+pub fn stitch_islands_with(board: &mut Board, areas: &[Area], net: NetId, o: &fill::Options, room: f64) -> Vec<Point> {
     let class = board.class_of(net).clone();
     let (diameter, drill) = o.via.unwrap_or((class.via_diameter, class.via_drill));
     let pitch = diameter + board.rules.hole_to_hole.max(class.clearance);
@@ -603,7 +610,11 @@ pub fn stitch_islands(board: &mut Board, areas: &[Area], net: NetId, o: &fill::O
     for _round in 0..8 {
         let f = fill::fill_net(board, areas, net, o);
         let before = placed.len();
-        let sites = f.islands.iter().filter_map(|i| i.via.as_ref());
+        let sites = f
+            .islands
+            .iter()
+            .filter_map(|i| i.via.as_ref())
+            .filter(|v| v.room >= room);
         for at in sites.flat_map(|v| v.anchor.into_iter().chain([v.at])) {
             if placed.iter().any(|q| q.dist(at) < pitch) {
                 continue;
@@ -613,6 +624,34 @@ pub fn stitch_islands(board: &mut Board, areas: &[Area], net: NetId, o: &fill::O
         }
         if placed.len() == before {
             break;
+        }
+    }
+    placed
+}
+
+/// The vias of the islands at the end of a route with `areas fill`: on the finished copper of
+/// `geo` every island of fill with pads gets one via of its net where the model finds the spot
+/// (and the second one where that spot lands on a piece that is itself apart), with at least
+/// one raster step to spare, so that what the raster cannot see costs no clearance. The vias
+/// are added to `geo`, and their number is returned.
+pub fn stitch_route(b: &Board, plan: &fill::AreaPlan, geo: &mut gummiband_core::realize::Geometry) -> usize {
+    let mut work = fill::with_copper(b, geo);
+    let mut placed = 0;
+    for &net in &plan.nets {
+        let class = b.class_of(net);
+        let (diameter, drill) = plan.options.via.unwrap_or((class.via_diameter, class.via_drill));
+        for at in stitch_islands_with(&mut work, &plan.areas, net, &plan.options, plan.options.step) {
+            geo.vias.push(gummiband_core::realize::Via {
+                at,
+                diameter,
+                drill,
+                net,
+                layer: None,
+                origin: None,
+                resting: false,
+                half: Point::default(),
+            });
+            placed += 1;
         }
     }
     placed

@@ -941,7 +941,9 @@ pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal
     let board = match &board.areas {
         Some(plan) if !plan.nets.is_empty() => {
             let mut b = board.clone();
-            b.area_fill = Some(std::sync::Arc::new(crate::fill::goals(board, plan, geo, 0.0, 0.0)));
+            b.area_fill = Some(std::sync::Arc::new(crate::fill::goals(
+                board, plan, geo, 0.0, 0.0, false,
+            )));
             filled = b;
             &filled
         }

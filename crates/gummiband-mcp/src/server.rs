@@ -1010,6 +1010,10 @@ pub struct RouteIn {
     /// "NET:LAYER,LAYER" (the outer layers where none is given). The route takes the pour as
     /// an area of the net; it does not write the zone.
     pub pour: Option<Vec<String>>,
+    /// With areas "fill": an island of fill that holds pads gets one via where it joins the
+    /// area, set on the finished copper where the fill model finds the spot (default true with
+    /// areas "fill"). false: such a pad gets a track to the area instead.
+    pub area_stitch: Option<bool>,
     /// Output .kicad_pcb (default: `<input>.routed.kicad_pcb` next to the input). The
     /// .kicad_pro and .kicad_dru are copied next to it if missing.
     pub output: Option<String>,
@@ -1420,6 +1424,8 @@ pub struct RouteOut {
     /// copper, judged by the router's fill model (area_report on the written file has the
     /// details).
     pub areas: Vec<RouteAreaOut>,
+    /// Of `vias`, those set for islands of fill (area_stitch).
+    pub area_vias: usize,
     /// Gummiband's own clearance check on the result.
     pub violations_total: usize,
     pub violations_by_kind: BTreeMap<String, usize>,
@@ -3275,6 +3281,7 @@ fn route_options(p: &RouteIn, keep_locked: bool) -> Result<RouteOptions> {
             Some(word) => gummiband_app::Areas::parse(word).map_err(anyhow::Error::msg)?,
         },
         pour: p.pour.clone().unwrap_or_default(),
+        area_stitch: p.area_stitch,
         runs: p.runs.unwrap_or(d.runs),
         via_pitch: p.via_pitch.unwrap_or(d.via_pitch),
         via_cost: p.via_cost.unwrap_or(d.via_cost),
@@ -3537,6 +3544,7 @@ fn route_blocking(id: String, path: PathBuf, opts: RouteOptions, p: RouteIn) -> 
         length_mm: st.length,
         items_written: items,
         skipped_nets: outcome.skipped_nets.clone(),
+        area_vias: routed.area_vias,
         areas: routed
             .areas
             .iter()

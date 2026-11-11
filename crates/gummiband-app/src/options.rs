@@ -116,6 +116,12 @@ pub const OPTIONS: &[OptionDoc] = &[
         "With areas fill: nets that get a pour after the route, each NET or NET:LAYER,LAYER (the outer layers where none is given), which the route takes as an area of the net.",
     ),
     opt(
+        "area_stitch",
+        Kind::OnOff,
+        "on with areas fill",
+        "With areas fill: an island of fill that holds pads gets one via where it joins the area, set on the finished copper where the fill model finds the spot.",
+    ),
+    opt(
         "runs",
         Kind::Number,
         "14",
@@ -326,6 +332,7 @@ mod tests {
             plane_layers,
             areas,
             pour,
+            area_stitch,
             runs,
             via_pitch,
             via_cost,
@@ -422,5 +429,6 @@ mod tests {
         assert_eq!(d.angles, crate::Angles::Any);
         assert_eq!(text("areas"), d.areas.word());
         assert!(d.pour.is_empty() && text("pour") == "none");
+        assert!(!d.area_stitch() && text("area_stitch") == "on with areas fill");
     }
 }

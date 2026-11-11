@@ -394,6 +394,14 @@ whose area has no fill at all is joined by tracks. What the fill joins stays in 
 connections (`Router::area_base`), so that rules on a share of them (the second, negotiating
 search at 15 % open) mean the same as with tracks.
 
+An island of fill that holds pads and has a spot for one via (`fill::Island::via`, with
+`fill::SITE_ROOM` to spare) gets no connection in that pass when the plan says `stitch` (the
+option `area_stitch`): `gummiband_app::areas::stitch_route` sets that via on the finished
+copper, where the model finds the spot, as `ground_pour` does for a pour that is laid. The
+search judges each net without its own copper of this pass (`fill::goals` with `bare`): a pad
+that hangs on the area only through a connection must not count as held by the area once that
+connection is taken out again.
+
 The last check (`legal::enforce`) runs the model once on the finished copper and takes a
 track end or a via in the fill of its net's area as held; it does not count the pads of these
 nets as open. After the route `Routed::areas` holds the report of the model per net on the

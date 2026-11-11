@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use gummiband_core::board::{Board, NetId};
+use gummiband_core::prof;
 use gummiband_core::realize::{Elem, Geometry};
 use gummiband_core::route::RouterConfig;
 use gummiband_core::topo::{Substrate, SubstrateConfig};
@@ -154,6 +155,9 @@ pub struct RouteOptions {
     /// Nets that get a pour after the route, each `NET` or `NET:LAYER,LAYER` ([`parse_pour`]):
     /// with `areas` fill the route takes the pour as an area of the net.
     pub pour: Vec<String>,
+    /// With `areas` fill: an island of fill with pads gets one via where it joins the area,
+    /// set on the finished copper.
+    pub area_stitch: Option<bool>,
     pub runs: usize,
     pub via_pitch: f64,
     pub via_cost: f64,
@@ -225,6 +229,7 @@ impl Default for RouteOptions {
             plane_layers: Vec::new(),
             areas: Areas::Tracks,
             pour: Vec::new(),
+            area_stitch: None,
             runs: defaults::RUNS,
             via_pitch: defaults::VIA_PITCH,
             via_cost: defaults::VIA_COST,
@@ -272,6 +277,11 @@ impl RouteOptions {
     /// they stay unless asked.
     pub fn move_parts(&self) -> bool {
         self.move_parts.unwrap_or(!self.keep_all)
+    }
+
+    /// The islands of fill get their via whenever the fill connects, unless switched off.
+    pub fn area_stitch(&self) -> bool {
+        self.area_stitch.unwrap_or(self.areas == Areas::Fill)
     }
 
     /// Finishing nets, the unlocked tracks of the other nets shift aside unless switched off or
@@ -361,6 +371,9 @@ impl RouteOptions {
             return err(
                 "pour needs areas fill: with areas tracks the nets are laid as tracks and no pour is looked at",
             );
+        }
+        if self.area_stitch == Some(true) && self.areas != Areas::Fill {
+            return err("area_stitch needs areas fill: with areas tracks no net is left to its fill");
         }
         let mut poured: Vec<String> = Vec::new();
         for entry in &self.pour {
@@ -627,6 +640,11 @@ pub struct Routed {
     /// With `areas` fill: what the fill of every net left to it reaches on the finished copper,
     /// by the fill model.
     pub areas: Vec<crate::areas::NetReport>,
+    /// Of the vias written, those set for islands of fill (`area_stitch`).
+    pub area_vias: usize,
+    /// CPU seconds the fill model took inside the search, and how often it ran.
+    pub area_model_seconds: f64,
+    pub area_model_runs: u64,
     write: WriteOptions,
 }
 
@@ -654,6 +672,7 @@ pub fn route_board(board: &Board, opts: &RouteOptions, hooks: &Hooks) -> Result<
 
 fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) -> Result<Routed> {
     opts.validate(hooks.stop.is_some()).map_err(anyhow::Error::msg)?;
+    let model_before = (prof::value(prof::Slot::AreaModel), prof::value(prof::Slot::AreaModels));
     let sub_cfg = opts.substrate_config();
     let router_cfg = opts.router_config()?;
     let search_cfg = opts.search_config(hooks, "");
@@ -785,6 +804,12 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     });
     // the last word, on the finished copper: no short between two nets is written, and a
     // connection counts as routed only if the copper holds together
+    // islands of fill that hold pads of a net left to its fill get their via
+    let area_vias = match b.areas.as_ref().filter(|p| p.stitch) {
+        Some(plan) => crate::areas::stitch_route(b, plan, &mut res.geometry),
+        None => 0,
+    };
+    res.stats.vias += area_vias;
     let legal = gummiband_core::legal::enforce(b, &mut res.geometry, &mut res.stats);
     // the alternatives of the open end are written as boards too
     let legal_alternatives = res
@@ -826,6 +851,9 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
         legal,
         legal_alternatives,
         areas,
+        area_vias,
+        area_model_seconds: (prof::value(prof::Slot::AreaModel) - model_before.0) as f64 * 1e-9,
+        area_model_runs: prof::value(prof::Slot::AreaModels) - model_before.1,
         write: WriteOptions {
             keep_all: opts.keep_all,
             keep_locked: opts.keep_locked,
@@ -1124,7 +1152,7 @@ fn load(path: &Path, opts: &RouteOptions, hooks: &Hooks) -> Result<(KicadBoard, 
     add(&opts.net_options);
     let applied = apply_net_options(&mut kb.board, &per_net, &opts.nets)?;
     if opts.areas == Areas::Fill {
-        let planned = crate::areas::route_plan(&kb, &opts.pour, &opts.nets)?;
+        let planned = crate::areas::route_plan(&kb, &opts.pour, &opts.nets, opts.area_stitch())?;
         for note in &planned.notes {
             eprintln!("areas: {note}");
         }

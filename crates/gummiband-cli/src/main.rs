@@ -191,6 +191,14 @@ struct RouteArgs {
     /// net; it does not write the zone. Give the flag once per net.
     #[arg(long, value_name = "NET[:LAYERS]")]
     pour: Vec<String>,
+    /// With --areas fill: an island of fill that holds pads gets one via where it joins the
+    /// area, set on the finished copper where the fill model finds the spot. On by default
+    /// with --areas fill; this flag insists on it.
+    #[arg(long, conflicts_with = "no_area_stitch")]
+    area_stitch: bool,
+    /// No vias for islands of fill: a pad on an island gets a track to the area instead.
+    #[arg(long)]
+    no_area_stitch: bool,
     /// Try this many placements from the netlist (see `gummiband place`), route each one with
     /// these settings and keep the best: fewest open connections, then clearance violations,
     /// vias and length. Parts that are not locked or mechanical get new positions.
@@ -303,6 +311,7 @@ impl RouteArgs {
                 Areas::Fill => gummiband_app::Areas::Fill,
             },
             pour: self.pour.clone(),
+            area_stitch: on_off(self.area_stitch, self.no_area_stitch),
             runs: self.runs,
             via_pitch: self.via_pitch,
             via_cost: self.via_cost,
@@ -783,6 +792,12 @@ fn main() -> Result<()> {
             for a in &r.areas {
                 println!("areas: {}", gummiband_app::areas::route_line(a));
             }
+            if !r.areas.is_empty() {
+                println!(
+                    "areas: {} vias set for islands of fill; the fill model ran {} times in the search, {:.1} s of CPU",
+                    r.area_vias, r.area_model_runs, r.area_model_seconds
+                );
+            }
             for t in r.tries.iter().skip(1) {
                 println!(
                     "give way within {} mm: {} nets, {} open, {} violations",
@@ -1045,6 +1060,9 @@ fn main() -> Result<()> {
                     "cleared_corridors": outcome.cleared_corridors,
                     "pours": r.legal.pours,
                     "areas": r.areas,
+                    "area_vias": r.area_vias,
+                    "area_model_seconds": r.area_model_seconds,
+                    "area_model_runs": r.area_model_runs,
                     "violations": viol.iter().map(|v| serde_json::json!({
                         "what": v.what,
                         "x": v.at.x,

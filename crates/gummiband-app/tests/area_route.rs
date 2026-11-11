@@ -122,14 +122,45 @@ fn a_pad_the_pour_does_not_reach_is_joined_to_it() {
     assert!(fill.routed.violations.is_empty());
 }
 
-/// A planned pour makes its net an area net, on the outer layers where none are named.
+/// Three of the pens of `area_strips` leave their pad on an island of fill with room for a via.
+/// Such an island gets that via on the finished copper and no track; with `area_stitch` off
+/// the pad gets a connection like any pad the fill does not reach.
+#[test]
+fn an_island_of_fill_gets_one_via_and_no_track() {
+    let locked = |stitch: Option<bool>| RouteOptions {
+        keep_locked: true,
+        area_stitch: stitch,
+        ..quick(Areas::Fill, &[])
+    };
+    let out = route("area_strips", "stitch", &locked(None));
+    let [gnd] = out.routed.areas.as_slice() else {
+        panic!("one area net")
+    };
+    assert_eq!((gnd.pads, gnd.reached), (10, 10), "{}", gnd.summary);
+    assert_eq!(out.routed.area_vias, 3);
+    let geo = &out.routed.res.geometry;
+    let net = out.routed.board.net_id("GND").unwrap();
+    assert_eq!(geo.vias.iter().filter(|v| v.net == net).count(), 3);
+    assert_eq!(
+        geo.tracks.iter().filter(|t| t.net == net && t.origin.is_none()).count(),
+        0
+    );
+    assert_eq!(out.routed.res.stats.vias, 3);
+    assert!(out.routed.violations.is_empty());
+    // without the vias the search joins the pads itself
+    let off = route("area_strips", "nostitch", &locked(Some(false)));
+    assert_eq!(off.routed.area_vias, 0);
+    assert_eq!(off.routed.areas[0].reached, 10, "{}", off.routed.areas[0].summary);
+    assert!(tracks_of(&off, "GND") > 0);
+}
+
 /// A planned pour makes its net an area net, on the outer layers where none are named.
 #[test]
 fn a_planned_pour_is_an_area_of_its_net() {
     let kb = read_board(&bench("area_halves"), &ReadOptions::default()).unwrap();
     let b = &kb.board;
-    assert!(route_plan(&kb, &[], &[]).unwrap().plan.nets.is_empty());
-    let p = route_plan(&kb, &["GND".into(), "GNDR".into()], &[]).unwrap().plan;
+    assert!(route_plan(&kb, &[], &[], true).unwrap().plan.nets.is_empty());
+    let p = route_plan(&kb, &["GND".into(), "GNDR".into()], &[], true).unwrap().plan;
     let (gnd, gndr) = (b.net_id("GND").unwrap(), b.net_id("GNDR").unwrap());
     assert_eq!(p.nets, [gnd.min(gndr), gnd.max(gndr)]);
     // each net on both outer layers, and the two share the board
@@ -139,7 +170,7 @@ fn a_planned_pour_is_an_area_of_its_net() {
         layers.dedup();
         assert_eq!(layers.len(), 2);
     }
-    let one = route_plan(&kb, &["GND:F.Cu".into()], &[]).unwrap().plan;
+    let one = route_plan(&kb, &["GND:F.Cu".into()], &[], true).unwrap().plan;
     assert!(
         one.areas
             .iter()
@@ -152,7 +183,7 @@ fn a_plan_that_cannot_work_is_refused_in_plain_words() {
     let refused = |board: &str, pour: &[&str], nets: &[&str], word: &str| {
         let kb = read_board(&bench(board), &ReadOptions::default()).unwrap();
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        let e = match route_plan(&kb, &s(pour), &s(nets)) {
+        let e = match route_plan(&kb, &s(pour), &s(nets), true) {
             Ok(_) => panic!("{word}"),
             Err(e) => e.to_string(),
         };
