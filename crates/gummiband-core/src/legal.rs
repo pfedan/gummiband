@@ -21,6 +21,9 @@ use crate::realize::{Elem, Geometry, Track, Via};
 pub struct Legal {
     /// Lines split where a track end met them in their middle.
     pub split: usize,
+    /// Tracks and vias of the route taken out because a coordinate was no number. Such copper
+    /// cannot be written: KiCad does not read the file.
+    pub not_finite: usize,
     /// Tracks taken out because they shorted another net: (net, the other net).
     pub dropped: Vec<(String, String)>,
     /// How many of them ended on a track of their own net (a tap). A tap can come to lie across
@@ -809,6 +812,9 @@ pub fn new_shorts(board_before: &Board, before: &Geometry, board_after: &Board, 
 /// copper: what is not connected there is open in `stats`, whatever the search believed.
 pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal {
     let mut legal = Legal::default();
+    // 0. copper with a coordinate that is no number goes first: it cannot be judged or written
+    let not_finite = drop_not_finite(geo);
+    legal.not_finite = not_finite.len();
     // 1. shorts go, with what hangs on them
     let (dropped, left) = drop_shorts(board, geo);
     legal.shorts_left = left;
@@ -821,6 +827,7 @@ pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal
         .map(|t| t.net)
         .chain(geo.vias.iter().map(|v| v.net))
         .chain(dropped.iter().map(|d| d.0))
+        .chain(not_finite.iter().copied())
         .collect();
     nets.sort_unstable();
     nets.dedup();
@@ -832,7 +839,7 @@ pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal
     if legal.trimmed > 0 {
         count_open(board, geo, &nets, &dropped, stats, &mut legal);
     }
-    if !legal.dropped.is_empty() || legal.trimmed > 0 {
+    if !legal.dropped.is_empty() || legal.trimmed > 0 || legal.not_finite > 0 {
         stats.vias = geo.vias.iter().filter(|v| v.drill > 0.0).count();
         stats.length = geo
             .tracks
@@ -844,6 +851,12 @@ pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal
     // does not always take an end in the middle of a track for a connection
     legal.split = split_at_junctions(geo);
     legal.dangling = dangling(board, geo);
+    if legal.not_finite > 0 {
+        eprintln!(
+            "last check on the copper: {} tracks or vias taken out because a coordinate was no number",
+            legal.not_finite
+        );
+    }
     if !legal.dropped.is_empty()
         || !legal.open.is_empty()
         || legal.shorts_left > 0
@@ -897,6 +910,37 @@ fn count_open(
     }
 }
 
+fn finite(p: Point) -> bool {
+    p.x.is_finite() && p.y.is_finite()
+}
+
+/// Take out the tracks and vias of the route that have a coordinate that is no number. Returns
+/// the net of each. Nothing in the router should make one; if a step does, the connection is
+/// counted as open and the file stays one KiCad can read.
+fn drop_not_finite(geo: &mut Geometry) -> Vec<NetId> {
+    let mut nets = Vec::new();
+    geo.tracks.retain(|t| {
+        let ok = t.origin.is_some()
+            || (t.pts.iter().all(|&p| finite(p))
+                && t.elems.iter().all(|el| match *el {
+                    Elem::Line(a, b) => finite(a) && finite(b),
+                    Elem::Arc(a, m, b) => finite(a) && finite(m) && finite(b),
+                }));
+        if !ok {
+            nets.push(t.net);
+        }
+        ok
+    });
+    geo.vias.retain(|v| {
+        let ok = v.origin.is_some() || finite(v.at);
+        if !ok {
+            nets.push(v.net);
+        }
+        ok
+    });
+    nets
+}
+
 /// Split the lines of the route that a track end of their net meets in their middle, so that
 /// every junction is one of ends: the foot of the end becomes a corner of the line (in its points
 /// and elements), and both halves keep the width the line had. KiCad does not take every end in
@@ -919,7 +963,10 @@ pub fn split_at_junctions(geo: &mut Geometry) -> usize {
             // the line element the end lies on, away from its ends
             let Some(k) = t.elems.iter().position(|el| match *el {
                 Elem::Line(a, b) => {
-                    point_seg_dist(e, a, b) <= t.piece_width(a, b) / 2.0 + ON
+                    // (a line too short for two halves stays whole; one of length zero has no
+                    // foot at all)
+                    a.dist(b) > 20.0 * ON
+                        && point_seg_dist(e, a, b) <= t.piece_width(a, b) / 2.0 + ON
                         && a.dist(e) > 10.0 * ON
                         && b.dist(e) > 10.0 * ON
                 }
@@ -933,7 +980,7 @@ pub fn split_at_junctions(geo: &mut Geometry) -> usize {
             // the end itself where it lies on the centre line (KiCad joins ends that coincide)
             let foot = a.lerp(b, s);
             let f = if e.dist(foot) <= ON { e } else { foot };
-            if a.dist(f) <= 10.0 * ON || b.dist(f) <= 10.0 * ON {
+            if !finite(f) || a.dist(f) <= 10.0 * ON || b.dist(f) <= 10.0 * ON {
                 continue;
             }
             let w = t.piece_width(a, b);
@@ -1291,6 +1338,52 @@ mod tests {
 
     /// A track that ends on the middle of a line of its net: the line gets a corner there, so
     /// that the junction is one of ends. The copper is the same, and both halves keep the width.
+    /// A line of length zero has no foot for an end beside it: the split leaves it alone, and
+    /// no coordinate of the result is anything but a number. (Three files of an open ended run
+    /// on a keyboard had `NaN` in them from this, and KiCad did not read them.)
+    #[test]
+    fn a_line_of_length_zero_is_not_split() {
+        let b = board(&[("A", 2., 10.), ("A", 18., 10.), ("A", 10., 16.)]);
+        let p = pt(10., 10.);
+        // arcs on both sides, so that the line of length zero is the only line the end is near
+        let (l, r) = (pt(6., 10.5), pt(14., 10.5));
+        let mut line = track(0, &[(2., 10.), (18., 10.)]);
+        line.pts = vec![pt(2., 10.), l, p, p, r, pt(18., 10.)];
+        line.elems = vec![
+            Elem::Arc(pt(2., 10.), l, p),
+            Elem::Line(p, p),
+            Elem::Arc(p, r, pt(18., 10.)),
+        ];
+        let mut geo = Geometry {
+            // the end lies within the line's width of the point, but not on it
+            tracks: vec![line, track(0, &[(10., 16.), (10., 10.05)])],
+            vias: Vec::new(),
+        };
+        let mut st = stats(2);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert_eq!((legal.split, legal.not_finite, st.routed), (0, 0, 2));
+        assert!(geo.tracks.iter().all(|t| t.pts.iter().all(|&q| finite(q))));
+        assert_eq!(geo.tracks[0].elems.len(), 3);
+    }
+
+    /// Copper of the route with a coordinate that is no number goes before anything is judged,
+    /// and its connection is counted as open.
+    #[test]
+    fn copper_with_a_coordinate_that_is_no_number_is_taken_out() {
+        let b = board(&[("A", 2., 10.), ("A", 18., 10.)]);
+        let mut bad = track(0, &[(2., 10.), (10., 10.), (18., 10.)]);
+        bad.pts[1] = pt(f64::NAN, f64::NAN);
+        bad.elems = vec![Elem::Line(bad.pts[0], bad.pts[1]), Elem::Line(bad.pts[1], bad.pts[2])];
+        let mut geo = Geometry {
+            tracks: vec![bad],
+            vias: Vec::new(),
+        };
+        let mut st = stats(1);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert_eq!((legal.not_finite, geo.tracks.len(), st.routed), (1, 0, 0));
+        assert_eq!(legal.open.len(), 1);
+    }
+
     #[test]
     fn a_line_is_split_where_a_track_of_its_net_ends_on_it() {
         let b = board(&[("A", 2., 10.), ("A", 18., 10.), ("A", 10., 16.)]);
