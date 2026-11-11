@@ -358,7 +358,13 @@ connected, and a connection that reaches the pour ends where it enters it (`End:
 `route.rs`), not at a pad under the pour across its holes. Other zones on routing layers are
 not obstacles: KiCad's fill gives way to the tracks. Planes on plane layers are reached by a
 via into the outline. The router does not yet use the fill model while it searches; that, and
-counting a pad the model leaves unreached as open, are the next stages.
+counting a pad the model leaves unreached as open, are the next stages. Until then the last
+check on the copper (`legal::pours`) gives the model's second opinion on the finished result:
+for every net with a `gb:` pour it fills the pours on the copper as routed and names the pads
+that lie on a pour by its outline but do not hang on the body of its fill ("the pour of GND
+does not reach pads ..., judged by the fill model"). The sentence goes to the console, into
+`pours` of the JSON report and into the notes of the MCP tool `route`; the count of routed
+connections stays as the router has it.
 
 **Validation.** The model was held against KiCad's fill of the planes of the LED controller
 (0.08 % of the area differs, the same pads are touched by both). Thin strips between tracks on

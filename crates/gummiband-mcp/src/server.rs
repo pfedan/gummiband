@@ -3404,6 +3404,12 @@ fn route_blocking(id: String, path: PathBuf, opts: RouteOptions, p: RouteIn) -> 
             names.join(", ")
         ));
     }
+    // the second opinion of the fill model on the pours of the nets routed
+    for p in &routed.legal.pours {
+        notes.push(format!(
+            "{p}: the pads count as connected through the pour, but its fill will not get to them; route a track to them or give the pour room (area_report on the written file has the details)"
+        ));
+    }
     let length_tuning: Vec<TunedOut> = tuned
         .iter()
         .flat_map(|r| &r.nets)

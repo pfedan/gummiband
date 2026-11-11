@@ -224,6 +224,7 @@ wrote 83 items to routed.kicad_pcb
   "length_mm": 2458.1,
   "length_lower_bound_mm": 1980.4,
   "items_written": 3306,
+  "pours": ["the pour of VBUS does not reach pads Q3.5, judged by the fill model"],
   "violations": [
     {"what": "pad /SDA~GND", "x": 143.21, "y": 121.07,
      "actual_mm": 0.148, "required_mm": 0.15, "nets": ["/SDA", "GND"]}
@@ -251,6 +252,10 @@ search. `seed` is the seed the search ran with. The report also lists `alternati
 results of an open ended run: `path`, `routed`, `connections`, `vias`, `length_mm`,
 `clearance_spots`), `copied` (project files copied next to the output), `skipped_nets` (left out
 by `--nets` or a `skip`) and `cleared_corridors` (the parts `--clear-corridors` placed again).
+`pours` holds the second opinion of the fill model on the `gb:` pours of the nets routed: a
+sentence per net whose pour holds a pad by its outline that its fill will not get to (tracks of
+other nets cut the pad off). The router counts such a pad as connected, so check it;
+`gummiband areas` on the written file has the details.
 
 `violations[].nets` is the routed net and the other net (or null for an obstacle without a net,
 such as the board edge or a hole). Positions are board millimetres as KiCad shows them. Scripts

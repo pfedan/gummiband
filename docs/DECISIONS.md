@@ -105,7 +105,10 @@ Standing decisions of the project owner, kept here so that they survive any sess
   taken as the state. The model is the router's own judgement; KiCad's fill and DRC have the
   last word, and a statement of the model says how sure it is (raster step, doubtful pads).
 - A pour of the net is copper of the net: a connection that reaches a `gb:` pour ends where it
-  enters it. It does not run on to a pad under the pour.
+  enters it. It does not run on to a pad under the pour. Whether the fill of the pour really
+  holds its pads is the fill model's to say: for now as a second opinion in the report of a
+  route, which changes no count (stage 1); counting such a pad as open comes with the stage in
+  which the search itself knows the fill.
 - Copper of the file that gave way in a shove and then touches another net goes back to where
   the file has it, and new tracks that cross that place are taken out by the last check. A
   route is not refused because tracks lie inside a pour outline: that is legal in KiCad.

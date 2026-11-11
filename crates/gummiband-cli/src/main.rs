@@ -1015,6 +1015,7 @@ fn main() -> Result<()> {
                     "copied": written.copied.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
                     "skipped_nets": outcome.skipped_nets,
                     "cleared_corridors": outcome.cleared_corridors,
+                    "pours": r.legal.pours,
                     "violations": viol.iter().map(|v| serde_json::json!({
                         "what": v.what,
                         "x": v.at.x,

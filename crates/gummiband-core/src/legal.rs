@@ -48,6 +48,10 @@ pub struct Legal {
     /// Track ends that still lie on nothing of their net, as `"NET at X Y"`: copper of the file,
     /// or a stub that could not go.
     pub dangling: Vec<String>,
+    /// What the fill model finds for the pours of the nets routed: a sentence per net whose
+    /// pour does not reach a pad that lies on it. The router takes the pads on one pour as
+    /// connected and counts them so; this is the second opinion, and it changes no count.
+    pub pours: Vec<String>,
 }
 
 /// Slack for "this point lies on that copper", in mm.
@@ -967,6 +971,10 @@ pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal
             legal.not_finite
         );
     }
+    legal.pours = pours(board, geo);
+    for p in &legal.pours {
+        eprintln!("last check on the copper: {p}");
+    }
     if !legal.dropped.is_empty()
         || !legal.open.is_empty()
         || legal.shorts_left > 0
@@ -1000,6 +1008,123 @@ pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal
         );
     }
     legal
+}
+
+/// The pours of the nets routed (`gb:` zones, which the router takes as copper of their net)
+/// under the fill model, on the finished copper: for every net with a pour the pads that lie
+/// on a pour of the net and do not hang on the body of its fill (they sit on a piece that
+/// tracks of other nets cut off, or no fill gets to them at all). A pour is an
+/// outline; what KiCad fills of it depends on the tracks that now run through it. The pour is
+/// taken with the settings `power_copper` writes (pads solid, 0.2 mm clearance and minimum
+/// width). Nothing is counted differently because of this.
+pub fn pours(board: &Board, geo: &Geometry) -> Vec<String> {
+    use crate::board::{LayerSet, Obstacle};
+    use crate::fill::{Area, Connect, Options, fill_net};
+    use crate::geom::Shape;
+
+    let nl = board.layers.len();
+    let mut areas: Vec<Area> = Vec::new();
+    // per pour: its net, its obstacle and the pads the router takes as held by it
+    let mut held: Vec<(NetId, usize, Vec<usize>)> = Vec::new();
+    for (oi, ob) in board.obstacles.iter().enumerate() {
+        let (ObstacleKind::Pour, Some(net), Shape::Polygon(poly)) = (ob.kind, ob.net, &ob.shape) else {
+            continue;
+        };
+        for l in ob.layers.iter().filter(|&l| (l as usize) < nl) {
+            let mut a = Area::pour(net, l, vec![poly.clone()]);
+            a.connect = Connect::Solid;
+            areas.push(a);
+        }
+        let pads: Vec<usize> = board.nets[net as usize]
+            .pins
+            .iter()
+            .copied()
+            .filter(|&p| {
+                let pin = &board.pins[p];
+                !pin.footprint.is_empty()
+                    && pin.obstacles.iter().any(|&o| {
+                        let pad = &board.obstacles[o];
+                        pad.kind == ObstacleKind::Pad
+                            && pad.layers.intersects(ob.layers)
+                            && pad.shape.dist(&ob.shape) <= TOUCH
+                    })
+            })
+            .collect();
+        if !pads.is_empty() {
+            held.push((net, oi, pads));
+        }
+    }
+    if held.is_empty() {
+        return Vec::new();
+    }
+    // the board with the finished copper on it
+    let mut work = board.clone();
+    for t in &geo.tracks {
+        let clearance = board.class_of(t.net).clearance;
+        for w in t.pts.windows(2) {
+            work.obstacles.push(Obstacle {
+                shape: Shape::Capsule {
+                    a: w[0],
+                    b: w[1],
+                    r: t.width / 2.0,
+                },
+                layers: LayerSet::single(t.layer),
+                net: Some(t.net),
+                kind: ObstacleKind::Track,
+                hole: None,
+                clearance,
+                pin: None,
+                locked: false,
+            });
+        }
+    }
+    for v in geo.vias.iter().filter(|v| v.drill > 0.0) {
+        work.obstacles.push(Obstacle {
+            shape: Shape::Circle {
+                c: v.at,
+                r: v.diameter / 2.0,
+            },
+            layers: LayerSet::all(nl),
+            net: Some(v.net),
+            kind: ObstacleKind::Via,
+            hole: Some(v.drill / 2.0),
+            clearance: board.class_of(v.net).clearance,
+            pin: None,
+            locked: false,
+        });
+    }
+    let mut nets: Vec<NetId> = held.iter().map(|x| x.0).collect();
+    nets.sort_unstable();
+    nets.dedup();
+    let mut out = Vec::new();
+    for net in nets {
+        let f = fill_net(&work, &areas, net, &Options::default());
+        let mut left: Vec<&str> = Vec::new();
+        for (_, oi, pads) in held.iter().filter(|h| h.0 == net) {
+            let ob = &board.obstacles[*oi];
+            // the body of the pour: its largest piece of fill. A pad the router takes as held
+            // hangs on that piece, itself or through tracks, or the pour does not reach it
+            let body = f
+                .pieces
+                .iter()
+                .filter(|pc| ob.layers.has(pc.layer) && ob.shape.dist_to_point(pc.at) <= 0.0)
+                .max_by(|a, b| a.area.total_cmp(&b.area))
+                .map(|pc| pc.group);
+            for pr in f.pins.iter().filter(|pr| pads.contains(&pr.pin)) {
+                if Some(pr.group) != body && !left.contains(&pr.name.as_str()) {
+                    left.push(&pr.name);
+                }
+            }
+        }
+        if !left.is_empty() {
+            out.push(format!(
+                "the pour of {} does not reach pads {}, judged by the fill model",
+                board.nets[net as usize].name,
+                left.join(", ")
+            ));
+        }
+    }
+    out
 }
 
 /// Count the connections on the copper: every piece of a net beyond its first that `stats` does

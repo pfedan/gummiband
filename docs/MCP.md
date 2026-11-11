@@ -758,7 +758,7 @@ the settings: `p`, `n`, `coupled_mm` within width + gap + 0.1 mm of the partner 
 longest stretches of 0.5 mm and more that do not run beside the partner, `net`, `layer`, `x`, `y`,
 `length_mm`, `why` one of "partner on another layer", "partner farther away" (a breakout to the
 pins, or a way of its own), "something between"), `notes` (hints, such as pairs routed without
-`pair_pull` or `pairs`, or a pair with `pair_pull` that runs coupled for less than 60 % of its length), `length_tuning` (every net the tuning aimed at: `net`, `before_mm`,
+`pair_pull` or `pairs`, a pair with `pair_pull` that runs coupled for less than 60 % of its length, or a `gb:` pour whose fill will not get to a pad that lies on it, judged by the fill model), `length_tuning` (every net the tuning aimed at: `net`, `before_mm`,
 `after_mm`, `aim_mm`, `as_pair`), `length_rules` (every length, skew, uncoupled and gap rule
 after the tuning, measured as the KiCad DRC measures: `rule`, `kind`, `min_mm`, `opt_mm`,
 `max_mm`, `nets`, `failed` with `net`, `length_mm`, `skew_mm`), `nets` (per routed net, longest first: `net`,

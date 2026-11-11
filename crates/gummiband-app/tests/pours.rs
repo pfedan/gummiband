@@ -51,6 +51,28 @@ const TWO: &str = r#"(kicad_pcb (version 20240108) (generator "test")
     (polygon (pts (xy 19 4) (xy 28 4) (xy 28 16) (xy 19 16))))
 )"#;
 
+/// As `HOLE` without the hole, and the pad under the pour in a ring of N so close that no fill
+/// fits between ring and pad: the outline holds the pad, the fill will not.
+const RING: &str = r#"(kicad_pcb (version 20240108) (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "") (net 1 "GND") (net 2 "N")
+  (gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts") (stroke (width 0.1) (type default)) (fill no))
+  (footprint "R" (layer "F.Cu") (at 5 10) (property "Reference" "R1")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND")))
+  (footprint "R" (layer "F.Cu") (at 26 10) (property "Reference" "R2")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND")))
+  (footprint "R" (layer "F.Cu") (at 4.1 9.1) (property "Reference" "R3")
+    (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 2 "N")))
+  (segment (start 4.1 9.1) (end 5.9 9.1) (width 0.2) (layer "F.Cu") (net 2) (uuid "00000000-0000-4000-8000-000000000001"))
+  (segment (start 5.9 9.1) (end 5.9 10.9) (width 0.2) (layer "F.Cu") (net 2) (uuid "00000000-0000-4000-8000-000000000003"))
+  (segment (start 5.9 10.9) (end 4.1 10.9) (width 0.2) (layer "F.Cu") (net 2) (uuid "00000000-0000-4000-8000-000000000004"))
+  (segment (start 4.1 10.9) (end 4.1 9.1) (width 0.2) (layer "F.Cu") (net 2) (uuid "00000000-0000-4000-8000-000000000005"))
+  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "00000000-0000-4000-8000-000000000002") (name "gb:ring") (hatch edge 0.5) (priority 1)
+    (connect_pads yes (clearance 0.2)) (min_thickness 0.2) (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 3 4) (xy 20 4) (xy 20 16) (xy 3 16))))
+)"#;
+
 fn finish_gnd(name: &str, shove: bool) -> gummiband_app::RouteOutcome {
     finish(HOLE, name, shove)
 }
@@ -158,4 +180,22 @@ fn a_track_from_pour_to_pour_is_the_piece_between_them() {
     );
     let len: f64 = t.pts.windows(2).map(|w| w[0].dist(w[1])).sum();
     assert!(len < 12.0, "{len}");
+}
+
+/// The router takes a pad on a pour as connected. Where the fill will not get to the pad, the
+/// last check says so as the fill model's finding; the count of routed connections stays.
+#[test]
+fn the_fill_model_names_a_pad_the_pour_will_not_reach() {
+    let out = finish(RING, "ring", false);
+    let r = &out.routed;
+    assert_eq!((r.res.stats.conns, r.res.stats.routed), (1, 1));
+    assert_eq!(
+        r.legal.pours,
+        ["the pour of GND does not reach pads R1.1, judged by the fill model"]
+    );
+    // a pour that holds its pads gets no line
+    let out = finish(HOLE, "held", false);
+    assert!(out.routed.legal.pours.is_empty(), "{:?}", out.routed.legal.pours);
+    let out = finish(TWO, "held-two", false);
+    assert!(out.routed.legal.pours.is_empty(), "{:?}", out.routed.legal.pours);
 }
