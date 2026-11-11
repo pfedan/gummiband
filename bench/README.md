@@ -219,6 +219,9 @@ The boards are not in the repository; the generator writes them in a second.
   130 boards the two agree: the own check is clean exactly where KiCad reports no place.
 - `check.sh [--update] [ROUTER]` generates, routes and compares routed connections and spots per
   board with `expected.txt`: the stand as a regression test (about five minutes on four cores).
+- `probe.py ROUTER CASE [slack in um ...]` builds one case with each slack and says from which
+  slack on the router lays it (it honours the `GB_` variables of the shell, and writes into
+  `probe/` in the current directory).
 
 A board is right if it is fully routed and clean, or for `short` clean and not fully routed.
 `expected.txt` records where the router stands, not where it should be: 47 of 130 are right at

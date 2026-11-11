@@ -1374,7 +1374,28 @@ pub fn relax_while(
                         push
                     }
                 };
-                let to = vc + mv * if on_gpu_now { via_gain } else { 1.0 };
+                let mut to = vc + mv * if on_gpu_now { via_gain } else { 1.0 };
+                if cfg.via_edge && !pair {
+                    // The board edge is a wall. The pushes above add up, and tracks and pads
+                    // that press from the other side would hold the via part way over the edge
+                    // rule: copper against copper can be seen and mended, a via in the edge of
+                    // the board cannot. The move still ends within the step of a round.
+                    let wall = edge_clr + cr + crate::check::MARGIN;
+                    for o in &board.outline {
+                        let on_board = board.inside(to);
+                        let (d, q) = nearest_on_poly(o, to);
+                        let d = if on_board { d } else { -d };
+                        if d < wall {
+                            let dir = if on_board { (to - q).norm() } else { (q - to).norm() };
+                            to = to + dir * (wall - d);
+                        }
+                    }
+                    let step = to - vc;
+                    let l = step.len();
+                    if l > cfg.max_step {
+                        to = vc + step * (cfg.max_step / l);
+                    }
+                }
                 // the plane copper, cut by the higher zones of other nets
                 let stays = |&(pl, floor): &(&crate::board::Plane, f64)| pl.holds(to, floor);
                 if via_planes[vi].is_empty() || via_planes[vi].iter().any(stays) {
@@ -3581,5 +3602,99 @@ mod tests {
         relax(&b, &sub, &mut g, &RelaxConfig::default());
         let h = g.vias[0].half;
         assert!(h.x.abs() < 0.1 && (h.len() - 0.45).abs() < 1e-9, "{h:?}");
+    }
+
+    /// A via between the board edge and a pad that leaves it too little room: the pad and the
+    /// edge both push. The via keeps the edge rule, and what is missing is missing to the pad.
+    #[test]
+    fn the_board_edge_is_a_wall_for_a_via() {
+        use crate::board::{Layer, LayerSet, Net, NetClass, Obstacle};
+        use crate::geom::Polygon;
+        let mut b = Board::default();
+        b.layers = ["F.Cu", "B.Cu"]
+            .iter()
+            .map(|n| Layer {
+                name: n.to_string(),
+                is_plane: false,
+            })
+            .collect();
+        b.outline = vec![Polygon::new(vec![pt(0., 0.), pt(20., 0.), pt(20., 10.), pt(0., 10.)])];
+        b.classes = vec![NetClass {
+            name: "Default".into(),
+            track_width: 0.2,
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            ..Default::default()
+        }];
+        for name in ["A", "B"] {
+            b.nets.push(Net {
+                name: name.into(),
+                class: 0,
+                pins: Vec::new(),
+                planes: LayerSet::default(),
+                priority: 0,
+            });
+        }
+        // the edge asks for the centre at 0.3 + 0.3 mm or more, the pad for 1.0 - 0.2 - 0.3 mm
+        // or less: 0.1 mm is missing
+        let edge = b.rules.edge_clearance;
+        assert_eq!(edge, 0.3);
+        b.obstacles.push(Obstacle {
+            shape: Shape::Polygon(Polygon::new(vec![pt(9., 1.), pt(11., 1.), pt(11., 3.), pt(9., 3.)])),
+            layers: LayerSet::all(2),
+            net: Some(1),
+            kind: ObstacleKind::Pad,
+            hole: None,
+            clearance: 0.2,
+            pin: None,
+            locked: true,
+        });
+        let track = |a: Point, c: Point, layer: u8| {
+            let elems = vec![Elem::Line(a, c)];
+            Track {
+                pts: crate::realize::flatten(&elems),
+                elems,
+                width: 0.2,
+                layer,
+                net: 0,
+                necks: Vec::new(),
+                neck_w: 0.2,
+                origin: None,
+                resting: false,
+                fitted: Vec::new(),
+                pattern: None,
+                seg: u32::MAX,
+                tap: None,
+            }
+        };
+        let c = pt(10., 0.55);
+        let mut geo = Geometry {
+            tracks: vec![track(pt(2., 0.55), c, 0), track(c, pt(18., 0.55), 1)],
+            vias: vec![Via {
+                at: c,
+                diameter: 0.6,
+                drill: 0.3,
+                net: 0,
+                layer: None,
+                origin: None,
+                resting: false,
+                half: Default::default(),
+            }],
+        };
+        let sub = Substrate::build(&b, &crate::topo::SubstrateConfig::default());
+        let cfg = RelaxConfig {
+            via_edge: true,
+            ..Default::default()
+        };
+        relax(&b, &sub, &mut geo, &cfg);
+        let y = geo.vias[0].at.y;
+        assert!(y >= edge + 0.3 + crate::check::MARGIN - 1e-9, "the via stands at {y}");
+        let found = crate::check::check(&b, &geo);
+        assert!(!found.is_empty(), "0.1 mm is missing and the check must say so");
+        assert!(
+            found.iter().all(|v| !v.what.contains("edge")),
+            "the edge rule holds: {found:?}"
+        );
     }
 }
