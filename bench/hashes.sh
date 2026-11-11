@@ -71,8 +71,8 @@ list() {
     if [ $# -eq 0 ]; then
         run "medium+default" --runs 4
         run "medium+45" --runs 4 --generations 1 --geometry-generations 1 --angles 45
-        run "diff_pairs+pairs" --runs 4 --generations 1 --geometry-generations 1 --pairs --no-move-parts
-        run "diff_pairs+pull" --runs 4 --generations 1 --geometry-generations 0 --pair-pull 1 --no-move-parts
+        run "diff_pairs+pairs" --runs 4 --generations 1 --geometry-generations 1 --pairs band --no-move-parts
+        run "diff_pairs+pull" --runs 4 --generations 1 --geometry-generations 0 --pairs pull --no-move-parts
         run "bus+groups" --runs 4 --generations 1 --geometry-generations 0 --patterns groups --no-move-parts
         run "crossing+negotiate" --runs 4 --generations 1 --geometry-generations 0 --negotiate 20 --no-move-parts
     fi

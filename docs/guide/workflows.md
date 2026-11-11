@@ -95,26 +95,31 @@ them: `diff_pair_gap` and `track_width` constraints, also per `(layer inner)` or
 and a `skew` constraint. Then:
 
 ```bash
-gummiband route board.kicad_pcb -o out.kicad_pcb --keep-locked --pairs
+# the gentle way: two nets, the second pulled to the way of the first
+gummiband route board.kicad_pcb -o out.kicad_pcb --keep-locked --pairs pull
+# one wide track per pair that has a pair rule or a net class of its own
+gummiband route board.kicad_pcb -o out.kicad_pcb --keep-locked --pairs band
 # with an impedance target: width per layer from the stackup, the gap stays
-gummiband route board.kicad_pcb -o out.kicad_pcb --keep-locked --pairs --pair-zdiff 90
+gummiband route board.kicad_pcb -o out.kicad_pcb --keep-locked --pairs band --pair-zdiff 90
 ```
 
-Each pair is routed as one wide track and split into two parallel tracks afterwards; the shorter
+`--pairs pull` works for every pair recognised by name and suits a board that is not dense; the
+tracks close up to the pair gap where nothing lies between, and `--pair-pull W` sets the weight
+(1 by default). With `--pairs band` each pair is routed as one wide track and split into two parallel tracks afterwards; the shorter
 track gets bumps until the length difference is below `--pair-skew` (0.1 mm by default) or the
 `skew` rule. The console and the JSON report list every pair with width, gap, estimated
 impedance, lengths, skew and vias. Where a pair could not be routed wide, the line says why and
 the pair is routed as two single nets.
 
 This is new. It costs connections on dense boards and can leave clearance errors or shorts next
-to pads and vias, so compare the KiCad DRC with and without `--pairs` before you keep the result.
+to pads and vias, so compare the KiCad DRC with and without `--pairs band` before you keep the result.
 
-![How --pairs routes a pair: one wide track, split into two at the pair gap, optionally with single tracks into the pads](img/pairs.svg)
+![How --pairs band routes a pair: one wide track, split into two at the pair gap, optionally with single tracks into the pads](img/pairs.svg)
 
-At connector rows `--breakouts` ends the wide track just outside the pads and runs two short
+At connector rows `--breakouts` (with `--pairs band`) ends the wide track just outside the pads and runs two short
 tracks in, which avoids the shorts the split can leave right at the pads:
 
-![A connector row with --pairs, without and with --breakouts](img/pair-breakouts-before-after.png)
+![A connector row with --pairs band, without and with --breakouts](img/pair-breakouts-before-after.png)
 
 ## Judge a result
 

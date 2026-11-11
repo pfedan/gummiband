@@ -80,11 +80,11 @@ See [Length matching](concepts.md#length-matching) and the
 
 ![A pair routed as one wide track and split into two tracks at the pair gap, with single tracks into the pads](img/pairs.svg)
 
-Pairs are recognised by name. `--pair-pull` keeps the two nets together while routing them on
-their own; `--pairs` routes a pair as one wide track and splits it in two at the gap from the
-rules or an impedance target. `--breakouts` ends the wide track before the pads.
+Pairs are recognised by name. `--pairs pull` keeps the two nets together while routing them on
+their own; `--pairs band` routes a pair as one wide track and splits it in two at the gap from the
+rules or an impedance target, and `--breakouts` then ends the wide track before the pads.
 
-![A connector row with --pairs: on the left the wide track ends at the pads and shorts on the right, on the right the breakout zone before the pads](img/pair-breakouts-before-after.png)
+![A connector row with --pairs band: on the left the wide track ends at the pads and shorts on the right, on the right the breakout zone before the pads](img/pair-breakouts-before-after.png)
 
 See [Route differential pairs](workflows.md#route-differential-pairs-experimental) and
 [Differential pairs](options.md#differential-pairs).

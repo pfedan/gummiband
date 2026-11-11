@@ -1,7 +1,7 @@
 //! The shared route pipeline on a board of two resistors: defaults, a route from file to file,
 //! and finishing a net on the result.
 
-use gummiband_app::{Event, Hooks, RouteOptions, defaults, route_file};
+use gummiband_app::{Event, Hooks, Pairs, RouteOptions, defaults, route_file};
 
 fn pad(num: u32, x: f64, net: &str) -> String {
     format!(
@@ -83,22 +83,16 @@ fn contradictions_are_errors() {
         assert!(e.contains(word), "{e}");
     };
     refused(RouteOptions { runs: 0, ..d.clone() }, false, "runs must be at least 1");
+    let band = RouteOptions {
+        pairs: Pairs::Band,
+        ..d.clone()
+    };
     refused(
-        RouteOptions {
-            pairs: true,
-            ..d.clone()
-        },
+        band.clone(),
         true,
-        "pairs",
+        "an open ended run does not work with pairs band: write pairs pull or off",
     );
-    assert_eq!(
-        RouteOptions {
-            pairs: true,
-            ..d.clone()
-        }
-        .validate(false),
-        Ok(())
-    );
+    assert_eq!(band.validate(false), Ok(()));
     refused(
         RouteOptions {
             reroute: true,
@@ -158,7 +152,7 @@ fn contradictions_are_errors() {
             ..d.clone()
         },
         false,
-        "pair_all needs pairs",
+        "pair_all acts on the wide track of pairs band only: write pairs band, or leave pair_all out",
     );
     refused(
         RouteOptions {
@@ -166,7 +160,50 @@ fn contradictions_are_errors() {
             ..d.clone()
         },
         false,
-        "pair_zdiff needs pairs",
+        "pair_zdiff acts on the wide track of pairs band only",
+    );
+    // the pull has a weight, and only the pull and the wide track know one
+    let pull = RouteOptions {
+        pairs: Pairs::Pull,
+        ..d.clone()
+    };
+    assert_eq!(pull.validate(true), Ok(()));
+    assert_eq!(
+        (d.pair_pull(), pull.pair_pull(), band.pair_pull()),
+        (0.0, defaults::PAIR_PULL, 0.0)
+    );
+    let weighed = |pairs, w| RouteOptions {
+        pairs,
+        pair_pull: Some(w),
+        ..d.clone()
+    };
+    assert_eq!(weighed(Pairs::Pull, 2.5).pair_pull(), 2.5);
+    assert_eq!(weighed(Pairs::Band, 2.5).pair_pull(), 2.5);
+    assert_eq!(weighed(Pairs::Band, 2.5).validate(false), Ok(()));
+    assert_eq!(weighed(Pairs::Off, 0.0).validate(false), Ok(()));
+    refused(
+        weighed(Pairs::Off, 1.0),
+        false,
+        "pair_pull needs pairs pull: write pairs pull, or leave pair_pull out",
+    );
+    refused(
+        weighed(Pairs::Pull, 0.0),
+        false,
+        "pairs pull with pair_pull 0 pulls nothing: write pairs off",
+    );
+    refused(weighed(Pairs::Pull, -1.0), false, "pair_pull must not be negative");
+    refused(
+        RouteOptions {
+            breakouts: true,
+            ..pull
+        },
+        false,
+        "breakouts acts on the wide track of pairs band only",
+    );
+    refused(
+        RouteOptions { placements: 2, ..band },
+        false,
+        "placements routes the whole board: not with keep_all, nets or pairs band",
     );
     refused(
         RouteOptions {

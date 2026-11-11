@@ -86,14 +86,22 @@ front end.
   falls back to `RouteOptions::default()`. Options that follow from others are `Option`s with one
   method each that resolves them: `move_parts` (on unless `keep_all`), `shove` (on when finishing
   nets with fixed parts), `give` (8 mm when finishing nets), `air` (0.03 mm in an open ended run
-  of the whole board).
+  of the whole board), `pair_pull` (1 with `pairs` pull, 0 with band).
 - `OPTIONS` is the table of them: name, kind of value, default in words and one sentence per
   option. The CLI offers each as `--kebab-case`, the MCP tool `route` as an argument of the same
   name. Three tests keep this true: the table against the fields of `RouteOptions`
   (`options.rs`), the flags of `gummiband route` against the table (`gummiband-cli`), the
   arguments of the tool against the table (`gummiband-mcp`). What a front end adds of its own
-  is listed in its test (`OWN`): where the result goes and how it is shown. Help texts are to
-  be generated from the table.
+  is listed in its test (`OWN`): where the result goes and how it is shown. An option with a
+  fixed list of words (`Kind::Choice`: `pairs`, `angles`) has its words in the table, each with
+  one sentence. The CLI's `--help` and the schema of the MCP tool take the words and the text
+  from there (`OptionDoc::describe`), and the type of the option parses with the table
+  (`Pairs::parse`). The other help texts are to follow.
+- `gummiband_app::old` holds the spellings of earlier versions that the front ends still take
+  (`pairs` as a switch, `pair_pull` without `pairs`): one function per option that gives the
+  value of today and a `Respelled`, the line that says what to write now. The CLI prints it as
+  `note: ...`, the MCP tool returns it in `notes`. The old spellings are hidden flags of the
+  CLI and no part of the MCP schema; the tests there pin each mapping.
 - `RouteOptions::validate` checks the options against each other. Options that contradict each
   other are errors that say what to change, and nothing is adjusted silently; `route_board` and
   `route_file` call it first, so both front ends return the same message.
@@ -349,7 +357,7 @@ for the shifts of `--move-parts`, with all routed copper awake, before it consid
 
 ## Differential pairs
 
-With `--pairs` (`gummiband_core::pairs`, experimental, off by default) a pair is routed as one wide
+With `--pairs band` (`gummiband_core::pairs`, experimental, off by default) a pair is routed as one wide
 track and split afterwards.
 
 1. Merge: the two nets become one net whose track is as wide as both tracks and their gap, with a
@@ -436,13 +444,13 @@ pad-to-die lengths; skew against the longest net of a group; coupling of exactly
 and the gap fits the rule. Tracks of tuning patterns stay out of the coupling, as in KiCad.
 
 Before that, still inside the geometry step, `tune::make_room` makes room: `room_wanted` gives
-every net (with `--pairs` every pair band, keyed by its P net) that is too short an extra width
+every net (with `--pairs band` every pair band, keyed by its P net) that is too short an extra width
 of twice the bump height its missing length needs, from the gain of one bump per `4r` of line
 (`2h + (2 pi - 8) r`), clamped to `[2r, amplitude]`. `push_aside` widens these tracks in steps of
 0.15 mm with `relax` (no tension, vias fixed, only the widened tracks and what they touch awake),
 keeps the old width as necks at the ends, near pads and zones and at spots that already had a
 violation, then pulls the moved tracks taut and restores the widths. `make_room_judged` keeps the
-result only if the judge (the router's clearance check, with `--pairs` on the split geometry)
+result only if the judge (the router's clearance check, with `--pairs band` on the split geometry)
 finds no spot that was not there before; otherwise it bisects the set and pushes the halves on
 top of what was accepted, at most 12 pushes. In `pairs.rs` this runs on the merged board, before
 the split.
@@ -618,7 +626,7 @@ hints on, all off by default (and then byte for byte the same as without them):
   of one pin row out and lays them again in the order of their pins, from one end, the other,
   the middle out or the ends in.
 - `pairs`: the connections of differential pairs (as two nets, or as the one wide net of
-  `--pairs`) go before the other signal connections of their priority, the longest first: a pair
+  `--pairs band`) go before the other signal connections of their priority, the longest first: a pair
   has the fewest ways, and a wide track that comes late finds its corridor taken
   (`Router::order_keys`).
 - `groups`: the connections between the same two parts (ICs or connectors, at least 4 pins on

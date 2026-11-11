@@ -145,7 +145,8 @@ Placement seeds differ a lot. Let the agent try two or three, route each and kee
 ### 5. Route
 
 `route` takes every option of `gummiband route` under the same name, with the same default:
-`seed`, `generations`, `geometry_generations`, `patterns`, `pairs` and `pair_pull`,
+`seed`, `generations`, `geometry_generations`, `patterns`, `pairs` (`"off"`, `"pull"` or
+`"band"`, each explained in the tool's schema),
 `angles: "45"`, `open_end_seconds` for the open end, the length tuning (`tune`, on by default
 when the rules ask for it) and the rest. Options that contradict each other are refused with a
 message that says what to change. `set_net_options` gives nets a priority, a width, a minimum

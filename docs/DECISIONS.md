@@ -109,6 +109,17 @@ Standing decisions of the project owner, kept here so that they survive any sess
   switches that are duplicates or contradict each other; it never removes a way to tune. Each
   knob has one name, one default and one description, the same in the CLI, the MCP server and
   the plugin (`gummiband_app::OPTIONS` for a route; tests hold the front ends to it).
+- Switches that are modes of one thing are one option with words (2026-11-11). The
+  handling of differential pairs is `pairs` = `off`, `pull` or `band`, where there were two
+  switches whose combination the user had to know (`pair_pull` above 0, `pairs`). The default
+  stays `off`: no pair was pulled unless a weight was given. Sub-options name the mode they
+  belong to and are refused elsewhere (`breakouts`, `via_pairs`, `pair_all`, `pair_zdiff` with
+  `band`). `pair_pull` is the weight of `pull` (1 unless given) and stays valid with `band`,
+  where it pulls the pairs that get no wide track: that combination had an effect before
+  (measured on `diff_pairs` with its pair rule taken away), so it keeps its meaning.
+- A renamed option keeps working under its old spelling for a while: it is mapped onto the new
+  one in `gummiband_app::old`, the result is the same, and the output says in one line what to
+  write now. The old spelling leaves every help text and schema at once.
 - The MCP server is a toolbox, not an automaton. An agent brings its own knowledge of
   electronics and must be able to do any part of a board by hand: place and lock parts, route
   single nets itself, prescribe widths and currents. It leaves only the rest to the router,

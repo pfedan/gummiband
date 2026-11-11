@@ -1904,8 +1904,8 @@ references, or pass them as fixed to place_parts and route). Keep the switch nod
 small and the input capacitor loop short. Place parts first if they are not placed (move_part for \
 connectors and power stages, place_parts with semantic true for the rest).
 
-4. Route: route the latest board id (keep_locked when you added locked copper). Use pair_pull or \
-pairs for differential pairs that need coupling. Read unrouted and blocked; fix with set_net_options \
+4. Route: route the latest board id (keep_locked when you added locked copper). Use pairs \"pull\" or \
+\"band\" for differential pairs that need coupling. Read unrouted and blocked; fix with set_net_options \
 (priority, width) and route again, or finish single nets with keep_all, nets and reroute. Nets that came out well: lock them \
 before routing others again. A net the router did badly: draw the critical stretch with \
 add_locked_copper, then route that net with keep_all, nets and reroute. A part in the way: move_part \

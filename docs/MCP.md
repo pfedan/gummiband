@@ -191,7 +191,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `set_rules` | `board`, `rules`, `replace?` | id of the working copy, path of its `.kicad_dru`, rule count, what Gummiband understood of the rules, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `width?`, `min_width?`, `neck_refs?`, `reset?` | the net's options and effective priority |
 | `try_seeds` | `board`, `seeds?`, `place?`, `route?`, `drc?` | per seed (best first) the placed and routed files, unrouted, Gummiband violations, KiCad DRC errors and unconnected, vias, length; the best seed, the working copy now holding its placement and its routed board |
-| `route` | `board`, `output?`, `max_violations?` and every option of the route pipeline under the name `gummiband route` has it (there as `--kebab-case`): `keep_locked?`, `keep_all?`, `nets?`, `reroute?`, `shove?`, `give?`, `move_parts?`, `fixed?`, `plane_layers?`, `runs?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `patterns?`, `via_pass?`, `pair_pull?`, `pairs?`, `pair_skew?`, `pair_zdiff?`, `pair_all?`, `breakouts?`, `via_pairs?`, `negotiate?`, `generations?`, `geometry_generations?`, `seed?`, `frames?`, `open_end_seconds?`, `open_via_cost?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `tune_spacing?`, `placements?`, `placement_seed?`, `clear_corridors?`, `net_widths?`, `net_priorities?`, `teardrops?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with the experimental `pairs` one entry per differential pair |
+| `route` | `board`, `output?`, `max_violations?` and every option of the route pipeline under the name `gummiband route` has it (there as `--kebab-case`): `keep_locked?`, `keep_all?`, `nets?`, `reroute?`, `shove?`, `give?`, `move_parts?`, `fixed?`, `plane_layers?`, `runs?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `patterns?`, `via_pass?`, `pairs?`, `pair_pull?`, `pair_skew?`, `pair_zdiff?`, `pair_all?`, `breakouts?`, `via_pairs?`, `negotiate?`, `generations?`, `geometry_generations?`, `seed?`, `frames?`, `open_end_seconds?`, `open_via_cost?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `tune_spacing?`, `placements?`, `placement_seed?`, `clear_corridors?`, `net_widths?`, `net_priorities?`, `teardrops?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with `pairs` `"band"` one entry per wide track |
 | `angles_45` | `path`, `output?`, `nets?` | path of the written `<input>.45.kicad_pcb`, runs of track looked at and changed, length before and after, pieces off the grid, sharp corners, Gummiband's violations before and after |
 | `power_plan` | `board`, `currents? [{net, amps, short_amps?}]`, `temp_rise?`, `apply?` | per power net the IPC-2221 width per layer, the track width to route with, vias per layer change, planes and zones, advice; board notes (GND plane, reference planes); the widths as `.kicad_dru` rules; with `apply` the widths stored as net options |
 | `current_check` | `path`, `paths? [{net, amps, short_amps?, from?, to?, name?}]`, `temp_rise?`, `refill?`, `max_segments?` | per current path the narrow segments, the narrowest single band and the total cross-section between the terminals (pours and vias included) with their position, vias against the current, verdict `ok` or `FLAG` |
@@ -310,8 +310,8 @@ whose ends join their nets; by default everything is routed from scratch, like
 `gummiband route`. `connections` is counted like `gummiband info` (pins - 1 per net with 2 or
 more pins); `route` counts plane nets per fan-out, so its total is lower on boards with planes.
 `diff_pairs` lists the differential pairs recognised by net name (`..P`/`..N`, `..+`/`..-`) with
-their class. They are routed as two independent nets unless `route` gets `pair_pull` or `pairs`;
-the summary says so.
+their class. They are routed as two independent nets unless `route` gets `pairs` `"pull"` or
+`"band"`; the summary says so.
 
 ```json
 {"name": "load_board", "arguments": {"path": "bench/work/ledctl/ledctl.kicad_pcb"}}
@@ -666,7 +666,7 @@ mm, two sided) seeds 1 to 8 gave anything from 0 to 47 KiCad errors, so an agent
 a few seeds before it refines one.
 
 ```json
-{"name": "try_seeds", "arguments": {"board": "b6", "seeds": [1, 2, 3, 4, 5, 6], "place": {"scope": "all_unlocked", "semantic": true, "two_sided": true}, "route": {"pair_pull": 2}}}
+{"name": "try_seeds", "arguments": {"board": "b6", "seeds": [1, 2, 3, 4, 5, 6], "place": {"scope": "all_unlocked", "semantic": true, "two_sided": true}, "route": {"pairs": "pull"}}}
 ```
 
 ### route
@@ -678,15 +678,24 @@ option has the name, the default and the meaning it has on the command line (the
 `--kebab-case`); a test fails when the two differ in what they offer. An argument that does not
 exist is refused. Options that contradict each other are refused too, with a message that says
 what to change (for example `move_parts` with `shove`, `reroute` without `keep_all` and `nets`,
-an open end with `pairs`, `runs` 0); nothing is adjusted silently. The defaults: `runs` 14 (a constant, so results do not depend on the machine), `generations` 3,
+an open end with `pairs` `"band"`, `breakouts` without `pairs` `"band"`, `runs` 0); nothing is
+adjusted silently. An option with a fixed list of words (`pairs`, `angles`) has the words as an
+`enum` in the tool's schema, and its description says what each word means and when to pick it;
+the text comes from the same table as the CLI's `--help`. An argument in the spelling of an
+earlier version still works: the result is the same, and `notes` says what to write now
+([Old spellings](#old-spellings-of-route)). The defaults: `runs` 14 (a constant, so results do not depend on the machine), `generations` 3,
 `geometry_generations` 3, `via_pitch` 0.5 mm, `via_cost` 3.0, `layer_dirs` 0.5 (preferred
-directions per layer for every third run, 0 = off), `pair_pull` 0 (experimental pull between the
-nets of a differential pair: the search keeps the second net near the first one's way on the same
-layer, and the finished tracks close up to the pair's gap wherever they run within 1.5 mm of each
-other and nothing lies between; works for every recognised pair, also in the `Default` class), `pairs` false (experimental: a pair as one wide track that is split
-in two, see the CLI guide; only pairs with a pair rule or a net class of their own, `pair_all`
-true for every pair), `breakouts` false (experimental: the wide track ends just outside the
-pads), `via_pairs` false (experimental: vias side by side as one capsule), `pair_skew` 0.1 mm, `pair_zdiff` none, `tune` true (meanders for the
+directions per layer for every third run, 0 = off), `pairs` `"off"` (how the two nets of a
+differential pair are laid: `"off"` each on its own; `"pull"`, experimental: the search keeps
+the second net near the first one's way on the same layer, and the finished tracks close up to
+the pair's gap wherever they run within 1.5 mm of each other and nothing lies between, which
+works for every recognised pair, also in the `Default` class; `"band"`, experimental: a pair as
+one wide track that is split in two, see the CLI guide, only for pairs with a pair rule or a net
+class of their own, `pair_all` true for every pair), `pair_pull` (the weight of the pull: 1 with
+`"pull"`; with `"band"` 0, and a value pulls the pairs that get no wide track; refused with
+`"off"`), and with `pairs` `"band"` only: `breakouts` false (experimental: the wide track ends
+just outside the pads), `via_pairs` false (experimental: vias side by side as one capsule),
+`pair_skew` 0.1 mm, `pair_zdiff` none. `tune` true (meanders for the
 `length` and `skew` rules of the `.kicad_dru`, written as KiCad tuning patterns),
 `tune_amplitude` 1 mm, `tune_spacing` 2 track widths between meander legs, `negotiate` 0
 (negotiated routing from the start, 20 rounds work well and take about twice the time; with 0
@@ -751,13 +760,14 @@ widths; `hole_to_hole` holds between all drilled holes, of the same net too, and
 names a track below the project's `min_track_width` or `min_connection`, which KiCad reports
 as `track_width` or `connection_width` whatever the net class allows),
 `portfolio` (per run: `generation`, `seed`, `fanout_first`, `routed`, `connections`, `vias`,
-`length_mm`, `violations`), `pairs` (with `pairs`), `coupling` (every recognised pair, whatever
+`length_mm`, `violations`), `pairs` (the wide tracks, with `pairs` `"band"`), `coupling` (every recognised pair, whatever
 the settings: `p`, `n`, `coupled_mm` within width + gap + 0.1 mm of the partner on the same layer,
-`length_mm` of both nets, `vias_p`, `vias_n`, and with `pair_pull` or `pairs` `uncoupled`: the
+`length_mm` of both nets, `vias_p`, `vias_n`, and with `pairs` `"pull"` or `"band"` `uncoupled`: the
 longest stretches of 0.5 mm and more that do not run beside the partner, `net`, `layer`, `x`, `y`,
 `length_mm`, `why` one of "partner on another layer", "partner farther away" (a breakout to the
-pins, or a way of its own), "something between"), `notes` (hints, such as pairs routed without
-`pair_pull` or `pairs`, or a pair with `pair_pull` that runs coupled for less than 60 % of its length), `length_tuning` (every net the tuning aimed at: `net`, `before_mm`,
+pins, or a way of its own), "something between"), `notes` (hints: an argument in an old spelling and what to write now,
+pairs routed with `pairs` `"off"`, or a pair that was asked to couple and runs coupled for less
+than 60 % of its length), `length_tuning` (every net the tuning aimed at: `net`, `before_mm`,
 `after_mm`, `aim_mm`, `as_pair`), `length_rules` (every length, skew, uncoupled and gap rule
 after the tuning, measured as the KiCad DRC measures: `rule`, `kind`, `min_mm`, `opt_mm`,
 `max_mm`, `nets`, `failed` with `net`, `length_mm`, `skew_mm`), `nets` (per routed net, longest first: `net`,
@@ -770,6 +780,19 @@ because no 45 degree path fit, `sharp_corners` left unchamfered).
 ```json
 {"name": "route", "arguments": {"board": "b1", "runs": 2, "generations": 0}}
 ```
+
+### Old spellings of route
+
+Arguments in the spelling of an earlier version still work. They are mapped onto the options of
+today, the result is the same, and `notes` of the result has one line `OLD is now NEW` for each.
+The schema of the tool no longer lists them.
+
+| Earlier | Now |
+| --- | --- |
+| `pairs: true` | `pairs: "band"` |
+| `pairs: false`, or `pairs` left out | `pairs: "off"`, the default |
+| `pair_pull: W` without `pairs: true` | `pairs: "pull"`, `pair_pull: W` (`"pull"` alone pulls with 1) |
+| `pairs: true`, `pair_pull: W` | `pairs: "band"`, `pair_pull: W` |
 
 ### Choosing opt-in options
 
@@ -788,16 +811,16 @@ board: each helps one kind of board and costs on another. The full table with th
   (`only`, `corridors`, `leash` 1.5). Measured: up to 25 % fewer vias, 18 % on the tightest board
   with the corridors cleared.
 - **FPGA or BGA with pairs and buses**: `patterns` `pairs,groups` (best on Arty).
-- **DDR fan-out**: `patterns` `groups-short`; for pairs that change layers `pairs` with
+- **DDR fan-out**: `patterns` `groups-short`; for pairs that change layers `pairs` `"band"` with
   `via_pairs`. Leave `breakouts` off there.
 - **Placement fixed and the board already routes cleanly**: leave the hints off (they added
   clearance errors on such a board); `decaps` at most. Spend the time on seeds and
   `open_end_seconds` instead.
 - **Placement from scratch**: `place_parts` with `semantic`, `corridors` and `escape_halo`, two or
   three seeds, route each without hints, keep the best.
-- **Differential pairs**: `pair_pull` 1 when they should run together and there is room; `pairs`
-  (one wide track) only for pairs with a rule or class of their own and room around them, it costs
-  connections on dense boards; `pair_all` for pairs in the default class.
+- **Differential pairs**: `pairs` `"pull"` when they should run together and there is room;
+  `pairs` `"band"` (one wide track) only for pairs with a rule or class of their own and room
+  around them, it costs connections on dense boards; `pair_all` for pairs in the default class.
 - `shares` usually costs vias; `rows` acts only in the open end (`open_end_seconds`).
 - Keep an option per board only when it beat the plain run; it is no default for the next board.
 

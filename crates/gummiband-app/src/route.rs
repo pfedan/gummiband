@@ -38,8 +38,8 @@ pub mod defaults {
     pub const PATTERNS: &str = "none";
     /// Factor on the via cost in the via pass.
     pub const VIA_PASS: f64 = 4.0;
-    /// Weight of the pull between the nets of differential pairs.
-    pub const PAIR_PULL: f64 = 0.0;
+    /// Weight of the pull between the two nets of a differential pair, with `pairs` pull.
+    pub const PAIR_PULL: f64 = 1.0;
     /// Length difference left within a pair in mm.
     pub const PAIR_SKEW: f64 = 0.1;
     /// Rounds of negotiated routing from the start.
@@ -78,6 +78,41 @@ pub enum Angles {
     Deg45,
 }
 
+/// How the two nets of a differential pair are laid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pairs {
+    /// Each net on its own, like any other net.
+    #[default]
+    Off,
+    /// Two nets, the second pulled to the way of the first ([`RouteOptions::pair_pull`]); the
+    /// finished tracks close up to the pair gap where nothing lies between.
+    Pull,
+    /// One wide track per pair that is split into two parallel tracks.
+    Band,
+}
+
+impl Pairs {
+    pub const ALL: [Pairs; 3] = [Pairs::Off, Pairs::Pull, Pairs::Band];
+
+    /// The word of the option `pairs` ([`crate::OPTIONS`]).
+    pub fn word(self) -> &'static str {
+        match self {
+            Pairs::Off => "off",
+            Pairs::Pull => "pull",
+            Pairs::Band => "band",
+        }
+    }
+
+    /// The value of a word; the error names the words there are.
+    pub fn parse(word: &str) -> Result<Pairs, String> {
+        let word = crate::option_doc("pairs").expect("pairs").choice(word)?;
+        Ok(*Pairs::ALL
+            .iter()
+            .find(|p| p.word() == word)
+            .expect("a word of the table"))
+    }
+}
+
 /// Every option of the route pipeline. `Default` gives the documented defaults ([`defaults`]).
 /// Options that are `None` follow from the others, see the methods of the same name.
 #[derive(Debug, Clone)]
@@ -110,9 +145,13 @@ pub struct RouteOptions {
     /// Hints from local patterns, comma separated (`gummiband_core::patterns::hints`).
     pub patterns: String,
     pub via_pass: f64,
-    pub pair_pull: f64,
-    /// Route differential pairs as one wide track.
-    pub pairs: bool,
+    /// How differential pairs are laid.
+    pub pairs: Pairs,
+    /// Weight of the pull between the two nets of a pair. None: [`defaults::PAIR_PULL`] with
+    /// `pairs` pull, and 0 with band, where it is the pull for the pairs that get no wide track,
+    /// see [`RouteOptions::pair_pull`].
+    pub pair_pull: Option<f64>,
+    /// With `pairs` band, as are the four below.
     pub pair_skew: f64,
     pub pair_zdiff: Option<f64>,
     pub pair_all: bool,
@@ -178,8 +217,8 @@ impl Default for RouteOptions {
             layer_dirs: defaults::LAYER_DIRS,
             patterns: defaults::PATTERNS.to_string(),
             via_pass: defaults::VIA_PASS,
-            pair_pull: defaults::PAIR_PULL,
-            pairs: false,
+            pairs: Pairs::Off,
+            pair_pull: None,
             pair_skew: defaults::PAIR_SKEW,
             pair_zdiff: None,
             pair_all: false,
@@ -242,6 +281,17 @@ impl RouteOptions {
         })
     }
 
+    /// The weight of the pull between the two nets of a pair: with `pairs` pull
+    /// [`defaults::PAIR_PULL`] unless told otherwise, with band what was given (there it pulls the
+    /// pairs that get no wide track together), without pairs none.
+    pub fn pair_pull(&self) -> f64 {
+        match self.pairs {
+            Pairs::Off => 0.0,
+            Pairs::Pull => self.pair_pull.unwrap_or(defaults::PAIR_PULL),
+            Pairs::Band => self.pair_pull.unwrap_or(0.0),
+        }
+    }
+
     /// Whether the run is open ended: by its time budget, or because the front end may stop it
     /// (`until_stop`, [`Hooks::stop`]).
     pub fn open_end(&self, until_stop: bool) -> bool {
@@ -282,7 +332,19 @@ impl RouteOptions {
         if finishing && self.move_parts == Some(true) && self.shove != Some(false) {
             return err("move_parts does not work with shove: switch shove off, or leave move_parts out");
         }
-        if !self.pairs {
+        if self.pair_pull.is_some_and(|w| w.is_nan() || w < 0.0) {
+            return err("pair_pull must not be negative");
+        }
+        let band = self.pairs == Pairs::Band;
+        if self.pairs == Pairs::Off && self.pair_pull.is_some_and(|w| w > 0.0) {
+            return err("pair_pull needs pairs pull: write pairs pull, or leave pair_pull out");
+        }
+        if self.pairs == Pairs::Pull && self.pair_pull == Some(0.0) {
+            return err(
+                "pairs pull with pair_pull 0 pulls nothing: write pairs off, or leave pair_pull out (the weight is then 1)",
+            );
+        }
+        if !band {
             let given = [
                 ("pair_zdiff", self.pair_zdiff.is_some()),
                 ("pair_all", self.pair_all),
@@ -290,16 +352,18 @@ impl RouteOptions {
                 ("via_pairs", self.via_pairs),
             ];
             if let Some((name, _)) = given.iter().find(|(_, on)| *on) {
-                return Err(format!("{name} needs pairs"));
+                return Err(format!(
+                    "{name} acts on the wide track of pairs band only: write pairs band, or leave {name} out"
+                ));
             }
         }
-        if open_end && self.pairs {
+        if open_end && band {
             return err(
-                "an open ended run does not work with pairs: leave out pairs, or the open end (until_stop, open_end_seconds)",
+                "an open ended run does not work with pairs band: write pairs pull or off, or leave out the open end (until_stop, open_end_seconds)",
             );
         }
-        if self.placements > 0 && (self.keep_all || !self.nets.is_empty() || self.pairs) {
-            return err("placements routes the whole board: not with keep_all, nets or pairs");
+        if self.placements > 0 && (self.keep_all || !self.nets.is_empty() || band) {
+            return err("placements routes the whole board: not with keep_all, nets or pairs band");
         }
         if self.clear_corridors && self.keep_all {
             return err("clear_corridors places parts before the whole board is routed: not with keep_all");
@@ -358,7 +422,7 @@ impl RouteOptions {
         Ok(RouterConfig {
             via_cost: self.via_cost,
             layer_dirs: self.layer_dirs,
-            pair_pull: self.pair_pull,
+            pair_pull: self.pair_pull(),
             via_pass: self.via_pass,
             negotiate: self.negotiate,
             ..Default::default()
@@ -506,7 +570,7 @@ pub struct Routed {
     pub sub: Substrate,
     /// Geometry, stats, portfolio, frames, part offsets and the alternatives of the open end.
     pub res: RouteResult,
-    /// One report per differential pair (`pairs`).
+    /// One report per differential pair (`pairs` band).
     pub pairs: Vec<gummiband_core::pairs::PairReport>,
     /// The nets whose unlocked copper gave way: the result replaces it.
     pub given: std::collections::BTreeSet<String>,
@@ -572,7 +636,8 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     let search_cfg = opts.search_config(hooks, "");
     let seed = search_cfg.seed_used();
     let with_zdiff;
-    let board = match (opts.pairs, opts.pair_zdiff) {
+    let band = opts.pairs == Pairs::Band;
+    let board = match (band, opts.pair_zdiff) {
         (true, Some(z)) => {
             let mut b = board.clone();
             gummiband_core::pairs::apply_zdiff(&mut b, z);
@@ -609,7 +674,7 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     let shove = opts.shove();
     // the nets asked for, and the nets that give way when a connection finds no way
     let finished = gummiband_core::finish_nets(b, &opts.nets, shove, opts.give(), &search_cfg, |board, search| {
-        let out = if opts.pairs {
+        let out = if band {
             let pair_cfg = gummiband_core::pairs::PairConfig {
                 skew: opts.pair_skew,
                 zdiff: opts.pair_zdiff,
@@ -647,7 +712,7 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     // room for the meanders: the copper next to the nets that want length steps aside
     // (the pairs make it while they are one wide track)
     let mut room = None;
-    if !opts.pairs && tune_room && !b.match_rules.is_empty() {
+    if !band && tune_room && !b.match_rules.is_empty() {
         let t1 = Instant::now();
         let want = gummiband_core::tune::room_wanted(b, &res.geometry, &tune_cfg, &[]);
         if !want.is_empty() {

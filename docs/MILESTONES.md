@@ -882,3 +882,18 @@ LED controller (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
     `via_pairs`; an argument that does not exist is refused.
   - The CLI removes its folder `gummiband-corridors-<pid>` from the temp directory.
   The route hashes did not change. Still to come: help texts generated from the table (2f).
+
+## Consolidation, phase 2b: one option for differential pairs
+
+- 2026-11-11: `pairs` is one option with three words in the CLI and the MCP tool `route`:
+  `off` (the default, as before), `pull` (what `pair_pull` above 0 did) and `band` (what the
+  switch `pairs` did). `pair_pull` is the weight of the pull, 1 unless given, and with `band`
+  the pull for the pairs that get no wide track (0 unless given). `breakouts`, `via_pairs`,
+  `pair_all` and `pair_zdiff` belong to `band` and are refused without it, with a message that
+  says what to write. The words and their sentences are in `gummiband_app::OPTIONS`
+  (`Kind::Choice`); `--help` and the MCP schema take them from there. The old spellings still
+  work and say what to write now (`gummiband_app::old`): `--pairs` alone is `--pairs band`,
+  `--pair-pull W` alone is `--pairs pull --pair-pull W`, `pairs: true` is `pairs: "band"`.
+  Measured: 12 routes of `diff_pairs` in old and new spelling give the files of the build
+  before the change, byte for byte; `bench/hashes.sh` now passes `--pairs band` and `--pairs
+  pull`, and both hash lists are unchanged.

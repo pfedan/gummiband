@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
-use gummiband_app::{Angles, NetOptions, RouteOptions};
+use gummiband_app::old::Respelled;
+use gummiband_app::{Angles, NetOptions, Pairs, RouteOptions};
 use gummiband_core::board::Board;
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -46,11 +47,11 @@ the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board 
 look at problems. To pre-route a critical part by hand (datasheet layout): part_info -> \
 add_locked_copper -> route the returned board id. move_part and add_zone edit the same working \
 copy. To change one net on a routed board: load the routed file -> route with keep_all, nets and \
-reroute (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short; two_sided: true when the parts do not fit on one side), set_layer_type (power) and add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Good practice around routing (the prompt good_practice walks through a whole board): \
+reroute (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short; two_sided: true when the parts do not fit on one side), set_layer_type (power) and add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pairs \"pull\" (gentle, every pair) or \"band\" (one wide track, experimental). Good practice around routing (the prompt good_practice walks through a whole board): \
 power_plan before routing (currents -> widths, planes, vias; apply stores the widths), \
 current_check after routing (narrowest cross-section of every current path), ground_pour (GND \
 pours and stitching vias), reference_check (signal tracks over gaps or splits of their reference plane), then drc. Opt-in options (route patterns, clear_corridors, \
-pairs, place_parts semantic, corridors, escape_halo, leash) are off because none wins on every board; \
+pairs pull and band, place_parts semantic, corridors, escape_halo, leash) are off because none wins on every board; \
 results scatter strongly between seeds, so compare a setting with the plain run over the same 2 or 3 \
 seeds (mean and worst, judged by drc). Rough guide: several chips with buses -> patterns groups, on a \
 tight board also clear_corridors, or track_corridors and place_parts only + corridors + leash 1.5 to \
@@ -577,7 +578,7 @@ pub struct TrySeedsIn {
     /// Arguments of power_copper (without board) to lay out after each placement and before
     /// its route, e.g. {"paths": [...]}; leave it out for none.
     pub power_copper: Option<serde_json::Map<String, serde_json::Value>>,
-    /// Arguments of route for every seed (without board and output), e.g. {"pair_pull": 2}.
+    /// Arguments of route for every seed (without board and output), e.g. {"pairs": "pull"}.
     #[serde(default)]
     pub route: serde_json::Map<String, serde_json::Value>,
     /// Run KiCad's DRC on every result and rank by its errors (default true when kicad-cli is
@@ -908,6 +909,27 @@ pub struct SetNetOptionsIn {
     pub neck_refs: Option<Vec<String>>,
 }
 
+/// An option with a fixed list of words: the word, or the true or false of an earlier version
+/// that had a switch under the same name (`gummiband_app::old`). The schema has the words only.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum WordOrSwitch {
+    Switch(bool),
+    Word(String),
+}
+
+/// The schema of an option with a fixed list of words, from the table of gummiband-app: its
+/// words, and a description with one line per word and the default.
+fn choice_schema(name: &str) -> schemars::Schema {
+    let doc = gummiband_app::option_doc(name).expect("an option of the table");
+    let words: Vec<&str> = doc.choices.iter().map(|c| c.value).collect();
+    schemars::json_schema!({"type": "string", "enum": words, "description": doc.describe()})
+}
+
+fn pairs_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    choice_schema("pairs")
+}
+
 /// The arguments of `route`: the options of the pipeline (`gummiband_app::OPTIONS`, each under
 /// its name) and what the session adds (`board`, `output`, `max_violations`). An argument that
 /// does not exist is an error, not a typo that goes unnoticed.
@@ -937,27 +959,28 @@ pub struct RouteIn {
     pub give: Option<f64>,
     /// Seed of the search. The same seed gives the same result; another one a different try.
     pub seed: Option<u64>,
-    /// Weight of the pull between the nets of differential pairs (default 0: off; 1 is a good
-    /// start, it can cost clearance on tight boards). The finished tracks then close up to the
-    /// pair's gap where nothing lies between; `coupling` says where and why a pair stays apart.
+    // the description and the words come from the table of gummiband-app
+    #[serde(default)]
+    #[schemars(schema_with = "pairs_schema")]
+    pub pairs: Option<WordOrSwitch>,
+    /// With pairs "pull": weight of the pull between the two nets of a pair (default 1, a good
+    /// start; up to about 4; it can cost clearance on tight boards). `coupling` says where and
+    /// why a pair stays apart. With pairs "band": the same pull for the pairs that get no wide
+    /// track (default 0). Not with pairs "off".
     pub pair_pull: Option<f64>,
-    /// Experimental: route differential pairs as one wide track and split it into two parallel
-    /// tracks, width and gap from net classes and custom rules (default false). Check the result
-    /// with drc; on dense boards it costs connections.
-    pub pairs: Option<bool>,
-    /// With pairs: length difference left within a pair in mm (default 0.1).
+    /// With pairs "band": length difference left within a pair in mm (default 0.1).
     pub pair_skew: Option<f64>,
-    /// With pairs: target differential impedance in ohm; sets the track width per layer from
-    /// the stackup, the gap stays.
+    /// With pairs "band": target differential impedance in ohm; sets the track width per layer
+    /// from the stackup, the gap stays.
     pub pair_zdiff: Option<f64>,
-    /// With pairs: couple every pair recognised by name (default false: only pairs with a
-    /// `diff_pair_gap` rule or a net class of their own).
+    /// With pairs "band": a wide track for every pair recognised by name (default false: only
+    /// pairs with a `diff_pair_gap` rule or a net class of their own).
     pub pair_all: Option<bool>,
-    /// With pairs, experimental: the wide track ends just outside the pads, two single tracks
-    /// connect them (default false).
+    /// With pairs "band", experimental: the wide track ends just outside the pads, two single
+    /// tracks connect them (default false).
     pub breakouts: Option<bool>,
-    /// With pairs, experimental: two vias side by side are one via pair, a capsule that turns
-    /// with the wide track (default false).
+    /// With pairs "band", experimental: two vias side by side are one via pair, a capsule that
+    /// turns with the wide track (default false).
     pub via_pairs: Option<bool>,
     /// Weight of the preferred layer directions in every third run (default 0.5, 0: off).
     pub layer_dirs: Option<f64>,
@@ -1195,7 +1218,7 @@ pub struct LoadBoardOut {
     /// Net options kept from an earlier load of the same file.
     pub net_options: BTreeMap<String, NetOption>,
     /// Differential pairs recognised by net name (`..P`/`..N`, `..+`/`..-`). route couples
-    /// them only with `pair_pull` or `pairs`.
+    /// them only with `pairs` "pull" or "band".
     pub diff_pairs: Vec<DiffPairOut>,
 }
 
@@ -1330,7 +1353,7 @@ pub struct CouplingOut {
     pub length_mm: f64,
     pub vias_p: usize,
     pub vias_n: usize,
-    /// With `pair_pull` or `pairs`: the longest stretches (0.5 mm and more, at most 5) that do
+    /// With `pairs` "pull" or "band": the longest stretches (0.5 mm and more, at most 5) that do
     /// not run beside the partner, with where and why.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub uncoupled: Vec<UncoupledOut>,
@@ -1399,12 +1422,13 @@ pub struct RouteOut {
     /// The first max_violations violations.
     pub violations: Vec<ViolationOut>,
     pub portfolio: Vec<PortfolioOut>,
-    /// Differential pairs, with `pairs` set.
+    /// The pairs laid as a wide track, with pairs "band".
     pub pairs: Vec<PairOut>,
     /// Every recognised differential pair, whatever the settings: how much of it runs next to
     /// its partner.
     pub coupling: Vec<CouplingOut>,
-    /// Hints on the settings, e.g. pairs that were not asked to couple.
+    /// Hints on the settings: an argument in the spelling of an earlier version and what to write
+    /// now, pairs that were not asked to couple.
     pub notes: Vec<String>,
     /// Per routed net: track length, vias and widths, longest first.
     pub nets: Vec<NetStatOut>,
@@ -2497,7 +2521,7 @@ impl Gummiband {
     /// and keeps the placement of `clear_corridors` in the working copy.
     fn route_entry(&self, p: RouteIn) -> Result<(String, RouteOut)> {
         let (options, loaded_keep) = self.with_entry(&p.board, |e| Ok((e.options.clone(), e.keep_locked)))?;
-        let mut opts = route_options(&p, p.keep_locked.unwrap_or(loaded_keep))?;
+        let (mut opts, respelled) = route_options(&p, p.keep_locked.unwrap_or(loaded_keep))?;
         opts.net_options = options;
         opts.validate(false).map_err(anyhow::Error::msg)?;
         let (mut id, mut cleared) = (p.board.clone(), Vec::new());
@@ -2506,7 +2530,7 @@ impl Gummiband {
             opts.clear_corridors = false;
         }
         let path = self.with_entry(&id, |e| Ok(e.path.clone()))?;
-        let (mut summary, mut out) = route_blocking(id, path, opts, p)?;
+        let (mut summary, mut out) = route_blocking(id, path, opts, &respelled, p)?;
         if !cleared.is_empty() {
             summary = format!(
                 "placed again out of the track corridors: {}\n{summary}",
@@ -3232,10 +3256,24 @@ impl Gummiband {
 }
 
 /// The options of a route call: what the caller gave, and the defaults of the pipeline for
-/// the rest. `keep_locked` is the caller's or the one the board was loaded with.
-fn route_options(p: &RouteIn, keep_locked: bool) -> Result<RouteOptions> {
+/// the rest; with them a note for every spelling of an earlier version among the arguments.
+/// `keep_locked` is the caller's or the one the board was loaded with.
+fn route_options(p: &RouteIn, keep_locked: bool) -> Result<(RouteOptions, Vec<Respelled>)> {
     let d = RouteOptions::default();
-    Ok(RouteOptions {
+    let mut respelled = Vec::new();
+    let pairs = match &p.pairs {
+        Some(WordOrSwitch::Word(word)) => Pairs::parse(word).map_err(anyhow::Error::msg)?,
+        switch => {
+            let switch = match switch {
+                Some(WordOrSwitch::Switch(on)) => Some(*on),
+                _ => None,
+            };
+            let (pairs, note) = gummiband_app::old::pairs(switch, p.pair_pull);
+            respelled.extend(note);
+            pairs
+        }
+    };
+    let opts = RouteOptions {
         keep_locked,
         keep_all: p.keep_all == Some(true),
         nets: p.nets.clone().unwrap_or_default(),
@@ -3251,8 +3289,8 @@ fn route_options(p: &RouteIn, keep_locked: bool) -> Result<RouteOptions> {
         layer_dirs: p.layer_dirs.unwrap_or(d.layer_dirs),
         patterns: p.patterns.clone().unwrap_or(d.patterns),
         via_pass: p.via_pass.unwrap_or(d.via_pass),
-        pair_pull: p.pair_pull.unwrap_or(d.pair_pull),
-        pairs: p.pairs.unwrap_or(d.pairs),
+        pairs,
+        pair_pull: p.pair_pull,
         pair_skew: p.pair_skew.unwrap_or(d.pair_skew),
         pair_zdiff: p.pair_zdiff,
         pair_all: p.pair_all.unwrap_or(d.pair_all),
@@ -3283,10 +3321,19 @@ fn route_options(p: &RouteIn, keep_locked: bool) -> Result<RouteOptions> {
         net_options: d.net_options,
         teardrops: p.teardrops.unwrap_or(d.teardrops),
         frames: p.frames.as_deref().map(abs_path),
-    })
+    };
+    Ok((opts, respelled))
 }
 
-fn route_blocking(id: String, path: PathBuf, opts: RouteOptions, p: RouteIn) -> Result<(String, RouteOut)> {
+/// Route the file of a loaded board and write the result. `respelled` are the arguments given
+/// in the spelling of an earlier version: the result says what to write now.
+fn route_blocking(
+    id: String,
+    path: PathBuf,
+    opts: RouteOptions,
+    respelled: &[Respelled],
+    p: RouteIn,
+) -> Result<(String, RouteOut)> {
     let output = match &p.output {
         Some(o) => abs_path(o),
         None => {
@@ -3361,7 +3408,7 @@ fn route_blocking(id: String, path: PathBuf, opts: RouteOptions, p: RouteIn) -> 
         let (w, g, _) = b.pair_shape(a, c, 0);
         let (coupled, total) = gummiband_core::pair_coupling_of(&res.geometry, a, c, w + g + 0.1);
         let vias = |n| res.geometry.vias.iter().filter(|v| v.net == n).count();
-        let asked = opts.pair_pull > 0.0 || opts.pairs;
+        let asked = opts.pairs != Pairs::Off;
         let uncoupled = if asked {
             gummiband_core::uncoupled_stretches(&res.geometry, a, c, w + g + 0.1, 0.5)
                 .into_iter()
@@ -3388,7 +3435,7 @@ fn route_blocking(id: String, path: PathBuf, opts: RouteOptions, p: RouteIn) -> 
             uncoupled,
         });
     }
-    let mut notes = Vec::new();
+    let mut notes: Vec<String> = respelled.iter().map(Respelled::mcp).collect();
     for x in coupling
         .iter()
         .filter(|x| !x.uncoupled.is_empty() && x.coupled_mm < 0.6 * x.length_mm)
@@ -3398,10 +3445,10 @@ fn route_blocking(id: String, path: PathBuf, opts: RouteOptions, p: RouteIn) -> 
             x.p, x.n, x.coupled_mm, x.length_mm
         ));
     }
-    if !coupling.is_empty() && opts.pair_pull == 0.0 && !opts.pairs {
+    if !coupling.is_empty() && opts.pairs == Pairs::Off {
         let names: Vec<String> = coupling.iter().map(|x| format!("{}/{}", x.p, x.n)).collect();
         notes.push(format!(
-            "differential pairs {} were routed as independent nets: set pair_pull (1 to 4) or pairs to couple them",
+            "differential pairs {} were routed as independent nets: set pairs to \"pull\" or \"band\" to couple them",
             names.join(", ")
         ));
     }
@@ -3609,7 +3656,7 @@ fn pairs_note(pairs: &[DiffPairOut]) -> String {
     }
     let names: Vec<String> = pairs.iter().map(|x| format!("{}/{}", x.p, x.n)).collect();
     format!(
-        " Differential pairs: {}; route couples them only with pair_pull or pairs.",
+        " Differential pairs: {}; route couples them only with pairs \"pull\" or \"band\".",
         names.join(", ")
     )
 }
@@ -4381,12 +4428,20 @@ mod tests {
         assert!(serde_json::from_value::<RouteIn>(serde_json::json!({"board": "b1", "pair_breakouts": true})).is_err());
     }
 
+    /// The options of a call of `route` and the notes about old spellings in it.
+    fn route_call(v: serde_json::Value) -> (RouteOptions, Vec<String>) {
+        let (opts, notes) = route_options(&serde_json::from_value::<RouteIn>(v).unwrap(), false).unwrap();
+        (opts, notes.iter().map(Respelled::mcp).collect())
+    }
+
     /// With nothing given the tool routes with the defaults of the pipeline, and what is given
     /// arrives under its name.
     #[test]
     fn arguments_become_the_options_of_the_pipeline() {
         let args = |v: serde_json::Value| -> RouteOptions {
-            route_options(&serde_json::from_value::<RouteIn>(v).unwrap(), false).unwrap()
+            let (opts, notes) = route_call(v);
+            assert!(notes.is_empty(), "{notes:?}");
+            opts
         };
         let opts = args(serde_json::json!({"board": "b1"}));
         assert_eq!(format!("{opts:?}"), format!("{:?}", RouteOptions::default()));
@@ -4402,6 +4457,100 @@ mod tests {
         assert_eq!(opts.plane_layers, ["In1.Cu"]);
         assert_eq!(opts.angles, Angles::Deg45);
         // contradictions are the pipeline's to refuse, in its words
-        assert!(opts.validate(false).unwrap_err().contains("breakouts needs pairs"));
+        assert!(
+            opts.validate(false)
+                .unwrap_err()
+                .contains("breakouts acts on the wide track of pairs band only")
+        );
+    }
+
+    /// An option with a fixed list of words has them in its schema, with the sentence of each
+    /// from the table of gummiband-app: an agent that reads only the schema knows what to pick.
+    #[test]
+    fn a_choice_has_the_words_of_the_table_in_its_schema() {
+        let schema = serde_json::to_value(schemars::schema_for!(RouteIn)).unwrap();
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("required")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(required, ["board"]);
+        for name in ["pairs"] {
+            let doc = gummiband_app::option_doc(name).unwrap();
+            let prop = &schema["properties"][name];
+            let words: Vec<&str> = doc.choices.iter().map(|c| c.value).collect();
+            assert_eq!(prop["enum"], serde_json::json!(words), "{name}");
+            let text = prop["description"].as_str().expect("description");
+            assert_eq!(text, doc.describe(), "{name}");
+            for c in doc.choices {
+                assert!(
+                    text.contains(&format!("\n{}: {}", c.value, c.help)),
+                    "{name} {}",
+                    c.value
+                );
+            }
+        }
+        // a word that is none of them is refused with the words there are
+        let bad = serde_json::from_value::<RouteIn>(serde_json::json!({"board": "b1", "pairs": "wide"})).unwrap();
+        let e = route_options(&bad, false).unwrap_err().to_string();
+        assert_eq!(e, "pairs must be off, pull or band, not \"wide\"");
+        let (opts, notes) = route_call(serde_json::json!({"board": "b1", "pairs": "pull"}));
+        assert!(opts.pairs == Pairs::Pull && opts.pair_pull() == 1.0 && notes.is_empty());
+    }
+
+    /// The spellings of earlier versions give the options of the new spelling, with a note that
+    /// says what to write now. Nothing in the schema names them.
+    #[test]
+    fn old_spellings_are_mapped_onto_the_new_ones() {
+        use serde_json::json;
+        let cases = [
+            (
+                json!({"pairs": true}),
+                json!({"pairs": "band"}),
+                "pairs: true is now pairs: \"band\"",
+            ),
+            (
+                json!({"pairs": true, "breakouts": true, "pair_pull": 1}),
+                json!({"pairs": "band", "breakouts": true, "pair_pull": 1}),
+                "pairs: true is now pairs: \"band\"",
+            ),
+            (
+                json!({"pair_pull": 2}),
+                json!({"pairs": "pull", "pair_pull": 2}),
+                "pair_pull: 2 is now pairs: \"pull\", pair_pull: 2",
+            ),
+            (
+                json!({"pairs": false, "pair_pull": 1}),
+                json!({"pairs": "pull"}),
+                "pairs: false, pair_pull: 1 is now pairs: \"pull\", pair_pull: 1",
+            ),
+            (
+                json!({"pairs": false}),
+                json!({"pairs": "off"}),
+                "pairs: false is now pairs: \"off\"",
+            ),
+        ];
+        // what the router is told, which is what decides the result
+        let told = |o: &RouteOptions| {
+            let mut o = o.clone();
+            o.pair_pull = Some(o.pair_pull());
+            format!("{o:?}")
+        };
+        let with_board = |mut v: serde_json::Value| {
+            v["board"] = json!("b1");
+            v
+        };
+        for (old, new, note) in cases {
+            let (old_opts, old_notes) = route_call(with_board(old.clone()));
+            let (new_opts, new_notes) = route_call(with_board(new));
+            assert_eq!(told(&old_opts), told(&new_opts), "{old}");
+            assert_eq!(old_notes, [note], "{old}");
+            assert!(new_notes.is_empty(), "{new_notes:?}");
+            assert_eq!(old_opts.validate(false), Ok(()), "{old}");
+        }
+        // the schema knows the word only
+        let schema = serde_json::to_value(schemars::schema_for!(RouteIn)).unwrap();
+        assert_eq!(schema["properties"]["pairs"]["type"], json!("string"));
     }
 }
