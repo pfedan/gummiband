@@ -44,7 +44,7 @@ const REACH: f64 = 8.0;
 pub const NEAR: f64 = 0.5;
 const STEP: f64 = 0.02;
 /// What the check lets pass below a clearance, in mm.
-const PASS: f64 = 1e-4;
+const PASS: f64 = crate::check::TOL;
 
 /// What a thing on the cut is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
