@@ -115,6 +115,10 @@ pub struct Mesh {
     pub opening: FastMap<u32, NetId>,
     /// Triangles covered by each obstacle (fixed: vias only split free triangles).
     pub obs_tris: Arc<FastMap<u32, Vec<u32>>>,
+    /// The outline of the pads with exits (`exit.rs`): for each edge between such a pad and free
+    /// room the exit whose far end it lies on (an index into `Board::exits`), or NONE for an
+    /// edge that is shut. A track of the net crosses the outline at an exit only.
+    pub exit_edges: Arc<FastMap<u32, u32>>,
     /// Obstacles around each original vertex (via vertices have none).
     pub vert_obs: Arc<Vec<Vec<u32>>>,
     /// Per edge end (2 * edge + end): demands.
@@ -370,6 +374,7 @@ impl Mesh {
             status: Vec::new(),
             opening: FastMap::default(),
             obs_tris: Arc::new(FastMap::default()),
+            exit_edges: Default::default(),
             vert_obs: Default::default(),
             demands: Vec::new(),
             tri_sites: Vec::new(),
@@ -420,6 +425,7 @@ impl Mesh {
                 })
                 .collect(),
         );
+        m.exit_edges = Arc::new(m.outline_of_exit_pads(board));
         m.demands = (0..m.edges.len() as u32)
             .flat_map(|e| {
                 let [a, b] = m.edge_demands(e);
@@ -502,6 +508,55 @@ impl Mesh {
                 self.vert_tris[v as usize].push(ti as u32);
             }
         }
+    }
+
+    /// See `exit_edges`. An edge of the outline stays open, as on a pad without exits, where the
+    /// free triangle behind it touches other copper of the net: two pads of one net side by
+    /// side join directly.
+    fn outline_of_exit_pads(&self, board: &Board) -> FastMap<u32, u32> {
+        let mut out = FastMap::default();
+        if board.exits.is_empty() {
+            return out;
+        }
+        for (e, &[a, b]) in self.edge_tris.iter().enumerate() {
+            if a == NONE || b == NONE {
+                continue;
+            }
+            let (o, free) = match (self.status[a as usize], self.status[b as usize]) {
+                (NONE, o) if o != NONE && o != OUTSIDE => (o, a),
+                (o, NONE) if o != NONE && o != OUTSIDE => (o, b),
+                _ => continue,
+            };
+            let ob = &board.obstacles[o as usize];
+            let Some(pin) = ob.pin else { continue };
+            let first = board.exits.partition_point(|x| x.pin < pin);
+            let exits = board.exits_of(pin);
+            if exits.first().is_none_or(|x| x.obs != o as usize) {
+                continue;
+            }
+            let [u, v] = self.edges[e];
+            let (pu, pv) = (self.verts[u as usize], self.verts[v as usize]);
+            let mouth = exits
+                .iter()
+                .position(|x| crate::exit::on_mouth(x, pu) && crate::exit::on_mouth(x, pv));
+            if let Some(k) = mouth {
+                out.insert(e as u32, (first + k) as u32);
+                continue;
+            }
+            let w = self.tris[free as usize].iter().copied().find(|&x| x != u && x != v);
+            let joins = w.is_some_and(|w| {
+                self.vert_obs[w as usize].iter().any(|&q| {
+                    q != o && q != OUTSIDE && {
+                        let other = &board.obstacles[q as usize];
+                        other.net == ob.net && !matches!(other.kind, ObstacleKind::Keepout { .. } | ObstacleKind::Hole)
+                    }
+                })
+            });
+            if !joins {
+                out.insert(e as u32, NONE);
+            }
+        }
+        out
     }
 
     /// True if triangle t lies in a solder mask opening around copper of another net.

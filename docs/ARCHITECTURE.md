@@ -117,8 +117,9 @@ front end.
   `RouteOptions::net_options`, which the MCP server fills from its session.
 - `route_board(board, options, hooks)` takes a board model and returns `Routed`: the search
   (`finish_nets` around `route_pairs` or `route_board` of the core), then room for meanders, the
-  45 degree step, length tuning, the last check on the finished copper, the length rules, the
-  clearance check and the soft copper that moved. The last check (`gummiband_core::legal`) is the
+  45 degree step, length tuning, the exit pieces of the pads as tracks (`exit::stub_tracks`),
+  the last check on the finished copper, the length rules, the clearance check and the soft
+  copper that moved. The last check (`gummiband_core::legal`) is the
   final word on what was routed: a track that still touches copper of another net is taken out
   with what hangs on it, and every net is followed through its pads, tracks, vias and planes
   (pads that touch are one piece, a via joins the pad its copper overlaps and the track it sits
@@ -214,6 +215,47 @@ each layer stays planar by construction.
   piece into the courtyard is narrow and the round end of the wide one stays out of it. On the
   finished geometry the necks widen piece by piece as far as there is room
   (`relax::widen_necks`).
+- Pad exits (`exit.rs`, `GB_EXITS=0`: off): between the pads of a fine pitch part a track has
+  room on the middle line of its pad and hardly anywhere else, so its first piece is constructed
+  and not left to the relaxation. The rule (`exit::plan`): a pad on one routing layer without a
+  hole, convex, at least 1.25 times as long as wide, with its pin on the middle line, whose net
+  is routed (not one of a differential pair), and with a pad of another net of the same part
+  beside one of its long sides so near that a track on the middle line has less than one
+  clearance of room to the side. The exit point lies on the middle line beyond the end of the
+  pad, as near to it as a track may turn there by 45 degrees towards either neighbour and keep
+  its clearance to that pad (searched in steps of 5 µm up to 0.6 mm; about 0.1 mm at 0.4 mm
+  pitch); both ends of the pad get one where the piece keeps its distance from other copper,
+  holes, keep-outs, the board edge and the pieces laid before, so a pad can also be left inwards
+  under its part. The piece is as wide as the track at the pin, or narrower down to the board
+  minimum where the row asks for it and the rules allow a neck there. Where even that is too
+  wide the pad is listed with what is missing (`Board::tight_pads`, `Routed::tight_pads`, a line
+  per pad in the report of both front ends): no route can mend a footprint that leaves no legal
+  way out.
+  The piece belongs to the pad for every step of the route: `Board::set_exits` (called by
+  `finish_nets` for every try) gives the pad obstacle the shape of pad and pieces together
+  (`Board::bare_shape` keeps the shape of the file), the mesh shuts the outline of such a pad for
+  its own net except at a gate of 0.02 mm in the middle of the far end of a piece, 0.01 mm
+  beyond the exit point (`Mesh::exit_edges`; an edge also stays open where the free triangle
+  behind it touches other copper of the net, so two pads of one net side by side still join
+  directly), and a track that crosses the outline there ends at the exit point
+  (`Router::seg_end`). The gate is narrow on purpose: through a wide one the track would pass
+  the corner of the piece and stand beside the middle line again. So the search judges every
+  candidate with the exit it will have, the capacity test sees the piece as copper of its net
+  between the neighbouring pads, and no step after the search can move, split or shorten the
+  piece, because it is no track.
+  During the search other nets keep their clearance from every piece, also from one that no
+  track takes in the end. Once the winner is known such a piece is given back
+  (`exit::release_unused`: the pad has the outline of the file again at that end): the tracks
+  of the nets that the search left too near to it get the rounds without tension of the polish
+  while the rest of the board sleeps (kept only with fewer clearance problems), and the last
+  steps of the search (wider necks, preferred widths, tapers), the comparison of two searches or
+  placements and the later steps of `gummiband_app::route_board` see the pads without those
+  pieces. At the end of `route_board` the pieces that carry a track become tracks of one line
+  each (`exit::stub_tracks`) and the board gets the pads of the file back
+  (`Board::without_exits`): the last check, the clearance check and the writer see plain copper.
+  The length of a net counts its pieces (`matching::net_length`). Pads with exits have no rail
+  in the relaxation. Not covered: the nets of differential pairs, and boards whose unlocked
+  copper is part of the topology.
 - Layer changes on current paths: a connection between two pins that take the minimum width of
   their class (`Board::current_min`: not for the nets of a differential pair) pays as many vias
   per layer change as carry that width (`Router::via_factor`, `Board::vias_for`, IPC-2221), and
@@ -318,7 +360,9 @@ of the nets that gave way; the soft copper shifts aside in its relaxation as in 
 ## Geometry
 
 1. Portals on every crossed edge (room for the neighbours and the edge end clearances) and the
-   funnel algorithm give a first taut polyline.
+   funnel algorithm give a first taut polyline. It runs from pin to pin, or to a via; at a pad
+   with exits (`exit.rs`) from the exit point, which is a fixed end like a pin for every step
+   below.
 2. Elastic optimizer (`relax`): every track is a chain of points under tension, obstacles,
    vias and other tracks push with their clearance, vias move as well and drag their tracks.
    All tracks relax in parallel (Jacobi rounds); the last quarter resolves clearances only.

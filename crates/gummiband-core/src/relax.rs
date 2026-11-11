@@ -136,6 +136,10 @@ fn pin_rails(board: &Board) -> crate::index::FastMap<u32, Vec<Rail>> {
             pins.iter().map(|&p| board.pins[p].pos).fold(pt(0.0, 0.0), |a, b| a + b) * (1.0 / pins.len() as f64);
         for &i in pins {
             let pin = &board.pins[i];
+            // a pad with exits needs no rail: its track begins beyond the pad
+            if !board.exits_of(i).is_empty() {
+                continue;
+            }
             let pitch = pins
                 .iter()
                 .filter(|&&j| j != i)

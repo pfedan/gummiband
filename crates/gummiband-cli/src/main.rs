@@ -964,6 +964,9 @@ fn main() -> Result<()> {
             let viol = &r.violations;
             let spots = gummiband_core::check::spots(&viol).len();
             println!("clearance check: {} violations at {spots} spots", viol.len());
+            for t in r.tight_pads() {
+                println!("  {t}");
+            }
             let mut kinds = std::collections::BTreeMap::new();
             for v in viol {
                 *kinds
@@ -1049,6 +1052,7 @@ fn main() -> Result<()> {
                     "connections": st.conns,
                     "routed": st.routed,
                     "unrouted": st.unrouted,
+                    "tight_pads": r.tight_pads(),
                     "pairs": r.pairs,
                     "matching": matching,
                     "vias": st.vias,

@@ -225,9 +225,33 @@ impl Router<'_> {
                         let (l, r) = self.portal(sid, k);
                         (l.p + r.p) * 0.5
                     }
-                    None => self.end_point(s.start),
+                    None => self.seg_end(sid, true),
                 }
             }
+        }
+    }
+
+    /// Where segment `sid` starts (`first`) or ends. At a pin that is the position of the pin,
+    /// and for a segment that crosses the outline of the pad at an exit (`exit.rs`) the exit
+    /// point: the piece from the pin to there belongs to the pad.
+    pub(crate) fn seg_end(&self, sid: u32, first: bool) -> Point {
+        let s = self.segs[sid as usize].as_ref().unwrap();
+        let end = if first { s.start } else { s.end };
+        let End::Pin(p) = end else {
+            return self.end_point(end);
+        };
+        let pos = self.board.pins[p].pos;
+        if self.board.exits.is_empty() {
+            return pos;
+        }
+        let c = if first { s.crossings.first() } else { s.crossings.last() };
+        match c.and_then(|c| self.sub.m[s.li as usize].exit_edges.get(&c.e)) {
+            Some(&x)
+                if x != crate::topo::NONE && self.pin_group[self.board.exits[x as usize].pin] == self.pin_group[p] =>
+            {
+                self.board.exits[x as usize].at
+            }
+            _ => pos,
         }
     }
 
@@ -313,7 +337,7 @@ impl Router<'_> {
         let s = self.segs[sid as usize].as_ref().unwrap();
         let li = s.li as usize;
         let m = &self.sub.m[li];
-        let (start, end) = (self.end_point(s.start), self.end_point(s.end));
+        let (start, end) = (self.seg_end(sid, true), self.seg_end(sid, false));
         let mut portals = vec![(start, start)];
         for c in &s.crossings {
             let list = &self.cross[li][c.e as usize];
@@ -388,6 +412,8 @@ impl Router<'_> {
     /// The portals of segment `sid`: its start, one per crossing, its end.
     fn seg_portals(&self, sid: u32) -> Vec<(Side, Side)> {
         let s = self.segs[sid as usize].as_ref().unwrap();
+        let start = self.seg_end(sid, true);
+        let end = self.seg_end(sid, false);
         let ends = |p: Point| Side {
             p,
             pivot: p,
@@ -395,7 +421,6 @@ impl Router<'_> {
             rad: 0.0,
             attached: false,
         };
-        let (start, end) = (self.end_point(s.start), self.end_point(s.end));
         let mut portals = Vec::with_capacity(s.crossings.len() + 2);
         portals.push((ends(start), ends(start)));
         for k in 0..s.crossings.len() {

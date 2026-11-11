@@ -875,6 +875,10 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     } else {
         routed_board.with_offsets(&res.offsets)
     };
+    // an exit piece that no track took is no copper: the steps from here on see the pads
+    // without those pieces, as the last steps of the search did
+    let released = gummiband_core::exit::release_unused(&final_board, &res.geometry);
+    let final_board = released.unwrap_or(final_board);
     let b = &final_board;
     // room for the meanders: the copper next to the nets that want length steps aside
     // (the pairs make it while they are one wide track)
@@ -928,6 +932,20 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
             seconds: t1.elapsed().as_secs_f64(),
         }
     });
+    // up to here the exit pieces of the pads were part of their pads (`exit.rs`); from here on
+    // they are tracks of the route, and the pads are the pads of the file
+    let plain = (!b.exits.is_empty()).then(|| {
+        let stubs = |g: &mut Geometry| {
+            let s = gummiband_core::exit::stub_tracks(b, g);
+            g.tracks.extend(s);
+        };
+        stubs(&mut res.geometry);
+        res.alternatives.iter_mut().for_each(|(_, g)| stubs(g));
+        res.frames.iter_mut().for_each(|(_, g, _)| stubs(g));
+        b.without_exits()
+    });
+    let final_board = plain.unwrap_or(final_board);
+    let b = &final_board;
     // the last word, on the finished copper: no short between two nets is written, and a
     // connection counts as routed only if the copper holds together
     let legal = gummiband_core::legal::enforce(b, &mut res.geometry, &mut res.stats);
@@ -968,7 +986,49 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     })
 }
 
+/// A pad whose row leaves a track no legal way out, see [`Routed::tight_pads`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TightPad {
+    /// "U3.12"
+    pub pad: String,
+    pub net: String,
+    /// Width of the piece that leaves the pad, in mm.
+    pub width_mm: f64,
+    /// How much the footprint lacks for that width and the clearance, in µm.
+    pub missing_um: f64,
+}
+
+impl std::fmt::Display for TightPad {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "pad {} ({}): the row leaves a track of {:.3} mm {:.0} µm less than its clearance",
+            self.pad, self.net, self.width_mm, self.missing_um
+        )
+    }
+}
+
 impl Routed {
+    /// The pads of the routed nets where the footprint itself leaves a track no legal way out:
+    /// on the middle line of the pad, at the narrowest width the rules allow there, it is nearer
+    /// to the next pad of another net than its clearance. No route can mend that; the rules or
+    /// the footprint can.
+    pub fn tight_pads(&self) -> Vec<TightPad> {
+        let b = &self.board;
+        b.tight_pads
+            .iter()
+            .map(|t| {
+                let pin = &b.pins[t.pin];
+                TightPad {
+                    pad: pin.name.clone(),
+                    net: b.nets[pin.net as usize].name.clone(),
+                    width_mm: t.width,
+                    missing_um: t.missing * 1000.0,
+                }
+            })
+            .collect()
+    }
+
     /// The board file with `geometry` (the result's own, or one of its alternatives) in place
     /// of the copper that goes, and the number of items written. Soft copper that rests stays
     /// in the file as it is; the meanders of the tuning become KiCad tuning patterns.

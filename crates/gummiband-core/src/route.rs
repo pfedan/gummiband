@@ -2386,6 +2386,10 @@ impl<'a> Router<'a> {
             }
             let free = m.status[t as usize] == NONE;
             let e = m.tri_edges[t as usize][k as usize];
+            // a pad with exits is left and reached at an exit
+            if !m.exit_edges.is_empty() && m.exit_edges.get(&e) == Some(&NONE) {
+                return;
+            }
             let k2 = m.local_edge(t2, e) as u8;
             if !free && s2 != NONE {
                 push(

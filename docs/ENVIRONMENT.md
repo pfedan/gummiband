@@ -59,6 +59,7 @@ Each turns off a behaviour that is on by default (or, for the `GB_NO_*` names, a
 | --- | --- | --- | --- |
 | `GB_AUTO_NEGOTIATE` | `0` turns it off | on | A plain search that leaves at most 15 % of the connections open starts a negotiated search on its own. |
 | `GB_TAPER` | `0` turns it off | on | The last step tapers a track at a spot that misses its clearance by a little. |
+| `GB_EXITS` | `0` turns it off | on | A track leaves a pad in a tight row by a fixed straight piece on the middle line of the pad (`exit.rs`). |
 | `GB_STITCH` | `0` turns it off | on | Layer changes of current paths get the vias that carry their current (`relax::stitch_vias`). |
 | `GB_PIVOT_ARCS` | `0` turns it off | on | The finished copper gets its last form from its pivots (`relax::pivot_pass`): one arc around each pad corner, via or bundle a track bends around, with the radius of what lies between, and tangent lines. A track keeps the corners the shortcuts gave it where such an arc or line comes too close, and where the own check finds something new. |
 | `GB_ZIP` | `0` turns it off | on | Pairs the search pulled together close up to their gap at the end (`pairs::zip`). |
