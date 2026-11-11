@@ -21,6 +21,7 @@ pub mod prof;
 pub mod realize;
 pub mod relax;
 pub mod route;
+pub mod spread;
 pub mod topo;
 pub mod tune;
 

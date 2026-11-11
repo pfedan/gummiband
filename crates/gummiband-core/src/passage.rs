@@ -334,6 +334,26 @@ impl Passage {
         out
     }
 
+    /// Can the tracks give way here, with the vias where they are and `margin` on top of every
+    /// clearance? With a via among the two items: it has room where it is, as one body through
+    /// all layers. Without: the passage has room between the nearest vias or walls on both
+    /// sides, at the widths the tracks have.
+    pub fn gives_way(&self, board: &Board, geo: &Geometry, margin: f64) -> bool {
+        if self.crossing {
+            return false;
+        }
+        let vias = self.via_items();
+        if !vias.is_empty() {
+            return vias.iter().any(|&vi| {
+                let v = &geo.vias[vi];
+                let local = Local::around(board, geo, v.at, NEAR + OPEN + v.diameter + 1.0);
+                local.via_at(vi, v.at, margin, &[self.dir], Some(-PASS)).0 >= -PASS
+            });
+        }
+        let room = self.room_vias_stay(margin);
+        room >= 0.0 && room >= self.grown_vias_stay()
+    }
+
     /// The kind of the finding: the first word of what the check calls it.
     pub fn kind(&self) -> &str {
         self.what.split(' ').next().unwrap_or("")
@@ -467,8 +487,27 @@ fn clearance(board: &Board, a: &Thing, b: &Thing) -> f64 {
     }
 }
 
+/// The clearance the check asks between a track of `net` and a thing of this kind (of net
+/// `other`; a board item: its obstacle).
+pub(crate) fn asked(board: &Board, net: NetId, kind: Kind, other: Option<NetId>, obstacle: Option<usize>) -> f64 {
+    let thing = |kind, net, obstacle| Thing {
+        kind,
+        net,
+        lo: 0.0,
+        hi: 0.0,
+        grown: 0.0,
+        obstacle,
+        id: 0,
+    };
+    clearance(
+        board,
+        &thing(Kind::Track, Some(net), None),
+        &thing(kind, other, obstacle),
+    )
+}
+
 /// What an obstacle of the board is on a cut (None: nothing that tracks care about).
-fn cut_kind(kind: &ObstacleKind) -> Option<Kind> {
+pub(crate) fn cut_kind(kind: &ObstacleKind) -> Option<Kind> {
     Some(match kind {
         ObstacleKind::Pad => Kind::Pad,
         ObstacleKind::Track | ObstacleKind::Via => Kind::Kept,
