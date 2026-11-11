@@ -278,6 +278,10 @@ pub struct Router<'a> {
     pub soft_on: bool,
     /// Chains of the soft copper that could not be traced: they stay as they are.
     pub soft_lost: Vec<u32>,
+    /// The band of a track is built with the radius of the stack and gives way wrap by wrap
+    /// (`GB_BAND`, see [`Router::seg_path`]). A field, so that a measurement can build both
+    /// bands of one topology.
+    pub stack_band: bool,
     /// Per pin: number of unrouted connections that start or end there.
     pending: Vec<u32>,
     /// Prices while a negotiation runs and in the passes after it.
@@ -644,6 +648,7 @@ impl<'a> Router<'a> {
             torn: Vec::new(),
             soft_on: false,
             soft_lost: Vec::new(),
+            stack_band: crate::knobs::BAND.on(),
         };
         if !board.soft.chains.is_empty() {
             r.import_soft();
@@ -827,6 +832,24 @@ impl<'a> Router<'a> {
         need
     }
 
+    /// [`Router::end_need`] counted squarely from the vertex: without the factor that an edge
+    /// along an obstacle side gets. This is what an arc around the vertex has to keep; the
+    /// factor is the price of crossing the edge at a slant, and an arc does not cross at one.
+    pub(crate) fn end_need_square(&self, li: usize, e: u32, end: usize, it: &Item) -> f64 {
+        let m = self.m(li);
+        let mut need: f64 = 0.0;
+        for d in m.demands(e, end) {
+            if self.obs_net(d.obs) == Some(it.net) {
+                continue;
+            }
+            need = need.max(self.eff_clearance(d.obs, it.c, it.net) + it.w / 2.0);
+        }
+        if let Some(via) = self.via_at(li, m.edges[e as usize][end]) {
+            need = need.max(Self::via_need(self.board, &via, it));
+        }
+        need
+    }
+
     /// Need of a track at vertex v (vertex demands only), for a new edge.
     fn vertex_need(&self, li: usize, v: u32, it: &Item) -> f64 {
         let m = self.m(li);
@@ -967,7 +990,7 @@ impl<'a> Router<'a> {
     }
 
     /// Extra room asked for near hot spots, for an edge a-b.
-    fn hot_extra(&self, a: Point, b: Point) -> f64 {
+    pub(crate) fn hot_extra(&self, a: Point, b: Point) -> f64 {
         let mut x: f64 = 0.0;
         for &(c, extra) in self.cfg.hotspots.iter() {
             if point_seg_dist(c, a, b) < 1.0 {
@@ -4338,7 +4361,7 @@ fn jitter(seed: u64, x: u64) -> f64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::board::{LayerSet, Net, Obstacle, ObstacleKind, Pin};
     use crate::geom::{Polygon, Shape};
@@ -4360,7 +4383,7 @@ mod tests {
     }
 
     /// A board of small square pads: (footprint, net, x, y) per pin, on a 20 mm square.
-    fn pad_board(pins: &[(&str, &str, f64, f64)]) -> Board {
+    pub(crate) fn pad_board(pins: &[(&str, &str, f64, f64)]) -> Board {
         let mut b = crate::topo::tests::two_pad_board();
         b.outline = vec![Polygon::new(vec![pt(0., 0.), pt(20., 0.), pt(20., 20.), pt(0., 20.)])];
         b.nets.clear();

@@ -326,6 +326,8 @@ knobs! {
         "Skips the polish relaxation of a winner that has clearance spots left.";
     NO_ARCS = "GB_NO_ARCS", Switch, Set, "off",
         "Tracks are realised as polylines, without arcs around the corners.";
+    BAND = "GB_BAND", Experiment, Set, "off",
+        "The band of a track takes the radius of the stack where the track lies next to the vertex it bends around, and where a wrap has no tangent, leaves its portal or its triangles, that wrap alone becomes a corner; today such a track loses all its arcs.";
     NO_TUNE_ROOM = "GB_NO_TUNE_ROOM", Switch, Set, "off",
         "CLI `route`: length tuning does not make room for its meanders first.";
 

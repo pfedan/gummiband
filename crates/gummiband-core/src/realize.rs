@@ -164,6 +164,43 @@ pub struct Side {
     pub p: Point,
     pub pivot: Point,
     pub pivot_id: u32,
+    /// With [`Router::stack_band`]: what the track needs around the pivot, counted squarely
+    /// from the vertex (0: nothing, the vertex belongs to its own net).
+    pub rad: f64,
+    /// With [`Router::stack_band`]: the track is the one next to the pivot on this edge, and
+    /// the point lies where its need at that end puts it (no bound from an apex, no share of
+    /// the slack).
+    pub attached: bool,
+}
+
+/// How the band of a segment came about ([`Router::seg_path_info`]).
+#[derive(Debug, Clone, Default)]
+pub struct PathInfo {
+    /// 0: a band of tangents and arcs. Else the funnel polyline, and why: 1 no chain of
+    /// tangents around the wraps, 2 the band leaves its triangles, 3 it misses a portal, 4 arcs
+    /// are off.
+    pub fallback: u8,
+    /// Fallback 1 without [`Router::stack_band`]: the kind of [`band_why`].
+    pub why: u8,
+    /// Bends of the funnel.
+    pub bends: usize,
+    /// Wraps of the band, and how many of them have the radius of the stack.
+    pub wraps: usize,
+    pub stack_wraps: usize,
+    /// With [`Router::stack_band`]: corners of the band, where a wrap gave way or the vertex
+    /// asks for no distance.
+    pub corners: usize,
+    /// Wraps that gave way, by reason: the kinds 1 to 5 of [`band_why`], then a missed portal,
+    /// a piece outside the triangles, and an arc out of the lane of the track.
+    pub gave_way: [usize; 8],
+    /// Vertices the band passes too closely and cannot wrap: no tangents with them, or the wrap
+    /// gave way again later.
+    pub refused: usize,
+    /// Wraps with the radius of the stack that went without a corner, because the band keeps
+    /// its distance from the vertex without them.
+    pub idle: usize,
+    /// Bends around a vertex that asks for no distance (corners from the start).
+    pub own: usize,
 }
 
 /// Circle the band wraps around: `side` +1 = pivot on the left of travel (left turn).
@@ -212,6 +249,7 @@ impl Router<'_> {
         } else {
             Ok(self.pack(li, c.e, &items, None))
         };
+        let fits = matches!(packed, Ok(Some(_)));
         let (lo, hi) = match packed {
             Err(iv) => iv,
             Ok(Some(iv)) => {
@@ -227,15 +265,33 @@ impl Router<'_> {
                 (len * f, len * f)
             }
         };
+        // the radius of the stack: for the track next to an edge end that lies where its need
+        // puts it, the need without the factor of a slanted obstacle side. That factor is the
+        // price of crossing the edge at a slant; an arc around the vertex keeps the plain need.
+        let mut stack = [(0.0, false); 2];
+        if self.stack_band && fits {
+            let it = &items[idx];
+            let extra = self.cfg.margin + self.hot_extra(pu, pv);
+            for (end, at, next) in [(0, lo, idx == 0), (1, len - hi, idx + 1 == items.len())] {
+                if next && (at - (self.end_need(li, c.e, end, it) + extra)).abs() < 1e-9 {
+                    let need = self.end_need_square(li, c.e, end, it);
+                    stack[end] = (if need > 0.0 { need + extra } else { 0.0 }, true);
+                }
+            }
+        }
         let slo = Side {
             p: pu + dir * lo,
             pivot: pu,
             pivot_id: u,
+            rad: stack[0].0,
+            attached: stack[0].1,
         };
         let shi = Side {
             p: pu + dir * hi,
             pivot: pv,
             pivot_id: v,
+            rad: stack[1].0,
+            attached: stack[1].1,
         };
         // Leaving triangle `from` (counter-clockwise) through edge a->b: b is on the left.
         let t = m.tris[c.from as usize];
@@ -321,23 +377,42 @@ impl Router<'_> {
     /// Rubber band of one segment: lines and arcs. Starts with the bends of the funnel, then
     /// adds every edge end vertex the band comes too close to as a further wrap, until the band
     /// keeps its distance from all of them.
+    ///
+    /// With [`Router::stack_band`] the radius of a wrap is the need of the stack where the
+    /// track lies next to the vertex, and a wrap that cannot be kept becomes a corner on its
+    /// own instead of taking all arcs of the track with it ([`stack_band`]).
     pub fn seg_path(&self, sid: u32) -> Vec<Elem> {
+        self.seg_path_info(sid).0
+    }
+
+    /// The portals of segment `sid`: its start, one per crossing, its end.
+    fn seg_portals(&self, sid: u32) -> Vec<(Side, Side)> {
         let s = self.segs[sid as usize].as_ref().unwrap();
-        let start = self.end_point(s.start);
-        let end = self.end_point(s.end);
         let ends = |p: Point| Side {
             p,
             pivot: p,
             pivot_id: u32::MAX,
+            rad: 0.0,
+            attached: false,
         };
+        let (start, end) = (self.end_point(s.start), self.end_point(s.end));
         let mut portals = Vec::with_capacity(s.crossings.len() + 2);
         portals.push((ends(start), ends(start)));
         for k in 0..s.crossings.len() {
             portals.push(self.portal(sid, k));
         }
         portals.push((ends(end), ends(end)));
+        portals
+    }
+
+    /// [`Router::seg_path`], and how the band came about.
+    pub fn seg_path_info(&self, sid: u32) -> (Vec<Elem>, PathInfo) {
+        let mut info = PathInfo::default();
+        let portals = self.seg_portals(sid);
+        let (start, end) = (portals[0].0.p, portals[portals.len() - 1].0.p);
         let pts: Vec<(Point, Point)> = portals.iter().map(|(l, r)| (l.p, r.p)).collect();
         let bends = funnel_bends(&pts);
+        info.bends = bends.len();
         let polyline = || -> Vec<Elem> {
             let mut p = vec![start];
             for &(i, left) in &bends {
@@ -349,7 +424,15 @@ impl Router<'_> {
         };
         // arcs around the edge ends know nothing of the imported tracks in the way
         if crate::knobs::NO_ARCS.on() || self.soft_on {
-            return polyline();
+            info.fallback = 4;
+            return (polyline(), info);
+        }
+        if self.stack_band {
+            let leaves = |path: &[Point]| self.corridor_exit(sid, path);
+            return match stack_band(&portals, &bends, &leaves, &mut info) {
+                Some(b) => (b, info),
+                None => (polyline(), info),
+            };
         }
         // wraps with the portal index they belong to
         let mut wraps: Vec<(usize, Wrap)> = Vec::new();
@@ -378,7 +461,11 @@ impl Router<'_> {
         for &(i, left) in &bends {
             add(&mut wraps, i, left);
         }
-        let mut best = band(start, end, &wraps.iter().map(|w| w.1).collect::<Vec<_>>());
+        let first = band_why(start, end, &wraps.iter().map(|w| w.1).collect::<Vec<_>>());
+        if let Err((_, kind)) = first {
+            info.why = kind;
+        }
+        let mut best = first.ok();
         for _ in 0..12 {
             let Some(elems) = &best else { break };
             let path = flatten(elems);
@@ -402,7 +489,6 @@ impl Router<'_> {
                 }
             }
             let Some((_, i, left)) = worst else { break };
-            let before = wraps.len();
             let side = if left { portals[i].0 } else { portals[i].1 };
             let known = wraps.iter().any(|(_, w)| {
                 w.id == side.pivot_id
@@ -413,10 +499,12 @@ impl Router<'_> {
                 break;
             }
             add(&mut wraps, i, left);
-            let _ = before;
             match band(start, end, &wraps.iter().map(|w| w.1).collect::<Vec<_>>()) {
                 Some(b) => best = Some(b),
-                None => break,
+                None => {
+                    info.refused += 1;
+                    break;
+                }
             }
         }
         // the band must stay inside the triangles its topology passes through, and it must keep
@@ -426,24 +514,31 @@ impl Router<'_> {
         // there: the band then swings wide around the pivot, inside its triangles but across the
         // track next to it (two crossings, a short on the board). The portals of neighbours are
         // disjoint, so a band that passes through all of its own crosses none of them.
-        let portals_ok = |path: &[Point]| {
-            portals[1..portals.len() - 1].iter().all(|(l, r)| {
-                path.windows(2).any(|w| {
-                    crate::geom::segs_intersect(w[0], w[1], l.p, r.p)
-                        || crate::geom::point_seg_dist(l.p, w[0], w[1]) < 1e-6
-                        || crate::geom::point_seg_dist(r.p, w[0], w[1]) < 1e-6
-                })
-            })
+        let Some(b) = best else {
+            info.fallback = 1;
+            return (polyline(), info);
         };
-        match best {
-            Some(b) if self.in_corridor(sid, &flatten(&b)) && portals_ok(&flatten(&b)) => b,
-            _ => polyline(),
+        let flat = flatten(&b);
+        if !self.in_corridor(sid, &flat) {
+            info.fallback = 2;
+            return (polyline(), info);
         }
+        if missed_portal(&portals, &flat, false).is_some() {
+            info.fallback = 3;
+            return (polyline(), info);
+        }
+        info.wraps = wraps.len();
+        (b, info)
     }
 
     /// True if the polyline stays in the corridor of seg `sid` (its crossed triangles and the
     /// copper of its own net).
     fn in_corridor(&self, sid: u32, path: &[Point]) -> bool {
+        self.corridor_exit(sid, path).is_none()
+    }
+
+    /// The first sample of the polyline outside the corridor of seg `sid`.
+    fn corridor_exit(&self, sid: u32, path: &[Point]) -> Option<Point> {
         let s = self.segs[sid as usize].as_ref().unwrap();
         let m = &self.sub.m[s.li as usize];
         let mut tris: Vec<u32> = Vec::new();
@@ -464,12 +559,11 @@ impl Router<'_> {
                     && self.sub.shared.obs_polys[o as usize].contains(p)
             })
         };
-        path.windows(2).all(|w| {
+        path.windows(2).find_map(|w| {
             let n = ((w[0].dist(w[1]) / 0.05).ceil() as usize).clamp(1, 200);
-            (0..=n).all(|k| {
-                let p = w[0].lerp(w[1], k as f64 / n as f64);
-                tris.iter().any(|&t| in_tri(t, p)) || own(p)
-            })
+            (0..=n)
+                .map(|k| w[0].lerp(w[1], k as f64 / n as f64))
+                .find(|&p| !(tris.iter().any(|&t| in_tri(t, p)) || own(p)))
         })
     }
 
@@ -658,6 +752,15 @@ pub fn cut_at_zones(pts: &[Point], zones: &[crate::geom::Rect], width: f64) -> V
 
 /// Tangent path from `start` around the wraps to `end`, with arcs on the wraps.
 fn band(start: Point, end: Point, wraps: &[Wrap]) -> Option<Vec<Elem>> {
+    band_why(start, end, wraps).ok()
+}
+
+/// [`band`], or why there is none: the index of the first circle of the pair without a tangent
+/// (or of the wrap that turns too far) and the kind. Circles count from 0, the start. Kinds: 1
+/// an end of the track or a corner lies inside the circle next to it, 2 two wraps on the same
+/// side, one circle inside the other, 3 two wraps on opposite sides that overlap, 4 the same
+/// centre, 5 a wrap of more than 270 degrees.
+fn band_why(start: Point, end: Point, wraps: &[Wrap]) -> Result<Vec<Elem>, (usize, u8)> {
     let mut circles = vec![Wrap {
         c: start,
         r: 0.0,
@@ -672,8 +775,22 @@ fn band(start: Point, end: Point, wraps: &[Wrap]) -> Option<Vec<Elem>> {
         id: u32::MAX,
     });
     let mut tangents = Vec::with_capacity(circles.len() - 1);
-    for w in circles.windows(2) {
-        tangents.push(tangent(&w[0], &w[1])?);
+    for (i, w) in circles.windows(2).enumerate() {
+        match tangent(&w[0], &w[1]) {
+            Some(t) => tangents.push(t),
+            None => {
+                let kind = if w[0].c.dist(w[1].c) < 1e-9 {
+                    4
+                } else if w[0].r == 0.0 || w[1].r == 0.0 {
+                    1
+                } else if w[0].side == w[1].side {
+                    2
+                } else {
+                    3
+                };
+                return Err((i, kind));
+            }
+        }
     }
     let mut out = Vec::new();
     for (i, &(a, b)) in tangents.iter().enumerate() {
@@ -694,7 +811,7 @@ fn band(start: Point, end: Point, wraps: &[Wrap]) -> Option<Vec<Elem>> {
                     }
                 }
                 if sweep.abs() > std::f64::consts::PI * 1.5 {
-                    return None;
+                    return Err((i, 5));
                 }
                 let mid = c.c + pt(c.r, 0.0).rotate(a0 + sweep / 2.0);
                 if sweep.abs() * c.r > 0.002 {
@@ -711,7 +828,392 @@ fn band(start: Point, end: Point, wraps: &[Wrap]) -> Option<Vec<Elem>> {
     if out.is_empty() {
         out.push(Elem::Line(start, end));
     }
-    Some(out)
+    Ok(out)
+}
+
+/// The first portal between the ends that the path does not pass through.
+///
+/// On a side the track is attached to ([`Side::attached`]), the portal reaches from its point
+/// down to the radius of the stack. The point lies farther out where the edge runs along an
+/// obstacle side, by the factor that side would ask for if it went on for ever; around a
+/// rounded pad corner, whose sides are 50 µm long, a band at the right distance from every
+/// vertex crosses the edge below that point. No neighbour lies between the track and the
+/// vertex it is attached to, so the longer portal is still disjoint from those of all others.
+///
+/// `strict`: a portal also counts as missed when the path crosses its edge anywhere else than
+/// in the portals the track has on that edge. A chain of arcs and corners can pass through a
+/// portal and still swing across the same edge beyond the track next to it and back; only a
+/// path that crosses each of its edges in its own place there crosses no neighbour.
+fn missed_portal(portals: &[(Side, Side)], path: &[Point], strict: bool) -> Option<usize> {
+    let reach = |s: &Side| {
+        let d = s.p.dist(s.pivot);
+        if s.attached && s.rad < d {
+            s.pivot.lerp(s.p, s.rad / d)
+        } else {
+            s.p
+        }
+    };
+    let inner = &portals[1..portals.len() - 1];
+    (1..portals.len() - 1).find(|&i| {
+        let (l, r) = (reach(&portals[i].0), reach(&portals[i].1));
+        let passes = path.windows(2).any(|w| {
+            crate::geom::segs_intersect(w[0], w[1], l, r)
+                || crate::geom::point_seg_dist(l, w[0], w[1]) < 1e-6
+                || crate::geom::point_seg_dist(r, w[0], w[1]) < 1e-6
+        });
+        if !passes || !strict {
+            return !passes;
+        }
+        let (a, b) = portals[i];
+        let len = a.pivot.dist(b.pivot);
+        if len < 1e-9 {
+            return false;
+        }
+        let dir = (b.pivot - a.pivot) * (1.0 / len);
+        // the places of the track on this edge, as stretches from the first vertex
+        let ids = |x: &Side, y: &Side| (x.pivot_id.min(y.pivot_id), x.pivot_id.max(y.pivot_id));
+        let own: Vec<(f64, f64)> = inner
+            .iter()
+            .filter(|(x, y)| ids(x, y) == ids(&a, &b))
+            .map(|(x, y)| {
+                let (s, t) = ((reach(x) - a.pivot).dot(dir), (reach(y) - a.pivot).dot(dir));
+                (s.min(t) - 1e-6, s.max(t) + 1e-6)
+            })
+            .collect();
+        path.windows(2).any(|w| {
+            let (da, db) = (dir.cross(w[0] - a.pivot), dir.cross(w[1] - a.pivot));
+            if da * db > 0.0 || da == db {
+                return false;
+            }
+            let at = (w[0].lerp(w[1], da / (da - db)) - a.pivot).dot(dir);
+            at > 1e-6 && at < len - 1e-6 && !own.iter().any(|&(s, t)| at >= s && at <= t)
+        })
+    })
+}
+
+/// True if the arc of a wrap stays in the lane of its track: on the vertex side of the line
+/// through the far ends of the track's portals, from the portal before the edges of the vertex
+/// to the one after them.
+///
+/// Two tracks that both go straight from portal to portal stay in their lanes and cannot cross.
+/// An arc swings out of the lane, and that is right where the track next to it swings out
+/// around the same vertex as well. If that one has lost its wrap there and goes straight, an
+/// arc beyond the lane crosses it, and both pass through all their portals. A radius that is
+/// the need of the stack is what the track has to keep from the vertex anyway. A radius with a
+/// share of the slack in it is not, so such an arc has to stay in the lane.
+fn in_lane(portals: &[(Side, Side)], w: &Link) -> bool {
+    let near = |i: usize| if w.w.side > 0.0 { portals[i].0 } else { portals[i].1 };
+    let far = |i: usize| if w.w.side > 0.0 { portals[i].1.p } else { portals[i].0.p };
+    let (mut first, mut last) = (w.at, w.to);
+    while first > 1 && near(first - 1).pivot_id == w.w.id {
+        first -= 1;
+    }
+    while last + 2 < portals.len() && near(last + 1).pivot_id == w.w.id {
+        last += 1;
+    }
+    (first - 1..=last).all(|i| crate::geom::point_seg_dist(w.w.c, far(i), far(i + 1)) >= w.w.r - 1e-6)
+}
+
+/// A circle in the chain of [`stack_band`]: a wrap around a vertex, or a corner (radius 0).
+#[derive(Clone)]
+struct Link {
+    /// The first and the last portal it stands for.
+    at: usize,
+    to: usize,
+    w: Wrap,
+    /// The corners of the funnel it stands for, with their portals.
+    pts: Vec<(usize, Point)>,
+    /// Its radius is the need of the stack.
+    stack: bool,
+}
+
+/// Vertex id of a corner in the chain.
+const CORNER: u32 = u32::MAX - 1;
+
+/// The band of a track through its `portals` (start, one per crossing, end) with the `bends`
+/// of the funnel, built so that one wrap that cannot be kept does not cost the others their
+/// arcs. `leaves` gives the first point of a path outside the triangles of the track.
+///
+/// - A wrap around a vertex the track lies next to has the radius the stack needs there
+///   ([`Side::rad`]); any other wrap reaches to its portal point, as the share of the slack in
+///   that point is what keeps neighbours in order. A bend around a vertex that asks for no
+///   distance is a corner at the portal point.
+/// - Where two circles have no tangent, the wider one becomes the corners of the funnel it
+///   stands for: points of its own portals. A wrap with the radius of the stack that turns
+///   the wrong way, or one inside such a circle on the same side, holds nothing and goes
+///   without a corner.
+/// - Every vertex the band then passes too closely becomes a further wrap, if the chain has
+///   its tangents with it.
+/// - Where the band misses one of its portals or leaves its triangles, the wrap nearest to
+///   that place becomes corners, and the tests run again.
+/// - A wrap whose radius is a share of the slack keeps its arc only inside the lane of the
+///   track ([`in_lane`]).
+///
+/// The band that comes back has passed both tests as a whole: it crosses each of its edges in
+/// its portal there and nowhere else ([`missed_portal`], strict), the portals are disjoint
+/// from those of its neighbours, and it stays in its triangles. None
+/// if no such band is left: the caller then takes the funnel polyline.
+fn stack_band(
+    portals: &[(Side, Side)],
+    bends: &[(usize, bool)],
+    leaves: &dyn Fn(&[Point]) -> Option<Point>,
+    info: &mut PathInfo,
+) -> Option<Vec<Elem>> {
+    let (start, end) = (portals[0].0.p, portals[portals.len() - 1].0.p);
+    let side_of = |i: usize, left: bool| if left { portals[i].0 } else { portals[i].1 };
+    let sign = |left: bool| if left { 1.0 } else { -1.0 };
+    let radius = |s: &Side| if s.attached { s.rad } else { s.p.dist(s.pivot) };
+    let chain = |ws: &[Link]| band_why(start, end, &ws.iter().map(|w| w.w).collect::<Vec<_>>());
+    // a corner goes in by its portal, unless a corner or an end of the track lies there already
+    let put_corner = |ws: &mut Vec<Link>, at: usize, p: Point, side: f64| {
+        let pos = ws.iter().position(|x| x.at > at).unwrap_or(ws.len());
+        let here = |x: Option<&Link>| x.is_some_and(|x| x.w.r == 0.0 && x.w.c.dist(p) < 1e-9);
+        if here(ws.get(pos)) || (pos > 0 && here(ws.get(pos - 1))) || p.dist(start) < 1e-9 || p.dist(end) < 1e-9 {
+            return;
+        }
+        ws.insert(
+            pos,
+            Link {
+                at,
+                to: at,
+                w: Wrap {
+                    c: p,
+                    r: 0.0,
+                    side,
+                    id: CORNER,
+                },
+                pts: Vec::new(),
+                stack: false,
+            },
+        );
+    };
+    // wrap k gives way: the corners it stands for take its place, and it does not come back
+    let demote = |ws: &mut Vec<Link>, k: usize, banned: &mut Vec<(u32, f64)>| {
+        let w = ws.remove(k);
+        if w.w.id != CORNER {
+            banned.push((w.w.id, w.w.side));
+            for (pi, p) in w.pts {
+                put_corner(ws, pi, p, w.w.side);
+            }
+        }
+    };
+    // wraps give way until the chain has its tangents (`gave`: by reason as in `PathInfo`, then
+    // 8 gone without a corner, 9 a wrap of the second step undone)
+    let repair = |ws: &mut Vec<Link>, banned: &mut Vec<(u32, f64)>, gave: &mut [usize; 10]| {
+        for _ in 0..4 * (ws.len() + bends.len()) + 8 {
+            // two wraps of one vertex on one side with nothing left between them are one
+            let mut k = 0;
+            while k + 1 < ws.len() {
+                let (a, b) = (&ws[k].w, &ws[k + 1].w);
+                if a.id != CORNER && a.id == b.id && a.side == b.side {
+                    let b = ws.remove(k + 1);
+                    let a = &mut ws[k];
+                    if b.w.r > a.w.r {
+                        a.w.r = b.w.r;
+                        a.stack = b.stack;
+                    }
+                    a.to = a.to.max(b.to);
+                    a.pts.extend(b.pts);
+                } else {
+                    k += 1;
+                }
+            }
+            let (i, kind) = match chain(ws) {
+                Ok(b) => return Some(b),
+                Err(e) => e,
+            };
+            // wrap k is circle k + 1. The wider circle of the pair goes; of two corners on
+            // one spot, one.
+            let pair = if kind == 5 { i..=i } else { i..=i + 1 };
+            let pair = pair.filter(|&c| c >= 1 && c <= ws.len()).map(|c| c - 1);
+            let k = pair.clone().max_by(|&a, &b| ws[a].w.r.total_cmp(&ws[b].w.r))?;
+            // A wrap with the radius of the stack that turns the wrong way holds nothing: the
+            // band passes its vertex at more than the need. Nor does a wrap inside such a
+            // circle on the same side. Those go without a corner.
+            let idle = match kind {
+                5 if ws[k].stack => Some(k),
+                2 if ws[k].stack => pair.min_by(|&a, &b| ws[a].w.r.total_cmp(&ws[b].w.r)),
+                _ => None,
+            };
+            if let Some(k) = idle {
+                let w = ws.remove(k);
+                banned.push((w.w.id, w.w.side));
+                gave[8] += 1;
+                continue;
+            }
+            if ws[k].w.id != CORNER {
+                gave[if ws[k].pts.is_empty() { 9 } else { kind as usize - 1 }] += 1;
+            }
+            demote(ws, k, banned);
+        }
+        None
+    };
+    let mut ws: Vec<Link> = Vec::new();
+    for &(i, left) in bends {
+        let s = side_of(i, left);
+        let r = radius(&s);
+        if r < 1e-9 {
+            info.own += 1;
+            put_corner(&mut ws, i, s.p, sign(left));
+            continue;
+        }
+        if let Some(last) = ws.last_mut()
+            && last.w.id == s.pivot_id
+            && last.w.side == sign(left)
+        {
+            if r > last.w.r {
+                last.w.r = r;
+                last.stack = s.attached;
+            }
+            last.to = i;
+            last.pts.push((i, s.p));
+            continue;
+        }
+        ws.push(Link {
+            at: i,
+            to: i,
+            w: Wrap {
+                c: s.pivot,
+                r,
+                side: sign(left),
+                id: s.pivot_id,
+            },
+            pts: vec![(i, s.p)],
+            stack: s.attached,
+        });
+    }
+    let mut gave = [0usize; 10];
+    let mut banned: Vec<(u32, f64)> = Vec::new();
+    let mut best = repair(&mut ws, &mut banned, &mut gave);
+    let mut fallback = if best.is_some() { 0 } else { 1 };
+    for _ in 0..2 * portals.len() + 2 {
+        let Some(elems) = &mut best else { break };
+        // every edge end the band passes too closely becomes a further wrap
+        for _ in 0..48 {
+            let path = flatten(elems);
+            let mut worst: Option<(f64, usize, bool)> = None;
+            for i in 1..portals.len() - 1 {
+                for left in [true, false] {
+                    let s = side_of(i, left);
+                    let (r, sgn) = (radius(&s), sign(left));
+                    if r < 1e-6
+                        || banned.contains(&(s.pivot_id, sgn))
+                        || ws
+                            .iter()
+                            .any(|w| w.w.id == s.pivot_id && w.w.side == sgn && w.w.r >= r - 1e-9)
+                    {
+                        continue;
+                    }
+                    let d = path
+                        .windows(2)
+                        .map(|w| crate::geom::point_seg_dist(s.pivot, w[0], w[1]))
+                        .fold(f64::INFINITY, f64::min);
+                    let deficit = r - d;
+                    if deficit > 1e-4 && worst.is_none_or(|w| deficit > w.0) {
+                        worst = Some((deficit, i, left));
+                    }
+                }
+            }
+            let Some((_, i, left)) = worst else { break };
+            let s = side_of(i, left);
+            let (r, sgn) = (radius(&s), sign(left));
+            let mut next = ws.clone();
+            let pos = next.iter().position(|w| w.at > i).unwrap_or(next.len());
+            let same = |w: Option<&Link>| w.is_some_and(|w| w.w.id == s.pivot_id && w.w.side == sgn);
+            let grows = if pos > 0 && same(next.get(pos - 1)) {
+                Some(pos - 1)
+            } else if same(next.get(pos)) {
+                Some(pos)
+            } else {
+                None
+            };
+            match grows {
+                // a wrap of this vertex right there grows
+                Some(k) => {
+                    let w = &mut next[k];
+                    w.w.r = r;
+                    w.stack = s.attached;
+                    w.at = w.at.min(i);
+                    w.to = w.to.max(i);
+                }
+                None => {
+                    // a wrap that goes on around its vertex past this portal has the new one
+                    // in its middle: it is two wraps then, one before and one after
+                    if pos > 0 && next[pos - 1].w.id != CORNER && next[pos - 1].to > i {
+                        let mut rest = next[pos - 1].clone();
+                        rest.pts.retain(|&(pi, _)| pi > i);
+                        rest.at = i + 1;
+                        next[pos - 1].pts.retain(|&(pi, _)| pi <= i);
+                        next[pos - 1].to = i;
+                        next.insert(pos, rest);
+                    }
+                    next.insert(
+                        pos,
+                        Link {
+                            at: i,
+                            to: i,
+                            w: Wrap {
+                                c: s.pivot,
+                                r,
+                                side: sgn,
+                                id: s.pivot_id,
+                            },
+                            pts: Vec::new(),
+                            stack: s.attached,
+                        },
+                    );
+                }
+            }
+            match chain(&next) {
+                Ok(b) => {
+                    ws = next;
+                    *elems = b;
+                }
+                Err(_) => {
+                    banned.push((s.pivot_id, sgn));
+                    info.refused += 1;
+                }
+            }
+        }
+        // the two tests of the whole band; where one fails, the nearest wrap gives way
+        let path = flatten(elems);
+        let wraps = (0..ws.len()).filter(|&k| ws[k].w.id != CORNER);
+        let (k, why) = if let Some(i) = missed_portal(portals, &path, true) {
+            fallback = 3;
+            let far = |w: &Link| i.saturating_sub(w.to).max(w.at.saturating_sub(i));
+            let k = wraps.min_by(|&a, &b| far(&ws[a]).cmp(&far(&ws[b])).then(ws[b].w.r.total_cmp(&ws[a].w.r)));
+            (k, 5)
+        } else if let Some(p) = leaves(&path) {
+            fallback = 2;
+            let far = |w: &Link| (w.w.c.dist(p) - w.w.r).abs();
+            (wraps.min_by(|&a, &b| far(&ws[a]).total_cmp(&far(&ws[b]))), 6)
+        } else if let Some(k) = wraps.clone().find(|&k| !ws[k].stack && !in_lane(portals, &ws[k])) {
+            fallback = 3;
+            (Some(k), 7)
+        } else {
+            fallback = 0;
+            break;
+        };
+        // no wrap is left to give way: the chain is the funnel polyline
+        let Some(k) = k else { break };
+        gave[if ws[k].pts.is_empty() { 9 } else { why }] += 1;
+        demote(&mut ws, k, &mut banned);
+        best = repair(&mut ws, &mut banned, &mut gave);
+        if best.is_none() {
+            fallback = 1;
+        }
+    }
+    info.gave_way.copy_from_slice(&gave[..8]);
+    info.idle = gave[8];
+    info.refused += gave[9];
+    info.fallback = fallback;
+    if fallback != 0 {
+        return None;
+    }
+    info.wraps = ws.iter().filter(|w| w.w.id != CORNER).count();
+    info.stack_wraps = ws.iter().filter(|w| w.w.id != CORNER && w.stack).count();
+    info.corners = ws.iter().filter(|w| w.w.id == CORNER).count();
+    best
 }
 
 pub fn flatten(elems: &[Elem]) -> Vec<Point> {
@@ -913,6 +1415,313 @@ mod tests {
             (q - p).dot(q - pt(5., 0.)).abs() < 1e-9,
             "tangent is perpendicular to the radius"
         );
+    }
+
+    fn wrap(c: Point, r: f64, side: f64, id: u32) -> Wrap {
+        Wrap { c, r, side, id }
+    }
+
+    fn end_portal(p: Point) -> (Side, Side) {
+        let s = Side {
+            p,
+            pivot: p,
+            pivot_id: u32::MAX,
+            rad: 0.0,
+            attached: false,
+        };
+        (s, s)
+    }
+
+    /// The portal of a track on an edge from vertex `id` at `pivot` through `through`: the
+    /// track lies `lo` from the pivot along the edge and needs `rad` around it; the other end
+    /// of the edge is far. `left`: the pivot is on the left of travel.
+    fn portal_at(pivot: Point, id: u32, through: Point, lo: f64, rad: Option<f64>, left: bool) -> (Side, Side) {
+        let dir = (through - pivot) * (1.0 / through.dist(pivot));
+        let near = Side {
+            p: pivot + dir * lo,
+            pivot,
+            pivot_id: id,
+            rad: rad.unwrap_or(0.0),
+            attached: rad.is_some(),
+        };
+        let far = Side {
+            p: pivot + dir * (lo + 2.0),
+            pivot: pivot + dir * (lo + 2.3),
+            pivot_id: id + 100,
+            rad: 0.0,
+            attached: false,
+        };
+        if left { (near, far) } else { (far, near) }
+    }
+
+    /// The point of the line a-b at distance `d` from `c`: the first one on the way, or the
+    /// second.
+    fn at_dist(c: Point, a: Point, b: Point, d: f64, second: bool) -> Point {
+        let v = (b - a) * (1.0 / a.dist(b));
+        let foot = (c - a).dot(v);
+        let h2 = (c - a).len2() - foot * foot;
+        let half = (d * d - h2).sqrt();
+        a + v * if second { foot + half } else { foot - half }
+    }
+
+    fn ends_of(e: &Elem) -> (Point, Point) {
+        match *e {
+            Elem::Line(a, b) | Elem::Arc(a, _, b) => (a, b),
+        }
+    }
+
+    fn arcs(elems: &[Elem]) -> usize {
+        elems.iter().filter(|e| matches!(e, Elem::Arc(..))).count()
+    }
+
+    fn stack(portals: &[(Side, Side)]) -> (Option<Vec<Elem>>, PathInfo, Vec<(usize, bool)>) {
+        let pts: Vec<(Point, Point)> = portals.iter().map(|(l, r)| (l.p, r.p)).collect();
+        let bends = funnel_bends(&pts);
+        let mut info = PathInfo::default();
+        let band = stack_band(portals, &bends, &|_| None, &mut info);
+        (band, info, bends)
+    }
+
+    /// Two vertices on opposite sides of a track, 1 mm apart. The track needs 0.31 mm around
+    /// each, but both of its edges run along a wall and are crossed at a slant, so that the
+    /// track lies 0.62 mm from the vertex along the edge. Circles of 0.62 mm overlap and have
+    /// no tangent; with the radius of the stack the track has its two arcs, and it still runs
+    /// through its portals, because it crosses the slanted edges on its straight pieces.
+    #[test]
+    fn two_wraps_that_overlap_along_their_edges_keep_their_arcs() {
+        let (s, e) = (pt(0., 0.), pt(7., 1.5));
+        let (a, b) = (pt(3., 1.), pt(3.8, 0.4));
+        let ideal = band(s, e, &[wrap(a, 0.31, -1.0, 1), wrap(b, 0.31, 1.0, 2)]).unwrap();
+        let (first, last) = (ends_of(&ideal[0]), ends_of(ideal.last().unwrap()));
+        let qa = at_dist(a, first.0, first.1, 0.63, false);
+        let qb = at_dist(b, last.0, last.1, 0.63, true);
+        let portals = |rad: Option<f64>| {
+            vec![
+                end_portal(s),
+                portal_at(a, 1, qa, 0.62, rad, false),
+                portal_at(b, 2, qb, 0.62, rad, true),
+                end_portal(e),
+            ]
+        };
+        // the artefact: the radius along the edge
+        assert!(band(s, e, &[wrap(a, 0.62, -1.0, 1), wrap(b, 0.62, 1.0, 2)]).is_none());
+        let (band, info, bends) = stack(&portals(Some(0.31)));
+        assert_eq!(bends, vec![(1, false), (2, true)]);
+        let band = band.unwrap();
+        assert_eq!(
+            (arcs(&band), info.wraps, info.stack_wraps, info.corners),
+            (2, 2, 2, 0),
+            "{info:?}"
+        );
+        assert_eq!(missed_portal(&portals(Some(0.31)), &flatten(&band), true), None);
+        // with the radius along the edge one of the two gives way for the other, and that one
+        // swings out of the lane of the track: both are corners
+        let (band, info, _) = stack(&portals(None));
+        let band = band.unwrap();
+        assert_eq!((arcs(&band), info.wraps, info.corners), (0, 0, 2), "{info:?}");
+        assert_eq!(info.gave_way, [0, 0, 1, 0, 0, 0, 0, 1]);
+        assert_eq!(missed_portal(&portals(None), &flatten(&band), true), None);
+    }
+
+    /// Two vertices of one rounded pad corner, 0.05 mm apart, on the same side of the track.
+    /// Their edges meet the pad side at different angles, so the track lies 0.3205 mm from one
+    /// and 0.385 mm from the other along the edges: one circle inside the other, no tangent.
+    /// Around both the track needs the same 0.31 mm, and with that it turns around the corner
+    /// in arcs.
+    #[test]
+    fn a_rounded_corner_with_two_slants_is_turned_in_arcs() {
+        let (s, e) = (pt(0., 0.), pt(5., -2.));
+        let (a, b) = (pt(3., 1.), pt(3.04, 0.97));
+        let ideal = band(s, e, &[wrap(a, 0.31, -1.0, 1), wrap(b, 0.31, -1.0, 2)]).unwrap();
+        let (first, last) = (ends_of(&ideal[0]), ends_of(ideal.last().unwrap()));
+        let qa = at_dist(a, first.0, first.1, 0.3215, false);
+        let qb = at_dist(b, last.0, last.1, 0.386, true);
+        let portals = vec![
+            end_portal(s),
+            portal_at(a, 1, qa, 0.3205, Some(0.31), false),
+            portal_at(b, 2, qb, 0.385, Some(0.31), false),
+            end_portal(e),
+        ];
+        assert!(band(s, e, &[wrap(a, 0.3205, -1.0, 1), wrap(b, 0.385, -1.0, 2)]).is_none());
+        let (band, info, _) = stack(&portals);
+        let band = band.unwrap();
+        assert!(arcs(&band) >= 1, "{band:?}");
+        assert_eq!((info.wraps, info.stack_wraps, info.corners), (2, 2, 0), "{info:?}");
+        assert_eq!(info.gave_way, [0; 8]);
+        assert_eq!(missed_portal(&portals, &flatten(&band), true), None);
+        // the band keeps the need from both vertices
+        let flat = flatten(&band);
+        for c in [a, b] {
+            let d = flat
+                .windows(2)
+                .map(|w| crate::geom::point_seg_dist(c, w[0], w[1]))
+                .fold(f64::INFINITY, f64::min);
+            assert!(d > 0.31 - 1e-3, "{d}");
+        }
+    }
+
+    /// A track that turns around one vertex and then ends close to another, on an edge with
+    /// slack: its place on that edge is 1.6 mm from the vertex, and the end lies inside that
+    /// circle. Only this bend becomes a corner; the arc around the first vertex stays.
+    #[test]
+    fn an_end_inside_a_circle_costs_only_that_wrap() {
+        let (s, e) = (pt(0., 0.), pt(6.5, 0.));
+        let a = pt(3., 1.);
+        let ideal = band(s, pt(6., 0.6), &[wrap(a, 0.31, -1.0, 1)]).unwrap();
+        let first = ends_of(&ideal[0]);
+        let qa = at_dist(a, first.0, first.1, 0.63, false);
+        let portals = vec![
+            end_portal(s),
+            portal_at(a, 1, qa, 0.62, Some(0.31), false),
+            portal_at(pt(6., -1.), 2, pt(6., 0.), 1.6, None, false),
+            end_portal(e),
+        ];
+        let (band, info, bends) = stack(&portals);
+        assert_eq!(bends, vec![(1, false), (2, false)]);
+        // the artefact: no band at all for the track
+        assert!(super::band(s, e, &[wrap(a, 0.62, -1.0, 1), wrap(pt(6., -1.), 1.6, -1.0, 2)]).is_none());
+        let band = band.unwrap();
+        assert_eq!((arcs(&band), info.wraps, info.corners), (1, 1, 1), "{info:?}");
+        assert_eq!(info.gave_way, [1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(missed_portal(&portals, &flatten(&band), true), None);
+        assert!(
+            flatten(&band).iter().any(|p| p.dist(pt(6., 0.6)) < 1e-9),
+            "the corner is the point of the portal"
+        );
+    }
+
+    /// A wrap that takes the band past its portal, and one that takes it out of its triangles,
+    /// give way alone: the band that is left passes both tests, and the other wrap keeps its
+    /// arc.
+    #[test]
+    fn a_wrap_that_fails_a_test_gives_way_alone() {
+        let (s, e) = (pt(0., 0.), pt(7., 1.5));
+        let (a, b) = (pt(3., 1.), pt(3.8, 0.4));
+        let ideal = band(s, e, &[wrap(a, 0.31, -1.0, 1), wrap(b, 0.31, 1.0, 2)]).unwrap();
+        let (first, last) = (ends_of(&ideal[0]), ends_of(ideal.last().unwrap()));
+        let qa = at_dist(a, first.0, first.1, 0.63, false);
+        let qb = at_dist(b, last.0, last.1, 0.63, true);
+        // a third vertex with two edges: on the first the track lies 0.4 to 1.1 mm from it, on
+        // the second, with slack, 1.2 mm. A circle of 1.2 mm misses the place on the first
+        let c = pt(6., 0.);
+        let on_edge = |deg: f64, lo: f64, hi: f64| {
+            let dir = pt(1., 0.).rotate(deg.to_radians());
+            let side = |d: f64, id: u32| Side {
+                p: c + dir * d,
+                pivot: if id == 3 { c } else { c + dir * 3.0 },
+                pivot_id: id,
+                rad: 0.0,
+                attached: false,
+            };
+            (side(hi, 103), side(lo, 3))
+        };
+        let portals = vec![
+            end_portal(s),
+            portal_at(a, 1, qa, 0.62, Some(0.31), false),
+            on_edge(120., 0.4, 1.1),
+            on_edge(30., 1.2, 1.4),
+            end_portal(pt(9., -3.)),
+        ];
+        let (band, info, bends) = stack(&portals);
+        assert_eq!(bends, vec![(1, false), (3, false)]);
+        let band = band.unwrap();
+        assert_eq!((arcs(&band), info.wraps, info.corners), (1, 1, 1), "{info:?}");
+        assert_eq!(info.gave_way, [0, 0, 0, 0, 0, 1, 0, 0]);
+        assert_eq!(missed_portal(&portals, &flatten(&band), true), None);
+        // the triangles end right above the first vertex: its arc is outside
+        let portals = vec![
+            end_portal(s),
+            portal_at(a, 1, qa, 0.62, Some(0.31), false),
+            portal_at(b, 2, qb, 0.62, Some(0.31), true),
+            end_portal(e),
+        ];
+        let pts: Vec<(Point, Point)> = portals.iter().map(|(l, r)| (l.p, r.p)).collect();
+        let bends = funnel_bends(&pts);
+        let leaves = |path: &[Point]| path.iter().copied().find(|p| p.x < 3.5 && p.y > 1.3);
+        let mut info = PathInfo::default();
+        let band = stack_band(&portals, &bends, &leaves, &mut info).unwrap();
+        assert_eq!((arcs(&band), info.wraps, info.corners), (1, 1, 1), "{info:?}");
+        assert_eq!(info.gave_way, [0, 0, 0, 0, 0, 0, 1, 0]);
+        assert_eq!(leaves(&flatten(&band)), None);
+        assert_eq!(missed_portal(&portals, &flatten(&band), true), None);
+    }
+
+    /// A path that runs through its portal and then swings across the same edge twice more,
+    /// farther out, has gone around whatever lies between: the strict test says so.
+    #[test]
+    fn a_band_may_cross_an_edge_only_in_its_portal() {
+        let side = |y: f64, pivot: f64, id: u32| Side {
+            p: pt(0., y),
+            pivot: pt(0., pivot),
+            pivot_id: id,
+            rad: 0.0,
+            attached: false,
+        };
+        let portals = vec![
+            end_portal(pt(-1., 0.1)),
+            (side(0.2, 3., 2), side(0., -1., 1)),
+            end_portal(pt(2., 2.5)),
+        ];
+        let straight = [pt(-1., 0.1), pt(2., 2.5)];
+        let looped = [
+            pt(-1., 0.1),
+            pt(1., 0.1),
+            pt(1., 2.),
+            pt(-1., 2.),
+            pt(-1., 2.5),
+            pt(2., 2.5),
+        ];
+        assert_eq!(missed_portal(&portals, &looped, false), None);
+        assert_eq!(missed_portal(&portals, &looped, true), Some(1));
+        assert_eq!(
+            missed_portal(&portals, &[pt(-1., 0.1), pt(1., 0.1), pt(2., 2.5)], true),
+            None
+        );
+        assert_eq!(missed_portal(&portals, &straight, true), Some(1));
+    }
+
+    /// Tracks that have to bend around pads on their way: with the radius of the stack every
+    /// band runs through all of its portals and stays in its triangles, and no track has
+    /// fewer arcs than with the radius along the edge.
+    #[test]
+    fn the_band_of_the_stack_keeps_to_its_portals_on_a_board() {
+        let mut pins = Vec::new();
+        for (k, net) in ["A", "B", "C", "D"].into_iter().enumerate() {
+            pins.push(("U1", net, 3.0, 8.5 + k as f64));
+            pins.push(("U2", net, 17.0, 11.5 - k as f64));
+        }
+        for (k, net) in ["P", "Q", "R", "S", "T"].into_iter().enumerate() {
+            pins.push(("X", net, 7.0 + 1.5 * k as f64, 6.0 + 2.0 * (k % 3) as f64));
+        }
+        let b = crate::route::tests::pad_board(&pins);
+        let sub = crate::topo::Substrate::build(&b, &crate::topo::SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, crate::route::RouterConfig::default());
+        r.plan();
+        r.run();
+        let ids: Vec<u32> = (0..r.segs.len() as u32)
+            .filter(|&i| r.segs[i as usize].is_some())
+            .collect();
+        assert!(ids.len() >= 4, "{}", ids.len());
+        let (mut edge, mut stack) = (0, 0);
+        for &sid in &ids {
+            r.stack_band = false;
+            let before = arcs(&r.seg_path(sid));
+            r.stack_band = true;
+            let (band, info) = r.seg_path_info(sid);
+            let flat = flatten(&band);
+            if info.fallback == 0 {
+                assert_eq!(missed_portal(&r.seg_portals(sid), &flat, true), None, "segment {sid}");
+                assert!(r.in_corridor(sid, &flat), "segment {sid}");
+            }
+            assert!(
+                arcs(&band) >= before,
+                "segment {sid}: {} < {before}, {info:?}",
+                arcs(&band)
+            );
+            edge += before;
+            stack += arcs(&band);
+        }
+        assert!(stack > 0 && stack >= edge, "{stack} {edge}");
     }
 }
 

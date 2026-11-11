@@ -77,6 +77,7 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 
 | Variable | Value | Without it | What it does |
 | --- | --- | --- | --- |
+| `GB_BAND` | set to anything | off | The band of a track takes the radius of the stack where the track lies next to the vertex it bends around, and where a wrap has no tangent, leaves its portal or its triangles, that wrap alone becomes a corner; today such a track loses all its arcs. |
 | `GB_EVO_SEED` | value | 0x5eed | Seed of the search when the caller gives none (`route --seed`). Search changes are judged over several seeds with it. |
 | `GB_GPU` | set to anything | off | Relaxation rounds on the GPU; needs a binary built with the `gpu` feature. |
 | `GB_OPEN_GENERATIONS` | value | no limit | Benchmarks: the open end stops by itself after this many generations. |
