@@ -15,6 +15,12 @@ use crate::realize::{Elem, Geometry, Track};
 /// finding here either.
 pub const TOL: f64 = 0.0005;
 
+/// What copper that is laid for good keeps beyond the clearance, in mm, wherever there is room
+/// for it: the last pass of the tracks ([`crate::relax::pivot_pass`]) and the groups of a
+/// squeezed place ([`crate::spread`]). It is measured the way the check measures, arcs as
+/// arcs, so it is all there is between the copper and a finding.
+pub const MARGIN: f64 = 0.002;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Violation {
     pub what: String,
@@ -93,38 +99,43 @@ struct Bow {
     sag: f64,
 }
 
+impl Bow {
+    /// The bow from a to b on the circle about c; a piece of half a turn or more is none.
+    fn of(a: Point, b: Point, c: Point, rad: f64) -> Option<Bow> {
+        let half = a.dist(b) / 2.0;
+        (half < rad * 0.9).then(|| Bow {
+            c,
+            rad,
+            sag: rad - (rad * rad - half * half).sqrt(),
+        })
+    }
+}
+
 /// For every piece of a track (two points of it one after the other) the arc it is of, if the
 /// track says so in its elements and the points lie on that arc.
-fn bows(t: &Track) -> Vec<Option<Bow>> {
-    let n = t.pts.len().saturating_sub(1);
+fn bows(pts: &[Point], elems: &[Elem]) -> Vec<Option<Bow>> {
+    let n = pts.len().saturating_sub(1);
     let mut out = vec![None; n];
     let mut i = 0;
-    for e in &t.elems {
+    for e in elems {
         let (a, b) = match *e {
             Elem::Line(a, b) | Elem::Arc(a, _, b) => (a, b),
         };
         // the points and the elements do not tell the same way: chords it is
-        if t.pts.get(i).is_none_or(|p| p.dist(a) > 1e-9) {
+        if pts.get(i).is_none_or(|p| p.dist(a) > 1e-9) {
             return vec![None; n];
         }
-        let Some(len) = t.pts[i + 1..].iter().position(|p| p.dist(b) <= 1e-9) else {
+        let Some(len) = pts[i + 1..].iter().position(|p| p.dist(b) <= 1e-9) else {
             return vec![None; n];
         };
         let j = i + 1 + len;
         if let Elem::Arc(a, m, b) = *e
             && let Some((c, rad, _, sweep)) = arc_from_three(a, m, b)
-            && t.pts[i..=j].iter().all(|p| (p.dist(c) - rad).abs() < 1e-6)
+            && pts[i..=j].iter().all(|p| (p.dist(c) - rad).abs() < 1e-6)
+            && sweep.abs() < 6.3
         {
             for k in i..j {
-                let half = t.pts[k].dist(t.pts[k + 1]) / 2.0;
-                // a piece of half a turn or more is no bow
-                if half < rad * 0.9 && sweep.abs() < 6.3 {
-                    out[k] = Some(Bow {
-                        c,
-                        rad,
-                        sag: rad - (rad * rad - half * half).sqrt(),
-                    });
-                }
+                out[k] = Bow::of(pts[k], pts[k + 1], c, rad);
             }
         }
         i = j;
@@ -227,6 +238,10 @@ impl Piece {
 pub struct Copper<'a> {
     board: &'a Board,
     pieces: Vec<Piece>,
+    /// The track a piece is of ([`NO_TRACK`] for a via, [`GONE`] for a piece that was replaced).
+    owner: Vec<u32>,
+    /// The pieces of every track.
+    owned: Vec<Vec<u32>>,
     idx: GridIndex,
     oidx: GridIndex,
     /// The edges of the board outline, and an index of them: a panel has hundreds.
@@ -234,12 +249,45 @@ pub struct Copper<'a> {
     eidx: GridIndex,
 }
 
+const NO_TRACK: u32 = u32::MAX;
+const GONE: u32 = u32::MAX - 1;
+
+/// How a piece is asked about: against everything but one track, with something on top of
+/// every clearance, with which tolerance, and whether one finding is enough.
+#[derive(Clone, Copy)]
+struct Ask {
+    skip: u32,
+    extra: f64,
+    tol: f64,
+    first: bool,
+}
+
+const PLAIN: Ask = Ask {
+    skip: NO_TRACK,
+    extra: 0.0,
+    tol: TOL,
+    first: false,
+};
+
 impl<'a> Copper<'a> {
     pub fn new(board: &'a Board, geo: &Geometry) -> Self {
+        Self::of(board, geo, None)
+    }
+
+    /// The copper of a geometry whose tracks have these points for the time being, as chords
+    /// (`None`: the points and the arcs they have in the geometry).
+    pub(crate) fn of(board: &'a Board, geo: &Geometry, chains: Option<&[Vec<Point>]>) -> Self {
         let mut pieces = Vec::new();
-        for t in &geo.tracks {
-            let bows = bows(t);
-            for (w, bow) in t.pts.windows(2).zip(bows) {
+        let mut owner = Vec::new();
+        let mut owned = vec![Vec::new(); geo.tracks.len()];
+        for (ti, t) in geo.tracks.iter().enumerate() {
+            let (pts, bows) = match chains {
+                Some(c) => (&c[ti], vec![None; c[ti].len().saturating_sub(1)]),
+                None => (&t.pts, bows(&t.pts, &t.elems)),
+            };
+            for (w, bow) in pts.windows(2).zip(bows) {
+                owned[ti].push(pieces.len() as u32);
+                owner.push(ti as u32);
                 pieces.push(Piece::Seg {
                     a: w[0],
                     b: w[1],
@@ -260,6 +308,7 @@ impl<'a> Copper<'a> {
                 net: v.net,
                 half: v.half,
             });
+            owner.push(NO_TRACK);
         }
         let mut idx = GridIndex::new(board.bbox().grow(5.0), 1.0);
         for (i, p) in pieces.iter().enumerate() {
@@ -280,6 +329,8 @@ impl<'a> Copper<'a> {
         Copper {
             board,
             pieces,
+            owner,
+            owned,
             idx,
             oidx,
             esegs,
@@ -306,13 +357,70 @@ impl<'a> Copper<'a> {
             net,
             half: Point::default(),
         });
-        segs.chain(vias).all(|p| self.violations(&p, None).is_empty())
+        segs.chain(vias).all(|p| self.violations(&p, None, PLAIN).is_empty())
+    }
+
+    /// Track `ti` of the geometry has these points and elements from now on.
+    pub(crate) fn set_track(&mut self, ti: usize, t: &Track, pts: &[Point], elems: &[Elem]) {
+        for id in std::mem::take(&mut self.owned[ti]) {
+            self.owner[id as usize] = GONE;
+        }
+        for (w, bow) in pts.windows(2).zip(bows(pts, elems)) {
+            let id = self.pieces.len() as u32;
+            let p = Piece::Seg {
+                a: w[0],
+                b: w[1],
+                r: t.piece_width(w[0], w[1]) / 2.0,
+                layer: t.layer,
+                net: t.net,
+                bow,
+            };
+            self.idx.insert(id, &p.bbox());
+            self.pieces.push(p);
+            self.owner.push(ti as u32);
+            self.owned[ti].push(id);
+        }
+    }
+
+    /// Would the piece from a to b of track `ti` (net, layer, half width `r`; with `arc` the
+    /// piece of the circle with that centre and radius, else the straight line) keep every
+    /// clearance of [`check`] with `margin` on top, against the board and all copper but the
+    /// track's own? It is the check itself that is asked, with every clearance that much larger
+    /// and its one tolerance.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn keeps(
+        &self,
+        ti: usize,
+        net: NetId,
+        layer: u8,
+        r: f64,
+        a: Point,
+        b: Point,
+        arc: Option<(Point, f64)>,
+        margin: f64,
+    ) -> bool {
+        let p = Piece::Seg {
+            a,
+            b,
+            r,
+            layer,
+            net,
+            bow: arc.and_then(|(c, rad)| Bow::of(a, b, c, rad)),
+        };
+        let ask = Ask {
+            skip: ti as u32,
+            extra: margin,
+            tol: TOL,
+            first: true,
+        };
+        self.violations(&p, None, ask).is_empty()
     }
 
     /// The violations of piece p; with `after` only those against the pieces after that one,
     /// so that every pair counts once.
-    fn violations(&self, p: &Piece, after: Option<usize>) -> Vec<Violation> {
+    fn violations(&self, p: &Piece, after: Option<usize>, ask: Ask) -> Vec<Violation> {
         let board = self.board;
+        let (extra, tol) = (ask.extra, ask.tol);
         let routing = board.routing_layers();
         let clr = |n: NetId| board.class_of(n).clearance.max(board.rules.min_clearance);
         let mut out = Vec::new();
@@ -353,7 +461,7 @@ impl<'a> Copper<'a> {
             }
             None => reach.add(at),
         }
-        let reach = reach.grow(board.rules.edge_clearance + r + 1e-3);
+        let reach = reach.grow(board.rules.edge_clearance + extra + r + 1e-3);
         let edge = self
             .eidx
             .query(&reach)
@@ -369,7 +477,7 @@ impl<'a> Copper<'a> {
             - r;
         // an arc is measured as the arc where its chord says it may be too near
         let edge = match *p {
-            Piece::Seg { a, b, bow: Some(w), .. } if edge < board.rules.edge_clearance + w.sag + TOL => {
+            Piece::Seg { a, b, bow: Some(w), .. } if edge < board.rules.edge_clearance + extra + w.sag + TOL => {
                 self.eidx
                     .query(&reach.grow(w.sag))
                     .into_iter()
@@ -382,7 +490,7 @@ impl<'a> Copper<'a> {
             }
             _ => edge,
         };
-        if edge < board.rules.edge_clearance - TOL {
+        if edge < board.rules.edge_clearance + extra - tol {
             out.push(Violation {
                 what: "edge".into(),
                 nets: (net, None),
@@ -393,6 +501,9 @@ impl<'a> Copper<'a> {
         }
         let h2h = board.rules.hole_to_hole;
         for j in self.oidx.query(&bb) {
+            if ask.first && !out.is_empty() {
+                return out;
+            }
             let o = &board.obstacles[j as usize];
             // hole to hole holds for every net, the own one too (KiCad's hole_to_hole)
             if let (Piece::Via { c, drill, half, .. }, Some(h)) = (p, o.hole)
@@ -442,7 +553,7 @@ impl<'a> Copper<'a> {
             };
             let d = o.shape.dist(&shape);
             let d = match *p {
-                Piece::Seg { a, b, bow: Some(w), .. } if d < need + w.sag + TOL => match &o.shape {
+                Piece::Seg { a, b, bow: Some(w), .. } if d < need + extra + w.sag + TOL => match &o.shape {
                     Shape::Circle { c, r: or } => (bow_point_dist(a, b, w.c, w.rad, *c) - or - r).max(0.0),
                     Shape::Capsule { a: s, b: t, r: or } => (bow_seg_dist(a, b, w.c, w.rad, *s, *t) - or - r).max(0.0),
                     Shape::Polygon(poly) if poly.contains(a) || poly.contains(b) => 0.0,
@@ -455,7 +566,7 @@ impl<'a> Copper<'a> {
                 },
                 _ => d,
             };
-            if d < need - TOL {
+            if d < need + extra - tol {
                 out.push(Violation {
                     what: format!(
                         "{} {}~{}",
@@ -483,8 +594,14 @@ impl<'a> Copper<'a> {
             }
         }
         for j in self.idx.query(&bb) {
-            if after.is_some_and(|i| j as usize <= i) {
+            if after.is_some_and(|i| j as usize <= i) || self.owner[j as usize] == GONE {
                 continue;
+            }
+            if self.owner[j as usize] == ask.skip && ask.skip != NO_TRACK {
+                continue;
+            }
+            if ask.first && !out.is_empty() {
+                return out;
             }
             let q = &self.pieces[j as usize];
             if let (
@@ -551,12 +668,12 @@ impl<'a> Copper<'a> {
                 (Piece::Via { c, half: h1, .. }, Piece::Via { c: c2, half: h2, .. }) => vias_dist(*c, *h1, *c2, *h2),
             } - reach;
             let sag = p.sag() + q.sag();
-            let d = if sag > 0.0 && chords < need + sag + TOL {
+            let d = if sag > 0.0 && chords < need + extra + sag + TOL {
                 p.line_dist(q) - reach
             } else {
                 chords
             };
-            if d < need - TOL {
+            if d < need + extra - tol {
                 out.push(Violation {
                     what: format!(
                         "{} {}~{}",
@@ -585,7 +702,8 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
         .pieces
         .par_iter()
         .enumerate()
-        .flat_map_iter(|(i, p)| copper.violations(p, Some(i)))
+        .filter(|(i, _)| copper.owner[*i] != GONE)
+        .flat_map_iter(|(i, p)| copper.violations(p, Some(i), PLAIN))
         .collect();
     // a custom rule may lower the clearance in a courtyard (fine pitch power ICs)
     if !board.courtyard_clearance.is_empty() {

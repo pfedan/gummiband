@@ -2023,8 +2023,22 @@ fn taut(
             (v.at, r, v.net, v.half)
         })
         .collect();
-    let m = cfg.margin * 0.5;
+    // With the arcs around pivots the copper is put to the check itself, arcs as arcs, with
+    // the one margin of finished copper; else to the chords with half the margin of the forces.
+    let mut judge = cfg.pivots.then(|| {
+        if only_built {
+            crate::check::Copper::new(board, geo)
+        } else {
+            crate::check::Copper::of(board, geo, Some(&tracks))
+        }
+    });
+    let m = if cfg.pivots {
+        crate::check::MARGIN
+    } else {
+        cfg.margin * 0.5
+    };
     for ti in 0..tracks.len() {
+        let exact = judge.as_ref();
         let t = &geo.tracks[ti];
         if !awake[ti] {
             result.push((t.pts.clone(), t.elems.clone()));
@@ -2036,6 +2050,9 @@ fn taut(
         let ruled = board.class_of(net).min_width.is_some() && !t.necks.is_empty();
         let clear_piece = |a: Point, b: Point, pieces: &[(Point, Point, u32)], idx: &GridIndex| -> bool {
             let w = t.piece_width(a, b);
+            if let Some(j) = exact {
+                return j.keeps(ti, net, layer, w / 2.0, a, b, None, m);
+            }
             let mut r = Rect::empty();
             r.add(a);
             r.add(b);
@@ -2128,6 +2145,25 @@ fn taut(
                 from = to;
             }
             true
+        };
+        // an arc: as the arc it is where the check is asked, else by its chords
+        let clear_arc = |a: Point, mid: Point, b: Point, pieces: &[(Point, Point, u32)], idx: &GridIndex| -> bool {
+            let chords = crate::geom::arc_polyline(a, mid, b, crate::pivot::FLAT);
+            match (exact, crate::geom::arc_from_three(a, mid, b)) {
+                (Some(j), Some((c, rad, ..))) => chords.windows(2).all(|w| {
+                    j.keeps(
+                        ti,
+                        net,
+                        layer,
+                        t.piece_width(w[0], w[1]) / 2.0,
+                        w[0],
+                        w[1],
+                        Some((c, rad)),
+                        m,
+                    )
+                }),
+                _ => chords.windows(2).all(|w| clear(w[0], w[1], pieces, idx)),
+            }
         };
         let cut = |p: Vec<Point>| {
             if ruled {
@@ -2283,8 +2319,8 @@ fn taut(
                     let bis = (u + v).norm();
                     let center = b + bis * (r / math::sin(half));
                     let mid = center - bis * r;
-                    let arc = crate::geom::arc_polyline(p1, mid, p2, crate::pivot::FLAT);
-                    if arc.windows(2).all(|w| clear(w[0], w[1], pieces, idx)) {
+                    if clear_arc(p1, mid, p2, pieces, idx) {
+                        let arc = crate::geom::arc_polyline(p1, mid, p2, crate::pivot::FLAT);
                         return Some((p1, mid, p2, arc));
                     }
                     r *= 0.5;
@@ -2315,6 +2351,7 @@ fn taut(
                 &fixed,
                 &rounded,
                 &|a, b| clear(a, b, &pieces, &idx),
+                &|a, mid, b| clear_arc(a, mid, b, &pieces, &idx),
                 &|a, b, c, cur| fillet(a, b, c, cur, 0.5, &pieces, &idx),
             );
             if let Err(e) = built {
@@ -2380,6 +2417,9 @@ fn taut(
         }
         owned[ti].clear();
         add(&mut idx, &mut pieces, &mut owned, ti, &flat);
+        if let Some(j) = judge.as_mut() {
+            j.set_track(ti, t, &flat, &elems);
+        }
         tracks[ti] = flat.clone();
         result.push((flat, elems));
     }
