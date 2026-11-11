@@ -97,6 +97,18 @@ Standing decisions of the project owner, kept here so that they survive any sess
   default, because the crossings it selects by say almost nothing about the routed result.
 - A block is a group of parts with its locked copper that moves only as a whole.
 - Layer preferred directions are a portfolio dimension, not only an option.
+- An area (the zones of a net: a pour or a plane) is one model, and its fill is computed, never
+  stored. The model holds the outline and the settings of the fill; what the fill is and what
+  it joins is computed from the board and its copper each time it is asked for
+  (`gummiband_core::fill`), because every track of another net changes it. The fill in a file is
+  KiCad's answer for the copper of its last refill and is only ever compared against, never
+  taken as the state. The model is the router's own judgement; KiCad's fill and DRC have the
+  last word, and a statement of the model says how sure it is (raster step, doubtful pads).
+- A pour of the net is copper of the net: a connection that reaches a `gb:` pour ends where it
+  enters it. It does not run on to a pad under the pour.
+- Copper of the file that gave way in a shove and then touches another net goes back to where
+  the file has it, and new tracks that cross that place are taken out by the last check. A
+  route is not refused because tracks lie inside a pour outline: that is legal in KiCad.
 - Teardrops come from KiCad's built-in feature.
 - Any-angle tracks with arcs stay the default. Conventional 45 degree routing is an optional
   last step (`--angles 45`, plugin and MCP alike) that never adds a clearance violation and

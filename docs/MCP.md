@@ -198,6 +198,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `power_copper` | `board`, `paths [{net, amps, short_amps?, from, to?, layer?, name?}]`, `temp_rise?`, `margin?`, `max_span?`, `via_diameter?`, `via_drill?`, `via_rings?`, `via_in_pad?`, `vias_in_courtyards?`, `via_margin?`, `priority?`, `unlocked?` | id and path of the working copy with "gb:" power pours over the pads of each path and, for plane nets, locked via fields with a pour into the plane; per pour its outline, area, what cut it, vias needed and placed; a `current_check` of the pours; the unlocked copper on the board, with `unlocked: "clear"` what was removed (`cleared`) and the nets to route again (`reroute_nets`); `warnings` |
 | `reference_check` | `path`, `nets?`, `min_gap?`, `refill?`, `max_items?` | per routing layer its reference layers and their zone nets; signal tracks over no copper (`gap`, with length) or across the border between two zone nets (`split`) on their reference layer, with position; per net the length over no copper; short gaps only counted |
 | `ground_pour` | `path`, `net?`, `layers?`, `pitch?`, `edge_pitch?`, `edge_inset?`, `avoid_courtyards?`, `via_diameter?`, `via_drill?`, `priority?`, `pad_connection?`, `thermal_spoke_width?`, `output?` | id and path of `<input>.gnd.kicad_pcb` with ground zones on the outer layers and locked stitching vias, `warnings` |
+| `area_report` | `path`, `nets?`, `pour?`, `zone_clearance?`, `zone_min_width?`, `thermal_gap?`, `thermal_spoke_width?`, `pad_connection?`, `plane_layers?`, `step?`, `doubtful?` | per net with a zone what its fill reaches, judged by the router's fill model: `summary`, pieces per layer, `unreached` pads with the reason, `islands` with the site of one via each, `site_distance`, `doubtful` pads |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?`, `refill?` | PNG (image content) and its path, region, pixels per mm |
 | `guide` | `topic?` | how to use Gummiband: the workflow of manual and automatic steps (default), one section per tool, concepts, options, open points; without a known topic the list of topics |
@@ -814,7 +815,7 @@ nets. The output goes to `<input>.45.kicad_pcb` by default, with the `.kicad_pro
 {"name": "angles_45", "arguments": {"path": "/abs/path/ledctl.routed.kicad_pcb"}}
 ```
 
-### Good practice: power_plan, power_copper, current_check, reference_check, ground_pour
+### Good practice: power_plan, power_copper, current_check, reference_check, ground_pour, area_report
 
 The router does the heavy lifting; around it go the rules of the craft a careful layouter
 applies: plan the power copper before routing, check the current carrying capacity after it,
@@ -1097,6 +1098,62 @@ up in `drc` as dangling, unless an inner plane of the net holds it.
 {"name": "ground_pour", "arguments": {"path": "/abs/ledctl.routed.kicad_pcb"}}
 ```
 
+#### area_report
+
+What the copper fill of the nets with a zone reaches, on the copper the file has. A zone is an
+outline; KiCad computes the fill later, and what the fill joins depends on every track and via
+of the other nets. `area_report` computes that fill with the router's own model (no KiCad
+needed) and reads it for you. Per net:
+
+- `summary`: the finding in one sentence. "The area of GND (812.4 mm2 on F.Cu, B.Cu) reaches 48
+  of 52 pads; 4 are not reached: 3 on islands, 1 without a spoke."
+- `layers`: pieces of fill per layer, how many belong to the area and how many hold nothing of
+  the net (KiCad removes those where the zone says so).
+- `pads`, `reached` (`by_fill`: touched by the fill itself, `by_copper`: joined through tracks,
+  vias or other pads of the net), `joins`: the pads the area joins. `groups_apart`: the groups
+  of pads that do not hang on the area, and `expected_unconnected`: the unconnected items
+  KiCad's DRC would count for them.
+- `unreached`: each pad with `reason` and the same in plain words (`why`):
+  `island` (on a piece of fill that copper of other nets cuts off from the area), `walled` (in
+  the outline, but no room for fill next to it), `no_spoke` (a thermal relief none of whose
+  spokes ends in fill), `outside` (outside the outline), `other_layer` (the net has no area on
+  the pad's layer: it needs a via or a track).
+- `islands`: pads, layers, `filled` mm², `widest` spot, and `via`: where one via joins the
+  island to the area (`at`, `from` and `to` layer, `spare` room; `second`: the piece it lands on
+  is itself apart and needs this second via), or `no_via` with the reason (narrower than a via,
+  blocked on some layer under every spot, nothing of the area above or below).
+- `site_distance`: mean and largest straight distance from a pad to the nearest spot where a
+  via of the net stands clear on every layer and lands in the area, and the `farthest` pad. For
+  a plane this is how far the pins are from their via.
+- `doubtful`: the pads whose answer changes when every clearance of the fill moves by half a
+  raster cell (`reached` now, `with_less`, `with_more`). The model works on a raster (`step`,
+  0.04 to 0.05 mm by default); a strip of fill within one cell of the minimum width can come
+  out either way, and these are the pads that hang on such a strip. Treat them as not reached
+  until KiCad's fill says otherwise.
+- `against_file`: where the file holds a fill (KiCad's, as of its last refill), the model
+  against it per layer: mm² in both, in one only, and the pads only one of them touches.
+
+"The area" of a net is the group of fill and copper that joins the most fill among those that
+join at least two pads. Where no piece joins two pads (a plane before its first via, a pour cut
+off from all pads but one), the summary says so ("The fill of GND joins no two pads") and the
+largest piece is taken, so the pads are measured against the copper they are meant to reach.
+
+With `nets` and `pour` (layers) the nets given get an area over the board outline for the
+report where they have none yet, with `zone_clearance`, `zone_min_width`, `thermal_gap`,
+`thermal_spoke_width` and `pad_connection` as their settings (defaults 0.2, 0.2, 0.3, 0.3,
+`thermal`): what a pour would reach, before one is written. The file is never changed.
+
+The model is not KiCad's filler. It was compared with KiCad's fill of the LED controller planes
+(0.08 % of the area differs, the same pads are touched); thin strips between tracks on a
+routed outer layer have not been compared yet, which is what `doubtful` is for. `drc` stays the
+judge.
+
+```json
+{"name": "area_report", "arguments": {"path": "/abs/ledctl.routed.gnd.kicad_pcb"}}
+{"name": "area_report", "arguments": {"path": "/abs/board.routed.kicad_pcb",
+  "nets": ["GND"], "pour": ["F.Cu", "B.Cu"]}}
+```
+
 #### The prompt good_practice
 
 The server offers one MCP prompt, `good_practice` (arguments `path`, optional `currents` and
@@ -1220,6 +1277,7 @@ Shortened session on the LED controller benchmark (4 threads):
   keeps the class clearance in those courtyards.
 - `current_check` measures on a raster (0.05 mm, coarser on very large nets); it does not weigh
   the length of a neck, and the cross-section is skipped for nets of more than three million
-  copper cells. `ground_pour` does not yet check that the fill reaches every via (the DRC does).
+  copper cells. `ground_pour` does not yet check that the fill reaches every via; `area_report` on its result
+  names the pads and islands the fill leaves, by the router's model (the DRC is the judge).
 - Progress notifications during long routes, and cancellation (the core has no cancel hook).
 - `route` returns Gummiband's own clearance check; KiCad's verdict needs a `drc` call.

@@ -2,11 +2,13 @@
 //! (`gummiband-mcp`) map their arguments to the options here, call, and present the result: an
 //! option, its default and what it does exist once.
 
+pub mod areas;
 pub mod nets;
 pub mod options;
 pub mod route;
 pub mod svg;
 
+pub use areas::{AREA_OPTIONS, AreaOptions, AreaReport, area_option_doc, area_report};
 pub use nets::{AppliedNetOptions, NetOptions, apply_net_options, parse_net_options, read_net_options};
 pub use options::{Kind, OPTIONS, OptionDoc, option_doc};
 pub use route::{

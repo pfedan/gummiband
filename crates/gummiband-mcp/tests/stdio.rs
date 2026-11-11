@@ -146,6 +146,7 @@ fn initialize_list_load_route() {
             "add_mounting_hole",
             "add_zone",
             "angles_45",
+            "area_report",
             "board_patterns",
             "create_board",
             "current_check",
@@ -582,6 +583,31 @@ fn good_practice_plan_check_and_pour() {
     let text = std::fs::read_to_string(dir.join("tiny.routed.gnd.kicad_pcb")).unwrap();
     assert_eq!(text.matches("(zone ").count(), 2);
     assert!(text.contains("(locked yes)"));
+
+    // what the pours reach, judged by the fill model: both pads of B, none on an island
+    let a = s.call("area_report", json!({"path": g["path"]}));
+    assert_eq!(a["nets"].as_array().map(Vec::len), Some(1), "{a}");
+    let n = &a["nets"][0];
+    assert_eq!(
+        (&n["net"], &n["pads"], &n["reached"]),
+        (&json!("B"), &json!(2), &json!(2)),
+        "{a}"
+    );
+    assert_eq!(
+        (&n["unreached"], &n["islands"], &n["doubtful"]),
+        (&json!([]), &json!([]), &json!([])),
+        "{a}"
+    );
+    assert!(a["summary"][0].as_str().unwrap().contains("reaches all 2 pads"), "{a}");
+    // the same question before a pour is written
+    let a = s.call(
+        "area_report",
+        json!({"path": out, "nets": ["B"], "pour": ["F.Cu"], "doubtful": false}),
+    );
+    assert_eq!(a["nets"][0]["reached"], 2, "{a}");
+    assert!(a["nets"][0]["doubtful"].is_null(), "{a}");
+    let bad = s.call_err("area_report", json!({"path": out, "pour": ["F.Cu"]}));
+    assert!(bad.contains("pour needs nets"), "{bad}");
 }
 
 #[test]

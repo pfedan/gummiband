@@ -22,10 +22,11 @@ pub enum Kind {
     Path,
 }
 
-/// One option of [`RouteOptions`](crate::RouteOptions).
+/// One option of a pipeline: of [`RouteOptions`](crate::RouteOptions) in [`OPTIONS`], of
+/// [`AreaOptions`](crate::AreaOptions) in [`AREA_OPTIONS`](crate::AREA_OPTIONS).
 #[derive(Debug, Clone, Copy)]
 pub struct OptionDoc {
-    /// The field of `RouteOptions` and the MCP argument; the CLI flag is this in kebab-case.
+    /// The field of the options and the MCP argument; the CLI flag is this in kebab-case.
     pub name: &'static str,
     pub kind: Kind,
     /// The default in words, the same in every front end. For a plain number it is the number
@@ -42,7 +43,7 @@ impl OptionDoc {
     }
 }
 
-const fn opt(name: &'static str, kind: Kind, default: &'static str, help: &'static str) -> OptionDoc {
+pub(crate) const fn opt(name: &'static str, kind: Kind, default: &'static str, help: &'static str) -> OptionDoc {
     OptionDoc {
         name,
         kind,

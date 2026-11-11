@@ -1,7 +1,7 @@
 //! Good practice around routing: power planning and power copper before (`power_plan`,
-//! `power_copper`), current carrying checks (`current_check`) and ground pours with stitching
-//! vias (`ground_pour`) after, and the `good_practice` prompt that walks an agent through a
-//! whole board.
+//! `power_copper`), current carrying checks (`current_check`), ground pours with stitching
+//! vias (`ground_pour`) and what the fill of an area reaches (`area_report`) after, and the
+//! `good_practice` prompt that walks an agent through a whole board.
 
 use std::path::{Path, PathBuf};
 
@@ -104,6 +104,93 @@ pub struct CurrentCheckIn {
     pub refill: Option<bool>,
     /// How many narrow segments to list per path (default 5).
     pub max_segments: Option<usize>,
+}
+
+/// The arguments of `area_report`: the options of the report (`gummiband_app::AREA_OPTIONS`,
+/// each under its name) and the file. An argument that does not exist is an error.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AreaReportIn {
+    /// Path of a .kicad_pcb. It is read with all its tracks and vias as copper and stays as it
+    /// is.
+    pub path: String,
+    /// Report only these nets (default: every net with a zone).
+    pub nets: Option<Vec<String>>,
+    /// Layers on which the nets given get an area over the board outline for this report where
+    /// they have none yet, as ground_pour would lay it (default: none). Answers "what would a
+    /// pour reach" before one is written.
+    pub pour: Option<Vec<String>>,
+    /// Clearance in mm of the areas of pour to copper of other nets (default 0.2).
+    pub zone_clearance: Option<f64>,
+    /// Minimum width in mm of the fill in the areas of pour (default 0.2).
+    pub zone_min_width: Option<f64>,
+    /// Gap in mm of the thermal reliefs in the areas of pour (default 0.3).
+    pub thermal_gap: Option<f64>,
+    /// Width in mm of the thermal spokes in the areas of pour (default 0.3).
+    pub thermal_spoke_width: Option<f64>,
+    /// How the pads of the net join the areas of pour: "thermal" (default), "solid",
+    /// "thermal_tht" or "none".
+    pub pad_connection: Option<String>,
+    /// Copper layers treated as planes besides those of KiCad type "power".
+    pub plane_layers: Option<Vec<String>>,
+    /// Raster step wanted in mm (default 0.05); the step used divides the minimum width into an
+    /// odd number of cells.
+    pub step: Option<f64>,
+    /// List the pads whose answer changes when every clearance moves by half a raster cell
+    /// (default true; two more runs of the model per net).
+    pub doubtful: Option<bool>,
+}
+
+impl AreaReportIn {
+    /// The options of the report as the arguments give them.
+    pub fn options(&self) -> gummiband_app::AreaOptions {
+        let d = gummiband_app::AreaOptions::default();
+        gummiband_app::AreaOptions {
+            nets: self.nets.clone().unwrap_or(d.nets),
+            pour: self.pour.clone().unwrap_or(d.pour),
+            zone_clearance: self.zone_clearance.unwrap_or(d.zone_clearance),
+            zone_min_width: self.zone_min_width.unwrap_or(d.zone_min_width),
+            thermal_gap: self.thermal_gap.unwrap_or(d.thermal_gap),
+            thermal_spoke_width: self.thermal_spoke_width.unwrap_or(d.thermal_spoke_width),
+            pad_connection: self.pad_connection.clone().unwrap_or(d.pad_connection),
+            plane_layers: self.plane_layers.clone().unwrap_or(d.plane_layers),
+            step: self.step.unwrap_or(d.step),
+            doubtful: self.doubtful.unwrap_or(d.doubtful),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AreaReportOut {
+    pub path: String,
+    /// One sentence per net: what its area reaches.
+    pub summary: Vec<String>,
+    /// Per net the report of `gummiband areas --json`: net, summary, step, layers, area, apart,
+    /// joins, groups_apart, expected_unconnected, pads, reached, by_fill, by_copper, unreached (pad, at, reason, why, island,
+    /// site_distance), islands (pads, layers, filled, widest, via or no_via), site_distance,
+    /// doubtful (pad, at, reached, with_less, with_more), against_file, seconds.
+    pub nets: Vec<serde_json::Value>,
+    /// What a reader has to know to weigh the report.
+    pub notes: Vec<String>,
+}
+
+/// The area report of a board file, through the one function the CLI calls as well.
+pub fn area_report(p: &AreaReportIn) -> Result<AreaReportOut> {
+    let path = PathBuf::from(&p.path);
+    if !path.is_file() {
+        bail!("{} does not exist", path.display());
+    }
+    let r = gummiband_app::area_report(&path, &p.options())?;
+    Ok(AreaReportOut {
+        path: p.path.clone(),
+        summary: r.nets.iter().map(|n| n.summary.clone()).collect(),
+        nets: r
+            .nets
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<_, _>>()?,
+        notes: r.notes,
+    })
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

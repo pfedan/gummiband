@@ -49,7 +49,8 @@ copy. To change one net on a routed board: load the routed file -> route with ke
 reroute (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short; two_sided: true when the parts do not fit on one side), set_layer_type (power) and add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pair_pull or pairs. Good practice around routing (the prompt good_practice walks through a whole board): \
 power_plan before routing (currents -> widths, planes, vias; apply stores the widths), \
 current_check after routing (narrowest cross-section of every current path), ground_pour (GND \
-pours and stitching vias), reference_check (signal tracks over gaps or splits of their reference plane), then drc. Opt-in options (route patterns, clear_corridors, \
+pours and stitching vias), area_report (which pads the fill of a pour or plane reaches, which it \
+leaves on islands, and where one via joins each island), reference_check (signal tracks over gaps or splits of their reference plane), then drc. Opt-in options (route patterns, clear_corridors, \
 pairs, place_parts semantic, corridors, escape_halo, leash) are off because none wins on every board; \
 results scatter strongly between seeds, so compare a setting with the plain run over the same 2 or 3 \
 seeds (mean and worst, judged by drc). Rough guide: several chips with buses -> patterns groups, on a \
@@ -4227,6 +4228,34 @@ impl Gummiband {
     }
 
     #[tool(
+        description = "What the copper fill of the nets with a zone (pours, planes) reaches on the copper a .kicad_pcb has, judged by the router's own fill model (no KiCad needed; KiCad's fill has the last word): per net the pieces of fill, the pads the area reaches, the pads it does not reach with the reason in plain words, the islands with their pads and the site of one via that joins each to the area (or why none fits), the distance from the pads to the nearest spot where a via lands in the area, and the pads whose answer changes within one raster cell. With nets and pour it answers what a pour over the board outline would reach before one is written. The file stays as it is.",
+        output_schema = schema_for_output::<practice::AreaReportOut>(),
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn area_report(
+        &self,
+        Parameters(mut p): Parameters<practice::AreaReportIn>,
+    ) -> Result<CallToolResult, ErrorData> {
+        p.path = abs_path(&p.path).display().to_string();
+        match blocking(move || practice::area_report(&p)).await {
+            Ok(out) => {
+                let s = if out.summary.is_empty() {
+                    format!("No net with an area in {}. {}", out.path, out.notes.join(" "))
+                } else {
+                    format!(
+                        "Areas of {}: {} {}",
+                        out.path,
+                        out.summary.join(" "),
+                        out.notes.join(" ")
+                    )
+                };
+                ok(s, &out)
+            }
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
         description = "Run KiCad's DRC (kicad-cli pcb drc --refill-zones) on a .kicad_pcb and summarize it: violation counts per type (silkscreen and library checks left out), unconnected items, a deficit histogram and the worst clearance violations with positions. The full report is written next to the board as <name>.drc.json.",
         output_schema = schema_for_output::<external::DrcOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -4379,6 +4408,45 @@ mod tests {
         // an argument that does not exist is refused
         assert_eq!(schema["additionalProperties"], serde_json::json!(false));
         assert!(serde_json::from_value::<RouteIn>(serde_json::json!({"board": "b1", "pair_breakouts": true})).is_err());
+    }
+
+    /// The same for `area_report` and the options of the area report: the tool offers every
+    /// entry of the table under its name and nothing of its own but the file.
+    #[test]
+    fn area_report_offers_the_options_of_the_report() {
+        use practice::AreaReportIn;
+        const OWN: &[&str] = &["path"];
+        let schema = serde_json::to_value(schemars::schema_for!(AreaReportIn)).unwrap();
+        let args: Vec<&String> = schema["properties"].as_object().expect("properties").keys().collect();
+        for o in gummiband_app::AREA_OPTIONS {
+            assert!(args.iter().any(|a| *a == o.name), "area_report lacks {}", o.name);
+        }
+        for a in args {
+            assert!(
+                OWN.contains(&a.as_str()) || gummiband_app::area_option_doc(a).is_some(),
+                "{a} is neither in gummiband_app::AREA_OPTIONS nor the tool's own argument"
+            );
+        }
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        // with nothing given the report runs with the defaults of the table
+        let args = |v: serde_json::Value| serde_json::from_value::<AreaReportIn>(v).unwrap().options();
+        assert_eq!(
+            args(serde_json::json!({"path": "b.kicad_pcb"})),
+            gummiband_app::AreaOptions::default()
+        );
+        let o = args(serde_json::json!({
+            "path": "b.kicad_pcb", "nets": ["GND"], "pour": ["F.Cu", "B.Cu"], "zone_min_width": 0.15,
+            "pad_connection": "solid", "doubtful": false, "plane_layers": ["In1.Cu"],
+        }));
+        assert_eq!(
+            (o.nets, o.pour),
+            (vec!["GND".to_string()], vec!["F.Cu".to_string(), "B.Cu".into()])
+        );
+        assert_eq!(
+            (o.zone_min_width, o.pad_connection.as_str(), o.doubtful),
+            (0.15, "solid", false)
+        );
+        assert!(serde_json::from_value::<AreaReportIn>(serde_json::json!({"path": "b", "net": "GND"})).is_err());
     }
 
     /// With nothing given the tool routes with the defaults of the pipeline, and what is given

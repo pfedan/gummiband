@@ -1,4 +1,4 @@
-//! Experimental: a model of the copper fill of an area net, as a report.
+//! A model of the copper fill of an area net.
 //!
 //! An area is a zone outline of a net on one copper layer: a pour on an outer layer or a plane
 //! on an inner one. KiCad fills it later; the router so far only knows the outline. This module
@@ -12,15 +12,22 @@
 //!    grow again);
 //! 4. with the thermal spokes that end in what is left;
 //! 5. then the pieces, joined with the pads, tracks and vias of the net over all layers into
-//!    groups. The group with the most fill is the area; a pin outside it is not reached, a
-//!    group with pins outside it is an island, and for every island the best site for one via
-//!    that joins it to the area is looked for.
+//!    groups. The area is the group with the most fill among those that join at least two
+//!    pads (where none does: the largest piece, and the result says so); a pin outside it is
+//!    not reached, a group with pins outside it is an island, and for every island the best
+//!    site for one via that joins it to the area is looked for.
 //!
 //! It works on a raster (cell centres, an exact Euclidean distance transform), so a statement is
 //! good to about one cell: 0.04 to 0.05 mm by default. The step is chosen so that the minimum
 //! width is an odd number of cells, which makes "narrower than the minimum width" exact for
-//! strips along the axes. Nothing in the route pipeline calls this yet (see `AREAS.md` of the
-//! study it belongs to); the example `area_fill` of the command line crate runs it on a file.
+//! strips along the axes. A strip within one cell of the minimum width may come out either way:
+//! [`Options::slack`] moves every clearance by a part of a cell, and a caller that runs the model
+//! with half a cell less and half a cell more sees which pads depend on such a strip.
+//!
+//! The fill is never stored: it is computed from the board and its copper whenever it is asked
+//! for. `gummiband_app::areas` turns it into the report of `gummiband areas` and `area_report`.
+//! The model is the router's own; it has not been held against KiCad's filler at thin strips
+//! yet (`bench/areas-kicad.sh` does that where KiCad is installed).
 
 use std::collections::HashMap;
 
@@ -105,6 +112,10 @@ pub struct Options {
     pub no_pour: Vec<(LayerSet, Polygon)>,
     /// Diameter and drill of the via a site is looked for; default: the net class.
     pub via: Option<(f64, f64)>,
+    /// Added to every clearance of the fill and to the thermal gap, in mm (the room for vias
+    /// stays as it is). With plus and minus half a raster step the width of every strip of
+    /// fill changes by one cell: what then changes is within the precision of the raster.
+    pub slack: f64,
 }
 
 impl Default for Options {
@@ -115,6 +126,7 @@ impl Default for Options {
             pad_connect: HashMap::new(),
             no_pour: Vec::new(),
             via: None,
+            slack: 0.0,
         }
     }
 }
@@ -411,7 +423,7 @@ pub struct Piece {
     pub pins: Vec<usize>,
     /// The group of copper it belongs to (pieces of one group hang together).
     pub group: usize,
-    /// Part of the area (the group with the most fill).
+    /// Part of the area.
     pub main: bool,
     /// Holds nothing of the net: KiCad leaves such a piece out where the zone says so.
     pub floating: bool,
@@ -426,8 +438,9 @@ pub struct ViaSite {
     /// Layer on which it stands in the island, and layer on which it lands in the area.
     pub from: LayerId,
     pub to: LayerId,
-    /// It lands on a piece of fill that holds nothing of the net yet (a pour on a layer without
-    /// pads of the net): that piece needs this second via to hang on the area.
+    /// It lands on a piece of fill that is not part of the area itself (a pour on a layer
+    /// without pads of the net, or another island): that piece needs this second via to hang
+    /// on the area.
     pub anchor: Option<Point>,
 }
 
@@ -472,6 +485,13 @@ pub struct NetFill {
     /// Fill of the area in mm² (the main group), and of everything else.
     pub area_main: f64,
     pub area_rest: f64,
+    /// Pads the area joins. Below two it is the largest piece of fill and no more: nothing is
+    /// connected through it yet.
+    pub main_pads: usize,
+    /// Groups of copper of the net that hold a pad and are not the area: islands, and pads or
+    /// routed pieces without fill. KiCad's ratsnest has one line for each (one less where the
+    /// area itself holds no pad).
+    pub groups_apart: usize,
 }
 
 impl NetFill {
@@ -548,22 +568,23 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
         g.toggle(&mut inboard, p);
     }
     let edge = edt(&inboard, nx, ny);
-    let edge_need = (board.rules.edge_clearance / s + 0.5) as f32;
+    let edge_need = |slack: f64| ((board.rules.edge_clearance + slack).max(0.0) / s + 0.5) as f32;
     let gap_to = |other: Option<NetId>| board.clearance(Some(net), other).max(board.item_gap(net, other));
     // cells closed to copper of the net on a layer: within the clearance of other nets' copper
     // (at least `least`), of a hole, of the edge
     let closed = |l: LayerId, least: f64, for_via: bool| -> Vec<bool> {
         let mut k = vec![false; n];
+        let slack = if for_via { 0.0 } else { o.slack };
         for ob in &board.obstacles {
             if !ob.layers.has(l) {
                 continue;
             }
             let need = match ob.kind {
-                ObstacleKind::Hole => board.hole_gap(net),
+                ObstacleKind::Hole => (board.hole_gap(net) + slack).max(0.0),
                 ObstacleKind::Pad | ObstacleKind::Track | ObstacleKind::Via | ObstacleKind::Graphic
                     if ob.net != Some(net) =>
                 {
-                    gap_to(ob.net).max(least)
+                    (gap_to(ob.net).max(least) + slack).max(0.0)
                 }
                 ObstacleKind::Keepout {
                     vias: true,
@@ -584,6 +605,7 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
                 }
             }
         }
+        let edge_need = edge_need(slack);
         for i in 0..n {
             if !inboard[i] || edge[i] < edge_need {
                 k[i] = true;
@@ -626,7 +648,8 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
             for other in areas.iter().filter(|x| x.layer == l && x.net != net && x.wins_over(a)) {
                 let inv: Vec<bool> = g.rings(&other.rings).iter().map(|&x| !x).collect();
                 let d = edt(&inv, nx, ny);
-                let need = (a.clearance.max(other.clearance).max(gap_to(Some(other.net))) / s + 0.5) as f32;
+                let need = a.clearance.max(other.clearance).max(gap_to(Some(other.net))) + o.slack;
+                let need = (need.max(0.0) / s + 0.5) as f32;
                 for i in 0..n {
                     if d[i] < need {
                         open[i] = false;
@@ -636,6 +659,7 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
             // the pads of the net: a gap around those with a thermal relief
             let mut base = open.clone();
             let mut thermal: Vec<(usize, usize)> = Vec::new();
+            let thermal_gap = (a.thermal_gap + o.slack).max(0.0);
             for &p in &pins {
                 for &oi in &board.pins[p].obstacles {
                     let ob = &board.obstacles[oi];
@@ -646,9 +670,9 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
                         Connect::Solid | Connect::ThermalTht => continue,
                         Connect::Thermal => {
                             thermal.push((p, oi));
-                            a.thermal_gap
+                            thermal_gap
                         }
-                        Connect::None => a.clearance.max(gap_to(Some(net))),
+                        Connect::None => (a.clearance.max(gap_to(Some(net))) + o.slack).max(0.0),
                     };
                     g.each_in(&ob.shape, gap, |i| base[i] = false);
                 }
@@ -671,7 +695,7 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
                 for axis in spoke_axes(&ob.shape) {
                     for d in [axis, -axis] {
                         let from = extent(&ob.shape, c, d);
-                        let to = from + a.thermal_gap + 1.5 * s;
+                        let to = from + thermal_gap + 1.5 * s;
                         // the way across the gap is open, and it ends in fill
                         let steps = ((to - from) / (s * 0.5)).ceil() as usize;
                         let clear = (0..=steps).all(|k| {
@@ -810,16 +834,20 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
             holds.entry(groups.find(node)).or_default().push(p);
         }
     }
-    // the area: the group with the most fill among those that hold a pad; a net none of whose
-    // pads has fill yet (a plane before its first via) takes its largest piece
+    // the area: the group with the most fill among those that join at least two pads. Where no
+    // group does (a plane before its first via, a pour that copper of other nets cuts off from
+    // every pad but one), the largest piece is taken: that is what the pins are to reach, and a
+    // sliver at one pad is not
+    let pads_of = |gr: usize| holds.get(&gr).map_or(0, |v| v.iter().filter(|&&p| real_pin(p)).count());
     let main: Option<usize> = group_fill
         .iter()
         .map(|(&gr, &cells)| {
-            let pads = holds.get(&gr).map_or(0, |v| v.iter().filter(|&&p| real_pin(p)).count());
-            (pads > 0, cells, pads, std::cmp::Reverse(gr))
+            let pads = pads_of(gr);
+            (pads >= 2, cells, pads, std::cmp::Reverse(gr))
         })
         .max()
         .map(|x| x.3.0);
+    let main_pads = main.map_or(0, pads_of);
     let cell_mm2 = s * s;
 
     // ---- pieces of fill
@@ -925,8 +953,8 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
         (labels[l][i] != 0).then(|| groups.find(offset[l] + labels[l][i] as usize - 1))
     };
     let is_fill = |l: usize, i: usize| fill[l].as_ref().is_some_and(|f| f[i]);
-    // pieces of fill that hold nothing of the net, but which one via joins to the area (the
-    // pour on a layer without pads of the net): group -> the best cell for that via
+    // groups of fill apart from the area which one via joins to it (the pour on a layer without
+    // pads of the net, or another island): group -> the best cell for that via
     let mut anchors: HashMap<usize, (f32, usize)> = HashMap::new();
     if let Some(m) = main {
         for l in 0..nl {
@@ -940,7 +968,7 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
                 let Some(gr) = group_at(&mut groups, l, i) else {
                     continue;
                 };
-                if gr == m || holds.contains_key(&gr) {
+                if gr == m {
                     continue;
                 }
                 let on_main = (0..nl).any(|l2| l2 != l && is_fill(l2, i) && group_at(&mut groups, l2, i) == Some(m));
@@ -1018,6 +1046,7 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
                         break;
                     }
                     if to.is_none()
+                        && g2 != gr
                         && let Some(a) = anchors.get(&g2)
                     {
                         to = Some((l2, Some(a.1)));
@@ -1116,6 +1145,10 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
         }
     }
 
+    let groups_apart = holds
+        .iter()
+        .filter(|(gr, ps)| Some(**gr) != main && ps.iter().any(|&p| real_pin(p)))
+        .count();
     let area_main: f64 = pieces.iter().filter(|p| p.main).map(|p| p.area).sum();
     let area_rest: f64 = pieces.iter().filter(|p| !p.main).map(|p| p.area).sum();
     NetFill {
@@ -1127,6 +1160,8 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
         islands,
         area_main,
         area_rest,
+        main_pads,
+        groups_apart,
     }
 }
 
@@ -1256,11 +1291,14 @@ mod tests {
             ("GND", 15., 5., 0),
             ("S", 10., 1., 0),
             ("S", 10., 19., 0),
+            ("GND", 5., 15., 0),
         ]);
         track(&mut b, "S", 0, &[(10., 1.), (10., 19.)], 0.2);
         let f = fill_net(&b, &[solid(over_board(&b, "GND", 0))], 0, &Options::default());
-        // the cut reaches the edge clearance at both ends: two pieces, one pad each
+        // the cut reaches the edge clearance at both ends: two pieces, the left with two pads
+        // is the area
         assert_eq!(f.pieces.len(), 2);
+        assert_eq!(f.main_pads, 2);
         assert_eq!(f.islands.len(), 1);
         assert_eq!(f.unreached().count(), 1);
         // one layer only: nothing to land on
@@ -1288,6 +1326,60 @@ mod tests {
         assert!(f.islands.is_empty());
         assert_eq!(f.unreached().count(), 0);
         assert!(f.pins.iter().any(|p| p.reach == Reach::Fill));
+    }
+
+    #[test]
+    fn where_the_fill_joins_no_two_pads_its_largest_piece_is_the_area() {
+        // one pad on each side of the cut, and the same pour on the other layer: no piece joins
+        // two pads, so the largest piece (the other layer, whole) is what the pads are to reach
+        let mut b = board(&[
+            ("GND", 5., 5., 0),
+            ("GND", 15., 5., 0),
+            ("S", 8., 1., 0),
+            ("S", 8., 19., 0),
+        ]);
+        track(&mut b, "S", 0, &[(8., 1.), (8., 19.)], 0.2);
+        let areas = [solid(over_board(&b, "GND", 0)), solid(over_board(&b, "GND", 1))];
+        let f = fill_net(&b, &areas, 0, &Options::default());
+        assert_eq!((f.main_pads, f.groups_apart), (0, 2));
+        let main: Vec<_> = f.pieces.iter().filter(|p| p.main).collect();
+        assert_eq!((main.len(), main[0].layer), (1, 1));
+        assert_eq!(f.unreached().count(), 2);
+        // each side is an island with a via of its own, and none needs a second one
+        assert_eq!(f.islands.len(), 2);
+        assert!(
+            f.islands
+                .iter()
+                .all(|i| i.via.as_ref().is_some_and(|v| v.anchor.is_none()))
+        );
+        // on one layer the larger side is taken, and it joins one pad
+        let f = fill_net(&b, &areas[..1], 0, &Options::default());
+        assert_eq!(f.main_pads, 1);
+        assert_eq!(f.pins[1].reach, Reach::Fill);
+        assert_eq!(f.pins[0].reach, Reach::Island(0));
+    }
+
+    #[test]
+    fn slack_moves_every_clearance_of_the_fill() {
+        // 0.2 mm of fill is left between the tracks: exactly the minimum width. Half a cell
+        // more clearance on each side takes it away, half a cell less keeps it
+        let x = 10.0 + 0.6 / 2.0 + 0.1;
+        let mut b = board(&[("GND", 5., 10., 0), ("S", 20.0 - x, 1., 0), ("T", x, 1., 0)]);
+        track(&mut b, "S", 0, &[(20.0 - x, 1.), (20.0 - x, 19.)], 0.2);
+        track(&mut b, "T", 0, &[(x, 1.), (x, 19.)], 0.2);
+        let at = |slack: f64| {
+            let o = Options {
+                slack,
+                ..Default::default()
+            };
+            let f = fill_net(&b, &[solid(over_board(&b, "GND", 0))], 0, &o);
+            f.fill[0].as_ref().unwrap()[f.raster.cell(pt(10.0, 10.0)).unwrap()]
+        };
+        let step = fill_net(&b, &[solid(over_board(&b, "GND", 0))], 0, &Options::default())
+            .raster
+            .step;
+        assert!(at(-step / 2.0));
+        assert!(!at(step / 2.0));
     }
 
     #[test]
@@ -1385,6 +1477,7 @@ mod tests {
             ("GND", 10., 10., 0),
             ("S", 2., 9.0, 0),
             ("T", 2., 11.0, 0),
+            ("GND", 15., 3., 0),
         ]);
         b.obstacles[1].shape = Shape::Polygon(roundrect_polygon(pt(10., 10.), 0.4, 0.4, 0.0, 0.0, 0.005));
         track(&mut b, "S", 0, &[(0.2, 9.5), (19.8, 9.5)], 0.2);

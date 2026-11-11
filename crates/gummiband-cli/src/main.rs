@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use gummiband_app::{Hooks, RouteOptions, defaults};
+use gummiband_app::{AreaOptions, Hooks, RouteOptions, defaults};
 use gummiband_core::board::ObstacleKind;
 use gummiband_kicad::{KeepCopper, ReadOptions, read_board, write};
 use gummiband_place::auto::PlaceOptions;
@@ -318,6 +318,75 @@ impl RouteArgs {
     }
 }
 
+/// The arguments of `areas`: the options of the report ([`gummiband_app::AREA_OPTIONS`], each as
+/// `--kebab-case`) and how the CLI prints it.
+#[derive(clap::Args)]
+struct AreasArgs {
+    board: PathBuf,
+    /// Report only these nets, comma separated [default: every net with a zone]
+    #[arg(long, alias = "net", value_delimiter = ',')]
+    nets: Vec<String>,
+    /// Layers, comma separated, on which the nets given get an area over the board outline for
+    /// this report where they have none yet, as `ground_pour` would lay it. The file stays as
+    /// it is.
+    #[arg(long, value_delimiter = ',')]
+    pour: Vec<String>,
+    /// Clearance in mm of the areas of --pour to copper of other nets.
+    #[arg(long, default_value_t = AreaOptions::default().zone_clearance)]
+    zone_clearance: f64,
+    /// Minimum width in mm of the fill in the areas of --pour.
+    #[arg(long, default_value_t = AreaOptions::default().zone_min_width)]
+    zone_min_width: f64,
+    /// Gap in mm of the thermal reliefs in the areas of --pour.
+    #[arg(long, default_value_t = AreaOptions::default().thermal_gap)]
+    thermal_gap: f64,
+    /// Width in mm of the thermal spokes in the areas of --pour.
+    #[arg(long, default_value_t = AreaOptions::default().thermal_spoke_width)]
+    thermal_spoke_width: f64,
+    /// How the pads of the net join the areas of --pour: thermal, solid, thermal_tht or none.
+    #[arg(long, default_value_t = AreaOptions::default().pad_connection)]
+    pad_connection: String,
+    /// Raster step wanted in mm; the step used divides the minimum width into an odd number of
+    /// cells.
+    #[arg(long, default_value_t = AreaOptions::default().step)]
+    step: f64,
+    /// List the pads whose answer changes when every clearance moves by half a raster cell
+    /// (two more runs of the model per net). On by default; this flag insists on it.
+    #[arg(long, conflicts_with = "no_doubtful")]
+    doubtful: bool,
+    /// Leave the doubtful pads out: one run of the model per net.
+    #[arg(long)]
+    no_doubtful: bool,
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+    /// One sentence per net.
+    #[arg(long)]
+    brief: bool,
+    /// Write the fill per net and layer as PREFIX.<net>.<layer>.pgm (white: fill of the area,
+    /// grey: other fill of the net, black: none).
+    #[arg(long, value_name = "PREFIX")]
+    pgm: Option<String>,
+}
+
+impl AreasArgs {
+    /// The options of the report as the arguments give them.
+    fn options(&self, plane_layers: &[String]) -> AreaOptions {
+        AreaOptions {
+            nets: self.nets.clone(),
+            pour: self.pour.clone(),
+            zone_clearance: self.zone_clearance,
+            zone_min_width: self.zone_min_width,
+            thermal_gap: self.thermal_gap,
+            thermal_spoke_width: self.thermal_spoke_width,
+            pad_connection: self.pad_connection.clone(),
+            plane_layers: plane_layers.to_vec(),
+            step: self.step,
+            doubtful: self.doubtful || !self.no_doubtful,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)] // parsed once
 enum Cmd {
@@ -463,6 +532,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// What the copper fill of the nets with a zone (pours, planes) reaches on the copper the
+    /// board has: pieces of fill, islands with their pads and the site of one via for each,
+    /// the pads the fill does not reach and why. The fill is the router's own model on a
+    /// raster; KiCad's fill has the last word.
+    Areas(AreasArgs),
     /// Remove tracks, vias and outer copper zones (benchmark preparation).
     Strip {
         board: PathBuf,
@@ -1307,6 +1381,32 @@ fn main() -> Result<()> {
                 print_matching(&rules);
             }
         }
+        Cmd::Areas(args) => {
+            let report = gummiband_app::area_report(&args.board, &args.options(&cli.plane_layers))?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.text(args.brief));
+            }
+            if let Some(prefix) = &args.pgm {
+                for (n, f) in report.nets.iter().zip(&report.fills) {
+                    let safe: String = n
+                        .net
+                        .chars()
+                        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                        .collect();
+                    for l in &n.layers {
+                        let layer =
+                            f.fill.iter().enumerate().position(|(i, m)| {
+                                m.is_some() && report.layer_names.get(i).is_some_and(|x| *x == l.layer)
+                            });
+                        if let Some(picture) = layer.and_then(|i| gummiband_app::areas::fill_picture(f, i)) {
+                            std::fs::write(format!("{prefix}.{safe}.{}.pgm", l.layer), picture)?;
+                        }
+                    }
+                }
+            }
+        }
         Cmd::Strip {
             board,
             output,
@@ -1393,8 +1493,13 @@ mod tests {
 
     /// The long names of `route`, with the global ones.
     fn route_flags() -> Vec<(String, Vec<String>)> {
+        flags_of("route")
+    }
+
+    /// The long names of a subcommand, with the global ones.
+    fn flags_of(sub: &str) -> Vec<(String, Vec<String>)> {
         let cli = Cli::command();
-        let route = cli.find_subcommand("route").expect("route");
+        let route = cli.find_subcommand(sub).expect(sub);
         cli.get_arguments()
             .chain(route.get_arguments())
             .filter(|a| a.get_id() != "threads")
@@ -1440,6 +1545,72 @@ mod tests {
                 "--{flag} is neither in gummiband_app::OPTIONS nor one of the CLI's own arguments"
             );
         }
+    }
+
+    /// The same for `areas` and the options of the area report: every entry of the table is a
+    /// flag with the table's default, and `areas` has no option that the table lacks. The MCP
+    /// tool `area_report` has the same test.
+    #[test]
+    fn areas_offers_the_options_of_the_report() {
+        const OWN: &[&str] = &["board", "json", "brief", "pgm"];
+        let flags = flags_of("areas");
+        let has = |name: &str| flags.iter().any(|(f, _)| f == name);
+        for o in gummiband_app::AREA_OPTIONS {
+            let flag = o.flag();
+            let Some((_, defaults)) = flags.iter().find(|(f, _)| *f == flag) else {
+                panic!("areas lacks --{flag}");
+            };
+            if o.kind == Kind::OnOff {
+                assert!(has(&format!("no-{flag}")), "areas lacks --no-{flag}");
+            }
+            if let [d] = defaults.as_slice()
+                && o.kind != Kind::Switch
+                && o.kind != Kind::OnOff
+            {
+                assert_eq!(d, o.default, "default of --{flag}");
+            }
+        }
+        for (flag, _) in &flags {
+            let name = flag.strip_prefix("no-").unwrap_or(flag).replace('-', "_");
+            assert!(
+                OWN.contains(&flag.as_str()) || gummiband_app::area_option_doc(&name).is_some(),
+                "--{flag} is neither in gummiband_app::AREA_OPTIONS nor one of the CLI's own arguments"
+            );
+        }
+        // with nothing given the report runs with the defaults of the table
+        let args = |extra: &[&str]| {
+            let mut argv = vec!["gummiband", "areas", "in.kicad_pcb"];
+            argv.extend(extra);
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let Cmd::Areas(a) = cli.cmd else { panic!("areas") };
+            a.options(&cli.plane_layers)
+        };
+        assert_eq!(args(&[]), AreaOptions::default());
+        let o = args(&[
+            "--net",
+            "GND,GNDR",
+            "--pour",
+            "F.Cu,B.Cu",
+            "--zone-min-width",
+            "0.15",
+            "--pad-connection",
+            "solid",
+            "--no-doubtful",
+            "--plane-layers",
+            "In1.Cu",
+        ]);
+        assert_eq!(
+            (o.nets, o.pour),
+            (
+                vec!["GND".to_string(), "GNDR".into()],
+                vec!["F.Cu".to_string(), "B.Cu".into()]
+            )
+        );
+        assert_eq!(
+            (o.zone_min_width, o.pad_connection.as_str(), o.doubtful),
+            (0.15, "solid", false)
+        );
+        assert_eq!(o.plane_layers, ["In1.Cu"]);
     }
 
     fn route_args(extra: &[&str]) -> (RouteOptions, bool) {
