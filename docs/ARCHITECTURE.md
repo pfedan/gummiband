@@ -107,11 +107,15 @@ front end.
   clearance check and the soft copper that moved. The last check (`gummiband_core::legal`) is the
   final word on what was routed: a track that still touches copper of another net is taken out
   with what hangs on it, and every net is followed through its pads, tracks, vias and planes
-  (pads that touch are one piece, a via or a through hole pad inside a plane of its net reaches
-  the plane). A connection that is not there in copper is reported as open, whatever the search
+  (pads that touch are one piece, a via joins the pad its copper overlaps and the track it sits
+  on, a via or a through hole pad inside a plane of its net reaches the plane). A connection that is not there in copper is reported as open, whatever the search
   counted. Then the stubs go: a track of the route whose end lies on nothing of its net is cut
-  back to where it is last held (or goes as a whole, with a via that then joins nothing), and
-  the copper is counted once more as the final word. It prints a line when it had to step in; a routed file holds no short between two
+  back to where it is last held (or goes as a whole, with a via that then joins nothing: a via
+  of the route must join on two layers), and the copper is counted once more as the final word.
+  Only copper of the file is spared in all of this, told by its origin; that a track rested in
+  the last round of the relaxation says nothing. At the very end a line of the route that a
+  track end of its net meets in its middle gets a corner there, so that every junction is one of
+  ends, which is how KiCad reads a connection for certain. It prints a line when it had to step in; a routed file holds no short between two
   nets. Every way to a routed file passes it: the plain run, the open end with each of its
   alternatives and with what it has when it is stopped, finishing nets, the pairs, and so both
   front ends, which write through `RouteOutcome::write` only. The writer (`Routed::board_text`)

@@ -19,6 +19,8 @@ use crate::realize::{Elem, Geometry, Track, Via};
 /// What [`enforce`] found and did.
 #[derive(Debug, Clone, Default)]
 pub struct Legal {
+    /// Lines split where a track end met them in their middle.
+    pub split: usize,
     /// Tracks taken out because they shorted another net: (net, the other net).
     pub dropped: Vec<(String, String)>,
     /// How many of them ended on a track of their own net (a tap). A tap can come to lie across
@@ -190,13 +192,27 @@ impl<'a> NetCopper<'a> {
                 }
             }
         }
-        // vias: in a pad, in a plane, on kept copper, on each other
+        // vias: on a pad (the via's copper overlaps the pad, as KiCad joins them), in a plane, on
+        // kept copper, on the middle of a track, on each other
         for i in 0..self.vias.len() {
             let v = self.vias[i];
             let node = self.via_node(i);
+            let r = if v.is_pair() { 0.0 } else { v.diameter / 2.0 };
             for j in 0..self.pins.len() {
-                if self.on_pad(self.pins[j], v.at, v.layer) {
+                let pn = &b.pins[self.pins[j]];
+                let overlaps = pn.obstacles.iter().any(|&o| {
+                    let ob = &b.obstacles[o];
+                    v.layer.is_none_or(|l| ob.layers.has(l)) && ob.shape.dist_to_point(v.at) <= r + ON
+                });
+                if overlaps || self.on_pad(self.pins[j], v.at, v.layer) {
                     self.join(node, j);
+                }
+            }
+            for j in 0..self.tracks.len() {
+                let u = self.tracks[j];
+                if v.layer.is_none_or(|l| l == u.layer) && u.pts.len() >= 2 && on_track(u, v.at) {
+                    let un = self.track_node(j);
+                    self.join(node, un);
                 }
             }
             if v.drill > 0.0 && self.in_plane(v.at) {
@@ -369,7 +385,7 @@ fn held_fixed(board: &Board, net: NetId, p: Point, layer: u8) -> bool {
 fn dangling(board: &Board, geo: &Geometry) -> Vec<String> {
     let mut out = Vec::new();
     for (i, t) in geo.tracks.iter().enumerate() {
-        if t.resting || t.pts.len() < 2 {
+        if t.pts.len() < 2 {
             continue;
         }
         for p in [t.pts[0], *t.pts.last().unwrap()] {
@@ -391,7 +407,7 @@ fn prune(board: &Board, geo: &mut Geometry, net: NetId) {
             .filter(|&i| {
                 let t = &geo.tracks[i];
                 t.net == net
-                    && !t.resting
+                    && t.origin.is_none()
                     && t.pts.len() >= 2
                     && (!held(geo, i, t.pts[0], t.layer) || !held(geo, i, *t.pts.last().unwrap(), t.layer))
             })
@@ -410,24 +426,51 @@ fn prune(board: &Board, geo: &mut Geometry, net: NetId) {
 fn drop_idle_vias(board: &Board, geo: &mut Geometry, net: NetId) {
     let tracks = &geo.tracks;
     geo.vias.retain(|v| {
-        if v.net != net || v.resting || v.drill <= 0.0 {
+        if v.net != net || v.origin.is_some() || v.drill <= 0.0 {
             return true;
         }
-        let ends = tracks
+        // the layers on which the via joins something: a track end, a pad its copper overlaps
+        // (as KiCad joins them), a plane. A via must join on two layers, or KiCad calls it
+        // dangling ("connected on only one layer"), and two track ends on one layer meet anyway.
+        let mut layers: u64 = 0;
+        for t in tracks.iter().filter(|t| t.net == net && t.pts.len() >= 2) {
+            if on_via(v, t.pts[0]) || on_via(v, *t.pts.last().unwrap()) {
+                layers |= 1 << t.layer;
+            }
+        }
+        let r = if v.is_pair() { 0.0 } else { v.diameter / 2.0 };
+        for &pin in &board.nets[net as usize].pins {
+            for &o in &board.pins[pin].obstacles {
+                let ob = &board.obstacles[o];
+                if ob.shape.dist_to_point(v.at) <= r + ON {
+                    for l in 0..64u8 {
+                        if ob.layers.has(l) {
+                            layers |= 1 << l;
+                        }
+                    }
+                }
+            }
+        }
+        for pl in board.planes.iter().filter(|pl| pl.net == net && pl.covers(v.at)) {
+            layers |= 1 << pl.layer;
+        }
+        // kept copper of the net under the via, and a track the via sits on
+        for ob in board.obstacles.iter().filter(|ob| {
+            ob.net == Some(net) && matches!(ob.kind, ObstacleKind::Track | ObstacleKind::Via | ObstacleKind::Pour)
+        }) {
+            if ob.shape.dist_to_point(v.at) <= r + ON {
+                for l in (0..64u8).filter(|&l| ob.layers.has(l)) {
+                    layers |= 1 << l;
+                }
+            }
+        }
+        for t in tracks
             .iter()
-            .filter(|t| t.net == net && t.pts.len() >= 2)
-            .flat_map(|t| [t.pts[0], *t.pts.last().unwrap()])
-            .filter(|&p| on_via(v, p))
-            .count();
-        let in_pad = board.nets[net as usize].pins.iter().any(|&pin| {
-            board.pins[pin]
-                .obstacles
-                .iter()
-                .any(|&o| board.obstacles[o].shape.dist_to_point(v.at) <= ON)
-        });
-        let in_plane = board.planes.iter().any(|pl| pl.net == net && pl.covers(v.at));
-        // a via needs two things to join: tracks, a pad, a plane
-        ends + usize::from(in_pad) + usize::from(in_plane) >= 2
+            .filter(|t| t.net == net && t.pts.len() >= 2 && on_track(t, v.at))
+        {
+            layers |= 1 << t.layer;
+        }
+        layers.count_ones() >= 2
     });
 }
 
@@ -543,7 +586,7 @@ fn trim_stubs(board: &Board, geo: &mut Geometry) -> usize {
     // a track of the route with a loose end, and whether that is its last point
     let loose = |geo: &Geometry, net: NetId| {
         geo.tracks.iter().enumerate().find_map(|(i, t)| {
-            if t.net != net || t.resting || t.origin.is_some() || t.pts.len() < 2 {
+            if t.net != net || t.origin.is_some() || t.pts.len() < 2 {
                 return None;
             }
             let first = !held(board, geo, t.net, i, t.pts[0], t.layer);
@@ -556,8 +599,7 @@ fn trim_stubs(board: &Board, geo: &mut Geometry) -> usize {
         .iter()
         .enumerate()
         .filter(|(i, t)| {
-            !t.resting
-                && t.origin.is_none()
+            t.origin.is_none()
                 && t.pts.len() >= 2
                 && (!held(board, geo, t.net, *i, t.pts[0], t.layer)
                     || !held(board, geo, t.net, *i, *t.pts.last().unwrap(), t.layer))
@@ -680,13 +722,13 @@ fn drop_shorts(board: &Board, geo: &mut Geometry) -> (Vec<(NetId, NetId, bool)>,
             .tracks
             .iter()
             .enumerate()
-            .filter(|(_, t)| (t.net == a || t.net == b) && !t.resting && t.origin.is_none() && t.pts.len() >= 2)
+            .filter(|(_, t)| (t.net == a || t.net == b) && t.origin.is_none() && t.pts.len() >= 2)
             .filter(|(_, t)| {
                 let other = if t.net == a { b } else { a };
                 touches(board, geo, t, other)
                     || geo.vias.iter().any(|w| {
                         w.net == t.net
-                            && !w.resting
+                            && w.origin.is_none()
                             && (on_via(w, t.pts[0]) || on_via(w, *t.pts.last().unwrap()))
                             && via_touches(board, geo, w, other)
                     })
@@ -798,6 +840,9 @@ pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal
             .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
             .sum();
     }
+    // 5. a track end on the middle of a line of its net becomes a corner of that line: KiCad
+    // does not always take an end in the middle of a track for a connection
+    legal.split = split_at_junctions(geo);
     legal.dangling = dangling(board, geo);
     if !legal.dropped.is_empty()
         || !legal.open.is_empty()
@@ -850,6 +895,69 @@ fn count_open(
             legal.open.push(open);
         }
     }
+}
+
+/// Split the lines of the route that a track end of their net meets in their middle, so that
+/// every junction is one of ends: the foot of the end becomes a corner of the line (in its points
+/// and elements), and both halves keep the width the line had. KiCad does not take every end in
+/// the middle of a track for a connection (it reported a few of a hundred as dangling), ends that
+/// coincide it always does. Arcs stay as they are, and so does copper of the file. Returns the
+/// number of splits.
+pub fn split_at_junctions(geo: &mut Geometry) -> usize {
+    let ends: Vec<(u32, u8, Point)> = geo
+        .tracks
+        .iter()
+        .filter(|t| t.pts.len() >= 2)
+        .flat_map(|t| [(t.net, t.layer, t.pts[0]), (t.net, t.layer, *t.pts.last().unwrap())])
+        .collect();
+    let mut splits = 0;
+    for t in geo.tracks.iter_mut().filter(|t| t.origin.is_none()) {
+        for &(net, layer, e) in &ends {
+            if net != t.net || layer != t.layer {
+                continue;
+            }
+            // the line element the end lies on, away from its ends
+            let Some(k) = t.elems.iter().position(|el| match *el {
+                Elem::Line(a, b) => {
+                    point_seg_dist(e, a, b) <= t.piece_width(a, b) / 2.0 + ON
+                        && a.dist(e) > 10.0 * ON
+                        && b.dist(e) > 10.0 * ON
+                }
+                Elem::Arc(..) => false,
+            }) else {
+                continue;
+            };
+            let Elem::Line(a, b) = t.elems[k] else { continue };
+            let d = b - a;
+            let s = ((e - a).dot(d) / d.dot(d)).clamp(0.0, 1.0);
+            // the end itself where it lies on the centre line (KiCad joins ends that coincide)
+            let foot = a.lerp(b, s);
+            let f = if e.dist(foot) <= ON { e } else { foot };
+            if a.dist(f) <= 10.0 * ON || b.dist(f) <= 10.0 * ON {
+                continue;
+            }
+            let w = t.piece_width(a, b);
+            t.elems.splice(k..=k, [Elem::Line(a, f), Elem::Line(f, b)]);
+            // a half that no longer reaches the zone its width came from keeps that width
+            for (p, q) in [(a, f), (f, b)] {
+                if (t.piece_width(p, q) - w).abs() > 1e-12 {
+                    let mut r = crate::geom::Rect::empty();
+                    r.add(p.lerp(q, 0.5));
+                    t.fitted.push((r.grow(1e-6), w));
+                }
+            }
+            // the points: f goes between the two points of a-b
+            if let Some(i) = t
+                .pts
+                .windows(2)
+                .position(|w| w[0].dist(a) < 1e-9 && w[1].dist(b) < 1e-9)
+            {
+                t.pts.insert(i + 1, f);
+            }
+            splits += 1;
+        }
+    }
+    splits
 }
 
 #[cfg(test)]
@@ -1146,6 +1254,123 @@ mod tests {
         assert_eq!(geo.tracks[0].pts, vec![pt(10., 10.), pt(2., 10.)]);
         assert_eq!(legal.dangling, vec!["B at 4.000 7.000".to_string()]);
         assert_eq!(geo.tracks.len(), 3);
+    }
+
+    /// In a result `resting` says that a track was asleep in the last round of the relaxation,
+    /// not that it is copper of the file: in the open end most tracks are. A short between two
+    /// such tracks is taken out like any other; only copper of the file (with an origin) stays.
+    #[test]
+    fn a_short_between_tracks_that_rest_is_taken_out() {
+        let b = cross();
+        let rest = |t: Track| Track { resting: true, ..t };
+        let mut geo = Geometry {
+            tracks: vec![
+                rest(track(0, &[(2., 10.), (10., 9.), (18., 10.)])),
+                rest(track(1, &[(10., 2.), (10., 18.)])),
+            ],
+            vias: Vec::new(),
+        };
+        let mut st = stats(2);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert_eq!(legal.dropped, vec![("B".to_string(), "A".to_string())]);
+        assert_eq!((legal.shorts_left, geo.tracks.len(), st.routed), (0, 1, 1));
+        assert!(without_shorts(&b, &geo).is_none());
+        // two tracks of the file that cross are not the route's to take out: the short is counted
+        let file = |t: Track, o: u32| Track { origin: Some(o), ..t };
+        let mut geo = Geometry {
+            tracks: vec![
+                file(track(0, &[(2., 10.), (10., 9.), (18., 10.)]), 0),
+                file(track(1, &[(10., 2.), (10., 18.)]), 1),
+            ],
+            vias: Vec::new(),
+        };
+        let legal = enforce(&b, &mut geo, &mut stats(2));
+        assert!(legal.dropped.is_empty() && legal.shorts_left > 0);
+        assert_eq!(geo.tracks.len(), 2);
+    }
+
+    /// A track that ends on the middle of a line of its net: the line gets a corner there, so
+    /// that the junction is one of ends. The copper is the same, and both halves keep the width.
+    #[test]
+    fn a_line_is_split_where_a_track_of_its_net_ends_on_it() {
+        let b = board(&[("A", 2., 10.), ("A", 18., 10.), ("A", 10., 16.)]);
+        let mut line = track(0, &[(2., 10.), (18., 10.)]);
+        // the line is 0.15 wide by a zone around its middle
+        let mut zone = crate::geom::Rect::empty();
+        zone.add(pt(10., 10.));
+        line.fitted.push((zone.grow(1e-6), 0.15));
+        let mut geo = Geometry {
+            // the end lies a hair beside the centre line, as the search leaves it
+            tracks: vec![line, track(0, &[(10., 16.), (10., 10.0000005)])],
+            vias: Vec::new(),
+        };
+        let mut st = stats(2);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert!(legal.open.is_empty() && legal.dangling.is_empty(), "{legal:?}");
+        assert_eq!((legal.split, st.routed), (1, 2));
+        let corner = pt(10., 10.0000005);
+        assert_eq!(geo.tracks[0].pts, vec![pt(2., 10.), corner, pt(18., 10.)]);
+        assert_eq!(
+            geo.tracks[0].elems,
+            vec![Elem::Line(pt(2., 10.), corner), Elem::Line(corner, pt(18., 10.))]
+        );
+        assert_eq!(geo.tracks[0].piece_width(pt(2., 10.), corner), 0.15);
+        assert_eq!(geo.tracks[0].piece_width(corner, pt(18., 10.)), 0.15);
+        // a second look splits nothing more, and copper of the file is never split
+        assert_eq!(split_at_junctions(&mut geo), 0);
+        let mut geo = Geometry {
+            tracks: vec![
+                Track {
+                    origin: Some(0),
+                    ..track(0, &[(2., 10.), (18., 10.)])
+                },
+                track(0, &[(10., 16.), (10., 10.)]),
+            ],
+            vias: Vec::new(),
+        };
+        assert_eq!(split_at_junctions(&mut geo), 0);
+    }
+
+    fn via(net: NetId, x: f64, y: f64) -> Via {
+        Via {
+            at: pt(x, y),
+            diameter: 0.6,
+            drill: 0.3,
+            net,
+            layer: None,
+            origin: None,
+            resting: false,
+            half: Point::default(),
+        }
+    }
+
+    /// A via whose centre lies beside a pad while its copper overlaps the pad joins the two, as
+    /// in KiCad. And a via of the route must join on two layers: one that holds a track end and
+    /// a pad on the same layer and nothing on another joins nothing, and goes.
+    #[test]
+    fn a_via_joins_the_pad_its_copper_overlaps_and_must_join_on_two_layers() {
+        let mut b = board(&[("A", 2., 10.), ("A", 18., 10.)]);
+        let second = b.layers[0].clone();
+        b.layers.push(second);
+        // the via stands 0.29 mm from the pad centre: 0.09 outside the pad, its copper 0.21 inside
+        let on = |layer: u8, pts: &[(f64, f64)]| Track { layer, ..track(0, pts) };
+        let geo = Geometry {
+            tracks: vec![on(1, &[(2.29, 10.), (18., 10.)])],
+            vias: vec![via(0, 2.29, 10.), via(0, 18., 10.)],
+        };
+        assert!(open_in_copper(&b, &geo, &[0]).is_empty());
+        let mut geo = geo;
+        let mut st = stats(1);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert!(legal.open.is_empty() && legal.dangling.is_empty(), "{legal:?}");
+        assert_eq!((geo.vias.len(), geo.tracks.len(), st.routed), (2, 1, 1));
+        // a via beside the first pad with a track end on the pad's layer only: nothing on layer 1
+        let mut geo = Geometry {
+            tracks: vec![on(0, &[(2., 10.), (18., 10.)]), on(0, &[(2.29, 10.), (2.29, 11.)])],
+            vias: vec![via(0, 2.29, 10.)],
+        };
+        drop_idle_vias(&b, &mut geo, 0);
+        assert!(geo.vias.is_empty());
     }
 
     #[test]
