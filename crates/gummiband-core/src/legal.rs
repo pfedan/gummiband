@@ -775,10 +775,21 @@ fn put_back_soft(board: &Board, geo: &mut Geometry) -> Vec<NetId> {
     if soft.chains.is_empty() && soft.nodes.is_empty() {
         return nets;
     }
+    // moved is read off the copper itself: `resting` also says "asleep in the last relaxation",
+    // and copper that gave way earlier may sleep by now
+    let moved_track = |t: &Track| {
+        t.origin.is_some_and(|o| {
+            soft.chains.get(o as usize).is_none_or(|ch| {
+                ch.pts.len() != t.pts.len() || ch.pts.iter().zip(&t.pts).any(|(a, b)| a.dist(*b) >= 1e-6)
+            })
+        })
+    };
+    let moved_via = |v: &Via| {
+        v.origin
+            .is_some_and(|o| soft.nodes.get(o as usize).is_none_or(|n| n.at.dist(v.at) >= 1e-6))
+    };
     for _ in 0..soft.chains.len() + soft.nodes.len() + 1 {
-        if !geo.tracks.iter().any(|t| t.origin.is_some() && !t.resting)
-            && !geo.vias.iter().any(|v| v.origin.is_some() && !v.resting)
-        {
+        if !geo.tracks.iter().any(moved_track) && !geo.vias.iter().any(moved_via) {
             break;
         }
         let pairs = shorts(board, geo);
@@ -786,7 +797,8 @@ fn put_back_soft(board: &Board, geo: &mut Geometry) -> Vec<NetId> {
         for &(a, b) in &pairs {
             for (net, other) in [(a, b), (b, a)] {
                 for t in &geo.tracks {
-                    if let (Some(o), false) = (t.origin, t.resting)
+                    if let Some(o) = t.origin
+                        && moved_track(t)
                         && t.net == net
                         && t.pts.len() >= 2
                         && touches(board, geo, t, other)
@@ -795,7 +807,8 @@ fn put_back_soft(board: &Board, geo: &mut Geometry) -> Vec<NetId> {
                     }
                 }
                 for v in &geo.vias {
-                    if let (Some(o), false) = (v.origin, v.resting)
+                    if let Some(o) = v.origin
+                        && moved_via(v)
                         && v.net == net
                         && via_touches(board, geo, v, other)
                     {
@@ -808,7 +821,7 @@ fn put_back_soft(board: &Board, geo: &mut Geometry) -> Vec<NetId> {
             break;
         }
         // what hangs together through vias and branch points that moved goes back as one
-        let moved_node = |n: u32| geo.vias.iter().any(|v| v.origin == Some(n) && !v.resting);
+        let moved_node = |n: u32| geo.vias.iter().any(|v| v.origin == Some(n) && moved_via(v));
         let (mut at_c, mut at_n) = (0, 0);
         while at_c < chains.len() || at_n < nodes.len() {
             if at_c < chains.len() {
@@ -1772,6 +1785,34 @@ mod tests {
         assert!(back.resting);
         assert_eq!(back.pts, vec![pt(14., 2.), pt(14., 18.)]);
         assert!(shorts(&b, &geo).is_empty());
+    }
+
+    /// Copper of the file that gave way in an earlier step and was asleep in the last relaxation
+    /// carries `resting`, yet it is not where the file has it: it goes back all the same.
+    #[test]
+    fn copper_that_gave_way_and_sleeps_by_now_goes_back_too() {
+        let b = with_soft(
+            board(&[
+                ("A", 2., 10.),
+                ("A", 8., 10.),
+                ("B", 14., 2.),
+                ("B", 14., 18.),
+                ("C", 11., 10.),
+            ]),
+            &[(14., 2.), (14., 18.)],
+        );
+        let mut asleep = moved(&[(14., 2.), (11., 10.), (14., 18.)]);
+        asleep.resting = true;
+        let mut geo = Geometry {
+            tracks: vec![track(0, &[(2., 10.), (8., 10.)]), asleep],
+            vias: Vec::new(),
+        };
+        let mut st = stats(1);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert_eq!(legal.put_back, vec!["B".to_string()]);
+        assert!(legal.shorts_left == 0 && shorts(&b, &geo).is_empty());
+        let back = geo.tracks.iter().find(|t| t.origin == Some(0)).unwrap();
+        assert_eq!(back.pts, vec![pt(14., 2.), pt(14., 18.)]);
     }
 
     /// The same, but the new track runs across the old place of the track that gave way: with
