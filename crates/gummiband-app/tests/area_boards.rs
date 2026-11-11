@@ -2,6 +2,10 @@
 //! `bench/gen_boards.py`). The boards are fixtures: each holds one situation of a pour or a
 //! plane, and these tests pin what the model finds there. Whether KiCad's fill agrees is
 //! measured with `bench/areas-kicad.sh` where KiCad is installed.
+//!
+//! The boards of `bench/boards/areas/kicad` are routed bench boards with a GND pour, kept as
+//! KiCad 10 got them when it was held against the model: at each of them the two disagreed.
+//! Their tests pin what KiCad's fill does there.
 
 use gummiband_app::areas::model;
 use gummiband_app::{AreaOptions, AreaReport, area_report};
@@ -22,23 +26,27 @@ fn names(v: &[&str]) -> Vec<String> {
 }
 
 /// Six pens open through strips of fill 0.10, 0.15, 0.20, 0.25, 0.30 and 0.40 mm wide, the
-/// minimum width of the pour is 0.2 mm: the fill passes a strip that is wider and not one that
-/// is narrower, and the strip of just the minimum width is the doubtful one.
+/// minimum width of the pour is 0.2 mm: the fill passes a strip of the minimum width and wider
+/// and not one that is narrower. That is KiCad's answer (3 pieces of fill on the front, 2
+/// unconnected); the strip of just the minimum width stays the doubtful one, half a cell
+/// decides it.
 #[test]
-fn the_fill_passes_a_strip_wider_than_the_minimum_width_and_no_narrower_one() {
+fn the_fill_passes_a_strip_of_the_minimum_width_and_no_narrower_one() {
     let r = report("area_strips", &AreaOptions::default());
     let gnd = &r.nets[0];
     assert_eq!(
         (gnd.net.as_str(), gnd.pads, gnd.reached),
-        ("GND", 10, 7),
+        ("GND", 10, 8),
         "{}",
         gnd.summary
     );
     let unreached: Vec<&str> = gnd.unreached.iter().map(|u| u.pad.as_str()).collect();
-    assert_eq!(unreached, ["TP1.1", "TP2.1", "TP3.1"]);
+    assert_eq!(unreached, ["TP1.1", "TP2.1"]);
     assert!(gnd.unreached.iter().all(|u| u.reason == "island"));
+    assert_eq!(gnd.expected_unconnected, 2);
+    assert_eq!((gnd.layers[0].layer.as_str(), gnd.layers[0].pieces), ("F.Cu", 3));
     // every closed pen is an island with room for one via to the back
-    assert_eq!(gnd.islands.len(), 3);
+    assert_eq!(gnd.islands.len(), 2);
     for i in &gnd.islands {
         let via = i.via.as_ref().expect("a via site in the pen");
         assert_eq!((via.from.as_str(), via.to.as_str()), ("F.Cu", "B.Cu"));
@@ -46,6 +54,134 @@ fn the_fill_passes_a_strip_wider_than_the_minimum_width_and_no_narrower_one() {
     // 0.10 and 0.15 are shut and 0.25 and wider are open at any reading of the raster
     let doubtful: Vec<&str> = gnd.doubtful.as_ref().unwrap().iter().map(|d| d.pad.as_str()).collect();
     assert_eq!(doubtful, ["TP3.1"]);
+    assert!(gnd.doubtful.as_ref().unwrap()[0].reached);
+}
+
+/// From the top of the board down: a region and a band of fill with one GND pad each, cut off
+/// by locked tracks from the rest (two islands, each with room for a via to the back), between
+/// them strips of fill that hold nothing, and a pad whose spokes are all cut by a pen of
+/// track.
+#[test]
+fn two_islands_with_a_via_site_each_and_a_pad_without_a_spoke() {
+    let r = report("area_island", &AreaOptions::default());
+    let gnd = &r.nets[0];
+    assert_eq!((gnd.pads, gnd.reached), (6, 3), "{}", gnd.summary);
+    let unreached: Vec<(&str, &str)> = gnd.unreached.iter().map(|u| (u.pad.as_str(), u.reason)).collect();
+    assert_eq!(
+        unreached,
+        [("TP1.1", "island"), ("TP2.1", "island"), ("G3.1", "no_spoke")]
+    );
+    for i in &gnd.islands {
+        let via = i.via.as_ref().expect("a via site on the island");
+        assert_eq!((via.from.as_str(), via.to.as_str()), ("F.Cu", "B.Cu"));
+        assert!(via.second.is_none());
+    }
+    // the strips are pieces of their own that hold nothing, and are left out
+    let front = &gnd.layers[0];
+    assert_eq!((front.of_the_area, front.floating, front.isolated), (1, 4, 0));
+    assert!(gnd.doubtful.as_ref().unwrap().is_empty());
+}
+
+/// The report of GND on a board of `bench/boards/areas/kicad`.
+fn as_kicad_got_it(board: &str) -> gummiband_app::areas::NetReport {
+    let r = report(&format!("kicad/{board}"), &AreaOptions::default());
+    let [gnd] = r.nets.as_slice() else {
+        panic!("one net with an area")
+    };
+    assert_eq!(gnd.net, "GND");
+    gnd.clone()
+}
+
+/// `fine_pitch_mixed`, seed 2: six resistor pads in a row at a pitch of 1.6 mm, whose thermal
+/// gaps meet, so that no spoke between two of them ends in fill. KiCad joins all six all the
+/// same: a spoke also stays where it and a spoke of another pad reach each other's ends. The
+/// one pad KiCad leaves unconnected is the exposed pad of U1.
+#[test]
+fn pads_in_a_row_whose_reliefs_meet_are_joined_by_their_spokes() {
+    let gnd = as_kicad_got_it("fine_pitch_mixed.s2");
+    let unreached: Vec<&str> = gnd.unreached.iter().map(|u| u.pad.as_str()).collect();
+    assert_eq!(unreached, ["U1.57"], "{}", gnd.summary);
+    assert_eq!(gnd.expected_unconnected, 1);
+    let doubtful = gnd.doubtful.as_ref().unwrap();
+    for pad in ["R50.2", "R51.2", "R52.2", "R53.2", "R54.2", "R56.2"] {
+        assert!(doubtful.iter().all(|d| d.pad != pad), "{pad} is doubtful");
+    }
+}
+
+/// `fine_pitch_mixed`, seed 3: the exposed pad of U1 hangs by its spokes on a piece of fill of
+/// one square millimetre between the tracks that leave the chip. KiCad has that piece (two
+/// pieces of fill on the front: the area and this one) and counts the pad as unconnected. On
+/// the back nothing of GND holds the pour: KiCad keeps all its pieces as isolated copper.
+#[test]
+fn a_pad_whose_spokes_end_in_a_small_piece_of_fill_is_on_an_island() {
+    let gnd = as_kicad_got_it("fine_pitch_mixed.s3");
+    let [u] = gnd.unreached.as_slice() else {
+        panic!("{}", gnd.summary)
+    };
+    assert_eq!((u.pad.as_str(), u.reason), ("U1.57", "island"));
+    assert_eq!(gnd.expected_unconnected, 1);
+    let [island] = gnd.islands.as_slice() else {
+        panic!("one island")
+    };
+    assert!(
+        island.via.is_none() && island.filled > 0.5 && island.filled < 1.5,
+        "{}",
+        island.filled
+    );
+    let (front, back) = (&gnd.layers[0], &gnd.layers[1]);
+    assert_eq!((front.layer.as_str(), back.layer.as_str()), ("F.Cu", "B.Cu"));
+    // what stays of the front: the area and the island
+    assert_eq!(front.of_the_area, 1);
+    assert_eq!(front.pieces - front.floating + front.isolated, 2);
+    assert_eq!((back.of_the_area, back.isolated), (0, back.pieces));
+    assert!(
+        back.pieces > 30 && back.filled > 1390.0 && back.filled < 1420.0,
+        "{}",
+        back.filled
+    );
+}
+
+/// `parts_medium`, seed 1: every GND pad is on the front and nothing joins the pour of the
+/// back to the net. KiCad keeps that copper all the same (one piece of 1760 mm2) and warns of
+/// isolated copper: it takes no piece out of a zone in which every piece holds nothing. U2.4
+/// is reached in the model and not in KiCad, and the model names it as doubtful.
+#[test]
+fn a_pour_that_nothing_holds_stays_as_isolated_copper() {
+    let gnd = as_kicad_got_it("parts_medium.s1");
+    let back = &gnd.layers[1];
+    assert_eq!(back.layer, "B.Cu");
+    assert_eq!(
+        (back.pieces, back.of_the_area, back.floating, back.isolated),
+        (1, 0, 1, 1)
+    );
+    assert!(back.filled > 1750.0 && back.filled < 1770.0, "{}", back.filled);
+    // on the front the pieces that hold nothing are left out: other pieces hold pads there
+    assert!(gnd.layers[0].floating > 0 && gnd.layers[0].isolated == 0);
+    let doubtful: Vec<(&str, bool)> = gnd
+        .doubtful
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|d| (d.pad.as_str(), d.reached))
+        .collect();
+    assert_eq!(doubtful, [("U2.4", true)]);
+}
+
+/// `matching`, seed 3: J1.16, the last pad of a connector with a pitch of 0.5 mm. Its spoke
+/// away from the row ends 0.05 mm from the clearance of a track, in a pocket of fill between
+/// two tracks. KiCad joins the pad. The model does not: with the clearances as they are the
+/// end of the spoke lies one cell outside the fill, with half a cell less the spoke stays and
+/// the pocket is an island. That is within the raster, and the model says so: the pad is
+/// doubtful.
+#[test]
+fn a_pad_whose_spoke_ends_within_a_cell_of_the_fill_is_doubtful() {
+    let gnd = as_kicad_got_it("matching.s3");
+    let unreached: Vec<&str> = gnd.unreached.iter().map(|u| u.pad.as_str()).collect();
+    assert_eq!(unreached, ["J1.16"], "{}", gnd.summary);
+    let [d] = gnd.doubtful.as_ref().unwrap().as_slice() else {
+        panic!("one doubtful pad")
+    };
+    assert_eq!((d.pad.as_str(), d.reached, d.spoke), ("J1.16", false, true));
 }
 
 /// Two ground nets on two halves and no zone in the file: the pour of both shares the board

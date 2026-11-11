@@ -151,7 +151,11 @@ pub struct LayerFill {
     pub pieces: usize,
     pub of_the_area: usize,
     pub floating: usize,
-    /// mm².
+    /// Of those, the pieces that stay in the fill: KiCad leaves a piece that holds nothing out
+    /// where the zone says so (always, unless it is set otherwise), but none where no piece of
+    /// the zone holds anything, and warns of isolated copper for each.
+    pub isolated: usize,
+    /// mm² of all pieces.
     pub filled: f64,
 }
 
@@ -218,6 +222,9 @@ pub struct Doubtful {
     pub reached: bool,
     pub with_less: bool,
     pub with_more: bool,
+    /// Reached in none of the three, but a spoke of its thermal relief stays in one and none
+    /// in another: whether the pad hangs on fill at all is within the raster.
+    pub spoke: bool,
 }
 
 /// The model against the fill the file holds (KiCad's, as of its last fill), on one layer.
@@ -834,6 +841,7 @@ pub fn net_report(
             pieces: ps.len(),
             of_the_area: ps.iter().filter(|p| p.main).count(),
             floating: ps.iter().filter(|p| p.floating).count(),
+            isolated: ps.iter().filter(|p| p.floating && !p.left_out).count(),
             filled: r3(ps.iter().map(|p| p.area).sum()),
         });
     }
@@ -883,23 +891,26 @@ pub fn net_report(
             farthest: far.name.clone(),
         });
     let doubt = doubtful.then(|| {
+        // the answer of a pad: reached, and where it is not, whether none of its spokes stays
+        let answer = |p: &fill::PinReach| (p.reached(), p.reach == Reach::NoSpoke);
         let at = |slack: f64| {
             let o = fill::Options { slack, ..o.clone() };
             let f = fill::fill_net(board, areas, net, &o);
-            f.pins.iter().map(|p| p.reached()).collect::<Vec<bool>>()
+            f.pins.iter().map(answer).collect::<Vec<(bool, bool)>>()
         };
         let half = f.raster.step / 2.0;
         let (less, more) = (at(-half), at(half));
         f.pins
             .iter()
             .enumerate()
-            .filter(|(i, p)| less[*i] != p.reached() || more[*i] != p.reached())
+            .filter(|(i, p)| less[*i] != answer(p) || more[*i] != answer(p))
             .map(|(i, p)| Doubtful {
                 pad: p.name.clone(),
                 at: xy(board.pins[p.pin].pos),
                 reached: p.reached(),
-                with_less: less[i],
-                with_more: more[i],
+                with_less: less[i].0,
+                with_more: more[i].0,
+                spoke: !p.reached() && !less[i].0 && !more[i].0,
             })
             .collect::<Vec<_>>()
     });
@@ -991,7 +1002,7 @@ pub fn area_report_of(kb: &KicadBoard, name: &str, o: &AreaOptions) -> Result<Ar
         board: name.to_string(),
         nets: Vec::new(),
         notes: vec![
-            "The fill is the router's model on a raster, not KiCad's fill: a statement is good to about one step, and strips of about the minimum width have not been compared with KiCad yet.".into(),
+            "The fill is the router's model on a raster, not KiCad's fill: a statement is good to about one step, and a pad that hangs on a strip of about the minimum width or on a spoke that ends within a step of the fill is named as doubtful.".into(),
         ],
         fills: Vec::new(),
         layer_names: b.layers.iter().map(|l| l.name.clone()).collect(),
@@ -1066,6 +1077,12 @@ impl NetReport {
                 "  {}: {} pieces of fill ({} of the area, {} that hold nothing of the net), {:.1} mm2\n",
                 l.layer, l.pieces, l.of_the_area, l.floating, l.filled
             );
+            if l.isolated > 0 {
+                s += &format!(
+                    "    {} of them stay in KiCad's fill as isolated copper, with a warning each: the zone keeps pieces of their size, or none of its pieces holds anything of the net (KiCad takes none out then)\n",
+                    l.isolated
+                );
+            }
         }
         for (k, i) in self.islands.iter().enumerate() {
             let pads: Vec<&str> = i.pads.iter().map(String::as_str).collect();
@@ -1138,6 +1155,13 @@ impl NetReport {
                 }
                 if !lost.is_empty() {
                     s += &format!("    reached, but not then: {}\n", some(&lost, 40));
+                }
+                let spoke: Vec<&str> = d.iter().filter(|x| x.spoke).map(|x| x.pad.as_str()).collect();
+                if !spoke.is_empty() {
+                    s += &format!(
+                        "    not reached, and a spoke stays in one and none in the other: {}\n",
+                        some(&spoke, 40)
+                    );
                 }
             }
             None => {}

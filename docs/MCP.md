@@ -1157,8 +1157,11 @@ needed) and reads it for you. Per net:
 
 - `summary`: the finding in one sentence. "The area of GND (812.4 mm2 on F.Cu, B.Cu) reaches 48
   of 52 pads; 4 are not reached: 3 on islands, 1 without a spoke."
-- `layers`: pieces of fill per layer, how many belong to the area and how many hold nothing of
-  the net (KiCad removes those where the zone says so).
+- `layers`: pieces of fill per layer, how many belong to the area (`of_the_area`) and how many
+  hold nothing of the net (`floating`: KiCad removes those where the zone says so, which is
+  always unless the zone is set otherwise). `isolated` of them stay all the same: KiCad takes
+  no piece out of a zone in which every piece holds nothing, and warns of isolated copper for
+  each. A pour on a layer without a pad or via of the net is such a zone.
 - `pads`, `reached` (`by_fill`: touched by the fill itself, `by_copper`: joined through tracks,
   vias or other pads of the net), `joins`: the pads the area joins. `groups_apart`: the groups
   of pads that do not hang on the area, and `expected_unconnected`: the unconnected items
@@ -1177,10 +1180,12 @@ needed) and reads it for you. Per net:
   via of the net stands clear on every layer and lands in the area, and the `farthest` pad. For
   a plane this is how far the pins are from their via.
 - `doubtful`: the pads whose answer changes when every clearance of the fill moves by half a
-  raster cell (`reached` now, `with_less`, `with_more`). The model works on a raster (`step`,
-  0.04 to 0.05 mm by default); a strip of fill within one cell of the minimum width can come
-  out either way, and these are the pads that hang on such a strip. Treat them as not reached
-  until KiCad's fill says otherwise.
+  raster cell (`reached` now, `with_less`, `with_more`; `spoke`: reached in none of the three,
+  but a spoke of the thermal relief stays in one and none in another, so whether the pad hangs
+  on fill at all is within the raster). The model works on a raster (`step`, 0.04 to 0.05 mm by
+  default); a strip of fill within one cell of the minimum width can come out either way, and
+  so can a spoke that ends within a cell of the border of the fill. These are the pads that
+  hang on such a spot. Treat them as not reached until KiCad's fill says otherwise.
 - `against_file`: where the file holds a fill (KiCad's, as of its last refill), the model
   against it per layer: mm² in both, in one only, and the pads only one of them touches.
 
@@ -1196,9 +1201,11 @@ lays them), with `zone_clearance`, `zone_min_width`, `thermal_gap`,
 `thermal`): what a pour would reach, before one is written. The file is never changed.
 
 The model is not KiCad's filler. It was compared with KiCad's fill of the LED controller planes
-(0.08 % of the area differs, the same pads are touched); thin strips between tracks on a
-routed outer layer have not been compared yet, which is what `doubtful` is for. `drc` stays the
-judge.
+(0.08 % of the area differs, the same pads are touched) and with KiCad 10 on routed bench boards
+with a pour (`bench/areas-kicad.sh`): a strip of just the minimum width passes, pads in a row
+whose thermal gaps meet are joined by their spokes, and a pour that nothing holds stays as
+isolated copper, as in KiCad. A pad that hangs on a strip or a spoke within a raster cell is
+what `doubtful` is for. `drc` stays the judge.
 
 ```json
 {"name": "area_report", "arguments": {"path": "/abs/ledctl.routed.gnd.kicad_pcb"}}

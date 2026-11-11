@@ -486,9 +486,14 @@ The area of GND (1203.4 mm2 on F.Cu, B.Cu) reaches 49 of 52 pads; 3 are not reac
   no area.
 - **From a pad to the nearest spot where a via lands in the area** tells how far the pins of a
   plane net are from their via.
+- **Pieces that hold nothing of the net** are left out of the fill, as KiCad leaves them out
+  (unless the zone is set to keep them). Where no piece of a zone holds anything, KiCad keeps
+  them all and warns of isolated copper for each: a line under the layer says so. A pour on a
+  layer without a pad or via of the net is such a zone.
 - **Doubtful** pads change their answer when every clearance moves by half a raster cell. The
   model works on a raster of 0.04 to 0.05 mm (`--step`); a strip of fill within one cell of the
-  minimum width can come out either way. Read them as "not reached until KiCad says otherwise".
+  minimum width can come out either way, and so can a thermal spoke that ends within a cell of
+  the border of the fill. Read them as "not reached until KiCad says otherwise".
   `--no-doubtful` leaves the two extra runs per net out.
 
 `--pour LAYERS` with `--nets` lays an area of those nets for the report where they have none
@@ -502,8 +507,10 @@ a line per layer holds the model against it.
 
 The model is the router's own and not KiCad's filler: KiCad's fill and its DRC have the last
 word. On the planes of the LED controller the two differ in 0.08 % of the area and touch the
-same pads; thin strips between tracks on a routed outer layer have not been compared yet
-(`bench/areas-kicad.sh` does that where KiCad is installed).
+same pads. On routed bench boards with a pour it was held against KiCad 10
+(`bench/areas-kicad.sh`) and follows it where the two disagreed: a strip of just the minimum
+width passes, pads in a row whose thermal gaps meet are joined by their spokes, and a pour that
+nothing holds stays as isolated copper.
 
 ## Judging a result with KiCad
 

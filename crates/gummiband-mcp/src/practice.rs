@@ -168,7 +168,7 @@ pub struct AreaReportOut {
     /// Per net the report of `gummiband areas --json`: net, summary, step, layers, area, apart,
     /// joins, groups_apart, expected_unconnected, pads, reached, by_fill, by_copper, unreached (pad, at, reason, why, island,
     /// site_distance), islands (pads, layers, filled, widest, via or no_via), site_distance,
-    /// doubtful (pad, at, reached, with_less, with_more), against_file, seconds.
+    /// doubtful (pad, at, reached, with_less, with_more, spoke), against_file, seconds.
     pub nets: Vec<serde_json::Value>,
     /// What a reader has to know to weigh the report.
     pub notes: Vec<String>,

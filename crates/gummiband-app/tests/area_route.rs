@@ -122,7 +122,7 @@ fn a_pad_the_pour_does_not_reach_is_joined_to_it() {
     assert!(fill.routed.violations.is_empty());
 }
 
-/// Three of the pens of `area_strips` leave their pad on an island of fill with room for a via.
+/// Two of the pens of `area_strips` leave their pad on an island of fill with room for a via.
 /// Such an island gets that via on the finished copper and no track; with `area_stitch` off
 /// the pad gets a connection like any pad the fill does not reach.
 #[test]
@@ -137,15 +137,15 @@ fn an_island_of_fill_gets_one_via_and_no_track() {
         panic!("one area net")
     };
     assert_eq!((gnd.pads, gnd.reached), (10, 10), "{}", gnd.summary);
-    assert_eq!(out.routed.area_vias, 3);
+    assert_eq!(out.routed.area_vias, 2);
     let geo = &out.routed.res.geometry;
     let net = out.routed.board.net_id("GND").unwrap();
-    assert_eq!(geo.vias.iter().filter(|v| v.net == net).count(), 3);
+    assert_eq!(geo.vias.iter().filter(|v| v.net == net).count(), 2);
     assert_eq!(
         geo.tracks.iter().filter(|t| t.net == net && t.origin.is_none()).count(),
         0
     );
-    assert_eq!(out.routed.res.stats.vias, 3);
+    assert_eq!(out.routed.res.stats.vias, 2);
     assert!(out.routed.violations.is_empty());
     // without the vias the search joins the pads itself
     let off = route("area_strips", "nostitch", &locked(Some(false)));

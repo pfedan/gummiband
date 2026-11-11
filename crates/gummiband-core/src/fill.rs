@@ -7,27 +7,42 @@
 //! 1. the outline, inside the board and its edge clearance, without the outlines of other nets'
 //!    areas that win by priority;
 //! 2. without the copper of other nets (pads, tracks, vias, holes) grown by the clearance, and
-//!    without the thermal gap around the pads of its own net that get a thermal relief;
+//!    without the thermal gap around the pads of its own net that get a thermal relief. A
+//!    cell centre at just the clearance is fill: a strip of just the minimum width passes;
 //! 3. without everything narrower than the minimum width (an opening: erode by half the width,
 //!    grow again);
-//! 4. with the thermal spokes that end in what is left;
+//! 4. with the thermal spokes as KiCad lays them: a bar from the middle of the pad to a point
+//!    the gap and half the minimum width beyond its box, as wide as the spoke width or the
+//!    short side of the pad (none where that is under the minimum width). A spoke stays when
+//!    its end lies in what step 3 left, or when it and a spoke of another pad hold each other's
+//!    ends: pads in a row whose gaps meet are joined by their spokes. Other copper cuts a
+//!    spoke by its clearance like the rest of the fill, and what that leaves narrower than the
+//!    minimum width goes;
 //! 5. then the pieces, joined with the pads, tracks and vias of the net over all layers into
 //!    groups. The area is the group with the most fill among those that join at least two
 //!    pads (where none does: the largest piece, and the result says so); a pin outside it is
 //!    not reached, a group with pins outside it is an island, and for every island the best
-//!    site for one via that joins it to the area is looked for.
+//!    site for one via that joins it to the area is looked for;
+//! 6. a piece that holds nothing of the net is left out where the zone says so (always, unless
+//!    it is set otherwise). Not where every piece of the zone is such a piece: KiCad takes
+//!    none out then, and warns of isolated copper for each ([`Piece::left_out`]).
 //!
 //! It works on a raster (cell centres, an exact Euclidean distance transform), so a statement is
 //! good to about one cell: 0.04 to 0.05 mm by default. The step is chosen so that the minimum
 //! width is an odd number of cells, which makes "narrower than the minimum width" exact for
-//! strips along the axes. A strip within one cell of the minimum width may come out either way:
+//! strips along the axes. A strip within one cell of the minimum width may come out either way,
+//! and so may a spoke whose end lies within a cell of the border of the fill:
 //! [`Options::slack`] moves every clearance by a part of a cell, and a caller that runs the model
-//! with half a cell less and half a cell more sees which pads depend on such a strip.
+//! with half a cell less and half a cell more sees which pads depend on such a spot.
 //!
 //! The fill is never stored: it is computed from the board and its copper whenever it is asked
 //! for. `gummiband_app::areas` turns it into the report of `gummiband areas` and `area_report`.
-//! The model is the router's own; it has not been held against KiCad's filler at thin strips
-//! yet (`bench/areas-kicad.sh` does that where KiCad is installed).
+//!
+//! The model is the router's own. Steps 2, 4 and 6 follow what KiCad 10 did on the bench boards
+//! (`bench/areas-kicad.sh`, and the boards of `bench/boards/areas/kicad` with their tests in
+//! `gummiband-app/tests/area_boards.rs`); how KiCad lays and tests a spoke is taken from what
+//! is known of its filler, not from a measurement of every case, so a pad that depends on it
+//! within a cell is named as doubtful and not as open.
 
 use std::collections::HashMap;
 
@@ -172,6 +187,10 @@ pub struct AreaGoal {
     /// with at least [`SITE_ROOM`] to spare.
     pub site: Vec<bool>,
 }
+
+/// KiCad lays the end of a thermal spoke this much beyond the gap and half the minimum width
+/// (its largest error of an arc, 0.005 mm by default).
+const SPOKE_MARGIN: f64 = 0.005;
 
 /// Room in mm that a spot for the via of an island must have beyond what the via needs, for the
 /// search to count on that via and lay no connection: the via is set on the finished copper,
@@ -421,6 +440,23 @@ impl Raster {
         self.each_in(s, grow, |i| m[i] = true);
     }
 
+    /// Calls `f` for every cell whose centre lies nearer to the shape than `grow`: a centre at
+    /// just that distance is left out. A clearance is kept this way. KiCad's fill passes a
+    /// strip of just its minimum width, and on a board drawn on a grid the two borders of such
+    /// a strip fall on cell centres as often as not.
+    fn each_nearer(&self, s: &Shape, grow: f64, mut f: impl FnMut(usize)) {
+        let (c0, r0, c1, r1) = self.range(s.bbox().grow(grow));
+        for r in r0..r1 {
+            for c in c0..c1 {
+                let i = r * self.nx + c;
+                let d = s.dist_to_point(self.center(i));
+                if d <= 1e-9 || d < grow - 1e-6 {
+                    f(i);
+                }
+            }
+        }
+    }
+
     /// Flips the cells inside the polygon (even-odd scanline): rings marked one after the other
     /// give the area with its holes.
     pub fn toggle(&self, m: &mut [bool], p: &Polygon) {
@@ -657,6 +693,10 @@ pub struct Piece {
     pub main: bool,
     /// Holds nothing of the net: KiCad leaves such a piece out where the zone says so.
     pub floating: bool,
+    /// Left out of the fill for that. A floating piece stays where the zone keeps pieces of
+    /// its size, and where no piece of the zone holds anything of the net: KiCad takes none
+    /// out then and warns of isolated copper for each.
+    pub left_out: bool,
 }
 
 /// Where one via joins an island (or, set in a pad, that pad) to the area.
@@ -827,7 +867,12 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
                 } if for_via => 0.0,
                 _ => continue,
             };
-            g.mark(&mut k, &ob.shape, need);
+            // (the room for a via is counted the careful way)
+            if for_via {
+                g.mark(&mut k, &ob.shape, need);
+            } else {
+                g.each_nearer(&ob.shape, need, |i| k[i] = true);
+            }
         }
         if !for_via {
             for (ls, poly) in &o.no_pour {
@@ -908,57 +953,118 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
                         }
                         Connect::None => (a.clearance.max(gap_to(Some(net))) + o.slack).max(0.0),
                     };
-                    g.each_in(&ob.shape, gap, |i| base[i] = false);
+                    g.each_nearer(&ob.shape, gap, |i| base[i] = false);
                 }
             }
-            // nothing narrower than the minimum width
+            // nothing narrower than the minimum width: an opening, erode by half the width and
+            // grow again
             let r = (a.min_width / 2.0 / s) as f32;
-            let d1 = edt(&base, nx, ny);
-            let not_core: Vec<bool> = d1.iter().map(|&d| d < r + 0.5 - 1e-3).collect();
-            let d2 = edt(&not_core, nx, ny);
-            let mut f: Vec<bool> = (0..n).map(|i| base[i] && d2[i] <= r + 1e-3).collect();
-            // the spokes that end in fill
-            let mut spokes: Vec<usize> = Vec::new();
-            for &(p, oi) in &thermal {
+            let opened = |m: &[bool]| -> Vec<bool> {
+                let d1 = edt(m, nx, ny);
+                let not_core: Vec<bool> = d1.iter().map(|&d| d < r + 0.5 - 1e-3).collect();
+                let d2 = edt(&not_core, nx, ny);
+                (0..n).map(|i| m[i] && d2[i] <= r + 1e-3).collect()
+            };
+            let mut f = opened(&base);
+            // the spokes, as KiCad lays them: from the middle of the pad to a point the gap and
+            // half the minimum width beyond its box, as wide as the spoke width or the short
+            // side of the pad; none where that is under the minimum width. A spoke stays when
+            // its end lies in the fill as it is so far, or in a spoke of another pad whose end
+            // lies in this one: two pads whose gaps meet are joined by their spokes.
+            struct Spoke {
+                pad: usize,
+                from: Point,
+                end: Point,
+                half: f64,
+                stays: bool,
+            }
+            let mut spokes: Vec<Spoke> = Vec::new();
+            // per pad with a thermal relief in this area: one of its spokes stays
+            let mut spoked: Vec<Option<bool>> = vec![None; thermal.len()];
+            for (k, &(_, oi)) in thermal.iter().enumerate() {
                 let ob = &board.obstacles[oi];
                 let c = ob.shape.bbox().center();
                 if !a.contains(c) {
                     continue;
                 }
-                let mut any = false;
-                for axis in spoke_axes(&ob.shape) {
+                spoked[k] = Some(false);
+                let axes = spoke_axes(&ob.shape);
+                let short = axes
+                    .iter()
+                    .map(|&d| extent(&ob.shape, c, d) + extent(&ob.shape, c, -d))
+                    .fold(f64::INFINITY, f64::min);
+                let width = a.spoke_width.min(short);
+                if width < a.min_width - 1e-9 {
+                    continue;
+                }
+                for axis in axes {
                     for d in [axis, -axis] {
-                        let from = extent(&ob.shape, c, d);
-                        let to = from + thermal_gap + 1.5 * s;
-                        // the way across the gap is open, and it ends in fill
-                        let steps = ((to - from) / (s * 0.5)).ceil() as usize;
-                        let clear = (0..=steps).all(|k| {
-                            let q = c + d * (from + (to - from) * k as f64 / steps.max(1) as f64);
-                            g.cell(q).is_some_and(|i| open[i])
-                        });
-                        if !clear || !g.cell(c + d * to).is_some_and(|i| f[i]) {
-                            continue;
-                        }
-                        any = true;
-                        let bar = Shape::Capsule {
-                            a: c,
-                            b: c + d * to,
-                            r: 0.0,
-                        };
-                        // (a bar with square sides; its round end lies in fill anyway)
-                        g.each_in(&bar, a.spoke_width / 2.0, |i| {
-                            if open[i] {
-                                spokes.push(i);
-                            }
+                        let end = c + d * (extent(&ob.shape, c, d) + thermal_gap + a.min_width / 2.0 + SPOKE_MARGIN);
+                        spokes.push(Spoke {
+                            pad: k,
+                            from: c,
+                            end,
+                            half: width / 2.0,
+                            stays: g.cell(end).is_some_and(|i| f[i]),
                         });
                     }
                 }
-                if !any {
+            }
+            let within = |sp: &Spoke, q: Point| {
+                let axis = sp.end - sp.from;
+                let len = axis.len();
+                if len < 1e-9 {
+                    return false;
+                }
+                let u = axis * (1.0 / len);
+                let along = (q - sp.from).dot(u);
+                let across = (q - sp.from).dot(u.perp()).abs();
+                (-1e-6..=len + 1e-6).contains(&along) && across <= sp.half + 1e-6
+            };
+            let met: Vec<bool> = spokes
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    !x.stays
+                        && spokes
+                            .iter()
+                            .enumerate()
+                            .any(|(j, y)| i != j && within(y, x.end) && within(x, y.end))
+                })
+                .collect();
+            let mut with_spokes = base.clone();
+            let mut clipped = false;
+            for (sp, &met) in spokes.iter().zip(&met) {
+                if !(sp.stays || met) {
+                    continue;
+                }
+                spoked[sp.pad] = Some(true);
+                let side = (sp.end - sp.from).norm().perp() * sp.half;
+                let bar = Shape::Polygon(Polygon::new(vec![
+                    sp.from + side,
+                    sp.from - side,
+                    sp.end - side,
+                    sp.end + side,
+                ]));
+                // the clearance of other copper cuts a spoke like the rest of the fill
+                g.each_in(&bar, 0.0, |i| {
+                    if open[i] {
+                        with_spokes[i] = true;
+                        f[i] = true;
+                    } else {
+                        clipped = true;
+                    }
+                });
+            }
+            for (k, &(p, _)) in thermal.iter().enumerate() {
+                if spoked[k] == Some(false) {
                     no_spoke.push((p, l));
                 }
             }
-            for i in spokes {
-                f[i] = true;
+            // a spoke that other copper cuts into may be left narrower than the minimum width:
+            // then KiCad's last pruning takes that part of it, and so does this one
+            if clipped {
+                f = opened(&with_spokes);
             }
             for i in 0..n {
                 layer_fill[i] |= f[i];
@@ -1118,6 +1224,7 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
                 group,
                 main: Some(group) == main,
                 floating: !holds.contains_key(&group),
+                left_out: false,
             });
         }
         piece_at[l] = Some((lab, base));
@@ -1430,21 +1537,41 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
         .collect();
     // floating pieces go where the zone says so, now that the via sites are found: a piece that
     // a via can anchor counted for those (and never the area itself: a plane that nothing
-    // reaches yet is what the pins are to reach)
+    // reaches yet is what the pins are to reach). KiCad takes none out of a zone all of whose
+    // pieces float: the layers of one zone are looked at together, and so are the zones of
+    // one layer, which the pieces do not tell apart.
+    let mut set: Vec<usize> = (0..nl).collect();
+    for a in &own_areas {
+        for b in &own_areas {
+            if !a.tie.is_empty() && a.tie == b.tie && a.layer != b.layer {
+                let (x, y) = (set[a.layer as usize], set[b.layer as usize]);
+                for v in set.iter_mut().filter(|v| **v == y) {
+                    *v = x;
+                }
+            }
+        }
+    }
+    let mut all_float = vec![true; nl];
+    for pc in &pieces {
+        all_float[set[pc.layer as usize]] &= pc.floating;
+    }
     for l in 0..nl {
         let Some((lab, base)) = &piece_at[l] else { continue };
+        if all_float[set[l]] {
+            continue;
+        }
         let limit = own_areas
             .iter()
             .filter(|a| a.layer as usize == l)
             .map(|a| a.island_min)
             .fold(f64::INFINITY, f64::min);
+        for pc in pieces.iter_mut().filter(|pc| pc.layer as usize == l) {
+            pc.left_out = pc.floating && !pc.main && pc.area < limit;
+        }
         let f = fill[l].as_mut().unwrap();
         for i in 0..n {
-            if lab[i] != 0 {
-                let pc = &pieces[base + lab[i] as usize - 1];
-                if pc.floating && !pc.main && pc.area < limit {
-                    f[i] = false;
-                }
+            if lab[i] != 0 && pieces[base + lab[i] as usize - 1].left_out {
+                f[i] = false;
             }
         }
     }
