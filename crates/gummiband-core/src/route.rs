@@ -3422,6 +3422,9 @@ impl<'a> Router<'a> {
             }
         }
         for net in b.routable_nets() {
+            if b.areas.as_ref().is_some_and(|a| a.holds(net)) {
+                continue; // the fill connects it
+            }
             let n = &b.nets[net as usize];
             let has_plane = b.planes.iter().any(|p| p.net == net);
             let prio = n.priority as i64;

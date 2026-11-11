@@ -1001,6 +1001,15 @@ pub struct RouteIn {
     /// zones stay (as `gummiband --plane-layers`). To make it lasting, use set_layer_type.
     #[serde(default)]
     pub plane_layers: Vec<String>,
+    /// How nets with an area (a zone of the file, or a pour of `pour`) on a routed layer are
+    /// connected: "tracks" (default) lays them like any net and does not look at the area,
+    /// "fill" does not lay them as tracks: the fill connects them, and `areas` in the result
+    /// says per net which pads it does not reach.
+    pub areas: Option<String>,
+    /// With areas "fill": nets that get a pour after the route (ground_pour), each "NET" or
+    /// "NET:LAYER,LAYER" (the outer layers where none is given). The route takes the pour as
+    /// an area of the net; it does not write the zone.
+    pub pour: Option<Vec<String>>,
     /// Output .kicad_pcb (default: `<input>.routed.kicad_pcb` next to the input). The
     /// .kicad_pro and .kicad_dru are copied next to it if missing.
     pub output: Option<String>,
@@ -1350,6 +1359,19 @@ pub struct UncoupledOut {
     pub why: String,
 }
 
+/// The area of one net after a route with areas "fill".
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RouteAreaOut {
+    pub net: String,
+    /// The finding in one sentence.
+    pub summary: String,
+    pub pads: usize,
+    pub reached: usize,
+    /// The pads the fill does not reach, each with the reason: island, walled, no_spoke,
+    /// outside or other_layer.
+    pub unreached: Vec<String>,
+}
+
 /// The fields of `gummiband route --report`, plus a few for the session.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BlockedOut {
@@ -1394,6 +1416,10 @@ pub struct RouteOut {
     pub items_written: usize,
     /// Nets left out by set_net_options or the `nets` argument.
     pub skipped_nets: Vec<String>,
+    /// With areas "fill": per net left to its fill what the fill reaches on the finished
+    /// copper, judged by the router's fill model (area_report on the written file has the
+    /// details).
+    pub areas: Vec<RouteAreaOut>,
     /// Gummiband's own clearance check on the result.
     pub violations_total: usize,
     pub violations_by_kind: BTreeMap<String, usize>,
@@ -3244,6 +3270,11 @@ fn route_options(p: &RouteIn, keep_locked: bool) -> Result<RouteOptions> {
         move_parts: p.move_parts,
         fixed: p.fixed.clone(),
         plane_layers: p.plane_layers.clone(),
+        areas: match p.areas.as_deref() {
+            None => d.areas,
+            Some(word) => gummiband_app::Areas::parse(word).map_err(anyhow::Error::msg)?,
+        },
+        pour: p.pour.clone().unwrap_or_default(),
         runs: p.runs.unwrap_or(d.runs),
         via_pitch: p.via_pitch.unwrap_or(d.via_pitch),
         via_cost: p.via_cost.unwrap_or(d.via_cost),
@@ -3506,6 +3537,21 @@ fn route_blocking(id: String, path: PathBuf, opts: RouteOptions, p: RouteIn) -> 
         length_mm: st.length,
         items_written: items,
         skipped_nets: outcome.skipped_nets.clone(),
+        areas: routed
+            .areas
+            .iter()
+            .map(|a| RouteAreaOut {
+                net: a.net.clone(),
+                summary: a.summary.clone(),
+                pads: a.pads,
+                reached: a.reached,
+                unreached: a
+                    .unreached
+                    .iter()
+                    .map(|u| format!("{} ({})", u.pad, u.reason))
+                    .collect(),
+            })
+            .collect(),
         alternatives: written
             .alternatives
             .iter()
@@ -4469,6 +4515,17 @@ mod tests {
             "give": 2, "tune": false, "open_end_seconds": 30, "plane_layers": ["In1.Cu"],
             "breakouts": true, "placements": 3, "teardrops": true, "angles": "45",
         }));
+        let fill = args(serde_json::json!({"board": "b1", "areas": "fill", "pour": ["GND:F.Cu,B.Cu", "A"]}));
+        assert!(fill.areas == gummiband_app::Areas::Fill);
+        assert_eq!(fill.pour, ["GND:F.Cu,B.Cu", "A"]);
+        assert_eq!(fill.validate(false), Ok(()));
+        let bad = serde_json::from_value::<RouteIn>(serde_json::json!({"board": "b1", "areas": "pour"})).unwrap();
+        assert!(
+            route_options(&bad, false)
+                .unwrap_err()
+                .to_string()
+                .contains("areas must be")
+        );
         assert!(opts.keep_all && opts.reroute && !opts.tune && opts.breakouts && opts.teardrops);
         assert_eq!(opts.nets, ["A", "B"]);
         assert_eq!((opts.shove, opts.give, opts.move_parts), (Some(false), Some(2.0), None));

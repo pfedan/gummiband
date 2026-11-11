@@ -104,6 +104,18 @@ pub const OPTIONS: &[OptionDoc] = &[
         "Copper layers treated as planes besides those of KiCad type \"power\": not routed, their zones stay.",
     ),
     opt(
+        "areas",
+        Kind::Text,
+        "tracks",
+        "How nets with an area (a zone of the file or a pour of pour) on a routed layer are connected: tracks (like any net, the area is not looked at) or fill (they are not laid as tracks, the fill connects them, and the report says which pads it does not reach).",
+    ),
+    opt(
+        "pour",
+        Kind::List,
+        "none",
+        "With areas fill: nets that get a pour after the route, each NET or NET:LAYER,LAYER (the outer layers where none is given), which the route takes as an area of the net.",
+    ),
+    opt(
         "runs",
         Kind::Number,
         "14",
@@ -312,6 +324,8 @@ mod tests {
             move_parts,
             fixed,
             plane_layers,
+            areas,
+            pour,
             runs,
             via_pitch,
             via_cost,
@@ -406,5 +420,7 @@ mod tests {
         assert!(!d.shove() && text("shove").ends_with("else off"));
         assert_eq!(text("angles"), "any");
         assert_eq!(d.angles, crate::Angles::Any);
+        assert_eq!(text("areas"), d.areas.word());
+        assert!(d.pour.is_empty() && text("pour") == "none");
     }
 }

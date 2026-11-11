@@ -1031,7 +1031,6 @@ pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal
 /// taken with the settings `power_copper` writes (pads solid, 0.2 mm clearance and minimum
 /// width). Nothing is counted differently because of this.
 pub fn pours(board: &Board, geo: &Geometry) -> Vec<String> {
-    use crate::board::{LayerSet, Obstacle};
     use crate::fill::{Area, Connect, Options, fill_net};
     use crate::geom::Shape;
 
@@ -1071,41 +1070,7 @@ pub fn pours(board: &Board, geo: &Geometry) -> Vec<String> {
         return Vec::new();
     }
     // the board with the finished copper on it
-    let mut work = board.clone();
-    for t in &geo.tracks {
-        let clearance = board.class_of(t.net).clearance;
-        for w in t.pts.windows(2) {
-            work.obstacles.push(Obstacle {
-                shape: Shape::Capsule {
-                    a: w[0],
-                    b: w[1],
-                    r: t.width / 2.0,
-                },
-                layers: LayerSet::single(t.layer),
-                net: Some(t.net),
-                kind: ObstacleKind::Track,
-                hole: None,
-                clearance,
-                pin: None,
-                locked: false,
-            });
-        }
-    }
-    for v in geo.vias.iter().filter(|v| v.drill > 0.0) {
-        work.obstacles.push(Obstacle {
-            shape: Shape::Circle {
-                c: v.at,
-                r: v.diameter / 2.0,
-            },
-            layers: LayerSet::all(nl),
-            net: Some(v.net),
-            kind: ObstacleKind::Via,
-            hole: Some(v.drill / 2.0),
-            clearance: board.class_of(v.net).clearance,
-            pin: None,
-            locked: false,
-        });
-    }
+    let work = crate::fill::with_copper(board, geo);
     let mut nets: Vec<NetId> = held.iter().map(|x| x.0).collect();
     nets.sort_unstable();
     nets.dedup();
@@ -1152,6 +1117,9 @@ fn count_open(
 ) {
     let name = |n: NetId| board.nets[n as usize].name.clone();
     for (net, pins) in open_in_copper(board, geo, nets) {
+        if board.areas.as_ref().is_some_and(|a| a.holds(net)) {
+            continue; // its fill connects it: the report of the areas has its pads
+        }
         let net_name = name(net);
         let prefix = format!("{net_name} from ");
         let known = stats.unrouted.iter().filter(|u| u.starts_with(&prefix)).count();

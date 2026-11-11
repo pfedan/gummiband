@@ -366,6 +366,18 @@ does not reach pads ..., judged by the fill model"). The sentence goes to the co
 `pours` of the JSON report and into the notes of the MCP tool `route`; the count of routed
 connections stays as the router has it.
 
+**Area nets in a route (option `areas`).** With `areas tracks`, the default, a net with a
+zone on a routed layer is laid as tracks like any net. With `areas fill` the app builds a
+`fill::AreaPlan` when it loads the board (`gummiband_app::areas::route_plan`): the areas of the
+file, the pours named by the option `pour` as `lay_pours` would lay them, the settings of the
+model, and the nets the fill connects (those with an area that is not a `gb:` pour on a routed
+layer). The plan rides on the board (`Board::areas`), and everything that treats such a net
+differently asks it: `Router::plan` gives these nets no connections, the last check does not
+count their pads as open, and after the route `Routed::areas` holds the report of the model
+per net on the finished copper (`fill::with_copper` puts a geometry on the board as
+obstacles). With no plan on the board nothing in the router changes, which is what keeps the
+route hashes of `areas tracks`.
+
 **Validation.** The model was held against KiCad's fill of the planes of the LED controller
 (0.08 % of the area differs, the same pads are touched by both). Thin strips between tracks on
 a routed outer layer have not been compared; `bench/areas-kicad.sh` holds the commands and

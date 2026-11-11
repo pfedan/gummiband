@@ -131,6 +131,68 @@ impl Default for Options {
     }
 }
 
+/// What a route knows about the areas of its board when the fill connects the nets that have
+/// one (`areas fill`): every area, the settings of the model, and the nets left to the fill.
+#[derive(Debug, Clone, Default)]
+pub struct AreaPlan {
+    /// The areas of all nets: the zones of the file and the pours that are to be laid after
+    /// the route.
+    pub areas: Vec<Area>,
+    pub options: Options,
+    /// The nets the fill connects: those with an area on a layer that is routed. They are not
+    /// laid as tracks.
+    pub nets: Vec<NetId>,
+}
+
+impl AreaPlan {
+    pub fn holds(&self, net: NetId) -> bool {
+        self.nets.contains(&net)
+    }
+}
+
+/// `board` with the copper of a routed result on it as obstacles, as the fill model reads it:
+/// every piece of a track and every via of `geo`.
+pub fn with_copper(board: &Board, geo: &crate::realize::Geometry) -> Board {
+    use crate::board::Obstacle;
+    let nl = board.layers.len();
+    let mut work = board.clone();
+    for t in &geo.tracks {
+        let clearance = board.class_of(t.net).clearance;
+        for w in t.pts.windows(2) {
+            work.obstacles.push(Obstacle {
+                shape: Shape::Capsule {
+                    a: w[0],
+                    b: w[1],
+                    r: t.width / 2.0,
+                },
+                layers: LayerSet::single(t.layer),
+                net: Some(t.net),
+                kind: ObstacleKind::Track,
+                hole: None,
+                clearance,
+                pin: None,
+                locked: false,
+            });
+        }
+    }
+    for v in geo.vias.iter().filter(|v| v.drill > 0.0) {
+        work.obstacles.push(Obstacle {
+            shape: Shape::Circle {
+                c: v.at,
+                r: v.diameter / 2.0,
+            },
+            layers: LayerSet::all(nl),
+            net: Some(v.net),
+            kind: ObstacleKind::Via,
+            hole: Some(v.drill / 2.0),
+            clearance: board.class_of(v.net).clearance,
+            pin: None,
+            locked: false,
+        });
+    }
+    work
+}
+
 /// A raster over the board; a cell stands for its centre.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Raster {

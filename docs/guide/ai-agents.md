@@ -173,6 +173,10 @@ agent iterates on: give a blocked net priority, move a part, route again. On a f
 - `reference_check` looks under every fast signal track: a `gap` where the reference layer has no
   copper (a slot, merged antipads), a `split` where the track crosses from one zone net into
   another. KiCad's DRC does not check this.
+- `route` with `areas: "fill"` leaves a net with a pour to its fill instead of laying it as
+  tracks: name the pour you will lay with `pour: ["GND"]` (or have the zone in the file), read
+  `areas` in the result for the pads the fill does not reach, then lay the pour with
+  `ground_pour`. The default `areas: "tracks"` lays every net as tracks, whatever zones it has.
 
 ![A signal track over its reference layer: a gap at a slot and a split between two supply zones](img/reference-check.svg)
 

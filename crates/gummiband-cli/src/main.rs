@@ -17,6 +17,15 @@ enum Angles {
     Deg45,
 }
 
+/// How the nets with an area on a routed layer are connected.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Areas {
+    /// Like any net, as tracks.
+    Tracks,
+    /// By the fill of their area.
+    Fill,
+}
+
 #[derive(Parser)]
 #[command(name = "gummiband", about = "Topological rubber band autorouter for KiCad")]
 struct Cli {
@@ -171,6 +180,17 @@ struct RouteArgs {
     /// comma separated.
     #[arg(long, value_delimiter = ',')]
     fixed: Vec<String>,
+    /// How nets with an area (a zone of the file, or a pour of --pour) on a routed layer are
+    /// connected: `tracks` lays them like any net and does not look at the area, `fill` does
+    /// not lay them as tracks: the fill connects them, and the report says which pads it does
+    /// not reach.
+    #[arg(long, value_enum, default_value_t = Areas::Tracks)]
+    areas: Areas,
+    /// With --areas fill: a net that gets a pour after the route, as NET or NET:LAYER,LAYER
+    /// (the outer layers where none is given). The route takes the pour as an area of the
+    /// net; it does not write the zone. Give the flag once per net.
+    #[arg(long, value_name = "NET[:LAYERS]")]
+    pour: Vec<String>,
     /// Try this many placements from the netlist (see `gummiband place`), route each one with
     /// these settings and keep the best: fewest open connections, then clearance violations,
     /// vias and length. Parts that are not locked or mechanical get new positions.
@@ -278,6 +298,11 @@ impl RouteArgs {
             move_parts: on_off(self.move_parts, self.no_move_parts),
             fixed: self.fixed.clone(),
             plane_layers: plane_layers.to_vec(),
+            areas: match self.areas {
+                Areas::Tracks => gummiband_app::Areas::Tracks,
+                Areas::Fill => gummiband_app::Areas::Fill,
+            },
+            pour: self.pour.clone(),
             runs: self.runs,
             via_pitch: self.via_pitch,
             via_cost: self.via_cost,
@@ -755,6 +780,9 @@ fn main() -> Result<()> {
             if !outcome.skipped_nets.is_empty() {
                 println!("nets left out: {}", outcome.skipped_nets.len());
             }
+            for a in &r.areas {
+                println!("areas: {}", gummiband_app::areas::route_line(a));
+            }
             for t in r.tries.iter().skip(1) {
                 println!(
                     "give way within {} mm: {} nets, {} open, {} violations",
@@ -1016,6 +1044,7 @@ fn main() -> Result<()> {
                     "skipped_nets": outcome.skipped_nets,
                     "cleared_corridors": outcome.cleared_corridors,
                     "pours": r.legal.pours,
+                    "areas": r.areas,
                     "violations": viol.iter().map(|v| serde_json::json!({
                         "what": v.what,
                         "x": v.at.x,
@@ -1654,6 +1683,13 @@ mod tests {
         assert_eq!(opts.plane_layers, ["In1.Cu"]);
         assert_eq!(opts.frames, Some(PathBuf::from("pictures")));
         assert_eq!(opts.validate(false), Ok(()));
+        // a pour is one entry per flag: the comma belongs to its layers
+        let (opts, _) = route_args(&["--areas", "fill", "--pour", "GND:F.Cu,B.Cu", "--pour", "A"]);
+        assert!(opts.areas == gummiband_app::Areas::Fill);
+        assert_eq!(opts.pour, ["GND:F.Cu,B.Cu", "A"]);
+        assert_eq!(opts.validate(false), Ok(()));
+        let (opts, until_stop) = route_args(&["--areas", "fill", "--until-stop"]);
+        assert!(opts.validate(until_stop).unwrap_err().contains("open ended"));
         // contradictions are the pipeline's to refuse, in its words
         let (opts, until_stop) = route_args(&["--until-stop", "--pairs"]);
         assert!(opts.validate(until_stop).unwrap_err().contains("pairs"));

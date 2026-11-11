@@ -410,6 +410,18 @@ class OptInCommandTest(unittest.TestCase):
         self.assertEqual(runner.next_placement_seed(top).placement_seed, 1)
         self.assertTrue(1 <= runner.random_seed() <= runner.SEED_MAX)
 
+    def test_areas_fill_names_the_planned_pours_and_ends_on_its_own(self):
+        c = self.cmd(pour=["GND"])
+        self.assertNotIn("--areas", c)
+        self.assertNotIn("--pour", c)
+        self.assertIn("--until-stop", c)
+        c = self.cmd(areas_fill=True, pour=["GND", "VCC"])
+        self.assertEqual(c[c.index("--areas") + 1], "fill")
+        self.assertEqual([c[i + 1] for i, a in enumerate(c) if a == "--pour"], ["GND", "VCC"])
+        self.assertNotIn("--until-stop", c)
+        c = self.cmd(areas_fill=True, finish_nets=["A"])
+        self.assertNotIn("--areas", c)
+
     def test_pair_switches_need_pairs(self):
         c = self.cmd(pair_all=True, via_pairs=True, breakouts=True, until_stop=False)
         self.assertNotIn("--pair-all", c)

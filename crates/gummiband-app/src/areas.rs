@@ -381,6 +381,119 @@ pub fn model(kb: &KicadBoard, o: &AreaOptions) -> Result<Model> {
     })
 }
 
+/// The areas a route with `areas fill` works with.
+pub struct Planned {
+    pub plan: fill::AreaPlan,
+    /// What the user should know about the plan.
+    pub notes: Vec<String>,
+}
+
+/// The areas of a route with `areas fill`: the zones of the file, and the pours of `pour`
+/// (entries as [`crate::parse_pour`] reads them) as they will be laid after the route, with the
+/// fill rules a pour gets by default. The nets the fill connects are those with an area on a
+/// routed layer; the small `gb:` pours of `power_copper` are copper, not areas, and a net with
+/// planes only keeps its fan-outs. `nets` are the nets of the route (empty: all).
+pub fn route_plan(kb: &KicadBoard, pour: &[String], nets: &[String]) -> Result<Planned> {
+    let b = &kb.board;
+    let from_file = gummiband_kicad::area::areas(kb);
+    let mut areas = from_file.areas;
+    let mut notes = Vec::new();
+    let routed = b.routing_layers();
+    let outer: Vec<LayerId> = {
+        let mut v: Vec<LayerId> = routed.iter().collect();
+        if v.len() > 2 {
+            v = vec![v[0], v[v.len() - 1]];
+        }
+        v
+    };
+    // entries with the same layers are laid together, so that several nets share the board
+    let mut groups: Vec<(Vec<LayerId>, Vec<NetId>)> = Vec::new();
+    for entry in pour {
+        let (name, layer_names) = crate::parse_pour(entry).map_err(anyhow::Error::msg)?;
+        let net = b
+            .net_id(&name)
+            .with_context(|| format!("pour: no net named {name:?}"))?;
+        let mut layers: Vec<LayerId> = Vec::new();
+        for l in &layer_names {
+            let id = b.layer_id(l).with_context(|| format!("pour: no copper layer {l:?}"))?;
+            if !routed.has(id) {
+                bail!("pour: {l} is a plane layer and not routed; a pour goes on a routed layer");
+            }
+            if !layers.contains(&id) {
+                layers.push(id);
+            }
+        }
+        if layers.is_empty() {
+            layers = outer.clone();
+        }
+        layers.sort_unstable();
+        match groups.iter_mut().find(|(l, _)| *l == layers) {
+            Some((_, n)) => n.push(net),
+            None => {
+                if groups.iter().any(|(l, _)| l.iter().any(|x| layers.contains(x))) {
+                    bail!(
+                        "pour: nets that share a layer must name the same layers, so that they can share the board ({name} differs)"
+                    );
+                }
+                groups.push((layers, vec![net]));
+            }
+        }
+    }
+    for (layers, group) in &groups {
+        let laid = lay_pours(b, &areas, group, layers, &PourSettings::default())?;
+        if let Some(&(net, layer)) = laid.kept.first() {
+            bail!(
+                "pour: {} already has a zone on {}; leave it out of pour, the zone counts as its area",
+                b.nets[net as usize].name,
+                b.layers[layer as usize].name
+            );
+        }
+        if !laid.alone.is_empty() {
+            let pads: Vec<&str> = laid.alone.iter().map(|&p| b.pins[p].name.as_str()).collect();
+            notes.push(format!(
+                "{} pads lie alone among the pads of another poured net and get no fill around them: {}",
+                pads.len(),
+                some(&pads, 8)
+            ));
+        }
+        areas.extend(laid.areas);
+    }
+    let mut plan_nets: Vec<NetId> = Vec::new();
+    for net in b.routable_nets() {
+        let has = areas
+            .iter()
+            .any(|a| a.net == net && routed.has(a.layer) && !a.name.starts_with(gummiband_kicad::read::GB_ZONE_PREFIX));
+        if !has {
+            continue;
+        }
+        let name = &b.nets[net as usize].name;
+        if !nets.is_empty() && !nets.contains(name) {
+            bail!(
+                "areas fill: {name} has an area on a routed layer and nets leaves it out, so nothing would join the pads its fill does not reach; add it to nets, or route with areas tracks"
+            );
+        }
+        plan_nets.push(net);
+    }
+    if plan_nets.is_empty() {
+        notes.push(
+            "no net has an area on a routed layer (a zone in the file, or a pour of pour): the route is as with areas tracks"
+                .into(),
+        );
+    }
+    Ok(Planned {
+        plan: fill::AreaPlan {
+            areas,
+            options: fill::Options {
+                pad_connect: from_file.pad_connect,
+                no_pour: from_file.no_pour,
+                ..Default::default()
+            },
+            nets: plan_nets,
+        },
+        notes,
+    })
+}
+
 /// The settings of the fill of a pour that is laid.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PourSettings {
@@ -560,6 +673,21 @@ fn no_via_words(w: &NoVia) -> String {
         }
         NoVia::NothingOpposite => "no fill of the area lies above or below it".into(),
     }
+}
+
+/// One line on the area of a net for the report of a route: the finding, and the pads the
+/// fill does not reach with the reason of each.
+pub fn route_line(r: &NetReport) -> String {
+    if r.unreached.is_empty() {
+        return r.summary.clone();
+    }
+    let pads: Vec<String> = r
+        .unreached
+        .iter()
+        .map(|u| format!("{} ({})", u.pad, u.reason))
+        .collect();
+    let pads: Vec<&str> = pads.iter().map(String::as_str).collect();
+    format!("{} Not reached: {}", r.summary, some(&pads, 12))
 }
 
 /// The names of a list of pads, at most `limit` of them.

@@ -109,6 +109,11 @@ Standing decisions of the project owner, kept here so that they survive any sess
   holds its pads is the fill model's to say: for now as a second opinion in the report of a
   route, which changes no count (stage 1); counting such a pad as open comes with the stage in
   which the search itself knows the fill.
+- How a net with an area on a routed layer is connected is an option, `areas`: `tracks` (the
+  default: like any net, the area is not looked at) or `fill` (the fill of the area connects
+  it and it is not laid as tracks). A pour that is not in the file yet is named with `pour`
+  and taken as it will be laid. `fill` stays opt-in until it is measured against KiCad's fill
+  and DRC; with `tracks` a route is the same as before, to the byte.
 - Copper of the file that gave way in a shove and then touches another net goes back to where
   the file has it, and new tracks that cross that place are taken out by the last check. A
   route is not refused because tracks lie inside a pour outline: that is legal in KiCad.

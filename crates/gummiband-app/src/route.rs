@@ -78,6 +78,52 @@ pub enum Angles {
     Deg45,
 }
 
+/// How the nets with an area (a zone of the file, or a pour of `pour`) on a routed layer are
+/// connected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Areas {
+    /// Like any net, as tracks: the area is not looked at.
+    #[default]
+    Tracks,
+    /// The fill connects them: they are not laid as tracks, and only what the fill does not
+    /// reach gets copper of its own.
+    Fill,
+}
+
+impl Areas {
+    /// The word of the option.
+    pub fn word(self) -> &'static str {
+        match self {
+            Areas::Tracks => "tracks",
+            Areas::Fill => "fill",
+        }
+    }
+
+    pub fn parse(word: &str) -> Result<Areas, String> {
+        match word {
+            "tracks" => Ok(Areas::Tracks),
+            "fill" => Ok(Areas::Fill),
+            other => Err(format!("areas must be \"tracks\" or \"fill\", not {other:?}")),
+        }
+    }
+}
+
+/// One entry of `pour`: the net, and the copper layers given (none: the outer layers). The
+/// layers follow the last colon that is followed by layer names only (`GND:F.Cu,B.Cu`), so a
+/// colon in a net name does no harm.
+pub fn parse_pour(entry: &str) -> Result<(String, Vec<String>), String> {
+    let entry = entry.trim();
+    let is_layers = |s: &str| !s.is_empty() && s.split(',').all(|l| l.trim().ends_with(".Cu"));
+    let (net, layers) = match entry.rsplit_once(':') {
+        Some((net, layers)) if is_layers(layers) => (net, layers.split(',').map(|l| l.trim().to_string()).collect()),
+        _ => (entry, Vec::new()),
+    };
+    if net.is_empty() {
+        return Err(format!("pour: {entry:?} names no net (NET or NET:LAYER,LAYER)"));
+    }
+    Ok((net.to_string(), layers))
+}
+
 /// Every option of the route pipeline. `Default` gives the documented defaults ([`defaults`]).
 /// Options that are `None` follow from the others, see the methods of the same name.
 #[derive(Debug, Clone)]
@@ -103,6 +149,11 @@ pub struct RouteOptions {
     pub fixed: Vec<String>,
     /// Copper layers treated as planes besides those of KiCad type "power".
     pub plane_layers: Vec<String>,
+    /// How nets with an area on a routed layer are connected.
+    pub areas: Areas,
+    /// Nets that get a pour after the route, each `NET` or `NET:LAYER,LAYER` ([`parse_pour`]):
+    /// with `areas` fill the route takes the pour as an area of the net.
+    pub pour: Vec<String>,
     pub runs: usize,
     pub via_pitch: f64,
     pub via_cost: f64,
@@ -172,6 +223,8 @@ impl Default for RouteOptions {
             move_parts: None,
             fixed: Vec::new(),
             plane_layers: Vec::new(),
+            areas: Areas::Tracks,
+            pour: Vec::new(),
             runs: defaults::RUNS,
             via_pitch: defaults::VIA_PITCH,
             via_cost: defaults::VIA_COST,
@@ -303,6 +356,37 @@ impl RouteOptions {
         }
         if self.clear_corridors && self.keep_all {
             return err("clear_corridors places parts before the whole board is routed: not with keep_all");
+        }
+        if !self.pour.is_empty() && self.areas != Areas::Fill {
+            return err(
+                "pour needs areas fill: with areas tracks the nets are laid as tracks and no pour is looked at",
+            );
+        }
+        let mut poured: Vec<String> = Vec::new();
+        for entry in &self.pour {
+            let (net, _) = parse_pour(entry)?;
+            if poured.contains(&net) {
+                return Err(format!("pour names {net} twice"));
+            }
+            if !self.nets.is_empty() && !self.nets.contains(&net) {
+                return Err(format!(
+                    "pour names {net}, which nets leaves out: add it to nets, or leave it out of pour"
+                ));
+            }
+            poured.push(net);
+        }
+        if self.areas == Areas::Fill {
+            if self.pairs {
+                return err("areas fill does not work with pairs yet: route with areas tracks, or without pairs");
+            }
+            if open_end {
+                return err(
+                    "areas fill does not work with an open ended run yet: leave out the open end (until_stop, open_end_seconds), or route with areas tracks",
+                );
+            }
+            if self.shove() {
+                return err("areas fill does not work with shove yet: switch shove off, or route with areas tracks");
+            }
         }
         Ok(())
     }
@@ -540,6 +624,9 @@ pub struct Routed {
     pub legal: gummiband_core::legal::Legal,
     /// The same for every alternative of the open end, in their order.
     pub legal_alternatives: Vec<gummiband_core::legal::Legal>,
+    /// With `areas` fill: what the fill of every net left to it reaches on the finished copper,
+    /// by the fill model.
+    pub areas: Vec<crate::areas::NetReport>,
     write: WriteOptions,
 }
 
@@ -708,6 +795,16 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     let matching = gummiband_core::matching::check(b, &res.geometry);
     let violations = gummiband_core::check::check(b, &res.geometry);
     let soft = gummiband_core::import::soft_changes(b, &res.geometry);
+    let areas = match &b.areas {
+        Some(plan) => {
+            let work = gummiband_core::fill::with_copper(b, &res.geometry);
+            plan.nets
+                .iter()
+                .map(|&net| crate::areas::net_report(&work, &plan.areas, net, &plan.options, false).0)
+                .collect()
+        }
+        None => Vec::new(),
+    };
     Ok(Routed {
         board: final_board,
         sub,
@@ -728,6 +825,7 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
         violations,
         legal,
         legal_alternatives,
+        areas,
         write: WriteOptions {
             keep_all: opts.keep_all,
             keep_locked: opts.keep_locked,
@@ -1025,6 +1123,13 @@ fn load(path: &Path, opts: &RouteOptions, hooks: &Hooks) -> Result<(KicadBoard, 
     }
     add(&opts.net_options);
     let applied = apply_net_options(&mut kb.board, &per_net, &opts.nets)?;
+    if opts.areas == Areas::Fill {
+        let planned = crate::areas::route_plan(&kb, &opts.pour, &opts.nets)?;
+        for note in &planned.notes {
+            eprintln!("areas: {note}");
+        }
+        kb.board.areas = Some(Arc::new(planned.plan));
+    }
     Ok((kb, applied.skipped))
 }
 

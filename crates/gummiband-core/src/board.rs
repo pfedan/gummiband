@@ -294,6 +294,10 @@ pub struct Board {
     /// Unlocked copper that is part of the topology instead of an obstacle, see [`Board::soften`].
     #[serde(skip)]
     pub soft: crate::import::SoftCopper,
+    /// The areas of the board for a route that leaves the nets with an area to the fill
+    /// (`areas fill`); none: every net is laid as tracks and the areas are not looked at.
+    #[serde(skip)]
+    pub areas: Option<std::sync::Arc<crate::fill::AreaPlan>>,
     /// Stackup from top to bottom, if the board has one.
     #[serde(default)]
     pub stackup: Vec<StackItem>,
