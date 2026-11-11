@@ -326,9 +326,9 @@ struct AreasArgs {
     /// Report only these nets, comma separated [default: every net with a zone]
     #[arg(long, alias = "net", value_delimiter = ',')]
     nets: Vec<String>,
-    /// Layers, comma separated, on which the nets given get an area over the board outline for
-    /// this report where they have none yet, as `ground_pour` would lay it. The file stays as
-    /// it is.
+    /// Layers, comma separated, on which the nets given get an area for this report where they
+    /// have none yet, as `ground_pour` would lay it: one net over the board outline, several
+    /// nets each around its own pads. The file stays as it is.
     #[arg(long, value_delimiter = ',')]
     pour: Vec<String>,
     /// Clearance in mm of the areas of --pour to copper of other nets.

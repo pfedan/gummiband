@@ -3033,12 +3033,10 @@ impl Gummiband {
                 bail!("thermal_spoke_width must be positive");
             }
             let spec = write::ZoneSpec {
-                net,
-                layer,
                 priority: p.priority.unwrap_or(0),
-                name: "",
                 connect,
                 spoke,
+                ..write::ZoneSpec::plain(net, layer)
             };
             Ok(write::add_zone_named(kb, text, &spec, &pts, 1))
         })?;
@@ -4185,7 +4183,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Pour ground after routing: adds zones of the ground net (default GND) over the board outline on the outer layers (default) and locked stitching vias on a grid and along the board edge where they are clear of other nets, holes, rule areas, other nets' pours and courtyards. Writes <input>.gnd.kicad_pcb and loads it; KiCad fills the zones (drc refills them).",
+        description = "Pour ground after routing: adds zones of the ground net (default GND) over the board outline on the outer layers (default), with the fill rules given (pad_connection, thermal_spoke_width, thermal_gap, zone_clearance, zone_min_width), and locked stitching vias: by default one via for every island of fill with pads, at the spot the router's fill model finds, and never a via that joins nothing (stitch: islands, grid, both or none; the grid sets vias on a pitch and along the board edge where they are clear). nets pours several nets at once (GND and GNDR): the board is shared by nearest pad, each net gets zones of its own and they never overlap. via_in_pad also sets a via in an exposed pad that nothing else reaches. The result names per net what the pour reaches and which pads stay unreached and why. Writes <input>.gnd.kicad_pcb and loads it; KiCad fills the zones (drc refills them).",
         output_schema = schema_for_output::<practice::GroundPourOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
@@ -4207,8 +4205,9 @@ impl Gummiband {
         .await;
         match res {
             Ok(out) => {
+                let found: Vec<&str> = out.nets.iter().map(|n| n.summary.as_str()).collect();
                 let s = format!(
-                    "{} pours on {} and {} stitching vias ({} along the edge) in {} (board {}). {}",
+                    "{} pours on {} and {} stitching vias ({} along the edge) in {} (board {}). By the fill model: {} {}",
                     out.net,
                     if out.zones_added.is_empty() {
                         "no layer".to_string()
@@ -4219,6 +4218,7 @@ impl Gummiband {
                     out.edge_vias,
                     out.path,
                     out.board,
+                    found.join(" "),
                     out.warnings.join(" ")
                 );
                 ok(s, &out)

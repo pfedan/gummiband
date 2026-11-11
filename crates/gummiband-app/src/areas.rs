@@ -18,9 +18,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use gummiband_core::board::{Board, LayerId, NetId};
+use gummiband_core::board::{Board, LayerId, LayerSet, NetId, Obstacle, ObstacleKind};
 use gummiband_core::fill::{self, Area, Connect, NetFill, NoVia, Reach, edt, pieces_of};
 use gummiband_core::geom::{Point, Polygon, Shape, pt};
+use gummiband_core::region;
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board};
 use serde::Serialize;
 
@@ -66,7 +67,7 @@ pub const AREA_OPTIONS: &[OptionDoc] = &[
         "pour",
         Kind::List,
         "none",
-        "Layers on which the nets given get an area over the board outline for this report where they have none yet, as ground_pour would lay it.",
+        "Layers on which the nets given get an area for this report where they have none yet, as ground_pour would lay it: one net over the board outline, several nets each around its own pads.",
     ),
     opt(
         "zone_clearance",
@@ -167,6 +168,9 @@ pub struct Unreached {
     pub island: Option<usize>,
     /// Straight distance in mm to the nearest spot where a via lands in the area.
     pub site_distance: Option<f64>,
+    /// The pad holds a via (an exposed pad), and at this spot a via in the pad lands in the
+    /// area on another layer. A suggestion: a via in a pad is the user's decision.
+    pub pad_via: Option<[f64; 2]>,
 }
 
 /// Where one via joins an island to the area.
@@ -295,8 +299,10 @@ pub struct Model {
     pub filled: Vec<Vec<Polygon>>,
     /// The nets asked for, or every net with an area.
     pub nets: Vec<NetId>,
-    /// Net and layer of the areas that `pour` added.
-    pub poured: Vec<(NetId, LayerId)>,
+    /// The areas that `pour` added, as indices into `areas`.
+    pub poured: Vec<usize>,
+    /// Pads that got no outline in a pour of several nets: alone among the pads of the others.
+    pub alone: Vec<usize>,
 }
 
 /// Reads the areas of the file and lays those of `pour`.
@@ -325,36 +331,32 @@ pub fn model(kb: &KicadBoard, o: &AreaOptions) -> Result<Model> {
     if !(o.step > 0.0) {
         bail!("step must be positive");
     }
-    let connect = parse_connect(&o.pad_connection)?;
+    let settings = PourSettings {
+        clearance: o.zone_clearance,
+        min_width: o.zone_min_width,
+        thermal_gap: o.thermal_gap,
+        spoke_width: o.thermal_spoke_width,
+        connect: parse_connect(&o.pad_connection)?,
+        priority: 0,
+    };
     let mut poured = Vec::new();
+    let mut alone = Vec::new();
     if !o.pour.is_empty() {
         if asked.is_empty() {
             bail!("pour needs nets: name the nets that get an area");
         }
-        if asked.len() > 1 {
-            bail!("pour takes one net: two nets over the same outline would fill the same copper");
+        let layers: Vec<LayerId> = o
+            .pour
+            .iter()
+            .map(|l| b.layer_id(l).with_context(|| format!("no copper layer {l:?}")))
+            .collect::<Result<_>>()?;
+        let laid = lay_pours(b, &areas, &asked, &layers, &settings)?;
+        for a in laid.areas {
+            poured.push(areas.len());
+            areas.push(a);
+            filled.push(Vec::new());
         }
-        let outline = b
-            .main_outline()
-            .context("the board has no closed outline (Edge.Cuts)")?
-            .clone();
-        for &net in &asked {
-            for l in &o.pour {
-                let layer = b.layer_id(l).with_context(|| format!("no copper layer {l:?}"))?;
-                if areas.iter().any(|x| x.net == net && x.layer == layer) {
-                    continue;
-                }
-                let mut a = Area::pour(net, layer, vec![outline.clone()]);
-                a.clearance = o.zone_clearance;
-                a.min_width = o.zone_min_width;
-                a.thermal_gap = o.thermal_gap;
-                a.spoke_width = o.thermal_spoke_width;
-                a.connect = connect;
-                areas.push(a);
-                filled.push(Vec::new());
-                poured.push((net, layer));
-            }
-        }
+        alone = laid.alone;
     }
     let nets = if asked.is_empty() {
         let mut v: Vec<NetId> = areas.iter().map(|x| x.net).collect();
@@ -375,7 +377,153 @@ pub fn model(kb: &KicadBoard, o: &AreaOptions) -> Result<Model> {
         filled,
         nets,
         poured,
+        alone,
     })
+}
+
+/// The settings of the fill of a pour that is laid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PourSettings {
+    pub clearance: f64,
+    pub min_width: f64,
+    pub thermal_gap: f64,
+    pub spoke_width: f64,
+    pub connect: Connect,
+    pub priority: i64,
+}
+
+impl Default for PourSettings {
+    fn default() -> Self {
+        let p = Area::pour(0, 0, Vec::new());
+        PourSettings {
+            clearance: p.clearance,
+            min_width: p.min_width,
+            thermal_gap: p.thermal_gap,
+            spoke_width: p.spoke_width,
+            connect: p.connect,
+            priority: 0,
+        }
+    }
+}
+
+/// What [`lay_pours`] lays.
+#[derive(Debug, Clone, Default)]
+pub struct Laid {
+    /// One area per net, layer and outline.
+    pub areas: Vec<Area>,
+    /// Pads that got no outline: alone among the pads of the other nets (several nets only).
+    pub alone: Vec<usize>,
+    /// Net and layer that stay as they are, because the net has a zone there already.
+    pub kept: Vec<(NetId, LayerId)>,
+}
+
+/// The areas of a pour of `nets` on `layers`. One net gets the board outline. Several nets
+/// share the board by nearest pad (`gummiband_core::region`): their outlines never overlap, and
+/// a pad alone among the pads of another net gets none. A layer on which a net has a zone
+/// already is left as it is; the small `gb:` pours of `power_copper` do not count.
+pub fn lay_pours(b: &Board, existing: &[Area], nets: &[NetId], layers: &[LayerId], s: &PourSettings) -> Result<Laid> {
+    let mut out = Laid::default();
+    let outlines: Vec<(NetId, Polygon)> = if nets.len() == 1 {
+        let outline = b
+            .main_outline()
+            .context("the board has no closed outline (Edge.Cuts)")?;
+        vec![(nets[0], outline.clone())]
+    } else {
+        b.main_outline()
+            .context("the board has no closed outline (Edge.Cuts)")?;
+        let r = region::by_nearest_pad(b, nets, region::step_for(s.clearance));
+        out.alone = r.alone;
+        r.regions.into_iter().map(|x| (x.net, x.ring)).collect()
+    };
+    for &net in nets {
+        for &layer in layers {
+            let has = |a: &&Area| {
+                a.net == net && a.layer == layer && !a.name.starts_with(gummiband_kicad::read::GB_ZONE_PREFIX)
+            };
+            if existing.iter().any(|a| has(&a)) {
+                out.kept.push((net, layer));
+                continue;
+            }
+            for (_, ring) in outlines.iter().filter(|(n, _)| *n == net) {
+                let mut a = Area::pour(net, layer, vec![ring.clone()]);
+                a.clearance = s.clearance;
+                a.min_width = s.min_width;
+                a.thermal_gap = s.thermal_gap;
+                a.spoke_width = s.spoke_width;
+                a.connect = s.connect;
+                a.priority = s.priority;
+                out.areas.push(a);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Adds a via of `net` to the board as locked copper on every layer.
+pub fn add_via(board: &mut Board, net: NetId, at: Point, diameter: f64, drill: f64) {
+    let clearance = board.class_of(net).clearance;
+    board.obstacles.push(Obstacle {
+        shape: Shape::Circle {
+            c: at,
+            r: diameter / 2.0,
+        },
+        layers: LayerSet::all(board.layers.len()),
+        net: Some(net),
+        kind: ObstacleKind::Via,
+        hole: Some(drill / 2.0),
+        clearance,
+        pin: None,
+        locked: true,
+    });
+}
+
+/// Stitches the islands of `net`: one via per island at the site the model finds (and the
+/// second via where that site lands on a piece that is itself apart), then the model again on
+/// the board with those vias, until no island has a site left. Every via joins an island to the
+/// area; none is set where the model finds nothing to join. The vias are added to `board` and
+/// returned.
+pub fn stitch_islands(board: &mut Board, areas: &[Area], net: NetId, o: &fill::Options) -> Vec<Point> {
+    let class = board.class_of(net).clone();
+    let (diameter, drill) = o.via.unwrap_or((class.via_diameter, class.via_drill));
+    let pitch = diameter + board.rules.hole_to_hole.max(class.clearance);
+    let mut placed: Vec<Point> = Vec::new();
+    for _round in 0..8 {
+        let f = fill::fill_net(board, areas, net, o);
+        let before = placed.len();
+        let sites = f.islands.iter().filter_map(|i| i.via.as_ref());
+        for at in sites.flat_map(|v| v.anchor.into_iter().chain([v.at])) {
+            if placed.iter().any(|q| q.dist(at) < pitch) {
+                continue;
+            }
+            placed.push(at);
+            add_via(board, net, at, diameter, drill);
+        }
+        if placed.len() == before {
+            break;
+        }
+    }
+    placed
+}
+
+/// A via in every pad of `net` that nothing else reaches and that holds one (an exposed pad),
+/// where it lands in the area on another layer, with the second via where it lands on a piece
+/// that is itself apart. The vias are added to `board` and returned.
+pub fn stitch_pads(board: &mut Board, areas: &[Area], net: NetId, o: &fill::Options) -> Vec<Point> {
+    let class = board.class_of(net).clone();
+    let (diameter, drill) = o.via.unwrap_or((class.via_diameter, class.via_drill));
+    let pitch = diameter + board.rules.hole_to_hole.max(class.clearance);
+    let f = fill::fill_net(board, areas, net, o);
+    let mut placed: Vec<Point> = Vec::new();
+    for site in f.unreached().filter_map(|p| p.pad_site.as_ref()) {
+        for at in site.anchor.into_iter().chain([site.at]) {
+            if placed.iter().any(|q| q.dist(at) < pitch) {
+                continue;
+            }
+            placed.push(at);
+            add_via(board, net, at, diameter, drill);
+        }
+    }
+    placed
 }
 
 /// The reason a pad is not reached, as a word for programs and in plain words.
@@ -554,6 +702,7 @@ pub fn net_report(
                     _ => None,
                 },
                 site_distance: (p.site_dist >= 0.0).then(|| r3(p.site_dist)),
+                pad_via: p.pad_site.as_ref().map(|v| xy(v.at)),
             }
         })
         .collect();
@@ -683,6 +832,13 @@ pub fn area_report_of(kb: &KicadBoard, name: &str, o: &AreaOptions) -> Result<Ar
         out.notes
             .push("The board has no copper zone: name nets and layers with nets and pour.".into());
     }
+    if !m.alone.is_empty() {
+        let names: Vec<&str> = m.alone.iter().map(|&p| b.pins[p].name.as_str()).collect();
+        out.notes.push(format!(
+            "Pads that get no outline in a pour of several nets, because they lie alone among the pads of another net: {}.",
+            some(&names, 40)
+        ));
+    }
     for &net in &m.nets {
         let (mut r, f) = net_report(b, &m.areas, net, &m.options, o.doubtful);
         for l in 0..b.layers.len() as LayerId {
@@ -778,6 +934,13 @@ impl NetReport {
                     some(&pads, 40)
                 );
             }
+        }
+        for u in self.unreached.iter().filter(|u| u.pad_via.is_some()) {
+            let at = u.pad_via.unwrap();
+            s += &format!(
+                "  {} holds a via: one in the pad at {} {} would join it to the area\n",
+                u.pad, at[0], at[1]
+            );
         }
         if let Some(d) = &self.site_distance {
             s += &format!(

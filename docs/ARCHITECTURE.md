@@ -341,6 +341,17 @@ a cell less and half a cell more and lists the pads whose answer changes as doub
 MCP tool `area_report`; both front ends only map their arguments to `AreaOptions`, whose table
 `AREA_OPTIONS` the same guard tests hold them to as `OPTIONS` for a route.
 
+**Laying pours.** `gummiband_app::areas::lay_pours` makes the areas of a pour: one net gets the
+board outline; several nets share the board by nearest pad (`gummiband_core::region`: a raster
+labelled with the net of the nearest pad, a corridor of two cells between two nets, the pieces
+traced into outlines with their staircase corners cut, a region enclosed by another cut in as a
+hole through a slit, and no region for a pad alone among the pads of another net).
+`stitch_islands` sets one via per island at the model's site and runs the model again on the
+board with those vias until no island has a site left; `stitch_pads` sets a via in a pad that
+holds one, only where asked for. The MCP tool `ground_pour` writes the result (the zones with
+the fill rules given, the vias locked) and reports what stays unreached on the board as
+written; the report option `pour` lays the same areas without writing anything.
+
 **What the router does with a pour today.** A `gb:` zone (the pours of `power_copper`) is
 copper of its net like a large pad: other nets keep out, the pads under one pour count as
 connected, and a connection that reaches the pour ends where it enters it (`End::Area` in

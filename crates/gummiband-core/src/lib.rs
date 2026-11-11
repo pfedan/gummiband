@@ -17,6 +17,7 @@ pub mod pairs;
 pub mod patterns;
 pub mod prof;
 pub mod realize;
+pub mod region;
 pub mod relax;
 pub mod route;
 pub mod topo;

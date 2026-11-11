@@ -162,8 +162,14 @@ agent iterates on: give a blocked net priority, move a part, route again. On a f
 
 - `current_check` walks each current path of the written file and reports the narrowest band and
   the total cross-section between the terminals, pours and vias included, with a verdict.
-- `ground_pour` pours ground on the outer layers and stitches it with locked vias along the edge
-  and in a grid, then fills the zones.
+- `ground_pour` pours ground on the outer layers (one net, or several that share the board by
+  nearest pad) with the fill rules you give, and sets one locked via for every island of fill
+  with pads, where the router's fill model finds the spot; a grid and an edge row of vias are
+  an option (`stitch`). It tells which pads the pour still leaves unreached and why.
+- `area_report` answers the same question for any file and any net with a zone, also before a
+  pour is written: which pads the fill reaches, which sit on islands, where one via joins each
+  island, how far the pins of a plane net are from their via. It needs no KiCad; KiCad's own
+  fill and DRC have the last word.
 - `reference_check` looks under every fast signal track: a `gap` where the reference layer has no
   copper (a slot, merged antipads), a `split` where the track crosses from one zone net into
   another. KiCad's DRC does not check this.

@@ -258,8 +258,18 @@ impl Raster {
 /// Euclidean distance (in cells) from every cell to the nearest cell where `m` is false
 /// (Felzenszwalb and Huttenlocher); outside the raster counts as false. A cell that is false has
 /// 0, its neighbour 1: the border between them lies half a cell before that.
-#[allow(clippy::needless_range_loop)]
 pub fn edt(m: &[bool], nx: usize, ny: usize) -> Vec<f32> {
+    edt_with(m, nx, ny, true)
+}
+
+/// As [`edt`], but outside the raster counts for nothing: the distance to the nearest false
+/// cell of the raster itself (very large where it has none).
+pub fn edt_open(m: &[bool], nx: usize, ny: usize) -> Vec<f32> {
+    edt_with(m, nx, ny, false)
+}
+
+#[allow(clippy::needless_range_loop)]
+fn edt_with(m: &[bool], nx: usize, ny: usize, border: bool) -> Vec<f32> {
     const INF: f64 = 1e18;
     fn dt1(f: &[f64], d: &mut [f64], v: &mut [usize], z: &mut [f64]) {
         let n = f.len();
@@ -299,9 +309,14 @@ pub fn edt(m: &[bool], nx: usize, ny: usize) -> Vec<f32> {
             d[q] = dq * dq + f[p];
         }
     }
-    // pad by one false cell on every side
+    // pad by one cell on every side: false where the border counts
     let (w, h) = (nx + 2, ny + 2);
-    let mut g = vec![0f64; w * h];
+    let mut g = vec![if border { 0f64 } else { INF }; w * h];
+    for r in 0..ny {
+        for c in 0..nx {
+            g[(r + 1) * w + c + 1] = 0.0;
+        }
+    }
     for r in 0..ny {
         for c in 0..nx {
             if m[r * nx + c] {
@@ -398,9 +413,16 @@ pub struct PinReach {
     pub pin: usize,
     pub name: String,
     pub reach: Reach,
+    /// The group of copper the pad belongs to, as in [`Piece::group`]: a pad hangs on a piece
+    /// of fill, directly or through tracks, when they have the same group.
+    pub group: usize,
     /// Straight distance in mm from the pad centre to the nearest spot where a via of the net
     /// stands clear on every layer and lands in the fill of the area (-1: no such spot).
     pub site_dist: f64,
+    /// For a pad that is not reached and is large enough to hold a via of the net (an exposed
+    /// pad): the spot in the pad where a via stands clear on every layer and lands in the area
+    /// on another layer. A via in a pad is a decision for the user, never taken by default.
+    pub pad_site: Option<ViaSite>,
 }
 
 impl PinReach {
@@ -429,7 +451,7 @@ pub struct Piece {
     pub floating: bool,
 }
 
-/// Where one via joins an island to the area.
+/// Where one via joins an island (or, set in a pad, that pad) to the area.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ViaSite {
     pub at: Point,
@@ -944,6 +966,8 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
             g.each_in(&Shape::Circle { c, r: keep }, 0.0, |i| room[i] = 0.0);
         }
     }
+    // (a via in a pad of the net is looked for apart, for the pads nothing else reaches)
+    let room_in_pads = room.clone();
     for i in 0..n {
         if pad_cells[i] {
             room[i] = 0.0;
@@ -1117,11 +1141,66 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
             Some(i) if any_site => to_site[i] as f64 * s,
             _ => -1.0,
         };
+        // a via in the pad: the whole via on the pad, clear on every layer, in the area on a
+        // layer the pad is not on (or in a piece that one more via joins to the area); a spot
+        // that needs no second via wins, then the one nearest the middle of the pad
+        let mut pad_site: Option<(bool, f64, usize, LayerId, usize)> = None;
+        if !matches!(reach, Reach::Fill | Reach::Copper)
+            && let Some(m) = main
+        {
+            for &oi in &pin.obstacles {
+                let ob = &board.obstacles[oi];
+                let Some(from) = ob.layers.iter().find(|&l| (l as usize) < nl) else {
+                    continue;
+                };
+                if ob.kind != ObstacleKind::Pad || ob.hole.is_some() {
+                    continue;
+                }
+                g.each_in(&ob.shape, 0.0, |i| {
+                    let c = g.center(i);
+                    let d = c.dist(pin.pos);
+                    if room_in_pads[i] < need_v {
+                        return;
+                    }
+                    let on_pad = (0..8).all(|k| {
+                        let a = k as f64 * std::f64::consts::FRAC_PI_4;
+                        let q = c + pt(crate::math::cos(a), crate::math::sin(a)) * (via_d / 2.0);
+                        ob.shape.dist_to_point(q) <= 1e-9
+                    });
+                    if !on_pad {
+                        return;
+                    }
+                    for l2 in (0..nl).filter(|&l2| !ob.layers.has(l2 as LayerId) && is_fill(l2, i)) {
+                        let second = match group_at(&mut groups, l2, i) {
+                            Some(gr) if gr == m => None,
+                            Some(gr) => match anchors.get(&gr) {
+                                Some(a) => Some(a.1),
+                                None => continue,
+                            },
+                            None => continue,
+                        };
+                        let key = (second.is_some(), d);
+                        if pad_site.is_none_or(|b| key < (b.0, b.1)) {
+                            pad_site = Some((second.is_some(), d, i, from, l2 * n + second.unwrap_or(0)));
+                        }
+                    }
+                });
+            }
+        }
+        let pad_site = pad_site.map(|(second, _, i, from, packed)| ViaSite {
+            at: g.center(i),
+            room: (room_in_pads[i] - need_v) as f64 * s,
+            from,
+            to: (packed / n) as LayerId,
+            anchor: second.then(|| g.center(packed % n)),
+        });
         out_pins.push(PinReach {
             pin: p,
             name: pin.name.clone(),
             reach,
+            group: group.unwrap_or(usize::MAX),
             site_dist,
+            pad_site,
         });
     }
     // floating pieces go where the zone says so, now that the via sites are found: a piece that
@@ -1489,6 +1568,49 @@ mod tests {
             Some(NoVia::TooNarrow { widest, need }) => assert!(widest < 0.45 && need == 0.6, "{widest}"),
             ref x => panic!("{x:?}"),
         }
+    }
+
+    #[test]
+    fn a_pad_that_holds_a_via_gets_a_site_in_it() {
+        // a 3 mm pad in a ring of another net that leaves no room for fill around it; the area
+        // is the pour on the other layer, which a via joins to the two pads on the left
+        let mut b = board(&[
+            ("GND", 3., 4., 0),
+            ("GND", 3., 16., 0),
+            ("GND", 12., 10., 0),
+            ("S", 9.9, 7.9, 0),
+            ("GND", 16., 3., 0),
+        ]);
+        b.obstacles[2].shape = Shape::Polygon(roundrect_polygon(pt(12., 10.), 3.0, 3.0, 0.0, 0.0, 0.005));
+        b.obstacles[3].shape = Shape::Circle {
+            c: pt(9.9, 7.9),
+            r: 0.1,
+        };
+        track(
+            &mut b,
+            "S",
+            0,
+            &[(9.9, 7.9), (14.1, 7.9), (14.1, 12.1), (9.9, 12.1), (9.9, 7.9)],
+            0.2,
+        );
+        // the small pad next to it holds no via
+        b.obstacles[4].shape = Shape::Polygon(roundrect_polygon(pt(16., 3.), 0.4, 0.4, 0.0, 0.0, 0.005));
+        via(&mut b, "GND", 3.0, 6.0);
+        let areas = [over_board(&b, "GND", 0), over_board(&b, "GND", 1)];
+        let f = fill_net(&b, &areas, 0, &Options::default());
+        assert_eq!(f.pins[2].reach, Reach::NoSpoke);
+        let site = f.pins[2].pad_site.as_ref().expect("a site in the pad");
+        // in the middle of the pad, from its layer to the other, no second via needed
+        assert!(site.at.dist(pt(12., 10.)) < 0.1, "{site:?}");
+        assert_eq!((site.from, site.to, site.anchor), (0, 1, None));
+        // pads that are reached, or too small for a via, have none
+        assert!(f.pins[0].pad_site.is_none());
+        assert_eq!((f.pins[3].pin, f.pins[3].reach), (4, Reach::Fill));
+        // with the via set the pad hangs on the area
+        via(&mut b, "GND", site.at.x, site.at.y);
+        let f = fill_net(&b, &areas, 0, &Options::default());
+        assert_eq!(f.pins[2].reach, Reach::Copper);
+        assert_eq!(f.unreached().count(), 0);
     }
 
     #[test]

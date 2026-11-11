@@ -480,8 +480,9 @@ The area of GND (1203.4 mm2 on F.Cu, B.Cu) reaches 49 of 52 pads; 3 are not reac
   minimum width can come out either way. Read them as "not reached until KiCad says otherwise".
   `--no-doubtful` leaves the two extra runs per net out.
 
-`--pour LAYERS` with `--nets` lays an area of those nets over the board outline for the report
-where they have none yet: what a pour would reach before one exists. `--zone-clearance`,
+`--pour LAYERS` with `--nets` lays an area of those nets for the report where they have none
+yet: what a pour would reach before one exists. One net gets the board outline; several nets
+share the board by nearest pad, as the MCP tool `ground_pour` lays them. `--zone-clearance`,
 `--zone-min-width`, `--thermal-gap`, `--thermal-spoke-width` and `--pad-connection` are its
 settings (0.2, 0.2, 0.3, 0.3 mm, `thermal`). The file is never changed. `--json` prints
 everything for a program, `--brief` one sentence per net, `--pgm PREFIX` writes the fill per
