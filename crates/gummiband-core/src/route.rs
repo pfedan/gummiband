@@ -134,12 +134,28 @@ impl RouterConfig {
     }
 }
 
+/// Raster step in mm that the fill model is asked for inside the search, where it runs once per
+/// candidate and again after a rip-up: a minimum width of 0.2 mm is then three cells. The last
+/// check and the report take the finer step of the plan.
+const AREA_PASS_STEP: f64 = 0.07;
+
+/// Added to every clearance of the fill when the model runs inside the search, in mm: half a
+/// cell of its raster. The search works on the taut tracks and a coarse raster, the result is
+/// judged on the relaxed tracks and a fine one; with this reserve a strip of fill that the
+/// search counts on is one that is still there at the end.
+const AREA_PASS_SLACK: f64 = 0.035;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Goal {
     /// Any of these pins.
     Pins(Vec<usize>),
     /// A via into a plane of the net (or a through hole pin of the net).
     Plane,
+    /// Copper of the net that hangs together with its area, on whatever layer: the fill of the
+    /// area as the model has it ([`crate::fill::AreaGoal`]), or a pad the model says the area
+    /// joins. A via is only a change of layer: it ends the connection where its landing lies
+    /// in such fill on another layer, and where it does not, the search goes on from it.
+    Area,
 }
 
 /// Place of a planned connection in the routing order below its priority, see
@@ -297,6 +313,12 @@ pub struct Router<'a> {
     /// Per pin the distance to the nearest pin of its part on another net, see
     /// [`Board::pin_room`]: every search asks for it at its pins.
     pin_pitch: std::sync::Arc<Vec<f64>>,
+    /// With `areas fill`: per area net what its connections aim at, from the last run of the
+    /// fill model ([`Router::area_pass`]).
+    area_goals: std::sync::Arc<Vec<crate::fill::AreaGoal>>,
+    /// Connections of the area nets that the fill makes: they count as planned and routed, so
+    /// that shares of the connections mean the same with and without the fill.
+    pub area_base: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -644,6 +666,8 @@ impl<'a> Router<'a> {
             search_buf: Default::default(),
             trace: Default::default(),
             pin_pitch: std::sync::Arc::new(Self::pin_pitches(board)),
+            area_goals: Default::default(),
+            area_base: 0,
             pin_group,
             plane_groups,
             pour_pin,
@@ -2187,13 +2211,24 @@ impl<'a> Router<'a> {
     /// Where a track that crosses the outline of a pour at `q` ends in it: a little inside
     /// triangle t of the pour, so that the end lies in its copper, and what stands for it.
     fn area_end(&self, li: usize, t: u32, q: Point, width: f64) -> End {
-        let mid = self.m(li).tri_mid(t);
-        let d = mid.dist(q);
-        let at = if d > 1e-9 { q.lerp(mid, (width / d).min(0.6)) } else { q };
+        let at = self.fill_end(li, t, q, width);
         match self.tri_pour(li, t).and_then(|o| self.pour_pin.get(&o)) {
             Some(&p) => End::Area(at, p),
             None => End::Point(at),
         }
+    }
+
+    /// The end of a track that enters triangle t at `q` and ends in copper there: one track
+    /// width inside, towards the middle of the triangle.
+    fn fill_end(&self, li: usize, t: u32, q: Point, width: f64) -> Point {
+        let mid = self.m(li).tri_mid(t);
+        let d = mid.dist(q);
+        if d > 1e-9 { q.lerp(mid, (width / d).min(0.6)) } else { q }
+    }
+
+    /// What the connections of area net `net` aim at, once the fill model ran.
+    fn area_goal(&self, net: NetId) -> Option<&crate::fill::AreaGoal> {
+        self.area_goals.iter().find(|g| g.net == net)
     }
 
     /// A negotiation is on and capacity and planarity are soft.
@@ -2225,7 +2260,17 @@ impl<'a> Router<'a> {
         let src = &self.board.pins[conn.from];
         let target_pts: Vec<Point> = match &conn.goal {
             Goal::Pins(p) => p.iter().map(|&p| self.board.pins[p].pos).collect(),
-            Goal::Plane => Vec::new(),
+            Goal::Plane | Goal::Area => Vec::new(),
+        };
+        let area = if conn.goal == Goal::Area {
+            self.area_goal(net)
+        } else {
+            None
+        };
+        let joined = if area.is_some() {
+            self.area_joined(net, ci)
+        } else {
+            HashSet::new()
         };
         let h = |p: Point| -> f64 {
             match target_pts[..] {
@@ -2257,7 +2302,20 @@ impl<'a> Router<'a> {
                             .iter()
                             .any(|pl| pl.net == net && pn.layers.has(pl.layer) && pl.covers(pn.pos))
                 }
+                // a pad that hangs on the area: by the model, or through a connection laid
+                Goal::Area => {
+                    self.pin_group[pin] != self.pin_group[conn.from]
+                        && self.board.pins[pin].net == net
+                        && joined.contains(&self.pin_group[pin])
+                }
             }
+        };
+        // a via at `q`, set from the layer of mesh `lu`, ends the connection: its landing lies
+        // in the plane, or in the fill of the area on another layer
+        let via_ends = |q: Point, lu: usize| match conn.goal {
+            Goal::Pins(_) => false,
+            Goal::Plane => self.in_plane(q, net),
+            Goal::Area => area.is_some_and(|a| a.lands(self.m(lu).layer, q)),
         };
         let nl = self.nl();
         let tappable = self.tappable(ci);
@@ -2653,7 +2711,7 @@ impl<'a> Router<'a> {
                     // through the pour to the pad it would be one straight line from here to
                     // there, across the holes of the pour and what lies in them.
                     if entry < 3
-                        && matches!(conn.goal, Goal::Pins(_))
+                        && !matches!(conn.goal, Goal::Plane)
                         && let Some(o) = self.tri_pour(lu, t)
                         && let Some(&pin) = self.pour_pin.get(&o)
                         && is_target(pin)
@@ -2674,6 +2732,16 @@ impl<'a> Router<'a> {
                             node.g + node.pos.dist(q),
                             idx,
                         );
+                        continue;
+                    }
+                    // into the fill of the area: the way ends where it enters, a little inside
+                    // the triangle, where the fill is at least half its minimum width deep
+                    if free
+                        && entry < 3
+                        && let Some(a) = area
+                        && a.inside(m.layer, self.fill_end(lu, t, node.pos, item.w))
+                    {
+                        push(best, nodes, open, NK::GoalArea { t, li }, node.pos, node.g, idx);
                         continue;
                     }
                     // right next to a track of the net that is not on this side of the gap
@@ -2705,19 +2773,17 @@ impl<'a> Router<'a> {
                             if !self.sub.site_usable(site) || !ok {
                                 continue;
                             }
-                            if conn.goal == Goal::Plane {
-                                if self.in_plane(q, net) {
-                                    push(
-                                        best,
-                                        nodes,
-                                        open,
-                                        NK::GoalSite { site },
-                                        q,
-                                        node.g + node.pos.dist(q) + via_cost,
-                                        idx,
-                                    );
-                                }
-                            } else {
+                            if via_ends(q, lu) {
+                                push(
+                                    best,
+                                    nodes,
+                                    open,
+                                    NK::GoalSite { site },
+                                    q,
+                                    node.g + node.pos.dist(q) + via_cost,
+                                    idx,
+                                );
+                            } else if conn.goal != Goal::Plane {
                                 // leave the pad through a via to the other layers
                                 for l2 in 0..nl {
                                     if l2 != lu && self.m(l2).site_tri[site as usize] != PAD_SITE {
@@ -2800,7 +2866,7 @@ impl<'a> Router<'a> {
                         }
                         let q = m.verts[v as usize];
                         let d = node.pos.dist(q);
-                        if conn.goal == Goal::Plane && self.in_plane(q, net) {
+                        if via_ends(q, lu) {
                             push(best, nodes, open, NK::GoalVia { site }, q, node.g + d + vc * 0.5, idx);
                             continue;
                         }
@@ -2889,9 +2955,7 @@ impl<'a> Router<'a> {
                             vc += s.crossing;
                         }
                         tried += 1;
-                        if self.sub.shared.sites[site as usize].pad.is_some()
-                            || (conn.goal == Goal::Plane && self.in_plane(q, net))
-                        {
+                        if self.sub.shared.sites[site as usize].pad.is_some() || via_ends(q, lu) {
                             push(
                                 best,
                                 nodes,
@@ -3785,6 +3849,224 @@ impl<'a> Router<'a> {
         self.conn_segs.iter().filter(|s| !s.is_empty()).count()
     }
 
+    /// The second pass of a route with `areas fill`, after [`Router::run`] laid the other nets:
+    /// the fill model runs on their copper, and every group of pads of an area net that the
+    /// fill does not reach becomes one connection that ends in the area ([`Goal::Area`]). What
+    /// finds no way gets a via in its pad as a second chance and then the rip-up of the first
+    /// pass: the connections around the pad give way, the pad goes first, they are laid again,
+    /// and the model runs again on what they left. Returns the number of connections routed.
+    pub fn area_pass(&mut self) -> usize {
+        let routed = |r: &Router| r.conn_segs.iter().filter(|s| !s.is_empty()).count();
+        let Some(plan) = self.board.areas.clone().filter(|p| !p.nets.is_empty()) else {
+            return routed(self);
+        };
+        self.area_model(&plan);
+        let mut failed: Vec<usize> = self.area_conns();
+        failed.retain(|&ci| !self.route_area(ci));
+        let vip = self.cfg.via_in_pad;
+        self.cfg.via_in_pad = true;
+        failed.retain(|&ci| !self.route_area(ci));
+        self.cfg.via_in_pad = vip;
+        for _pass in 0..self.cfg.ripup_passes {
+            if failed.is_empty() {
+                break;
+            }
+            let mut still = Vec::new();
+            let mut moved = false;
+            for &ci in &failed {
+                if !self.conn_segs[ci].is_empty() {
+                    continue;
+                }
+                let victims = self.blockers(ci);
+                for &v in &victims {
+                    self.rip_up(v);
+                }
+                moved |= !victims.is_empty();
+                let ok = self.route_area(ci);
+                for &v in &victims {
+                    if !self.route_one(v) {
+                        still.push(v);
+                    }
+                }
+                if !ok {
+                    still.push(ci);
+                }
+            }
+            if moved {
+                // the copper around the pads is another now, and so is the fill
+                self.area_model(&plan);
+                // a connection that ended in fill that is gone is laid again
+                for ci in 0..self.conns.len() {
+                    if !self.conn_segs[ci].is_empty() && !self.area_end_holds(ci) {
+                        self.rip_up(ci);
+                        still.push(ci);
+                    }
+                }
+                still.extend(self.area_conns());
+            }
+            still.sort_unstable();
+            still.dedup();
+            still.retain(|&ci| self.conn_segs[ci].is_empty() && !self.route_area(ci));
+            failed = still;
+        }
+        routed(self)
+    }
+
+    /// The end of a routed connection into an area still lies in what the model has as the area
+    /// (true for every other connection).
+    fn area_end_holds(&self, ci: usize) -> bool {
+        let c = &self.conns[ci];
+        if c.goal != Goal::Area {
+            return true;
+        }
+        let (Some(g), Some(s)) = (
+            self.area_goal(c.net),
+            self.conn_segs[ci]
+                .last()
+                .and_then(|&sid| self.segs[sid as usize].as_ref()),
+        ) else {
+            return true;
+        };
+        let layer = self.m(s.li as usize).layer;
+        match s.end {
+            End::Point(p) => g.inside(layer, p),
+            End::Via(site) => {
+                self.sub.shared.sites[site as usize].pad.is_some() || g.lands(layer, self.site_point(site))
+            }
+            End::Pin(p) | End::Area(_, p) => self.area_joined(c.net, ci).contains(&self.pin_group[p]),
+            End::Tap(..) => true,
+        }
+    }
+
+    /// The groups of pads of area net `net` that hang on its area: those the fill joins, by the
+    /// model, and those with a connection laid that ends in the fill or on such a pad, together
+    /// with the pads on their piece of copper. Connection `but` counts as not laid: what hangs
+    /// on the area only through it is no place for it to end.
+    fn area_joined(&self, net: NetId, but: usize) -> HashSet<u32> {
+        let Some(g) = self.area_goal(net) else {
+            return HashSet::new();
+        };
+        let mut joined: HashSet<u32> = g.reached.iter().map(|&p| self.pin_group[p]).collect();
+        loop {
+            let before = joined.len();
+            for (cj, c) in self.conns.iter().enumerate() {
+                if cj == but || c.net != net || c.goal != Goal::Area || joined.contains(&self.pin_group[c.from]) {
+                    continue;
+                }
+                let last = self.conn_segs[cj]
+                    .last()
+                    .and_then(|&sid| self.segs[sid as usize].as_ref());
+                let holds = match last.map(|s| s.end) {
+                    Some(End::Pin(p) | End::Area(_, p)) => joined.contains(&self.pin_group[p]),
+                    Some(End::Point(_) | End::Via(_)) => true,
+                    Some(End::Tap(..)) | None => false,
+                };
+                if holds {
+                    let mates = g.apart.iter().find(|pins| pins.contains(&c.from));
+                    joined.extend(mates.into_iter().flatten().map(|&p| self.pin_group[p]));
+                    joined.insert(self.pin_group[c.from]);
+                }
+            }
+            if joined.len() == before {
+                return joined;
+            }
+        }
+    }
+
+    /// Runs the fill model for every area net on the copper as it lies.
+    fn area_model(&mut self, plan: &crate::fill::AreaPlan) {
+        // on the tracks as the geometry step will leave them, not on the taut ones: a strip of
+        // fill between two taut bundles is gone once they spread
+        let mut geo = self.geometry();
+        if !knobs::NO_RELAX.on() {
+            // a quarter of the rounds, as for the finalists that are screened: most of the way
+            let full = crate::relax::RelaxConfig::default();
+            let short = crate::relax::RelaxConfig {
+                iterations: (full.iterations / 4).max(40),
+                ..full
+            };
+            crate::relax::relax(self.board, &self.sub, &mut geo, &short);
+        }
+        let goals = crate::prof::time(crate::prof::Slot::AreaModel, || {
+            crate::fill::goals(self.board, plan, &geo, AREA_PASS_STEP, AREA_PASS_SLACK)
+        });
+        crate::prof::add(crate::prof::Slot::AreaModels, 1);
+        self.area_goals = std::sync::Arc::new(goals);
+    }
+
+    /// Plans a connection for every group of pads that the area of its net does not reach and
+    /// that has none yet, and returns the new ones. Where a net has no fill at all its groups
+    /// are joined to each other as tracks.
+    fn area_conns(&mut self) -> Vec<usize> {
+        let first = self.conns.len();
+        let goals = self.area_goals.clone();
+        self.area_base = 0;
+        for g in goals.iter() {
+            let has = |r: &Router, pins: &[usize]| r.conns.iter().any(|c| c.net == g.net && pins.contains(&c.from));
+            if g.has_fill() {
+                for pins in &g.apart {
+                    if !has(self, pins) {
+                        self.conns.push(Conn {
+                            net: g.net,
+                            from: pins[0],
+                            goal: Goal::Area,
+                        });
+                    }
+                }
+            } else {
+                let mut tree: Vec<usize> = Vec::new();
+                for pins in &g.apart {
+                    if !tree.is_empty() && !has(self, pins) {
+                        self.conns.push(Conn {
+                            net: g.net,
+                            from: pins[0],
+                            goal: Goal::Pins(tree.clone()),
+                        });
+                    }
+                    tree.extend(pins);
+                }
+            }
+            // what the fill joins counts as planned and done
+            let mut groups: Vec<u32> = self.board.nets[g.net as usize]
+                .pins
+                .iter()
+                .map(|&p| self.pin_group[p])
+                .collect();
+            groups.sort_unstable();
+            groups.dedup();
+            let own = self.conns.iter().filter(|c| c.net == g.net).count();
+            self.area_base += groups.len().saturating_sub(1).saturating_sub(own);
+        }
+        self.conn_segs.resize(self.conns.len(), Vec::new());
+        self.conn_vias.resize(self.conns.len(), Vec::new());
+        (first..self.conns.len()).collect()
+    }
+
+    /// Routes a connection into the area from the pad it names, or from another pad of its
+    /// group of copper.
+    fn route_area(&mut self, ci: usize) -> bool {
+        if self.route_one(ci) {
+            return true;
+        }
+        let c = self.conns[ci].clone();
+        if c.goal != Goal::Area {
+            return false;
+        }
+        let others: Vec<usize> = self
+            .area_goal(c.net)
+            .and_then(|g| g.apart.iter().find(|pins| pins.contains(&c.from)))
+            .map(|pins| pins.iter().copied().filter(|&p| p != c.from).take(3).collect())
+            .unwrap_or_default();
+        for p in others {
+            self.conns[ci].from = p;
+            if self.route_one(ci) {
+                return true;
+            }
+        }
+        self.conns[ci].from = c.from;
+        false
+    }
+
     /// PathFinder on the topology. In a first pass every connection takes its way and may
     /// overfill edges and cross tracks of other nets, for a price. Then, round after round, the
     /// connections in a conflict are routed again, one at a time and seeing all the others: the
@@ -4047,7 +4329,7 @@ impl<'a> Router<'a> {
                 .map(|&q| self.board.pins[q].pos)
                 .min_by(|x, y| x.dist(a).total_cmp(&y.dist(a)))
                 .unwrap_or(a),
-            Goal::Plane => a,
+            Goal::Plane | Goal::Area => a,
         };
         let radius = 1.0 + a.dist(b) * 0.15;
         let mut out = Vec::new();
@@ -4184,9 +4466,15 @@ impl<'a> Router<'a> {
                     }
                 }
                 // two fan-outs that end on each other reach no plane
-                if c.goal == Goal::Plane && !matches!(s.end, End::Tap(..)) {
+                if matches!(c.goal, Goal::Plane | Goal::Area) && !matches!(s.end, End::Tap(..)) {
                     join(nodes[0].unwrap_or(pin(c.from)), PLANE);
                 }
+            }
+        }
+        // the pads the fill of an area joins hang together through it
+        if let Some(g) = self.area_goal(net) {
+            for &p in &g.reached {
+                join(pin(p), PLANE);
             }
         }
         let mut roots: Vec<u64> = self.board.nets[net as usize]
@@ -4252,6 +4540,11 @@ impl<'a> Router<'a> {
         let goal = match &c.goal {
             Goal::Pins(p) => self.net_side(c.net, p),
             Goal::Plane => self.net_side(c.net, &self.plane_pins(c.net)),
+            // what hangs on the area: its pads, by the model
+            Goal::Area => {
+                let pads = self.area_goal(c.net).map(|g| g.reached.clone()).unwrap_or_default();
+                self.net_side(c.net, &pads)
+            }
         };
         let on = |side: &[End], e: End| side.iter().any(|&x| self.same_end(x, e));
         (0..self.conns.len())
@@ -4839,7 +5132,7 @@ mod tests {
         r.plan();
         let goal = |from: usize| match &r.conns.iter().find(|c| c.from == from).unwrap().goal {
             Goal::Pins(p) => p.clone(),
-            Goal::Plane => Vec::new(),
+            Goal::Plane | Goal::Area => Vec::new(),
         };
         assert_eq!(r.conns.len(), 2);
         assert_eq!(goal(1), vec![0]);

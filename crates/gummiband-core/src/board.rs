@@ -298,6 +298,10 @@ pub struct Board {
     /// (`areas fill`); none: every net is laid as tracks and the areas are not looked at.
     #[serde(skip)]
     pub areas: Option<std::sync::Arc<crate::fill::AreaPlan>>,
+    /// In the last check of a route with `areas fill`: the fill of every area net on the
+    /// finished copper, as the model has it.
+    #[serde(skip)]
+    pub area_fill: Option<std::sync::Arc<Vec<crate::fill::AreaGoal>>>,
     /// Stackup from top to bottom, if the board has one.
     #[serde(default)]
     pub stackup: Vec<StackItem>,
@@ -1021,6 +1025,15 @@ impl Board {
     }
 
     /// Nets that need routing: two or more pins.
+    /// The layers on which `p` lies in the fill of the area of `net`, where the fill is known
+    /// ([`Board::area_fill`]): none otherwise.
+    pub fn area_fill_at(&self, net: NetId, p: Point) -> LayerSet {
+        self.area_fill
+            .as_ref()
+            .and_then(|fills| fills.iter().find(|f| f.net == net))
+            .map_or(LayerSet::default(), |f| f.layers_at(p))
+    }
+
     pub fn routable_nets(&self) -> impl Iterator<Item = NetId> + '_ {
         self.nets
             .iter()

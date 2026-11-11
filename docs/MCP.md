@@ -701,9 +701,9 @@ length are written next to it as `<output>.altN.kicad_pcb` and listed in `altern
 (reserve on the clearances: 0.03 mm in an open ended route of the whole board, else 0),
 `prefer_width` 0 (off), `plane_layers` none (layers taken as planes for this route, as
 `--plane-layers`), `areas` "tracks" ("fill" leaves the nets with an area on a routed layer, a zone
-of the file or a pour named in `pour`, to the fill of that area: they are not laid as tracks,
-and `areas` in the result says per net what the fill reaches and which pads it does not, each
-with its reason; `pour` names nets that get a pour after the route, each "NET" or
+of the file or a pour named in `pour`, to the fill of that area: the other nets are laid first, and only a group of pads the fill then does not reach gets a
+piece of track or a via to the area; `areas` in the result says per net what the fill reaches
+on the finished copper and which pads it does not, each with its reason; `pour` names nets that get a pour after the route, each "NET" or
 "NET:LAYER,LAYER", the outer layers where none is given; not with `pairs`, the open end or
 shove), `placements` 0 (a value tries that many placements from the netlist, routes
 each and goes on with the best, as `--placements`; first seed `placement_seed`, default 1; the

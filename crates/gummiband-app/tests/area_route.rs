@@ -54,26 +54,75 @@ fn an_entry_of_pour_is_a_net_with_or_without_layers() {
     assert!(parse_pour(":F.Cu").unwrap_err().contains("names no net"));
 }
 
-/// With `areas tracks` a net with a zone is laid like any net; with `areas fill` it gets no
-/// copper of its own, and the report says what its fill reaches.
+/// With `areas tracks` a net with a zone is laid like any net. With `areas fill` only the pads
+/// its fill does not reach get copper, and only as far as the area: VBUS has its area on the
+/// back and pads on the front, so a group of pads gets a piece of track to a via that lands
+/// in the fill, or to a pad that hangs on the area already.
 #[test]
 fn a_net_with_an_area_is_left_to_its_fill() {
     let tracks = route("area_far", "tracks", &quick(Areas::Tracks, &[]));
     assert!(tracks_of(&tracks, "VBUS") > 0);
     assert!(tracks.routed.areas.is_empty());
     let fill = route("area_far", "fill", &quick(Areas::Fill, &[]));
-    assert_eq!(tracks_of(&fill, "VBUS"), 0);
+    let (b, geo) = (&fill.routed.board, &fill.routed.res.geometry);
+    let vbus = b.net_id("VBUS").unwrap();
     // GND has no area and is laid as before
     assert!(tracks_of(&fill, "GND") > 0);
     let [area] = fill.routed.areas.as_slice() else {
         panic!("one area net")
     };
     assert_eq!(area.net, "VBUS");
-    assert!(area.pads >= 2 && area.reached <= area.pads, "{}", area.summary);
-    // the pads the fill leaves are not counted among the open connections of the tracks
-    assert!(fill.routed.res.stats.unrouted.iter().all(|u| !u.starts_with("VBUS ")));
+    assert_eq!(area.reached, area.pads, "{}", area.summary);
+    assert!(fill.routed.res.stats.unrouted.is_empty());
+    // its copper is vias into the area and what leads to them: less than its tracks were,
+    // on a board whose pads lie as far from a spot for a via as they can
+    let length = |out: &gummiband_app::RouteOutcome| -> f64 {
+        let g = &out.routed.res.geometry;
+        let of = g.tracks.iter().filter(|t| t.net == vbus);
+        of.map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>()).sum()
+    };
+    assert!(geo.vias.iter().any(|v| v.net == vbus));
+    assert!(length(&fill) < length(&tracks), "{} {}", length(&fill), length(&tracks));
+    // the last check takes none of it back: an end in the fill is held
+    assert_eq!(fill.routed.legal.trimmed, 0);
+    // what the fill joins stays in the count of connections, so that a share of them means
+    // the same with tracks and with fill
+    assert_eq!(fill.routed.res.stats.conns, tracks.routed.res.stats.conns);
+    assert_eq!(fill.routed.res.stats.routed, fill.routed.res.stats.conns);
 }
 
+/// A pad the fill of a planned pour does not reach gets its piece of copper to the area.
+#[test]
+fn a_pad_the_pour_does_not_reach_is_joined_to_it() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/boards");
+    let run = |opts: &RouteOptions| {
+        let tmp = std::env::temp_dir().join(format!(
+            "gummiband-app-areas-medium-{}-{}",
+            opts.areas.word(),
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let out = route_file(
+            &dir.join("medium.kicad_pcb"),
+            &tmp.join("out.kicad_pcb"),
+            opts,
+            &Hooks::default(),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&tmp).ok();
+        out
+    };
+    let fill = run(&quick(Areas::Fill, &["GND"]));
+    let [gnd] = fill.routed.areas.as_slice() else {
+        panic!("one area net")
+    };
+    assert_eq!(gnd.reached, gnd.pads, "{}", gnd.summary);
+    assert!(gnd.islands.is_empty());
+    assert!(fill.routed.res.stats.unrouted.is_empty());
+    assert!(fill.routed.violations.is_empty());
+}
+
+/// A planned pour makes its net an area net, on the outer layers where none are named.
 /// A planned pour makes its net an area net, on the outer layers where none are named.
 #[test]
 fn a_planned_pour_is_an_area_of_its_net() {

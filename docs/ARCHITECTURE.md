@@ -372,11 +372,32 @@ zone on a routed layer is laid as tracks like any net. With `areas fill` the app
 file, the pours named by the option `pour` as `lay_pours` would lay them, the settings of the
 model, and the nets the fill connects (those with an area that is not a `gb:` pour on a routed
 layer). The plan rides on the board (`Board::areas`), and everything that treats such a net
-differently asks it: `Router::plan` gives these nets no connections, the last check does not
-count their pads as open, and after the route `Routed::areas` holds the report of the model
-per net on the finished copper (`fill::with_copper` puts a geometry on the board as
-obstacles). With no plan on the board nothing in the router changes, which is what keeps the
-route hashes of `areas tracks`.
+differently asks it. With no plan on the board nothing in the router changes, which is what
+keeps the route hashes of `areas tracks`.
+
+`Router::plan` gives the area nets no connections, so the first pass (`Router::run`) lays the
+other nets alone. Then `Router::area_pass` runs, once per candidate of the search: the model
+fills the areas on the copper of the candidate (`fill::goals`: after a short relaxation, on a
+raster of a third of the minimum width, with half a cell of reserve on every clearance, so
+that a strip of fill the search counts on is still there on the finished copper), and every
+group of pads the fill does not reach becomes one connection with the goal `Goal::Area`. The
+goal is copper of the net that hangs together with its area, on whatever layer
+(`fill::AreaGoal`): the search ends where it enters a free triangle at a spot of the fill at
+least half the minimum width inside (`inside`), on a pad that hangs on the area (by the
+model, or through a connection laid: `Router::area_joined`), or on a via whose landing lies in
+the fill on another layer (`lands`; an inner plane is such a layer). A via is only a change
+of layer: where its landing is not in the fill, the search goes on from it. What finds no way
+gets a via in its pad as a second chance and then the rip-up of the first pass: the
+connections around the pad give way, the pad goes first, they are laid again, the model runs
+again, and a connection whose end the new fill no longer holds is laid again as well. A net
+whose area has no fill at all is joined by tracks. What the fill joins stays in the count of
+connections (`Router::area_base`), so that rules on a share of them (the second, negotiating
+search at 15 % open) mean the same as with tracks.
+
+The last check (`legal::enforce`) runs the model once on the finished copper and takes a
+track end or a via in the fill of its net's area as held; it does not count the pads of these
+nets as open. After the route `Routed::areas` holds the report of the model per net on the
+finished copper (`fill::with_copper` puts a geometry on the board as obstacles).
 
 **Validation.** The model was held against KiCad's fill of the planes of the LED controller
 (0.08 % of the area differs, the same pads are touched by both). Thin strips between tracks on

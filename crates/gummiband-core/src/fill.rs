@@ -150,6 +150,126 @@ impl AreaPlan {
     }
 }
 
+/// What the connections of one area net aim at: the fill of its area on the copper of a
+/// route, as the model has it, and what hangs on it.
+#[derive(Debug, Clone)]
+pub struct AreaGoal {
+    pub net: NetId,
+    raster: Raster,
+    /// Per copper layer the cells of the fill of the area (not of pieces apart from it) that
+    /// lie at least half the minimum width inside it.
+    inside: Vec<Option<Vec<bool>>>,
+    /// Per copper layer every cell of the fill of the area.
+    fill: Vec<Option<Vec<bool>>>,
+    /// The pads the area joins, sorted.
+    pub reached: Vec<usize>,
+    /// The pads it does not reach, by the group of copper they hang on.
+    pub apart: Vec<Vec<usize>>,
+}
+
+impl AreaGoal {
+    /// The goal that the fill `f` of a net is, with `areas` as given to the model.
+    pub fn of(areas: &[Area], f: &NetFill) -> AreaGoal {
+        let g = &f.raster;
+        let min_w = areas
+            .iter()
+            .filter(|a| a.net == f.net && !a.rings.is_empty() && a.min_width > 0.0)
+            .map(|a| a.min_width)
+            .fold(f64::INFINITY, f64::min);
+        let min_w = if min_w.is_finite() { min_w } else { 0.0 };
+        let mut inside: Vec<Option<Vec<bool>>> = vec![None; f.fill.len()];
+        let mut of_the_area: Vec<Option<Vec<bool>>> = vec![None; f.fill.len()];
+        for (l, fill) in f.fill.iter().enumerate() {
+            let Some(fill) = fill else { continue };
+            // the pieces of a layer are listed in the order of their labels
+            let main: Vec<bool> = f
+                .pieces
+                .iter()
+                .filter(|p| p.layer as usize == l)
+                .map(|p| p.main)
+                .collect();
+            if !main.contains(&true) {
+                continue;
+            }
+            let (lab, _) = pieces_of(fill, g.nx, g.ny);
+            let of_area: Vec<bool> = lab.iter().map(|&k| k != 0 && main[k as usize - 1]).collect();
+            let d = edt(&of_area, g.nx, g.ny);
+            // the border of the fill lies half a cell before the first cell outside
+            let deep = |d: f32| d > 0.0 && (d as f64 - 0.5) * g.step >= min_w / 2.0 - 1e-9;
+            inside[l] = Some(d.iter().map(|&d| deep(d)).collect());
+            of_the_area[l] = Some(of_area);
+        }
+        let mut reached: Vec<usize> = f.pins.iter().filter(|p| p.reached()).map(|p| p.pin).collect();
+        reached.sort_unstable();
+        let mut apart: Vec<(usize, Vec<usize>)> = Vec::new();
+        for p in f.unreached() {
+            match apart.iter_mut().find(|(group, _)| *group == p.group) {
+                Some((_, pins)) => pins.push(p.pin),
+                None => apart.push((p.group, vec![p.pin])),
+            }
+        }
+        AreaGoal {
+            net: f.net,
+            raster: g.clone(),
+            inside,
+            fill: of_the_area,
+            reached,
+            apart: apart.into_iter().map(|(_, pins)| pins).collect(),
+        }
+    }
+
+    /// The area has fill somewhere: a connection can end in it.
+    pub fn has_fill(&self) -> bool {
+        self.inside.iter().any(|l| l.is_some())
+    }
+
+    /// `p` on `layer` lies in the fill of the area, at least half the minimum width inside.
+    pub fn inside(&self, layer: LayerId, p: Point) -> bool {
+        match (self.inside.get(layer as usize), self.raster.cell(p)) {
+            (Some(Some(m)), Some(i)) => m[i],
+            _ => false,
+        }
+    }
+
+    /// The layers on which `p` lies in the fill of the area, however near its border.
+    pub fn layers_at(&self, p: Point) -> LayerSet {
+        let mut layers = LayerSet::default();
+        if let Some(i) = self.raster.cell(p) {
+            for (l, m) in self.fill.iter().enumerate() {
+                if m.as_ref().is_some_and(|m| m[i]) {
+                    layers.insert(l as LayerId);
+                }
+            }
+        }
+        layers
+    }
+
+    /// A via at `p` lands in the fill of the area on a layer other than `from`.
+    pub fn lands(&self, from: LayerId, p: Point) -> bool {
+        let Some(i) = self.raster.cell(p) else { return false };
+        self.inside
+            .iter()
+            .enumerate()
+            .any(|(l, m)| l != from as usize && m.as_ref().is_some_and(|m| m[i]))
+    }
+}
+
+/// The goals of the nets of `plan` on `board` with the copper of `geo`: the model once per net,
+/// with a raster step of `step` or the one of the plan, whichever is coarser, and with `slack`
+/// more on every clearance of the fill.
+pub fn goals(board: &Board, plan: &AreaPlan, geo: &crate::realize::Geometry, step: f64, slack: f64) -> Vec<AreaGoal> {
+    let work = with_copper(board, geo);
+    let options = Options {
+        step: plan.options.step.max(step),
+        slack: plan.options.slack + slack,
+        ..plan.options.clone()
+    };
+    plan.nets
+        .iter()
+        .map(|&net| AreaGoal::of(&plan.areas, &fill_net(&work, &plan.areas, net, &options)))
+        .collect()
+}
+
 /// `board` with the copper of a routed result on it as obstacles, as the fill model reads it:
 /// every piece of a track and every via of `geo`.
 pub fn with_copper(board: &Board, geo: &crate::realize::Geometry) -> Board {
@@ -1468,6 +1588,44 @@ mod tests {
         assert!(f.islands.is_empty());
         assert_eq!(f.unreached().count(), 0);
         assert!(f.pins.iter().any(|p| p.reach == Reach::Fill));
+    }
+
+    /// What a connection of an area net may end in: the fill of the area half the minimum
+    /// width inside, on the layer it is on or under a via, and never the fill of an island.
+    #[test]
+    fn the_goal_of_an_area_net_is_the_fill_of_the_area_well_inside() {
+        let mut b = board(&[
+            ("GND", 5., 5., 0),
+            ("GND", 15., 5., 0),
+            ("S", 10., 1., 0),
+            ("S", 10., 19., 0),
+            ("GND", 5., 15., 0),
+        ]);
+        track(&mut b, "S", 0, &[(10., 1.), (10., 19.)], 0.2);
+        let areas = [solid(over_board(&b, "GND", 0))];
+        let g = AreaGoal::of(&areas, &fill_net(&b, &areas, 0, &Options::default()));
+        assert!(g.has_fill());
+        assert_eq!(g.reached, [0, 4]);
+        assert_eq!(g.apart, [vec![1]]);
+        // deep in the area, and not on the other layer
+        assert!(g.inside(0, pt(3., 10.)));
+        assert!(!g.inside(1, pt(3., 10.)));
+        // the island right of the track is fill, but not of the area
+        assert!(!g.inside(0, pt(17., 10.)));
+        assert!(g.layers_at(pt(17., 10.)).is_empty());
+        // at the border of the fill (the track's edge at 9.9, clearance 0.2: fill from 9.7 on)
+        // the first half of the minimum width is fill and no place to end in
+        assert!(g.layers_at(pt(9.66, 10.)).has(0));
+        assert!(!g.inside(0, pt(9.66, 10.)));
+        assert!(g.inside(0, pt(9.5, 10.)));
+        // a via lands in the area from the other layer only
+        assert!(g.lands(1, pt(3., 10.)));
+        assert!(!g.lands(0, pt(3., 10.)));
+        assert!(!g.lands(1, pt(17., 10.)));
+        // a net without fill has no such goal
+        let none = AreaGoal::of(&[], &fill_net(&b, &[], 0, &Options::default()));
+        assert!(!none.has_fill());
+        assert_eq!(none.apart.len(), 3);
     }
 
     #[test]

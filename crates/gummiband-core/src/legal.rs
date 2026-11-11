@@ -394,6 +394,7 @@ fn held_fixed(board: &Board, net: NetId, p: Point, layer: u8) -> bool {
         .planes
         .iter()
         .any(|pl| pl.net == net && pl.layer == layer && pl.covers(p))
+        || board.area_fill_at(net, p).has(layer)
 }
 
 /// The track ends of the result that lie on nothing of their net, as `"NET at X Y"`. Such an
@@ -471,6 +472,8 @@ fn drop_idle_vias(board: &Board, geo: &mut Geometry, net: NetId) {
         for pl in board.planes.iter().filter(|pl| pl.net == net && pl.covers(v.at)) {
             layers |= 1 << pl.layer;
         }
+        // the fill of the net's area, where the route left the net to it
+        layers |= board.area_fill_at(net, v.at).0;
         // kept copper of the net under the via, and a track the via sits on
         for ob in board.obstacles.iter().filter(|ob| {
             ob.net == Some(net) && matches!(ob.kind, ObstacleKind::Track | ObstacleKind::Via | ObstacleKind::Pour)
@@ -933,6 +936,17 @@ pub fn new_shorts(board_before: &Board, before: &Geometry, board_after: &Board, 
 /// instead), and every net with copper in `geo` or with a dropped track is counted on the
 /// copper: what is not connected there is open in `stats`, whatever the search believed.
 pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal {
+    // nets left to the fill of their area: a track end or a via in that fill is held by it
+    let filled;
+    let board = match &board.areas {
+        Some(plan) if !plan.nets.is_empty() => {
+            let mut b = board.clone();
+            b.area_fill = Some(std::sync::Arc::new(crate::fill::goals(board, plan, geo, 0.0, 0.0)));
+            filled = b;
+            &filled
+        }
+        _ => board,
+    };
     let mut legal = Legal::default();
     // 0. copper with a coordinate that is no number goes first: it cannot be judged or written
     let not_finite = drop_not_finite(geo);

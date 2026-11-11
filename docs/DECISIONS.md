@@ -111,9 +111,16 @@ Standing decisions of the project owner, kept here so that they survive any sess
   which the search itself knows the fill.
 - How a net with an area on a routed layer is connected is an option, `areas`: `tracks` (the
   default: like any net, the area is not looked at) or `fill` (the fill of the area connects
-  it and it is not laid as tracks). A pour that is not in the file yet is named with `pour`
-  and taken as it will be laid. `fill` stays opt-in until it is measured against KiCad's fill
+  it: the other nets are laid first, and only what the fill then does not reach gets a piece
+  of track or a via to the area). A pour that is not in the file yet is named with `pour` and
+  taken as it will be laid. `fill` stays opt-in until it is measured against KiCad's fill
   and DRC; with `tracks` a route is the same as before, to the byte.
+- The goal of a connection into an area is copper of the net that hangs together with the
+  area, on whatever layer: fill at least half the minimum width inside, or a pad the area
+  holds. A via is a change of layer and never a goal by itself: it ends a connection only
+  because its landing lies in such copper, and where it does not, the search goes on from it.
+  Other nets crossing an area, and a via that lands where the area is not yet, are then a
+  matter of price, not of another meaning.
 - Copper of the file that gave way in a shove and then touches another net goes back to where
   the file has it, and new tracks that cross that place are taken out by the last check. A
   route is not refused because tracks lie inside a pour outline: that is legal in KiCad.
