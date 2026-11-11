@@ -410,6 +410,8 @@ knobs! {
         "Triangulation: long obstacle sides get a vertex every this many mm.";
     RELAX_IT = "GB_RELAX_IT", Experiment, Num, "400",
         "Rounds of a full relaxation.";
+    RELAX_SETTLE = "GB_RELAX_SETTLE", Experiment, Num, "0",
+        "Relaxation: up to this many further rounds that only resolve clearances, until nothing moves.";
     SPACING = "GB_SPACING", Experiment, Num, "0.05",
         "Relaxation: distance of the points on a track in mm.";
     COARSE = "GB_COARSE", Experiment, Value, "twice the spacing, at least 0.1",

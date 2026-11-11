@@ -117,6 +117,7 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_SKEW_WEIGHT` | number | 0.5 | Weight of a mm of skew need in the cost of a candidate. |
 | `GB_REFINE` | number | 0.6 | Triangulation: long obstacle sides get a vertex every this many mm. |
 | `GB_RELAX_IT` | number | 400 | Rounds of a full relaxation. |
+| `GB_RELAX_SETTLE` | number | 0 | Relaxation: up to this many further rounds that only resolve clearances, until nothing moves. |
 | `GB_SPACING` | number | 0.05 | Relaxation: distance of the points on a track in mm. |
 | `GB_COARSE` | value | twice the spacing, at least 0.1 | Relaxation: distance of the points in mm while the bands still move a lot. |
 | `GB_SHIFT` | value | unset | CLI `route`, debugging: `R8:0.3,0;C4:0,-0.2` routes the board with these parts shifted by mm. |

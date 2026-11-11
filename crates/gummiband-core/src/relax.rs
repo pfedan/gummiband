@@ -22,6 +22,10 @@ mod gpu;
 #[derive(Debug, Clone)]
 pub struct RelaxConfig {
     pub iterations: usize,
+    /// Up to this many further rounds that only resolve clearances, until a round moves nothing.
+    /// The last quarter of `iterations` is a fixed number of such rounds, and on a dense board
+    /// tracks and vias are still answering each other when it ends.
+    pub settle: usize,
     /// Target point spacing along a track in mm.
     pub spacing: f64,
     /// Fraction of the way to the neighbour midpoint per round.
@@ -49,6 +53,7 @@ impl Default for RelaxConfig {
     fn default() -> Self {
         RelaxConfig {
             iterations: knobs::RELAX_IT.num(),
+            settle: knobs::RELAX_SETTLE.num(),
             spacing: knobs::SPACING.num(),
             tension: 0.25,
             margin: 0.008,
@@ -60,6 +65,10 @@ impl Default for RelaxConfig {
         }
     }
 }
+
+/// A round that moves no point and no via further than this (mm) has come to rest. The pushes
+/// shrink with what is left to resolve, so what remains is well below the margin.
+const REST: f64 = 0.0002;
 
 struct Piece {
     a: Point,
@@ -1043,9 +1052,17 @@ pub fn relax_while(
     // during a batch the tracks do not answer, so a via moves once per batch, but a batch far
     let via_gain = 10.0;
     let starts_batch = |it: usize| it == 0 || it % 10 == 9;
-    for it in 0..cfg.iterations {
+    // the largest move of a point or via in the last round that only resolved clearances
+    let mut largest = f64::INFINITY;
+    // a relaxation without rounds stays one: it only takes the shortcuts
+    let rounds = cfg.iterations + if cfg.iterations > 0 { cfg.settle } else { 0 };
+    for it in 0..rounds {
         if !go_on() {
             return false;
+        }
+        // at rest: the round before moved nothing that counts
+        if it >= cfg.iterations && largest < REST {
+            break;
         }
         let on_gpu_now = it < gpu_end;
         // anneal: the last quarter only resolves clearances
@@ -1708,6 +1725,7 @@ pub fn relax_while(
             }
         }
         dirty = before.map(|()| {
+            largest = 0.0;
             let mut d = vec![false; cells.len()];
             // the points that moved come in runs along their tracks: one mark per cell will do
             let mut centre = vec![false; cells.len()];
@@ -1727,10 +1745,12 @@ pub fn relax_while(
             };
             for (a, b) in old_tracks.iter().zip(&tracks) {
                 if a.len() != b.len() {
+                    largest = f64::INFINITY;
                     a.iter().chain(b).for_each(|p| mark(*p));
                 } else {
                     for (p, q) in a.iter().zip(b) {
                         if p != q && longer(*p - *q, 1e-9) {
+                            largest = largest.max((*p - *q).len2());
                             mark(*p);
                             mark(*q);
                         }
@@ -1739,14 +1759,19 @@ pub fn relax_while(
             }
             for (p, v) in old_vias.iter().zip(&vias) {
                 if *p != v.0 && longer(*p - v.0, 1e-9) {
+                    largest = largest.max((*p - v.0).len2());
                     mark(*p);
                     mark(v.0);
                 }
+            }
+            if !turned.is_empty() {
+                largest = f64::INFINITY;
             }
             for &vi in &turned {
                 mark(vias[vi].0 - halves[vi]);
                 mark(vias[vi].0 + halves[vi]);
             }
+            largest = largest.sqrt();
             d
         });
         prof::add(Slot::RelaxDirty, t_dirty.elapsed().as_nanos() as u64);
