@@ -982,6 +982,9 @@ pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal
     if legal.trimmed > 0 {
         count_open(board, geo, &nets, &dropped, stats, &mut legal);
     }
+    // and the nets left to the fill of their area by that fill
+    let changed = legal.trimmed > 0 || !dropped.is_empty() || !legal.put_back.is_empty() || legal.not_finite > 0;
+    count_areas(board, geo, changed, stats, &mut legal);
     if !legal.dropped.is_empty() || legal.trimmed > 0 || legal.not_finite > 0 {
         stats.vias = geo.vias.iter().filter(|v| v.drill > 0.0).count();
         stats.length = geo
@@ -1134,7 +1137,7 @@ fn count_open(
     let name = |n: NetId| board.nets[n as usize].name.clone();
     for (net, pins) in open_in_copper(board, geo, nets) {
         if board.areas.as_ref().is_some_and(|a| a.holds(net)) {
-            continue; // its fill connects it: the report of the areas has its pads
+            continue; // its fill connects it: `count_areas` counts it by the fill
         }
         let net_name = name(net);
         let prefix = format!("{net_name} from ");
@@ -1185,6 +1188,52 @@ fn drop_not_finite(geo: &mut Geometry) -> Vec<NetId> {
         ok
     });
     nets
+}
+
+/// Count the nets left to the fill of their area (`areas fill`) by that fill, as the model has
+/// it on the finished copper: a group of pads that neither the fill nor copper joins to the
+/// area is one open connection, in `stats` and in `legal`. One less where the area itself
+/// holds no pad, as KiCad's ratsnest counts. The fill has the last word in both directions:
+/// what the search left open and the fill joins after all is not open. With `again` the copper
+/// changed since the fill was computed, and the model runs once more.
+fn count_areas(board: &Board, geo: &Geometry, again: bool, stats: &mut RunStats, legal: &mut Legal) {
+    let Some(plan) = board.areas.as_ref().filter(|p| !p.nets.is_empty()) else {
+        return;
+    };
+    let fresh;
+    let fills: &[crate::fill::AreaGoal] = match &board.area_fill {
+        Some(f) if !again => f,
+        _ => {
+            fresh = crate::fill::goals(board, plan, geo, 0.0, 0.0, false);
+            &fresh
+        }
+    };
+    for g in fills {
+        let net_name = &board.nets[g.net as usize].name;
+        let prefix = format!("{net_name} from ");
+        let known = stats.unrouted.iter().filter(|u| u.starts_with(&prefix)).count();
+        stats.unrouted.retain(|u| !u.starts_with(&prefix));
+        legal.open.retain(|u| !u.starts_with(&prefix));
+        stats.routed = (stats.routed + known).min(stats.conns);
+        let first = g.reached.is_empty() as usize;
+        let open: Vec<String> = g
+            .apart
+            .iter()
+            .skip(first)
+            .map(|pins| format!("{net_name} from {}", board.pins[pins[0]].name))
+            .collect();
+        stats
+            .blocked
+            .retain(|(u, _)| !u.starts_with(&prefix) || open.contains(u));
+        for name in open {
+            if !stats.blocked.iter().any(|(u, _)| *u == name) {
+                stats.blocked.push((name.clone(), Vec::new()));
+            }
+            stats.unrouted.push(name.clone());
+            stats.routed = stats.routed.saturating_sub(1);
+            legal.open.push(name);
+        }
+    }
 }
 
 /// Split the lines of the route that a track end of their net meets in their middle, so that
@@ -1330,6 +1379,52 @@ mod tests {
 
     fn cross() -> Board {
         board(&[("A", 2., 10.), ("A", 18., 10.), ("B", 10., 2.), ("B", 10., 18.)])
+    }
+
+    /// A net left to the fill of its area is counted by that fill: a pad the fill does not
+    /// reach is an open connection, whatever the search believed, and a pad it does reach is
+    /// none, although no track leads to it.
+    #[test]
+    fn a_net_left_to_its_fill_is_counted_by_the_fill() {
+        let mut b = board(&[
+            ("GND", 4., 4.),
+            ("GND", 4., 16.),
+            ("GND", 16., 10.),
+            ("S", 10., 0.4),
+            ("S", 10., 19.6),
+        ]);
+        let mut area = crate::fill::Area::pour(0, 0, vec![b.outline[0].clone()]);
+        area.connect = crate::fill::Connect::Solid;
+        b.areas = Some(std::sync::Arc::new(crate::fill::AreaPlan {
+            areas: vec![area],
+            options: Default::default(),
+            nets: vec![0],
+            stitch: false,
+        }));
+        // nothing of GND is routed and nothing is in its way: the fill joins all three pads
+        let mut geo = Geometry::default();
+        let mut st = stats(2);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert!(legal.open.is_empty(), "{:?}", legal.open);
+        assert_eq!((st.routed, st.unrouted.len()), (2, 0));
+        // a connection the search gave up counts as made when the fill joins its pad
+        let mut st = stats(2);
+        st.routed = 1;
+        st.unrouted.push("GND from P.2".into());
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert!(legal.open.is_empty() && st.unrouted.is_empty());
+        assert_eq!(st.routed, 2);
+        // a track of S between its pads at the two edges cuts the third pad off: one open
+        // connection
+        let mut geo = Geometry {
+            tracks: vec![track(1, &[(10., 0.4), (10., 19.6)])],
+            vias: Vec::new(),
+        };
+        let mut st = stats(3);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert_eq!(legal.open, ["GND from P.2"]);
+        assert_eq!(st.unrouted, ["GND from P.2"]);
+        assert_eq!((st.conns, st.routed), (3, 2));
     }
 
     #[test]

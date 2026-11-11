@@ -176,8 +176,9 @@ agent iterates on: give a blocked net priority, move a part, route again. On a f
 - `route` with `areas: "fill"` leaves a net with a pour to its fill instead of laying it as
   tracks: the other nets get the room, and only the pads the fill then does not reach get a
   piece of track or a via to the area. Name the pour you will lay with `pour: ["GND"]` (or
-  have the zone in the file), read `areas` in the result for the pads still not reached, then
-  lay the pour with `ground_pour`. The default `areas: "tracks"` lays every net as tracks, whatever zones it has.
+  have the zone in the file), read `areas` in the result for the pads still not reached (they
+  are in `unrouted` too), then lay the pour with `ground_pour`. The default `areas: "tracks"`
+  lays every net as tracks, whatever zones it has.
 
 ![A signal track over its reference layer: a gap at a slot and a split between two supply zones](img/reference-check.svg)
 

@@ -703,7 +703,9 @@ length are written next to it as `<output>.altN.kicad_pcb` and listed in `altern
 `--plane-layers`), `areas` "tracks" ("fill" leaves the nets with an area on a routed layer, a zone
 of the file or a pour named in `pour`, to the fill of that area: the other nets are laid first, and only a group of pads the fill then does not reach gets a
 piece of track or a via to the area; `areas` in the result says per net what the fill reaches
-on the finished copper and which pads it does not, each with its reason; `pour` names nets that get a pour after the route, each "NET" or
+on the finished copper and which pads it does not, each with its reason, and a group of pads
+that neither fill nor copper joins to the area is listed in `unrouted` like any open
+connection; `pour` names nets that get a pour after the route, each "NET" or
 "NET:LAYER,LAYER", the outer layers where none is given; `area_stitch`, true with areas
 "fill", gives an island of fill that holds pads one via where it joins the area instead of a
 track, and `area_vias` in the result counts them; not with `pairs`, the open end or shove), `placements` 0 (a value tries that many placements from the netlist, routes

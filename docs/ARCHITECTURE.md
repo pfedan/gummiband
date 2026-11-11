@@ -410,9 +410,13 @@ that hangs on the area only through a connection must not count as held by the a
 connection is taken out again.
 
 The last check (`legal::enforce`) runs the model once on the finished copper and takes a
-track end or a via in the fill of its net's area as held; it does not count the pads of these
-nets as open. After the route `Routed::areas` holds the report of the model per net on the
-finished copper (`fill::with_copper` puts a geometry on the board as obstacles).
+track end or a via in the fill of its net's area as held. It counts these nets by the fill
+(`legal::count_areas`): a group of pads that neither the fill nor copper joins to the area is
+one open connection, in the count of the route and in its list of unrouted connections, one
+less where the area itself holds no pad (as KiCad's ratsnest counts); a connection the search
+gave up whose pad the fill joins after all is not open. After the route `Routed::areas` holds
+the report of the model per net on the finished copper (`fill::with_copper` puts a geometry
+on the board as obstacles).
 
 **Validation.** The model was held against KiCad's fill of the planes of the LED controller
 (0.08 % of the area differs, the same pads are touched by both). Thin strips between tracks on
