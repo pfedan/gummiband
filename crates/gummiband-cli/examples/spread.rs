@@ -30,7 +30,21 @@ fn main() -> anyhow::Result<()> {
                 Elem::Arc(..) => arcs += 1,
             }
         }
-        (length, lines, arcs, g.vias.len())
+        // how much of the track is narrower than its class, and at how many places the
+        // width changes
+        let free = || g.tracks.iter().filter(|t| t.origin.is_none());
+        let narrow: f64 = free()
+            .flat_map(|t| t.pts.windows(2).map(move |p| (t, p[0], p[1])))
+            .filter(|(t, a, b)| t.piece_width(*a, *b) < t.width - 1e-9)
+            .map(|(_, a, b)| a.dist(b))
+            .sum();
+        let steps: usize = free()
+            .map(|t| {
+                let w: Vec<f64> = t.pts.windows(2).map(|p| t.piece_width(p[0], p[1])).collect();
+                w.windows(2).filter(|w| (w[0] - w[1]).abs() > 1e-9).count()
+            })
+            .sum();
+        (length, lines, arcs, g.vias.len(), narrow, steps)
     };
     let clear = |v: &[check::Violation]| v.iter().filter(|v| !v.is_width()).cloned().collect::<Vec<_>>();
     let before = check::check(&board, &geo);
@@ -69,6 +83,10 @@ fn main() -> anyhow::Result<()> {
     println!(
         "length {:.3} -> {:.3} mm, lines {} -> {}, arcs {} -> {}, vias {} -> {}",
         b.0, a.0, b.1, a.1, b.2, a.2, b.3, a.3
+    );
+    println!(
+        "narrower than its class: {:.3} -> {:.3} mm, changes of width {} -> {}",
+        b.4, a.4, b.5, a.5
     );
     for k in &report.back {
         println!(

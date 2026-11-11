@@ -72,6 +72,19 @@ impl Track {
             self.width
         }
     }
+
+    /// The least width the piece a-b may have: the neck width where the track may narrow, and
+    /// never more than it has. `ruled` (the class has a minimum width rule): only in its neck
+    /// zones; else anywhere, since the neck width is not below the board minimum and the width
+    /// of the class is what a track should have where there is room, not what a check asks.
+    pub fn least_width(&self, a: Point, b: Point, ruled: bool) -> f64 {
+        let has = self.piece_width(a, b);
+        if ruled && !self.necks.iter().any(|r| r.touches_seg(a, b)) {
+            has.min(self.width)
+        } else {
+            has.min(self.neck_w).min(self.width)
+        }
+    }
 }
 
 /// How far a joint between two lines may lie off the line through their far ends, in mm, and

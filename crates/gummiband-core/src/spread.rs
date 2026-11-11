@@ -30,6 +30,16 @@
 //! from it without getting nearer until it is far enough, and meets its arc there with a
 //! corner; on that stretch the margin gives way, the clearance does not (`straight_on`).
 //!
+//! Every piece gets the width it may have there. A group is laid first with every track as
+//! wide as it is. If that does not fit, the stretches that have no room at that width (between
+//! their bounds, or at a held point that has less than the clearance) are laid at the least
+//! width the track may have ([`Track::least_width`]: the neck width; under a minimum width
+//! rule of the class only in its neck zones), and the runs still to come are given room at
+//! theirs. A new piece that is narrower than its track is then widened where the full width
+//! keeps every clearance and the margin, with its neighbours taken at their full widths as
+//! well (`widen`): an arc as a whole, a line from each end as far as the room goes. So a track
+//! is narrow as long as the passage needs it, and the width changes on a straight piece.
+//!
 //! The group is laid from both sides, and the side with the larger margin, then with fewer
 //! tracks to lay again, wins. [`spread`] takes the result only if the own check finds nothing
 //! new on the whole board and the worst finding of the spot is gone; otherwise all tracks keep
@@ -389,8 +399,10 @@ struct Feat {
     /// The ends of the whole side a piece is of, ascending in x.
     whole: (Point, Point),
     caps: [bool; 2],
-    /// Half its width (0: an outline).
+    /// Half its width (0: an outline), and for a point where a run is held half the least
+    /// width the run may have there.
     r: f64,
+    least: f64,
     kind: Kind,
     net: Option<NetId>,
     obstacle: Option<usize>,
@@ -406,25 +418,31 @@ struct Run {
     rev: bool,
     /// The span in x.
     span: (f64, f64),
-    /// The old path in the span, ascending in x, and the widths of the pieces between.
+    /// The old path in the span, ascending in x, and the widths of the pieces between: the
+    /// width each has and the least it may have there.
     v: Vec<Point>,
     w: Vec<f64>,
+    l: Vec<f64>,
     /// The arcs of the old path, as x ranges: a run is laid again over a whole arc or not at
     /// all of it.
     arcs: Vec<(f64, f64)>,
     /// Places inside the span where something of its net ends on it.
     held: Vec<f64>,
     /// Stations of the span, first and last, and per station from the first: the old path,
-    /// the widest piece there, and whether the run is held.
+    /// the widest piece there (as it is, and at the least it may be), and whether the run is
+    /// held.
     k: (usize, usize),
     x0: Vec<f64>,
     wk: Vec<f64>,
+    lk: Vec<f64>,
     pin: Vec<bool>,
     corner: Vec<bool>,
-    /// The fixed things below with the distance to keep without margin and half width, and
-    /// those above with the number of margins that go on top.
-    below: Vec<(usize, f64)>,
-    above: Vec<(usize, f64, f64)>,
+    /// The fixed things below with the distance to keep without margin and half width (as
+    /// wide as things are, and at the least widths), and
+    /// those above with the number of margins that go on top and the distance with the runs
+    /// between at their least widths.
+    below: Vec<(usize, f64, f64)>,
+    above: Vec<(usize, f64, f64, f64)>,
 }
 
 impl Run {
@@ -447,23 +465,39 @@ impl Run {
 
     /// The width of the old path at x: the wider piece at a joint.
     fn width(&self, x: f64) -> f64 {
+        self.of(&self.w, x)
+    }
+
+    /// The least width the run may have at x: the wider piece at a joint.
+    fn least(&self, x: f64) -> f64 {
+        self.of(&self.l, x)
+    }
+
+    fn of(&self, w: &[f64], x: f64) -> f64 {
         let x = x.clamp(self.v[0].x, self.v[self.v.len() - 1].x);
         self.v
             .windows(2)
-            .zip(&self.w)
+            .zip(w)
             .filter(|(p, _)| p[0].x - 1e-9 <= x && x <= p[1].x + 1e-9)
             .map(|(_, w)| *w)
             .fold(0.0, f64::max)
     }
 
-    /// The width of a new piece from x1 to x2: that of the old piece at its middle.
-    fn width_between(&self, x1: f64, x2: f64) -> f64 {
+    /// The width of a new piece from x1 to x2: that of the old piece at its middle, as it is
+    /// or (`narrow`) the least it may be.
+    fn width_between(&self, x1: f64, x2: f64, narrow: bool) -> f64 {
+        let w = if narrow { &self.l } else { &self.w };
         let mid = ((x1 + x2) / 2.0).clamp(self.v[0].x, self.v[self.v.len() - 1].x);
         self.v
             .windows(2)
-            .zip(&self.w)
+            .zip(w)
             .find(|(v, _)| v[0].x <= mid && mid <= v[1].x)
-            .map_or(self.w[0], |(_, w)| *w)
+            .map_or(w[0], |(_, w)| *w)
+    }
+
+    /// Can the run be narrower somewhere than it is?
+    fn can_narrow(&self) -> bool {
+        self.w.iter().zip(&self.l).any(|(w, l)| *l < *w - 1e-9)
     }
 
     fn has(&self, x: f64) -> bool {
@@ -894,7 +928,7 @@ impl<'a> Scene<'a> {
             let run = rg
                 .as_ref()
                 .filter(|_| free)
-                .and_then(|rg| Self::run(t, ti, &frame, &forms, rg, spot, w));
+                .and_then(|rg| Self::run(board, t, ti, &frame, &forms, rg, spot, w));
             let width = |i: usize| -> f64 {
                 match (&rg, t.elems[i]) {
                     (Some(rg), _) => t.pts[rg[i].0..=rg[i].1]
@@ -963,6 +997,7 @@ impl<'a> Scene<'a> {
                             whole: if a.x <= b.x { (a, b) } else { (b, a) },
                             caps: [i == 0, i + 1 == n],
                             r,
+                            least: r,
                             kind,
                             net,
                             obstacle,
@@ -978,6 +1013,7 @@ impl<'a> Scene<'a> {
                         whole: if a.x <= b.x { (a, b) } else { (b, a) },
                         caps: [true, true],
                         r,
+                        least: r,
                         kind,
                         net,
                         obstacle,
@@ -1032,6 +1068,7 @@ impl<'a> Scene<'a> {
                     whole: (c, c),
                     caps: [true, true],
                     r: r.width(x) / 2.0,
+                    least: r.least(x) / 2.0,
                     kind: Kind::Track,
                     net: Some(r.net),
                     obstacle: None,
@@ -1069,6 +1106,7 @@ impl<'a> Scene<'a> {
             let xs = &stations[r.k.0..=r.k.1];
             r.x0 = xs.iter().map(|&x| r.at(x)).collect();
             r.wk = xs.iter().map(|&x| r.width(x)).collect();
+            r.lk = xs.iter().map(|&x| r.least(x)).collect();
             r.pin = xs
                 .iter()
                 .map(|&x| r.held.iter().any(|h| (h - x).abs() < 1e-6))
@@ -1133,6 +1171,7 @@ impl<'a> Scene<'a> {
     /// The run of track `t` through the window, if it has one: the elements around the one
     /// nearest to the spot that go on along x.
     fn run(
+        board: &Board,
         t: &Track,
         ti: usize,
         frame: &Frame,
@@ -1143,11 +1182,17 @@ impl<'a> Scene<'a> {
     ) -> Option<Run> {
         let local: Vec<Point> = t.pts.iter().map(|p| frame.to(*p)).collect();
         // the direction an element goes in x, if all of it goes one way and along the passage
+        // (a steep piece that goes across by less than the width of the track is a jog in
+        // it, no turn away from the passage)
+        let steep = |i: usize| {
+            local[rg[i].0..=rg[i].1].windows(2).any(|p| {
+                let d = p[1] - p[0];
+                d.x.abs() < SLANT * d.len()
+            })
+        };
         let way = |i: usize| -> Option<f64> {
             let pts = &local[rg[i].0..=rg[i].1];
             let dir = (pts[pts.len() - 1].x - pts[0].x).signum();
-            // (a steep piece that goes across by less than the width of the track is a jog in
-            // it, no turn away from the passage)
             let jog =
                 matches!(t.elems[i], Elem::Line(a, b) if (pts[pts.len() - 1].y - pts[0].y).abs() < t.piece_width(a, b));
             pts.windows(2)
@@ -1187,15 +1232,28 @@ impl<'a> Scene<'a> {
         while e1 + 1 < forms.len() && way(e1 + 1) == Some(dir) && near(e1 + 1) {
             e1 += 1;
         }
+        // a jog lies in a run, not at its end: there the track turns away after all
+        while e0 < seed && steep(e0) {
+            e0 += 1;
+        }
+        while e1 > seed && steep(e1) {
+            e1 -= 1;
+        }
         // ascending in x
         let mut v: Vec<Point> = local[rg[e0].0..=rg[e1].1].to_vec();
         let mut wd: Vec<f64> = t.pts[rg[e0].0..=rg[e1].1]
             .windows(2)
             .map(|p| t.piece_width(p[0], p[1]))
             .collect();
+        let ruled = board.class_of(t.net).min_width.is_some();
+        let mut ld: Vec<f64> = t.pts[rg[e0].0..=rg[e1].1]
+            .windows(2)
+            .map(|p| t.least_width(p[0], p[1], ruled))
+            .collect();
         if dir < 0.0 {
             v.reverse();
             wd.reverse();
+            ld.reverse();
         }
         let n = v.len();
         let span = (v[0].x, v[n - 1].x);
@@ -1217,11 +1275,13 @@ impl<'a> Scene<'a> {
             span,
             v,
             w: wd,
+            l: ld,
             arcs,
             held: Vec::new(),
             k: (0, 0),
             x0: Vec::new(),
             wk: Vec::new(),
+            lk: Vec::new(),
             pin: Vec::new(),
             corner: Vec::new(),
             below: Vec::new(),
@@ -1248,8 +1308,8 @@ impl<'a> Scene<'a> {
                 }
                 if d < 0.0 {
                     let c = self.asked(r.net, f.kind, f.net, f.obstacle);
-                    if c > 0.0 && -d - f.r - c - r.width(x) / 2.0 < 0.5 {
-                        below.push((fi, f.r + c));
+                    if c > 0.0 && -d - f.least - c - r.least(x) / 2.0 < 0.5 {
+                        below.push((fi, f.r + c, f.least + c));
                     }
                     continue;
                 }
@@ -1263,11 +1323,12 @@ impl<'a> Scene<'a> {
                     .filter(|(oy, _)| *oy > y && *oy < mid.y)
                     .collect();
                 between.sort_by(|a, b| a.0.total_cmp(&b.0));
-                let (mut total, mut gaps, mut prev) = (0.0, 0.0, r.net);
+                let (mut total, mut least, mut gaps, mut prev) = (0.0, 0.0, 0.0, r.net);
                 for (_, j) in &between {
                     let o = &self.runs[*j];
                     let c = self.asked(prev, Kind::Track, Some(o.net), None);
                     total += c + o.width(x);
+                    least += c + o.least(x);
                     gaps += if c > 0.0 { 1.0 } else { 0.0 };
                     prev = o.net;
                 }
@@ -1276,9 +1337,10 @@ impl<'a> Scene<'a> {
                     continue;
                 }
                 total += c + f.r;
+                least += c + f.least;
                 gaps += 1.0;
-                if d - total - r.width(x) / 2.0 < 0.5 {
-                    above.push((fi, total, gaps));
+                if d - least - r.least(x) / 2.0 < 0.5 {
+                    above.push((fi, total, gaps, least));
                 }
             }
             self.runs[i].below = below;
@@ -1293,12 +1355,15 @@ struct New {
     from: f64,
     to: f64,
     elems: Vec<Elem>,
+    /// At the least width the run may have there, else as wide as the old copper was.
+    narrow: bool,
 }
 
 /// One laying from one side with one margin.
 struct Try {
-    /// The tracks with new copper.
+    /// The tracks with new copper, and the elements of each that were laid here.
     tracks: Vec<(usize, Track)>,
+    fresh: Vec<(usize, Vec<Elem>)>,
     /// The stretches laid as lines from station to station: lines and arcs did not fit there.
     rough: usize,
 }
@@ -1306,13 +1371,16 @@ struct Try {
 impl Scene<'_> {
     /// The bounds of run `i` at its stations with `margin` on every clearance, and what they are
     /// made of: below what is fixed there and the runs right below it (as `tracks` has them, else
-    /// as they lie), above what is fixed there less what the runs between need.
+    /// as they lie), above what is fixed there less what the runs between need. `narrow`: for
+    /// the run and those still to come at the least widths they may have, else as wide as
+    /// they are.
     fn limits(
         &self,
         geo: &Geometry,
         i: usize,
         margin: f64,
         tracks: &[(usize, Track)],
+        narrow: bool,
     ) -> (Vec<f64>, Vec<f64>, Vec<Bind>, Vec<Bind>) {
         let xs = &self.stations;
         let r = &self.runs[i];
@@ -1359,8 +1427,9 @@ impl Scene<'_> {
             up: bool,
         }
         let mut things: Vec<Thing> = Vec::new();
-        for &(fi, base) in &r.below {
+        for &(fi, wide, least) in &r.below {
             let f = &self.feats[fi];
+            let base = if narrow { least } else { wide };
             things.push(Thing {
                 form: f.form,
                 caps: f.caps,
@@ -1380,8 +1449,10 @@ impl Scene<'_> {
                 up: false,
             });
         }
-        for &(fi, base, gaps) in &r.above {
+        let own = if narrow { &r.lk } else { &r.wk };
+        for &(fi, wide, gaps, least) in &r.above {
             let f = &self.feats[fi];
+            let base = if narrow { least } else { wide };
             things.push(Thing {
                 form: f.form,
                 caps: f.caps,
@@ -1394,7 +1465,7 @@ impl Scene<'_> {
         // where the run goes on straight from a held point that is too near to something
         let held: Vec<(Point, f64)> = (0..n)
             .filter(|&k| r.pin[k])
-            .map(|k| (pt(xs[r.k.0 + k], r.x0[k]), r.wk[k] / 2.0))
+            .map(|k| (pt(xs[r.k.0 + k], r.x0[k]), own[k] / 2.0))
             .collect();
         let straight: Vec<Straight> = held
             .iter()
@@ -1407,7 +1478,7 @@ impl Scene<'_> {
             })
             .collect();
         for k in 0..n {
-            let (x, half) = (xs[r.k.0 + k], r.wk[k] / 2.0);
+            let (x, half) = (xs[r.k.0 + k], own[k] / 2.0);
             let line: Vec<f64> = straight.iter().filter_map(|s| s.at(x)).collect();
             // the straight side of a thing is that of all of it, not of the piece
             let side = |b: Bind, whole: Option<(Point, Point)>| match (b, whole) {
@@ -1458,18 +1529,21 @@ impl Scene<'_> {
     }
 
     /// Lays the runs from the first side outwards with `margin` on every clearance. Err: what
-    /// a run lacks at most, and where.
-    fn lay(&self, geo: &Geometry, margin: f64) -> Result<Try, (f64, Point)> {
+    /// a run lacks at most, and where. `narrow`: a stretch that has no room as wide as the run
+    /// is there is laid at the least width the run may have, and the runs still to come are
+    /// given room at theirs.
+    fn lay(&self, geo: &Geometry, margin: f64, narrow: bool) -> Result<Try, (f64, Point)> {
         let xs = &self.stations;
         let mut new: Vec<Vec<New>> = (0..self.runs.len()).map(|_| Vec::new()).collect();
         let mut tracks: Vec<(usize, Track)> = Vec::new();
+        let mut fresh: Vec<(usize, Vec<Elem>)> = Vec::new();
         let mut worst: Option<(f64, Point)> = None;
         let mut rough = 0;
         // where each run is out of its bounds as the copper lies
         let before: Vec<Vec<bool>> = (0..self.runs.len())
             .map(|i| {
                 let r = &self.runs[i];
-                let (lo, hi, ..) = self.limits(geo, i, margin, &[]);
+                let (lo, hi, ..) = self.limits(geo, i, margin, &[], false);
                 (0..lo.len())
                     .map(|k| r.x0[k] < lo[k] - EPS || r.x0[k] > hi[k] + EPS)
                     .collect()
@@ -1478,7 +1552,10 @@ impl Scene<'_> {
         for &i in &self.order {
             let r = &self.runs[i];
             let n = r.k.1 - r.k.0 + 1;
-            let (lo, hi, lob, hib) = self.limits(geo, i, margin, &tracks);
+            // its bounds as wide as it is, and at the least width it may have
+            let wide = self.limits(geo, i, margin, &tracks, false);
+            let thin = (narrow && r.can_narrow()).then(|| self.limits(geo, i, margin, &tracks, true));
+            let (lo, hi) = (&wide.0, &wide.1);
             let was = &before[i];
             // where it is out of its bounds, in the window
             let x = |k: usize| xs[r.k.0 + k];
@@ -1497,9 +1574,11 @@ impl Scene<'_> {
             let out = |k: usize| r.x0[k] < lo[k] - EPS || r.x0[k] > hi[k] + EPS;
             // beside the window only where a run laid before it has pushed it out
             let dirty: Vec<bool> = (0..n).map(|k| !r.pin[k] && out(k) && (seen(k) || !was[k])).collect();
+            let (least_lo, least_hi) = thin.as_ref().map_or((lo, hi), |t| (&t.0, &t.1));
             for k in (0..n).filter(|&k| !r.pin[k] && (seen(k) || !was[k])) {
-                if lo[k] > hi[k] + EPS && worst.is_none_or(|w| lo[k] - hi[k] > w.0) {
-                    worst = Some((lo[k] - hi[k], self.frame.from(pt(x(k), r.x0[k]))));
+                let lack = least_lo[k] - least_hi[k];
+                if lack > EPS && worst.is_none_or(|w| lack > w.0) {
+                    worst = Some((lack, self.frame.from(pt(x(k), r.x0[k]))));
                 }
             }
             if worst.is_some() || !dirty.contains(&true) {
@@ -1548,6 +1627,14 @@ impl Scene<'_> {
                 k = b + 1;
             }
             for (a, b) in stretches {
+                // narrow where the stretch has no room as wide as the run is: between its
+                // bounds, or at a point where it is held and has less than the clearance
+                let tight =
+                    thin.is_some() && (a..=b).any(|k| if r.pin[k] { out(k) } else { wide.0[k] > wide.1[k] + EPS });
+                let (lo, hi, lob, hib) = match &thin {
+                    Some(t) if tight => (&t.0, &t.1, &t.2, &t.3),
+                    _ => (&wide.0, &wide.1, &wide.2, &wide.3),
+                };
                 // held at both ends and at every joint between
                 let mut pins: Vec<usize> = (a..=b).filter(|&k| k == a || k == b || r.pin[k]).collect();
                 pins.dedup();
@@ -1628,20 +1715,23 @@ impl Scene<'_> {
                     from: x(a),
                     to: x(b),
                     elems,
+                    narrow: tight,
                 });
             }
             if !new[i].is_empty() {
-                tracks.push((r.ti, self.track(&geo.tracks[r.ti], r, &new[i])));
+                let (t, laid) = self.track(&geo.tracks[r.ti], r, &new[i]);
+                tracks.push((r.ti, t));
+                fresh.push((r.ti, laid));
             }
         }
         match worst {
             Some(w) => Err(w),
-            None => Ok(Try { tracks, rough }),
+            None => Ok(Try { tracks, fresh, rough }),
         }
     }
 
     /// The track of a run with its new stretches in place of the old copper there.
-    fn track(&self, old: &Track, r: &Run, new: &[New]) -> Track {
+    fn track(&self, old: &Track, r: &Run, new: &[New]) -> (Track, Vec<Elem>) {
         let f = &self.frame;
         let turned = |e: Elem| match e {
             Elem::Line(a, b) => Elem::Line(b, a),
@@ -1685,10 +1775,11 @@ impl Scene<'_> {
         let mut at = f64::NEG_INFINITY;
         for n in new {
             keep(at, n.from, &mut out);
-            // the places where the old width changes: a new line is cut there
+            // the places where the width changes: a new line is cut there
+            let widths = if n.narrow { &r.l } else { &r.w };
             let cuts: Vec<f64> =
                 r.v.windows(2)
-                    .zip(r.w.windows(2))
+                    .zip(widths.windows(2))
                     .filter(|(p, w)| (w[0] - w[1]).abs() > 1e-12 && p[1].x > n.from + 1e-6 && p[1].x < n.to - 1e-6)
                     .map(|(p, _)| p[1].x)
                     .collect();
@@ -1715,7 +1806,7 @@ impl Scene<'_> {
                     let (p, q) = match piece {
                         Elem::Line(p, q) | Elem::Arc(p, _, q) => (p, q),
                     };
-                    let w = r.width_between(p.x, q.x);
+                    let w = r.width_between(p.x, q.x, n.narrow);
                     out.push((
                         match piece {
                             Elem::Line(p, q) => Elem::Line(f.from(p), f.from(q)),
@@ -1767,45 +1858,63 @@ impl Scene<'_> {
             .chain(old.elems[r.e.1 + 1..].iter().copied())
             .collect();
         t.pts = flatten(&t.elems);
-        // the widths: every new piece is as wide as the old copper was there
-        let pieces: Vec<(Point, Point, f64)> = out
-            .iter()
-            .filter(|e| e.2)
-            .flat_map(|(e, w, _)| {
-                let pts = flatten(&[*e]);
-                let chord = (pts[0], pts[pts.len() - 1], *w);
-                pts.windows(2)
-                    .map(|p| (p[0], p[1], *w))
-                    .chain([chord])
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        t.fitted
-            .retain(|(z, _)| !pieces.iter().any(|(a, b, _)| z.touches_seg(*a, *b)));
-        for (a, b, w) in pieces {
-            if (t.piece_width(a, b) - w).abs() > 1e-12 {
-                let mut z = Rect::empty();
-                z.add(a.lerp(b, 0.5));
-                t.fitted.push((z.grow(1e-6), w));
-            }
-        }
-        t
+        // the widths: every new piece is as wide as the old copper was there, or as narrow as
+        // the run may be
+        let new: Vec<(Elem, f64)> = out.iter().filter(|e| e.2).map(|(e, w, _)| (*e, *w)).collect();
+        set_widths(&mut t, &new);
+        (t, new.into_iter().map(|e| e.0).collect())
     }
 }
 
-/// The best laying of a scene: with the full margin if it fits, else with the largest that does.
+/// Gives these elements of a track these widths.
+fn set_widths(t: &mut Track, elems: &[(Elem, f64)]) {
+    let pieces: Vec<(Point, Point, f64)> = elems
+        .iter()
+        .flat_map(|(e, w)| {
+            let pts = flatten(&[*e]);
+            let chord = (pts[0], pts[pts.len() - 1], *w);
+            pts.windows(2)
+                .map(|p| (p[0], p[1], *w))
+                .chain([chord])
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    t.fitted
+        .retain(|(z, _)| !pieces.iter().any(|(a, b, _)| z.touches_seg(*a, *b)));
+    for (a, b, w) in pieces {
+        if (t.piece_width(a, b) - w).abs() > 1e-12 {
+            let mut z = Rect::empty();
+            z.add(a.lerp(b, 0.5));
+            t.fitted.push((z.grow(1e-6), w));
+        }
+    }
+}
+
+/// The best laying of a scene: with the full margin and every track as wide as it is, if that
+/// fits; else with the full margin and the tracks narrow where they have to be and may be;
+/// else with the largest margin that fits so.
 fn best(scene: &Scene, geo: &Geometry) -> Result<(Try, f64), (f64, Point)> {
-    match scene.lay(geo, MARGIN) {
+    let narrow = scene.runs.iter().any(|r| r.can_narrow());
+    match scene.lay(geo, MARGIN, false) {
         Ok(t) => Ok((t, MARGIN)),
-        Err(full) => {
-            let mut found = match scene.lay(geo, LEAST) {
+        Err(wide) => {
+            // (what is missing is told for the narrowest way that was tried)
+            let full = if narrow {
+                match scene.lay(geo, MARGIN, true) {
+                    Ok(t) => return Ok((t, MARGIN)),
+                    Err(e) => e,
+                }
+            } else {
+                wide
+            };
+            let mut found = match scene.lay(geo, LEAST, narrow) {
                 Ok(t) => (t, LEAST),
                 Err(_) => return Err(full),
             };
             let (mut lo, mut hi) = (LEAST, MARGIN);
             for _ in 0..6 {
                 let mid = (lo + hi) / 2.0;
-                match scene.lay(geo, mid) {
+                match scene.lay(geo, mid, narrow) {
                     Ok(t) => {
                         found = (t, mid);
                         lo = mid;
@@ -1877,12 +1986,125 @@ pub fn lay(board: &Board, geo: &Geometry, violations: &[Violation], p: &Passage)
         out.tracks[ti] = track;
         changed.push(ti);
     }
+    widen(board, &mut out, &t.fresh);
     Ok(Laid {
         geo: out,
         tracks: changed,
         margin,
         rough,
     })
+}
+
+/// The width of an element of a track: that of its widest piece.
+fn width_of(t: &Track, e: &Elem) -> f64 {
+    flatten(&[*e])
+        .windows(2)
+        .map(|p| t.piece_width(p[0], p[1]))
+        .fold(0.0, f64::max)
+}
+
+/// The pieces laid here (`fresh`: per track its new elements) that are narrower than their
+/// tracks get the full width where there is room for it: where the piece keeps every clearance
+/// and [`MARGIN`] at that width, with the new pieces of the other tracks taken as wide as
+/// their tracks too, so that it does not matter which track is asked first. An arc is widened
+/// as a whole or not at all. A line is widened from each end as far as the room goes and cut
+/// there: the width changes on a straight piece. A wide piece is at least as long as it is
+/// wide.
+fn widen(board: &Board, geo: &mut Geometry, fresh: &[(usize, Vec<Elem>)]) {
+    let narrow: Vec<(usize, Vec<Elem>)> = fresh
+        .iter()
+        .map(|(ti, list)| {
+            let t = &geo.tracks[*ti];
+            let list = list
+                .iter()
+                .filter(|e| t.elems.contains(e) && width_of(t, e) < t.width - 1e-9)
+                .copied()
+                .collect();
+            (*ti, list)
+        })
+        .collect();
+    if narrow.iter().all(|(_, list)| list.is_empty()) {
+        return;
+    }
+    // the copper with every one of them at the width of its track
+    let mut full = geo.clone();
+    for (ti, list) in &narrow {
+        let w = full.tracks[*ti].width;
+        let list: Vec<(Elem, f64)> = list.iter().map(|e| (*e, w)).collect();
+        set_widths(&mut full.tracks[*ti], &list);
+    }
+    let judge = check::Copper::new(board, &full);
+    for (ti, list) in &narrow {
+        let ti = *ti;
+        if list.is_empty() {
+            continue;
+        }
+        let t = geo.tracks[ti].clone();
+        let w = t.width;
+        // (the margin is asked in full: where a cut is searched for, the tolerance of the
+        // check is not there to be used up)
+        let fits = |a: Point, b: Point, arc: Option<(Point, f64)>| {
+            judge.keeps(ti, t.net, t.layer, w / 2.0, a, b, arc, MARGIN + check::TOL)
+        };
+        let mut elems: Vec<Elem> = Vec::with_capacity(t.elems.len() + 4);
+        let mut widths: Vec<(Elem, f64)> = Vec::new();
+        for e in &t.elems {
+            if !list.contains(e) {
+                elems.push(*e);
+                continue;
+            }
+            let has = width_of(&t, e);
+            match *e {
+                Elem::Arc(a, m, b) => {
+                    let ok = arc_from_three(a, m, b).is_some_and(|(c, rad, ..)| {
+                        arc_polyline(a, m, b, 0.001)
+                            .windows(2)
+                            .all(|p| fits(p[0], p[1], Some((c, rad))))
+                    });
+                    elems.push(*e);
+                    widths.push((*e, if ok { w } else { has }));
+                }
+                Elem::Line(a, b) => {
+                    let len = a.dist(b);
+                    if fits(a, b, None) {
+                        elems.push(*e);
+                        widths.push((*e, w));
+                        continue;
+                    }
+                    // how far from one end the full width fits
+                    let reach = |from: Point, to: Point| -> f64 {
+                        let at = |d: f64| from.lerp(to, d / len);
+                        if len <= w || !fits(from, at(w), None) {
+                            return 0.0;
+                        }
+                        let (mut lo, mut hi) = (w, len);
+                        while hi - lo > 1e-4 {
+                            let mid = (lo + hi) / 2.0;
+                            if fits(from, at(mid), None) {
+                                lo = mid;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                        lo
+                    };
+                    let d0 = reach(a, b);
+                    let d1 = reach(b, a).min(len - d0);
+                    let (p, q) = (a.lerp(b, d0 / len), b.lerp(a, d1 / len));
+                    for (from, to, width) in [(a, p, w), (p, q, has), (q, b, w)] {
+                        if from.dist(to) > 1e-9 {
+                            elems.push(Elem::Line(from, to));
+                            widths.push((Elem::Line(from, to), width));
+                        }
+                    }
+                }
+            }
+        }
+        let t = &mut geo.tracks[ti];
+        t.elems = elems;
+        t.pts = flatten(&t.elems);
+        set_widths(t, &widths);
+    }
 }
 
 /// Every spot of the check where the tracks can give way gets its tracks laid again, the
@@ -2048,6 +2270,62 @@ pub(crate) mod tests {
             ..Default::default()
         };
         (b, geo)
+    }
+
+    /// The lines of a track with the width of each: (from, to, width).
+    fn lines(t: &Track) -> Vec<(Point, Point, f64)> {
+        t.elems
+            .iter()
+            .map(|e| match *e {
+                Elem::Line(a, b) => (a, b, t.piece_width(a, b)),
+                Elem::Arc(a, _, b) => (a, b, f64::NAN),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_track_wider_than_the_gap_between_two_pads_is_narrow_there_and_no_further() {
+        // Two pads with 0.606 between their faces and one straight track through the middle.
+        // The track is of a class 0.25 wide and may be 0.2 at its pads: at 0.25 it is 22 um
+        // short on both sides, at 0.2 it has the clearance and 3 um.
+        let (b, mut geo) = between_pads(0.606, &[]);
+        let c = b.class_of(2).clearance;
+        let x = 5.2 + 0.303;
+        let mut t = track(&[pt(x, 3.0), pt(x, 7.0)], 2, 0.25);
+        t.neck_w = 0.2;
+        geo.tracks.push(t);
+        let before = check::check(&b, &geo);
+        assert_eq!(before.len(), 2, "{before:?}");
+        assert!(before.iter().all(|v| (v.required - v.actual - 0.022).abs() < 1e-9));
+        let (l, after) = laid(&b, &geo);
+        assert!(after.is_empty(), "{after:?}");
+        assert!((l.margin - MARGIN).abs() < 1e-12);
+        // The same line in three pieces: 0.25, 0.2, 0.25. The wide pieces end where their round
+        // ends have the clearance and the margin to the corners of the pads: 0.125 + 0.2 +
+        // 0.002 from a corner that lies 0.303 beside the line, so sqrt(0.327^2 - 0.303^2)
+        // = 0.12296 before the pads begin and behind where they end.
+        let got = lines(&l.geo.tracks[0]);
+        assert_eq!(got.len(), 3, "{got:?}");
+        let reach = (0.327f64 * 0.327 - 0.303 * 0.303).sqrt();
+        let want = [3.0, 4.8 - reach, 5.2 + reach, 7.0];
+        for (k, (p, q, w)) in got.iter().enumerate() {
+            assert!((p.x - x).abs() < 1e-9 && (q.x - x).abs() < 1e-9, "{got:?}");
+            assert!(
+                (p.y - want[k]).abs() < 2e-4 && (q.y - want[k + 1]).abs() < 2e-4,
+                "{got:?}"
+            );
+            assert!((w - [0.25, 0.2, 0.25][k]).abs() < 1e-12, "{got:?}");
+        }
+        // and never nearer than the margin asks
+        for (corner, cut) in [(pt(5.2, 4.8), got[0].1), (pt(5.2, 5.2), got[2].0)] {
+            assert!(corner.dist(cut) - 0.125 >= c + MARGIN - 1e-9);
+        }
+        // under a rule that lets the class be narrow only in its zones there is no way
+        let mut ruled = b.clone();
+        ruled.classes[0].min_width = Some(0.25);
+        let found = check::check(&ruled, &geo);
+        let all = passage::passages(&ruled, &geo, &found);
+        assert!(all.iter().all(|p| !p.gives_way(&ruled, &geo, LEAST)));
     }
 
     #[test]
@@ -2228,6 +2506,95 @@ pub(crate) mod tests {
         }
         // the exit pieces and the first track lie as they did
         for k in [0, 3, 4, 5] {
+            assert_eq!(g.tracks[k].pts, geo.tracks[k].pts);
+        }
+    }
+
+    #[test]
+    fn a_row_of_wide_tracks_stays_narrow_through_its_turn_and_widens_where_the_tracks_part() {
+        // the row of the case before, with tracks of a class 0.25 wide that may be 0.2 at
+        // their pads: side by side at 0.4 mm there is room for 0.2 and no more
+        let b = crate::exit::tests::row_board(3, 0.4, 0.2, 0.2, 0.25);
+        let (w, neck, c) = (0.25, 0.2, 0.2);
+        let x = |k: usize| 9.6 + 0.4 * k as f64;
+        let pivot = pt(x(0), 8.6);
+        let d = pt(-1.0, 0.0).rotate(-40f64.to_radians());
+        let out = pt(d.y, -d.x);
+        // the far ends lie 0.5 apart: the tracks part by 0.1 over three millimetres
+        let mut tracks: Vec<Track> = (0..3)
+            .map(|k| {
+                let k = k as f64;
+                let end = pivot + d * 3.0 + out * (0.5 * k);
+                let from = pt(9.6 + 0.4 * k, 8.6);
+                let mut t = if k == 0.0 {
+                    track(&[from, end], 0, w)
+                } else {
+                    track(&[from, from + pt(-0.1, 0.2 * k), end], k as NetId, w)
+                };
+                t.neck_w = neck;
+                t
+            })
+            .collect();
+        tracks.extend((0..3).map(|k| track(&[pt(x(k), 8.0), pt(x(k), 8.6)], k as NetId, neck)));
+        let geo = Geometry {
+            tracks,
+            ..Default::default()
+        };
+        assert!(check::check(&b, &geo).len() >= 2);
+        let mut g = geo.clone();
+        let report = spread(&b, &mut g);
+        assert!(check::check(&b, &g).is_empty(), "{report:?}");
+        assert_eq!(report.margin, Some(MARGIN));
+        // the turn is that of tracks 0.2 wide: arcs about the end of the first exit piece,
+        // each 0.2 + 0.2 and the margin outside the one before
+        let step = neck + c + MARGIN;
+        for k in 1..3 {
+            let t = &g.tracks[k];
+            assert_eq!(shape(t), "lall", "track {k}");
+            let Elem::Arc(a, m, e) = t.elems[1] else { unreachable!() };
+            let (centre, rad, ..) = arc_from_three(a, m, e).unwrap();
+            assert!(
+                centre.dist(pivot) < 1e-6 && (rad - k as f64 * step).abs() < 1e-6,
+                "track {k}: {centre:?} {rad}"
+            );
+            let widths: Vec<f64> = t.elems.iter().map(|e| width_of(t, e)).collect();
+            assert_eq!(widths, vec![neck, neck, neck, w], "track {k}");
+        }
+        assert_eq!(shape(&g.tracks[0]), "ll");
+        assert_eq!(
+            g.tracks[0]
+                .elems
+                .iter()
+                .map(|e| width_of(&g.tracks[0], e))
+                .collect::<Vec<_>>(),
+            vec![neck, w]
+        );
+        // A track is 0.25 wide from the place on where it lies 0.25, the clearance and the
+        // margin from the middle of its nearest neighbour (which may be 0.25 wide there as
+        // well), and the width changes on the straight piece. The place is found to 0.1 um
+        // along the line; the tracks part by a thirtieth of that.
+        for k in 0..3 {
+            let t = &g.tracks[k];
+            let Some(&Elem::Line(from, to)) = t.elems.last() else {
+                unreachable!()
+            };
+            let Elem::Line(before, _) = t.elems[t.elems.len() - 2] else {
+                unreachable!()
+            };
+            assert!(
+                crate::geom::orient(before, from, to).abs() < 1e-9,
+                "track {k}: a corner"
+            );
+            let near = (0..3)
+                .filter(|j| *j != k)
+                .flat_map(|j| g.tracks[j].pts.windows(2))
+                .map(|p| point_seg_dist(from, p[0], p[1]))
+                .fold(f64::INFINITY, f64::min);
+            let want = w + c + MARGIN;
+            assert!(near >= want - 1e-9 && near < want + 1e-5, "track {k}: {near}");
+        }
+        // the exit pieces lie as they did
+        for k in 3..6 {
             assert_eq!(g.tracks[k].pts, geo.tracks[k].pts);
         }
     }

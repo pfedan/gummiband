@@ -14,8 +14,9 @@
 //!
 //! **Needed** is the sum of the widths of what lies between the walls and of the clearances
 //! between neighbours, each by the rule the check uses for that pair. A track counts with the
-//! least width it may have there: what it has grown beyond its class is the geometry's to take
-//! back, and is given beside the room. **Available** is the
+//! least width it may have there: what it is wider than that (grown beyond its class, or at
+//! the width of its class where it may be at its neck width) is the geometry's to take back,
+//! and is given beside the room. **Available** is the
 //! distance from wall to wall along the cut. A track on a pad of its own net needs no room
 //! beside that pad as far as the pad covers it; it counts with what it sticks out when it lies
 //! on the middle, and with half of what the pad is wider as slack.
@@ -103,8 +104,10 @@ pub struct Thing {
     /// second. A track: its centre line minus and plus half its width.
     pub lo: f64,
     pub hi: f64,
-    /// A track: what it is wider here than its class asks (a width fitted to the room). That
-    /// much the geometry can take back, so it is not counted as needed.
+    /// A track: what it is wider here than it has to be: than its class asks (a width fitted
+    /// to the room), and than its neck width where it may narrow
+    /// ([`crate::realize::Track::least_width`]). That much the geometry can take back, so it
+    /// is not counted as needed.
     pub grown: f64,
     #[serde(skip)]
     obstacle: Option<usize>,
@@ -337,7 +340,8 @@ impl Passage {
     /// Can the tracks give way here, with the vias where they are and `margin` on top of every
     /// clearance? With a via among the two items: it has room where it is, as one body through
     /// all layers. Without: the passage has room between the nearest vias or walls on both
-    /// sides, at the widths the tracks have.
+    /// sides, at the least widths the tracks may have there (the group that is laid gives each
+    /// piece the width it may have, [`crate::spread`]).
     pub fn gives_way(&self, board: &Board, geo: &Geometry, margin: f64) -> bool {
         if self.crossing {
             return false;
@@ -350,8 +354,7 @@ impl Passage {
                 local.via_at(vi, v.at, margin, &[self.dir], Some(-PASS)).0 >= -PASS
             });
         }
-        let room = self.room_vias_stay(margin);
-        room >= 0.0 && room >= self.grown_vias_stay()
+        self.room_vias_stay(margin) >= 0.0
     }
 
     /// The kind of the finding: the first word of what the check calls it.
@@ -586,21 +589,32 @@ impl<'a> Local<'a> {
             if t.layer != layer || Some(t.net) == not {
                 continue;
             }
-            let mut hits: Vec<(f64, f64)> = t
+            // (where the cut meets it, the width it has there, the least it may have there)
+            let kind = if t.origin.is_some() { Kind::Kept } else { Kind::Track };
+            let ruled = board.class_of(t.net).min_width.is_some();
+            let mut hits: Vec<(f64, f64, f64)> = t
                 .pts
                 .windows(2)
-                .filter_map(|w| cross_seg(o, n, w[0], w[1]).map(|x| (x, t.piece_width(w[0], w[1]))))
+                .filter_map(|w| {
+                    cross_seg(o, n, w[0], w[1]).map(|x| {
+                        let has = t.piece_width(w[0], w[1]);
+                        let least = match kind {
+                            Kind::Track => t.least_width(w[0], w[1], ruled),
+                            _ => has.min(t.width),
+                        };
+                        (x, has, least)
+                    })
+                })
                 .collect();
             hits.sort_by(|a, b| a.0.total_cmp(&b.0));
             hits.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
-            let kind = if t.origin.is_some() { Kind::Kept } else { Kind::Track };
-            out.extend(hits.into_iter().map(|(x, w)| Thing {
+            out.extend(hits.into_iter().map(|(x, w, least)| Thing {
                 kind,
                 net: Some(t.net),
                 lo: x - w / 2.0,
                 hi: x + w / 2.0,
                 obstacle: None,
-                grown: (w - t.width).max(0.0),
+                grown: (w - least).max(0.0),
                 id: ti,
             }));
         }
