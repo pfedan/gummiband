@@ -40,6 +40,9 @@ pub struct RelaxConfig {
     /// Finish with the shortcuts of [`taut`]. Off, the tracks stay chains of short pieces where
     /// the rounds left them, and a clearance check can say where it hurts.
     pub taut: bool,
+    /// The shortcuts build the track from its pivots where they can ([`crate::pivot`]). Off in
+    /// the relaxations of the search; [`pivot_pass`] does it once, on the finished copper.
+    pub pivots: bool,
 }
 
 impl Default for RelaxConfig {
@@ -53,6 +56,7 @@ impl Default for RelaxConfig {
             gpu: knobs::GPU.on(),
             via_edge: false,
             taut: true,
+            pivots: false,
         }
     }
 }
@@ -1739,7 +1743,7 @@ pub fn relax_while(
     }
     let t_taut = std::time::Instant::now();
     let tracks: Vec<(Vec<Point>, Vec<Elem>)> = if cfg.taut {
-        prof::time(Slot::Taut, || taut(board, sub, geo, tracks, cfg, &awake, &rails))
+        prof::time(Slot::Taut, || taut(board, sub, geo, tracks, cfg, &awake, &rails, None))
     } else {
         tracks
             .into_iter()
@@ -1953,7 +1957,19 @@ fn taut(
     cfg: &RelaxConfig,
     awake: &[bool],
     rails: &[[Option<Rail>; 2]],
+    last: Option<&mut [usize]>,
 ) -> Vec<(Vec<Point>, Vec<Elem>)> {
+    // the last pass (`last`: what becomes of each track, as in `pivot::OUTCOMES`) keeps the
+    // copper of a track that is not built from its pivots
+    let only_built = last.is_some();
+    let mut outcome = last;
+    let mut note = |ti: usize, what: usize| {
+        if let Some(o) = outcome.as_deref_mut()
+            && o[ti] != crate::pivot::NEW_FORM
+        {
+            o[ti] = what;
+        }
+    };
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
     let bounds = board.bbox().grow(5.0);
     let mut result: Vec<(Vec<Point>, Vec<Elem>)> = Vec::with_capacity(tracks.len());
@@ -2107,6 +2123,18 @@ fn taut(
         };
         let pts = &tracks[ti];
         let n = pts.len();
+        if only_built && (n <= 2 || ruled) {
+            note(
+                ti,
+                if ruled {
+                    crate::pivot::RULED
+                } else {
+                    crate::pivot::STRAIGHT
+                },
+            );
+            result.push((t.pts.clone(), t.elems.clone()));
+            continue;
+        }
         if n <= 2 {
             let p = cut(simplify(pts, 0.0005));
             result.push((p.clone(), p.windows(2).map(|w| Elem::Line(w[0], w[1])).collect()));
@@ -2125,7 +2153,7 @@ fn taut(
         }
         let mut out = vec![pts[0]];
         let mut i = 0;
-        while i < n - 1 {
+        while !only_built && i < n - 1 {
             let n = stops.iter().find(|&&k| k > i).map_or(n, |&k| k + 1);
             // farthest visible point: exponential search, then bisection (visibility along a
             // band is close to monotone, so this needs a handful of checks instead of a scan)
@@ -2159,50 +2187,172 @@ fn taut(
             out.push(pts[j]);
             i = j;
         }
-        let out = cut(simplify(&out, 0.0005));
-        // round the corners with the largest arcs that keep all clearances
-        let mut elems: Vec<Elem> = Vec::new();
-        let mut flat: Vec<Point> = vec![out[0]];
-        let mut cur = out[0];
-        for i in 1..out.len() {
-            let b = out[i];
-            if i + 1 < out.len() {
-                let (a, c) = (out[i - 1], out[i + 1]);
+        // the last pass starts from the corners the copper has, not from a new search
+        let mut rounded: crate::pivot::Rounded = Default::default();
+        let out = if only_built {
+            let (out, arcs) = crate::pivot::corners_of(pts[0], &t.elems);
+            rounded = arcs;
+            out
+        } else {
+            out
+        };
+        let mut out = cut(simplify(&out, 0.0005));
+        // In the last pass the copper keeps to a rail up to 0.2 mm before the rail's end: a point
+        // there that stays, so that an arc around the corner after it can begin on the rail.
+        // (That corner lies a few micrometres inside the circle of such an arc, and no tangent
+        // starts there; from 0.2 mm before it the tangent turns away by about one degree.)
+        let mut rail_nodes: Vec<Point> = Vec::new();
+        if only_built && let Some(ends) = rails.get(ti) {
+            let node = |out: &mut Vec<Point>, r: &Rail| -> Option<Point> {
+                let held = out.iter().take_while(|p| r.holds(**p)).count();
+                if held == 0 || held >= out.len() {
+                    return None;
+                }
+                let (a, b) = (out[held - 1], out[held]);
+                let (mut lo, mut hi) = (0.0, 1.0);
+                for _ in 0..20 {
+                    let mid = (lo + hi) / 2.0;
+                    if r.holds(a.lerp(b, mid)) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                // where the copper leaves the rail, as a length along it, and the point 0.2 mm
+                // before that (half way from the start if the rail is shorter than 0.4 mm)
+                let mut way: Vec<Point> = out[..held].to_vec();
+                way.push(a.lerp(b, lo));
+                let total: f64 = way.windows(2).map(|w| w[0].dist(w[1])).sum();
+                let mut left = (total - 0.2).max(total / 2.0);
+                for (k, w) in way.windows(2).enumerate() {
+                    let d = w[0].dist(w[1]);
+                    if left <= d {
+                        if left < 1e-6 || d - left < 1e-6 {
+                            return None;
+                        }
+                        let p = w[0].lerp(w[1], left / d);
+                        out.insert(k + 1, p);
+                        return Some(p);
+                    }
+                    left -= d;
+                }
+                None
+            };
+            if let Some(r) = &ends[0] {
+                rail_nodes.extend(node(&mut out, r));
+            }
+            if let Some(r) = &ends[1] {
+                out.reverse();
+                rail_nodes.extend(node(&mut out, r));
+                out.reverse();
+            }
+        }
+        let out = out;
+        // the corner a-b-c, reached from `cur`, with the largest arc that keeps all clearances:
+        // its ends, its middle and its chords
+        // (`share` of each leg at most: 0.45 leaves a tenth of a leg between two arcs)
+        let fillet =
+            |a: Point, b: Point, c: Point, cur: Point, share: f64, pieces: &[(Point, Point, u32)], idx: &GridIndex| {
                 let (u, v) = ((a - b).norm(), (c - b).norm());
                 let cos = u.dot(v).clamp(-1.0, 1.0);
                 let theta = math::acos(cos); // interior angle
-                if theta < std::f64::consts::PI - 0.03 && theta > 0.05 {
-                    let half = theta / 2.0;
-                    let t_max = (a.dist(b) * 0.45).min(c.dist(b) * 0.45).min(b.dist(cur));
-                    let mut r = t_max * math::tan(half);
-                    let mut done = false;
-                    while r >= 0.1 && !done {
-                        let t = r / math::tan(half);
-                        let (p1, p2) = (b + u * t, b + v * t);
-                        let bis = (u + v).norm();
-                        let center = b + bis * (r / math::sin(half));
-                        let mid = center - bis * r;
-                        let arc = crate::geom::arc_polyline(p1, mid, p2, 0.002);
-                        if arc.windows(2).all(|w| clear(w[0], w[1], &pieces, &idx)) {
-                            if cur.dist(p1) > 1e-6 {
-                                elems.push(Elem::Line(cur, p1));
-                            }
-                            elems.push(Elem::Arc(p1, mid, p2));
-                            flat.extend_from_slice(&arc);
-                            cur = p2;
-                            done = true;
-                        }
-                        r *= 0.5;
-                    }
-                    if done {
-                        continue;
-                    }
+                if !(theta < std::f64::consts::PI - 0.03 && theta > 0.05) {
+                    return None;
                 }
+                let half = theta / 2.0;
+                let t_max = (a.dist(b) * share).min(c.dist(b) * share).min(b.dist(cur));
+                let mut r = t_max * math::tan(half);
+                while r >= 0.1 {
+                    let t = r / math::tan(half);
+                    let (p1, p2) = (b + u * t, b + v * t);
+                    let bis = (u + v).norm();
+                    let center = b + bis * (r / math::sin(half));
+                    let mid = center - bis * r;
+                    let arc = crate::geom::arc_polyline(p1, mid, p2, crate::pivot::FLAT);
+                    if arc.windows(2).all(|w| clear(w[0], w[1], pieces, idx)) {
+                        return Some((p1, mid, p2, arc));
+                    }
+                    r *= 0.5;
+                }
+                None
+            };
+        // one arc around each pivot of the track, where that keeps all clearances
+        let mut why = crate::pivot::GIVEN_UP;
+        let built = if cfg.pivots && !ruled {
+            let scene = crate::pivot::Scene {
+                board,
+                sub,
+                geo,
+                vias: &routing_vias,
+                pieces: &pieces,
+                idx: &idx,
+                m,
+            };
+            let fixed: Vec<Point> = if only_built {
+                rail_nodes.clone()
+            } else {
+                stops.iter().map(|&k| pts[k]).collect()
+            };
+            let built = crate::pivot::rebuild(
+                &scene,
+                ti,
+                &out,
+                &fixed,
+                &rounded,
+                &|a, b| clear(a, b, &pieces, &idx),
+                &|a, b, c, cur| fillet(a, b, c, cur, 0.5, &pieces, &idx),
+            );
+            if let Err(e) = built {
+                why = e;
             }
-            elems.push(Elem::Line(cur, b));
-            flat.push(b);
-            cur = b;
+            built.ok()
+        } else {
+            None
+        };
+        // the last pass keeps the copper of a track that is not built from pivots, and of one
+        // whose new form is no shorter list of pieces
+        if only_built {
+            let count = |e: &[Elem]| {
+                let len = |e: &Elem| -> f64 {
+                    crate::realize::flatten(std::slice::from_ref(e))
+                        .windows(2)
+                        .map(|w| w[0].dist(w[1]))
+                        .sum()
+                };
+                (e.iter().filter(|e| len(e) < 0.05).count(), e.len())
+            };
+            let better = built.as_ref().is_some_and(|(_, e)| count(e) < count(&t.elems));
+            if !better {
+                note(ti, if built.is_some() { crate::pivot::NO_FEWER } else { why });
+                result.push((t.pts.clone(), t.elems.clone()));
+                continue;
+            }
+            note(ti, crate::pivot::NEW_FORM);
         }
+        // else round the corners
+        let (mut flat, elems) = built.unwrap_or_else(|| {
+            let mut elems: Vec<Elem> = Vec::new();
+            let mut flat: Vec<Point> = vec![out[0]];
+            let mut cur = out[0];
+            for i in 1..out.len() {
+                let b = out[i];
+                if i + 1 < out.len()
+                    && let Some((p1, mid, p2, arc)) = fillet(out[i - 1], b, out[i + 1], cur, 0.45, &pieces, &idx)
+                {
+                    if cur.dist(p1) > 1e-6 {
+                        elems.push(Elem::Line(cur, p1));
+                    }
+                    elems.push(Elem::Arc(p1, mid, p2));
+                    flat.extend_from_slice(&arc);
+                    cur = p2;
+                    continue;
+                }
+                elems.push(Elem::Line(cur, b));
+                flat.push(b);
+                cur = b;
+            }
+            (flat, elems)
+        });
         flat.dedup_by(|a, b| a.dist(*b) < 1e-9);
         for &id in &owned[ti] {
             pieces[id as usize].2 = u32::MAX;
@@ -2213,6 +2363,133 @@ fn taut(
         result.push((flat, elems));
     }
     result
+}
+
+/// The finished copper once more through the shortcuts of [`taut`], each track built from its
+/// pivots ([`crate::pivot`]): one arc around each pad corner, via or bundle it bends around, and
+/// tangent lines. The relaxation has settled where the vias are and on which side of everything
+/// each track passes; this step only gives a track its last form, and moves no via.
+///
+/// A track keeps the copper it has where it bends around nothing fixed, where the new form is
+/// no shorter list of pieces, where its widths are fitted to zones, and where it is soft copper
+/// or part of a tuning pattern. Every new line and arc passes the clearance test of the
+/// shortcuts. On top of that the own check has the last word: two nets that have more findings
+/// between them than before go back to the copper they had, and if the board as a whole still
+/// has more findings after that, all of it does. Returns the number of tracks with a new form.
+pub fn pivot_pass(board: &Board, sub: &Substrate, geo: &mut Geometry) -> usize {
+    type Pair = (u32, Option<u32>);
+    let cfg = RelaxConfig {
+        pivots: true,
+        ..Default::default()
+    };
+    let awake: Vec<bool> = geo
+        .tracks
+        .iter()
+        .map(|t| t.pts.len() > 2 && t.fitted.is_empty() && t.origin.is_none() && t.pattern.is_none())
+        .collect();
+    if !awake.contains(&true) {
+        return 0;
+    }
+    let by_net = pin_rails(board);
+    let rails: Vec<[Option<Rail>; 2]> = geo
+        .tracks
+        .iter()
+        .map(|t| match by_net.get(&t.net) {
+            Some(r) => [rail_of(r, t.pts.iter()), rail_of(r, t.pts.iter().rev())],
+            None => [None, None],
+        })
+        .collect();
+    let plain = geo.clone();
+    let findings = |g: &Geometry| -> std::collections::HashMap<Pair, usize> {
+        let mut by: std::collections::HashMap<Pair, usize> = Default::default();
+        for v in crate::check::check(board, g) {
+            *by.entry(v.nets).or_default() += 1;
+        }
+        by
+    };
+    let before = findings(&plain);
+    // Tracks are built one after the other, each against the copper as it is then. A track on
+    // the outside of a bend can take its arc only once the one inside has its own, so the
+    // pass goes over the board again as long as that changes a track, three times at most.
+    let mut changed = vec![false; geo.tracks.len()];
+    let mut outcome: Vec<usize> = geo
+        .tracks
+        .iter()
+        .map(|t| {
+            if t.origin.is_some() || t.pattern.is_some() {
+                crate::pivot::SOFT
+            } else if !t.fitted.is_empty() {
+                crate::pivot::FITTED
+            } else {
+                crate::pivot::STRAIGHT
+            }
+        })
+        .collect();
+    for _ in 0..3 {
+        let points: Vec<Vec<Point>> = geo.tracks.iter().map(|t| t.pts.clone()).collect();
+        let mut built = taut(board, sub, geo, points, &cfg, &awake, &rails, Some(&mut outcome));
+        // a track that ends on another one ends on its new form
+        let chains: Vec<Vec<Point>> = built.iter().map(|t| t.0.clone()).collect();
+        for (ti, others) in &tap_targets(&geo.tracks) {
+            let (pts, elems) = &mut built[*ti];
+            let Some(&end) = pts.last() else { continue };
+            if let Some(q) = nearest_on_tracks(&chains, others, end).filter(|q| q.dist(end) > 1e-9) {
+                *pts.last_mut().unwrap() = q;
+                match elems.last_mut() {
+                    Some(Elem::Line(_, b)) => *b = q,
+                    _ => elems.push(Elem::Line(end, q)),
+                }
+            }
+        }
+        let mut any = false;
+        for (ti, (t, (pts, elems))) in geo.tracks.iter_mut().zip(built).enumerate() {
+            if pts.len() != t.pts.len() || pts.iter().zip(&t.pts).any(|(a, b)| a.dist(*b) > 0.0) {
+                changed[ti] = true;
+                any = true;
+                t.pts = pts;
+                t.elems = elems;
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+    for _ in 0..6 {
+        let now = findings(geo);
+        let bad: Vec<u32> = now
+            .iter()
+            .filter(|(k, n)| **n > before.get(*k).copied().unwrap_or(0))
+            .flat_map(|(k, _)| [Some(k.0), k.1])
+            .flatten()
+            .collect();
+        if bad.is_empty() {
+            break;
+        }
+        for (ti, t) in geo.tracks.iter_mut().enumerate() {
+            if changed[ti] && bad.contains(&t.net) {
+                *t = plain.tracks[ti].clone();
+                changed[ti] = false;
+                outcome[ti] = crate::pivot::BACK;
+            }
+        }
+    }
+    let total = |by: &std::collections::HashMap<Pair, usize>| by.values().sum::<usize>();
+    if total(&findings(geo)) > total(&before) {
+        *geo = plain;
+        for (ti, c) in changed.iter_mut().enumerate().filter(|(_, c)| **c) {
+            *c = false;
+            outcome[ti] = crate::pivot::BACK;
+        }
+    }
+    // what became of the tracks, for measurements
+    let add = |what: usize, n: usize| {
+        crate::pivot::OUTCOME[what].fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+    };
+    add(0, 1);
+    for what in 1..crate::pivot::OUTCOMES.len() {
+        add(what, outcome.iter().filter(|&&o| o == what).count());
+    }
+    changed.iter().filter(|&&c| c).count()
 }
 
 /// Distance from p to the polygon boundary and the nearest boundary point.

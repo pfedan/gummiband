@@ -14,6 +14,7 @@ pub mod math;
 pub mod octo;
 pub mod pairs;
 pub mod patterns;
+pub mod pivot;
 pub mod prof;
 pub mod realize;
 pub mod relax;
@@ -1524,6 +1525,10 @@ fn search_fixed(
                     search.report("room", &best.stats);
                 }
             }
+        }
+        // the last form of the tracks: arcs around their pivots and tangent lines
+        if knobs::PIVOT_ARCS.on() {
+            relax::pivot_pass(board, &sub, &mut best.geo);
         }
         // tracks as wide as the surroundings allow; a net that gets a new violation by it falls back
         let plain = best.geo.clone();

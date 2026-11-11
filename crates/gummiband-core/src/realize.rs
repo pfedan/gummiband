@@ -205,11 +205,11 @@ pub struct PathInfo {
 
 /// Circle the band wraps around: `side` +1 = pivot on the left of travel (left turn).
 #[derive(Debug, Clone, Copy)]
-struct Wrap {
-    c: Point,
-    r: f64,
-    side: f64,
-    id: u32,
+pub(crate) struct Wrap {
+    pub(crate) c: Point,
+    pub(crate) r: f64,
+    pub(crate) side: f64,
+    pub(crate) id: u32,
 }
 
 impl Router<'_> {
@@ -1240,7 +1240,7 @@ pub fn flatten(elems: &[Elem]) -> Vec<Point> {
 }
 
 /// Tangent from circle a to circle b (signed sides), as (point on a, point on b).
-fn tangent(a: &Wrap, b: &Wrap) -> Option<(Point, Point)> {
+pub(crate) fn tangent(a: &Wrap, b: &Wrap) -> Option<(Point, Point)> {
     let d = b.c - a.c;
     let l = d.len();
     if l < 1e-9 {

@@ -328,6 +328,8 @@ knobs! {
         "Tracks are realised as polylines, without arcs around the corners.";
     BAND = "GB_BAND", Experiment, Set, "off",
         "The band of a track takes the radius of the stack where the track lies next to the vertex it bends around, and where a wrap has no tangent, leaves its portal or its triangles, that wrap alone becomes a corner; today such a track loses all its arcs.";
+    PIVOT_ARCS = "GB_PIVOT_ARCS", Experiment, Set, "off",
+        "The finished copper gets its last form from its pivots: one arc around each pad corner, via or bundle a track bends around, with the radius of what lies between, and tangent lines. A track keeps the corners of today where such an arc or line comes too close, and where the own check finds something new.";
     NO_TUNE_ROOM = "GB_NO_TUNE_ROOM", Switch, Set, "off",
         "CLI `route`: length tuning does not make room for its meanders first.";
 
