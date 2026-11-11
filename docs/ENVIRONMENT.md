@@ -78,6 +78,8 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 
 | Variable | Value | Without it | What it does |
 | --- | --- | --- | --- |
+| `GB_EXIT_INWARD` | `0` turns it off | on | Pads in a tight row get an exit under the part too, where there is room (off: outwards only). |
+| `GB_EXIT_RAIL` | number | 0.1 | How far beyond its exit point a track stays on the middle line of its pad, in mm (0: it may turn at the exit point). |
 | `GB_EVO_SEED` | value | 0x5eed | Seed of the search when the caller gives none (`route --seed`). Search changes are judged over several seeds with it. |
 | `GB_GPU` | set to anything | off | Relaxation rounds on the GPU; needs a binary built with the `gpu` feature. |
 | `GB_OPEN_GENERATIONS` | value | no limit | Benchmarks: the open end stops by itself after this many generations. |

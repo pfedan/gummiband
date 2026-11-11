@@ -119,15 +119,21 @@ fn main() -> anyhow::Result<()> {
     let d = RouteOptions::default();
     let opts = RouteOptions {
         seed: Some(flag("--seed").map_or(Ok(1), |s| s.parse())?),
-        runs: flag("--runs").map_or(Ok(d.runs), |s| s.parse())?,
-        generations: flag("--generations").map_or(Ok(d.generations), |s| s.parse())?,
-        geometry_generations: flag("--geometry-generations").map_or(Ok(d.geometry_generations), |s| s.parse())?,
+        runs: flag("--runs").map(|s| s.parse()).transpose()?.or(d.runs),
+        generations: flag("--generations").map(|s| s.parse()).transpose()?.or(d.generations),
+        geometry_generations: flag("--geometry-generations")
+            .map(|s| s.parse())
+            .transpose()?
+            .or(d.geometry_generations),
         move_parts: if args.iter().any(|a| a == "--move-parts") {
             d.move_parts
         } else {
             Some(false)
         },
-        open_end_seconds: flag("--open-end").map_or(Ok(d.open_end_seconds), |s| s.parse())?,
+        open_end_seconds: flag("--open-end")
+            .map(|s| s.parse())
+            .transpose()?
+            .or(d.open_end_seconds),
         ..d
     };
     let board = Path::new(&args[1]);

@@ -242,7 +242,10 @@ each layer stays planar by construction.
   the corner of the piece and stand beside the middle line again. So the search judges every
   candidate with the exit it will have, the capacity test sees the piece as copper of its net
   between the neighbouring pads, and no step after the search can move, split or shorten the
-  piece, because it is no track.
+  piece, because it is no track. Beyond the exit point the track stays on the middle line for
+  another 0.1 mm (`GB_EXIT_RAIL`; the rails of `relax::pin_rails`): the tracks of a row leave it
+  side by side with a few µm to spare, and a first point that the neighbours push aside right
+  behind the fixed exit point breaks the clearance to the track on the other side.
   During the search other nets keep their clearance from every piece, also from one that no
   track takes in the end. Once the winner is known such a piece is given back
   (`exit::release_unused`: the pad has the outline of the file again at that end): the tracks
