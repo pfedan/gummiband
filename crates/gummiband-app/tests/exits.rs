@@ -8,9 +8,9 @@ use gummiband_core::realize::Elem;
 
 fn quick(board: &str) -> gummiband_app::RouteOutcome {
     let opts = RouteOptions {
-        runs: 4,
-        generations: 1,
-        geometry_generations: 0,
+        runs: Some(4),
+        generations: Some(1),
+        geometry_generations: Some(0),
         move_parts: Some(false),
         ..Default::default()
     };
