@@ -253,6 +253,15 @@ pub fn plan(board: &Board) -> Vec<Plan> {
             parts.entry(p.footprint.as_str()).or_default().push(i);
         }
     }
+    let centres: std::collections::BTreeMap<&str, Point> = parts
+        .iter()
+        .map(|(&name, pins)| {
+            let sum = pins
+                .iter()
+                .fold(crate::geom::pt(0.0, 0.0), |a, &i| a + board.pins[i].pos);
+            (name, sum * (1.0 / pins.len() as f64))
+        })
+        .collect();
     // the pieces laid so far: (from, to, half width, net, layer)
     let mut laid: Vec<(Point, Point, f64, NetId, u8)> = Vec::new();
     let mut out = Vec::new();
@@ -260,7 +269,9 @@ pub fn plan(board: &Board) -> Vec<Plan> {
         let net = &board.nets[pin.net as usize];
         let layers: Vec<u8> = pin.layers.iter().filter(|&l| routing.has(l)).collect();
         // a net with one pin and no plane gets no track
-        let routed = net.pins.contains(&p) && (net.pins.len() >= 2 || net.planes.0 != 0);
+        // (a pad drawn in several pieces has a pin for each, all of one name)
+        let alone = net.pins.iter().all(|&q| board.pins[q].name == pin.name);
+        let routed = net.pins.contains(&p) && (!alone || net.planes.0 != 0);
         if !routed || pin.obstacles.len() != 1 || layers.len() != 1 || board.in_diff_pair(pin.net) {
             continue;
         }
@@ -314,7 +325,11 @@ pub fn plan(board: &Board) -> Vec<Plan> {
         let half = track_width / 2.0;
         let mut exits = Vec::new();
         let mut shape = pad.clone();
+        let centre = centres.get(pin.footprint.as_str()).copied().unwrap_or(pin.pos);
         for (dir, len) in [(f.u, f.fwd), (f.u * -1.0, f.back)] {
+            if !knobs::EXIT_INWARD.on() && dir.dot(pin.pos - centre) < 0.0 {
+                continue;
+            }
             let at = |y: f64| pin.pos + dir * (len + y);
             // the turn of 45 degrees at the exit point, to either side
             let turns = [
@@ -765,6 +780,62 @@ mod tests {
         let len = crate::matching::net_length(&b, &geo, 0).total();
         let same = crate::matching::net_length(&plain, &copper, 0).total();
         assert!((len - same).abs() < 1e-9 && len > 5.4, "{len} {same}");
+    }
+
+    /// The goals of the row lie in a column to one side, so every track turns hard right behind
+    /// its exit point and the next one has to go around it. The tracks leave the row with 10 µm
+    /// to spare between them (0.2 wide) or with none before they have spread (0.25 wide, 0.2 in
+    /// the row). They stay on the middle line a little beyond the exit point, and nothing comes
+    /// nearer to its neighbour than the clearance.
+    #[test]
+    fn a_row_that_turns_hard_behind_its_exits_keeps_its_clearance() {
+        for (clr, track) in [(0.19, 0.19), (0.19, 0.2), (0.19, 0.25)] {
+            let mut b = row_board(6, 0.4, 0.2, clr, track);
+            b.rules.min_track_width = 0.2f64.min(track);
+            // the rightmost pad of the row goes to the lowest goal
+            for i in 0..6 {
+                let at = pt(13.5, 9.2 + (5 - i) as f64 * 1.0);
+                b.pins[6 + i].pos = at;
+                b.obstacles[6 + i].shape = Shape::Polygon(rect(at.x - 0.25, at.y - 0.25, at.x + 0.25, at.y + 0.25));
+            }
+            b.set_exits();
+            assert_eq!(b.exits.len(), 12);
+            let sub = Substrate::build(&b, &SubstrateConfig::default());
+            let mut r = Router::new(&b, &sub, RouterConfig::default());
+            r.plan();
+            for ci in 0..r.conns.len() {
+                assert!(r.route_one(ci), "connection {ci}");
+            }
+            let mut geo = r.geometry();
+            relax(&b, &sub, &mut geo, &RelaxConfig::default());
+            let rails = RelaxConfig {
+                via_edge: true,
+                ..Default::default()
+            };
+            relax(&b, &sub, &mut geo, &rails);
+            let rail = knobs::EXIT_RAIL.num();
+            for t in &geo.tracks {
+                let e = b
+                    .exits_of(t.net as usize)
+                    .iter()
+                    .find(|e| e.at.dist(t.pts[0]) < 1e-9 || e.at.dist(t.pts[t.pts.len() - 1]) < 1e-9)
+                    .expect("the track ends at an exit");
+                for q in t
+                    .pts
+                    .iter()
+                    .filter(|q| (**q - e.at).dot(e.dir) < rail - 1e-6 && q.dist(e.at) < rail)
+                {
+                    assert!(
+                        (*q - e.at).cross(e.dir).abs() < 0.008,
+                        "track {track}: net {} leaves its middle line at {q:?}",
+                        t.net
+                    );
+                }
+            }
+            let (plain, copper) = (b.without_exits(), with_stubs(&b, &geo));
+            let found = crate::check::check(&plain, &copper);
+            assert!(found.is_empty(), "track {track}: {found:?}");
+        }
     }
 
     /// A piece that no track took is given back for the geometry after the search: the pad has
