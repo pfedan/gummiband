@@ -51,6 +51,9 @@ pub struct RouterConfig {
     /// Extra cost (mm) for passing right next to a pad of another net that still waits for its
     /// route: keeps the escape of dense pin rows free.
     pub escape_cost: f64,
+    /// The same price for a pad of a net left to the fill of its area (`areas fill`), through
+    /// the whole first pass: such a pad waits until the fill is known.
+    pub area_escape: f64,
     /// A connection may end on a track of its net, next to where that crosses an edge. Whatever
     /// rips up a segment has to rip up what ends on it, see `improve.rs`.
     pub taps: bool,
@@ -103,6 +106,7 @@ impl Default for RouterConfig {
             margin: 0.01,
             via_in_pad: false,
             escape_cost: knobs::ESCAPE.num(),
+            area_escape: knobs::AREA_ESCAPE.num(),
             taps: false,
             hotspots: Default::default(),
             patterns: None,
@@ -316,6 +320,9 @@ pub struct Router<'a> {
     /// With `areas fill`: per area net what its connections aim at, from the last run of the
     /// fill model ([`Router::area_pass`]).
     area_goals: std::sync::Arc<Vec<crate::fill::AreaGoal>>,
+    /// Per pin, while the first pass of a route with `areas fill` runs: it is a pad of a net
+    /// left to the fill of its area. Empty at any other time.
+    area_wait: Vec<bool>,
     /// Connections of the area nets that the fill makes: they count as planned and routed, so
     /// that shares of the connections mean the same with and without the fill.
     pub area_base: usize,
@@ -667,6 +674,7 @@ impl<'a> Router<'a> {
             trace: Default::default(),
             pin_pitch: std::sync::Arc::new(Self::pin_pitches(board)),
             area_goals: Default::default(),
+            area_wait: Vec::new(),
             area_base: 0,
             pin_group,
             plane_groups,
@@ -991,10 +999,13 @@ impl<'a> Router<'a> {
     /// Escape penalty for crossing edge e: an end vertex on a pad of another net that still
     /// has unrouted connections.
     fn escape_penalty(&self, li: usize, e: u32, net: NetId) -> f64 {
-        if self.cfg.escape_cost <= 0.0 {
+        // the pads of area nets wait through the first pass, at a price of their own
+        let waiting = !self.area_wait.is_empty();
+        if self.cfg.escape_cost <= 0.0 && !waiting {
             return 0.0;
         }
         let m = self.m(li);
+        let mut price: f64 = 0.0;
         for end in 0..2 {
             for d in m.demands(e, end) {
                 if d.obs == OUTSIDE {
@@ -1003,13 +1014,17 @@ impl<'a> Router<'a> {
                 let o = &self.board.obstacles[d.obs as usize];
                 if let Some(p) = o.pin
                     && o.net != Some(net)
-                    && self.pending[p] > 0
                 {
-                    return self.cfg.escape_cost;
+                    if self.pending[p] > 0 {
+                        price = price.max(self.cfg.escape_cost);
+                    }
+                    if waiting && self.area_wait[p] {
+                        price = price.max(self.cfg.area_escape);
+                    }
                 }
             }
         }
-        0.0
+        price
     }
 
     /// Extra room asked for near hot spots, for an edge a-b.
@@ -3770,6 +3785,10 @@ impl<'a> Router<'a> {
     }
 
     pub fn run(&mut self) -> usize {
+        // A pad of a net left to the fill of its area waits until the fill is known, which is
+        // after this pass: a track right next to it pays the escape price all the way through,
+        // so that the fill, or the pad's own piece of copper, finds the pad open.
+        self.area_pads_wait();
         let mut failed = Vec::new();
         for ci in 0..self.conns.len() {
             for p in self.conn_pins(ci) {
@@ -3846,7 +3865,26 @@ impl<'a> Router<'a> {
             failed = still;
         }
         self.reduce_vias();
+        self.area_wait = Vec::new();
         self.conn_segs.iter().filter(|s| !s.is_empty()).count()
+    }
+
+    /// From now until the end of [`Router::run`] the pads of the nets left to the fill of their
+    /// area count as waiting: a track of another net right next to one pays
+    /// [`RouterConfig::area_escape`].
+    fn area_pads_wait(&mut self) {
+        let Some(plan) = self.board.areas.as_ref().filter(|p| !p.nets.is_empty()) else {
+            return;
+        };
+        if self.cfg.area_escape <= 0.0 {
+            return;
+        }
+        self.area_wait = vec![false; self.board.pins.len()];
+        for &net in &plan.nets {
+            for &p in &self.board.nets[net as usize].pins {
+                self.area_wait[p] = true;
+            }
+        }
     }
 
     /// The second pass of a route with `areas fill`, after [`Router::run`] laid the other nets:
@@ -5306,5 +5344,46 @@ mod tests {
         });
         assert!(r.route_one(0) && r.route_one(1));
         assert_eq!(r.conflicts(0.0).2, 1);
+    }
+
+    /// With `areas fill` the pads of a net left to its fill wait through the first pass: a track
+    /// of another net right next to one pays for it, the net itself does not, and after the
+    /// pass nobody does.
+    #[test]
+    fn a_pad_of_an_area_net_keeps_its_escape_price_through_the_first_pass() {
+        let mut b = crate::topo::tests::two_pad_board();
+        b.areas = Some(std::sync::Arc::new(crate::fill::AreaPlan {
+            nets: vec![0],
+            ..Default::default()
+        }));
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let cfg = RouterConfig {
+            area_escape: 2.0,
+            ..Default::default()
+        };
+        let mut r = Router::new(&b, &sub, cfg);
+        r.plan();
+        // the net is left to its fill: nothing is planned for it
+        assert!(r.conns.is_empty());
+        let edges = r.sub.m[0].edges.len() as u32;
+        let paying = |r: &Router, net: NetId| (0..edges).filter(|&e| r.escape_penalty(0, e, net) > 0.0).count();
+        assert_eq!(paying(&r, 1), 0);
+        r.area_pads_wait();
+        assert!(paying(&r, 1) > 0);
+        assert!((0..edges).all(|e| [0.0, 2.0].contains(&r.escape_penalty(0, e, 1))));
+        assert_eq!(paying(&r, 0), 0);
+        r.run();
+        assert_eq!(paying(&r, 1), 0);
+        // without a price nothing waits
+        let mut free = Router::new(
+            &b,
+            &sub,
+            RouterConfig {
+                area_escape: 0.0,
+                ..Default::default()
+            },
+        );
+        free.area_pads_wait();
+        assert_eq!(paying(&free, 1), 0);
     }
 }

@@ -394,6 +394,13 @@ whose area has no fill at all is joined by tracks. What the fill joins stays in 
 connections (`Router::area_base`), so that rules on a share of them (the second, negotiating
 search at 15 % open) mean the same as with tracks.
 
+While the first pass runs, the pads of the area nets count as waiting
+(`Router::area_pads_wait`): a track of another net that passes right next to one pays
+`RouterConfig::area_escape` (2 mm of track; `GB_AREA_ESCAPE`), the escape price that
+`escape_penalty` knows for pads with an unrouted connection. It reserves nothing and takes no
+capacity; it only makes the way around the pad the cheaper one where there is one, so that
+the fill, or the pad's own piece of copper, finds the pad open.
+
 An island of fill that holds pads and has a spot for one via (`fill::Island::via`, with
 `fill::SITE_ROOM` to spare) gets no connection in that pass when the plan says `stitch` (the
 option `area_stitch`): `gummiband_app::areas::stitch_route` sets that via on the finished
