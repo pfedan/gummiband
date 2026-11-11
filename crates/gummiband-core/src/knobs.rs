@@ -308,6 +308,10 @@ knobs! {
         "The last step tapers a track at a spot that misses its clearance by a little.";
     EXITS = "GB_EXITS", Switch, NotZero, "on",
         "A track leaves a pad in a tight row by a fixed straight piece on the middle line of the pad (`exit.rs`).";
+    EXIT_INWARD = "GB_EXIT_INWARD", Experiment, NotZero, "on",
+        "Pads in a tight row get an exit under the part too, where there is room (off: outwards only).";
+    EXIT_RAIL = "GB_EXIT_RAIL", Experiment, Num, "0.1",
+        "How far beyond its exit point a track stays on the middle line of its pad, in mm (0: it may turn at the exit point).";
     STITCH = "GB_STITCH", Switch, NotZero, "on",
         "Layer changes of current paths get the vias that carry their current (`relax::stitch_vias`).";
     ZIP = "GB_ZIP", Switch, NotZero, "on",
