@@ -310,6 +310,48 @@ pub struct Board {
     /// (`A.intersectsCourtyard('U4')`): reference and minimum, below the net class clearance.
     #[serde(default)]
     pub courtyard_clearance: Vec<(String, f64)>,
+    /// The exits of tracks from pads in tight rows, sorted by pin ([`Board::set_exits`]).
+    #[serde(default)]
+    pub exits: Vec<Exit>,
+    /// The pads that carry an exit, as the file has them: obstacle and its shape without the
+    /// exit pieces.
+    #[serde(default)]
+    pub bare_pads: Vec<(usize, Shape)>,
+    /// Pads whose row leaves a track on the middle line less than its clearance.
+    #[serde(default)]
+    pub tight_pads: Vec<TightPad>,
+    /// Set by [`Board::set_exits`]: this board lays out exits, and a copy with moved parts
+    /// ([`Board::with_offsets`]) lays them out anew.
+    #[serde(default)]
+    pub exits_on: bool,
+}
+
+/// The way a track leaves a pad in a tight row: one straight piece on the middle line of the
+/// pad, from the pin to `at` beyond the end of the pad. The piece belongs to the pad for every
+/// step of the route (the shape of the pad obstacle holds it), tracks of the net end at `at`, and
+/// it becomes a line of its own when the board is written. See `exit.rs`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Exit {
+    pub pin: usize,
+    /// The pad obstacle that holds the piece.
+    pub obs: usize,
+    /// The exit point: where the tracks of the net end.
+    pub at: Point,
+    /// From the pin towards `at`.
+    pub dir: Point,
+    /// Width of the piece.
+    pub width: f64,
+    /// What the row leaves beside the piece after the clearance (negative: missing).
+    pub spare: f64,
+}
+
+/// A pad in a row that is too tight for its track: on the middle line of the pad a piece of
+/// `width` comes `missing` mm nearer to the next pad of another net than the clearance allows.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TightPad {
+    pub pin: usize,
+    pub width: f64,
+    pub missing: f64,
 }
 
 /// A min, opt and max value of a custom rule constraint.
@@ -428,6 +470,12 @@ impl Board {
             for p in b.pins.iter_mut().filter(|p| &p.footprint == fp) {
                 p.pos = p.pos + d;
             }
+            // the shapes under the exits go along; the exits are laid out again below
+            for (o, shape) in b.bare_pads.iter_mut() {
+                if self.obstacles[*o].pin.is_some_and(|p| &self.pins[p].footprint == fp) {
+                    *shape = shape.translated(d);
+                }
+            }
             if let Some(r) = b.courtyards.get_mut(fp) {
                 *r = Rect {
                     min: r.min + d,
@@ -441,6 +489,10 @@ impl Board {
                     }
                 }
             }
+        }
+        // what is free at the end of a pad depends on where the other parts are
+        if b.exits_on {
+            b.set_exits();
         }
         b
     }

@@ -306,6 +306,8 @@ knobs! {
         "A plain search that leaves at most 15 % of the connections open starts a negotiated search on its own.";
     TAPER = "GB_TAPER", Switch, NotZero, "on",
         "The last step tapers a track at a spot that misses its clearance by a little.";
+    EXITS = "GB_EXITS", Switch, NotZero, "on",
+        "A track leaves a pad in a tight row by a fixed straight piece on the middle line of the pad (`exit.rs`).";
     STITCH = "GB_STITCH", Switch, NotZero, "on",
         "Layer changes of current paths get the vias that carry their current (`relax::stitch_vias`).";
     ZIP = "GB_ZIP", Switch, NotZero, "on",

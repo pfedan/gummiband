@@ -3508,6 +3508,7 @@ fn route_blocking(
             names.join(", ")
         ));
     }
+    notes.extend(routed.tight_pads().iter().map(|t| t.to_string()));
     let length_tuning: Vec<TunedOut> = tuned
         .iter()
         .flat_map(|r| &r.nets)
