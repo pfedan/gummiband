@@ -13,7 +13,9 @@
 //! wall at that distance.
 //!
 //! **Needed** is the sum of the widths of what lies between the walls and of the clearances
-//! between neighbours, each by the rule the check uses for that pair. **Available** is the
+//! between neighbours, each by the rule the check uses for that pair. A track counts with the
+//! least width it may have there: what it has grown beyond its class is the geometry's to take
+//! back, and is given beside the room. **Available** is the
 //! distance from wall to wall along the cut. A track on a pad of its own net needs no room
 //! beside that pad as far as the pad covers it; it counts with what it sticks out when it lies
 //! on the middle, and with half of what the pad is wider as slack.
@@ -101,6 +103,9 @@ pub struct Thing {
     /// second. A track: its centre line minus and plus half its width.
     pub lo: f64,
     pub hi: f64,
+    /// A track: what it is wider here than its class asks (a width fitted to the room). That
+    /// much the geometry can take back, so it is not counted as needed.
+    pub grown: f64,
     #[serde(skip)]
     obstacle: Option<usize>,
     /// The track or via of the geometry.
@@ -114,6 +119,10 @@ impl Thing {
     }
     pub fn width(&self) -> f64 {
         self.hi - self.lo
+    }
+    /// The least width it may have: a track without what it has grown.
+    pub fn least(&self) -> f64 {
+        self.width() - self.grown
     }
 }
 
@@ -147,17 +156,17 @@ pub struct Passage {
 }
 
 impl Passage {
-    /// What thing `i` of the chain takes of the room between things `a` and `b`: its width,
-    /// or on its own copper what it sticks out when it lies on the middle.
+    /// What thing `i` of the chain takes of the room between things `a` and `b`: the least
+    /// width it may have, or on its own copper what it sticks out when it lies on the middle.
     fn takes(&self, i: usize) -> f64 {
         let k = self.chain.len() - 1;
         let x = &self.chain[i];
         if i == 1 && self.own[0] {
-            ((x.width() - self.chain[0].width()) / 2.0).max(0.0)
+            ((x.least() - self.chain[0].width()) / 2.0).max(0.0)
         } else if i + 1 == k && self.own[1] {
-            ((x.width() - self.chain[k].width()) / 2.0).max(0.0)
+            ((x.least() - self.chain[k].width()) / 2.0).max(0.0)
         } else {
-            x.width()
+            x.least()
         }
     }
 
@@ -171,7 +180,7 @@ impl Passage {
             (&self.chain[k], &self.chain[k.saturating_sub(1)], self.own[1])
         };
         if own {
-            ((w.width() - x.width()) / 2.0).max(0.0)
+            ((w.width() - x.least()) / 2.0).max(0.0)
         } else {
             0.0
         }
@@ -213,6 +222,24 @@ impl Passage {
         self.available() + self.own_slack() - self.room(0.0)
     }
 
+    /// What the tracks between things `a` and `b` of the chain are wider than their classes
+    /// ask: the room counts them without it, and whoever lays the passage has to take that
+    /// much back where the room is less than this.
+    pub fn grown_between(&self, a: usize, b: usize) -> f64 {
+        self.chain[a + 1..b.max(a + 1)].iter().map(|t| t.grown).sum()
+    }
+
+    /// The same from wall to wall.
+    pub fn grown(&self) -> f64 {
+        self.grown_between(0, self.chain.len() - 1)
+    }
+
+    /// The same with the vias where they are.
+    pub fn grown_vias_stay(&self) -> f64 {
+        let (a, b) = self.stay();
+        self.grown_between(a, b)
+    }
+
     /// The clearances that count: a margin on top is needed once for each.
     pub fn gaps(&self) -> usize {
         self.clearances.iter().filter(|c| **c > 0.0).count()
@@ -226,11 +253,17 @@ impl Passage {
     /// The same with the vias where they are: from the last via or wall before the finding to
     /// the first behind it.
     pub fn room_vias_stay(&self, margin: f64) -> f64 {
+        let (a, b) = self.stay();
+        self.room_between(a, b, margin)
+    }
+
+    /// The last via or wall before the finding and the first behind it, as places in the chain.
+    fn stay(&self) -> (usize, usize) {
         let k = self.chain.len() - 1;
         let fixed = |i: usize| self.chain[i].kind == Kind::Via || i == 0 || i == k;
         let a = (0..=self.items[0]).rev().find(|&i| fixed(i)).unwrap_or(0);
         let b = (self.items[1]..=k).find(|&i| fixed(i)).unwrap_or(k);
-        self.room_between(a, b, margin)
+        (a, b)
     }
 
     /// What each gap of the chain has over its clearance and `margin` as the copper lies.
@@ -528,6 +561,7 @@ impl<'a> Local<'a> {
                 lo: x - w / 2.0,
                 hi: x + w / 2.0,
                 obstacle: None,
+                grown: (w - t.width).max(0.0),
                 id: ti,
             }));
         }
@@ -550,6 +584,7 @@ impl<'a> Local<'a> {
                     lo,
                     hi,
                     obstacle: None,
+                    grown: 0.0,
                     id: vi,
                 });
             }
@@ -580,6 +615,7 @@ impl<'a> Local<'a> {
                     lo,
                     hi,
                     obstacle: Some(*oi),
+                    grown: 0.0,
                     id: *oi,
                 });
             }
@@ -592,6 +628,7 @@ impl<'a> Local<'a> {
                     lo: x,
                     hi: x,
                     obstacle: None,
+                    grown: 0.0,
                     id: 0,
                 });
             }
@@ -750,6 +787,7 @@ impl Local<'_> {
             lo: -r,
             hi: r,
             obstacle: None,
+            grown: 0.0,
             id: vi,
         };
         let far = r + OPEN + 0.5;
@@ -849,7 +887,7 @@ impl Local<'_> {
                         }
                         break;
                     }
-                    need += x.width();
+                    need += x.least();
                     between += 1;
                     prev = x.clone();
                 }
@@ -936,6 +974,7 @@ fn open(at: f64) -> Thing {
         lo: at,
         hi: at,
         obstacle: None,
+        grown: 0.0,
         id: 0,
     }
 }
@@ -1018,6 +1057,7 @@ fn cut(
             lo: 0.0,
             hi: 0.0,
             obstacle: None,
+            grown: 0.0,
             id: first.1,
         });
         all.len() - 1
@@ -1029,6 +1069,7 @@ fn cut(
             lo: d,
             hi: d,
             obstacle: second.1.filter(|_| second.0.wall() && second.0 != Kind::Edge),
+            grown: 0.0,
             id: second.1.unwrap_or(0),
         });
         all.len() - 1
@@ -1070,6 +1111,11 @@ fn cut(
             {
                 y.lo = y.lo.min(x.lo);
                 y.hi = y.hi.max(x.hi);
+                y.grown = if x.kind == Kind::Via || y.kind == Kind::Via {
+                    0.0
+                } else {
+                    y.grown.max(x.grown)
+                };
                 if x.kind == Kind::Via {
                     y.kind = Kind::Via;
                     y.id = x.id;
@@ -1365,6 +1411,26 @@ mod tests {
                 p.what
             );
             assert!((p.room(0.0) + 0.03).abs() < 1e-6, "{}: {}", p.what, p.room(0.0));
+            assert_eq!(p.movers(0.0, true), None, "{}", p.what);
+        }
+    }
+
+    #[test]
+    fn a_track_that_grew_wider_than_the_pads_leave_room_for_counts_with_its_class_width() {
+        let probe = between_pads(3.0, 0.1);
+        let (w, c) = (probe.2, probe.3);
+        let need = 2.0 * w + c + 2.0 * 0.2f64.max(c);
+        // room for both at the class width, with 50 µm to spare; one of them is 0.1 wider
+        let (b, mut geo, ..) = between_pads(need + 0.05, c);
+        let mut zone = crate::geom::Rect::empty();
+        zone.add(geo.tracks[1].pts[0].lerp(geo.tracks[1].pts[1], 0.5));
+        geo.tracks[1].fitted.push((zone.grow(1e-6), w + 0.1));
+        let found = crate::check::check(&b, &geo);
+        assert!(!found.is_empty());
+        for p in passages(&b, &geo, &found) {
+            assert!((p.room(0.0) - 0.05).abs() < 1e-6, "{}: {}", p.what, p.room(0.0));
+            assert!((p.grown() - 0.1).abs() < 1e-9 && (p.grown_vias_stay() - 0.1).abs() < 1e-9);
+            // no shifting mends it as long as the track is that wide
             assert_eq!(p.movers(0.0, true), None, "{}", p.what);
         }
     }

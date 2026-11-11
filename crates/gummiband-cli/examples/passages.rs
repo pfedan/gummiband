@@ -79,17 +79,23 @@ fn route(args: &[String]) -> anyhow::Result<State> {
         violations: routed.violations,
     };
     if let Some(path) = flag("--dump") {
-        let all = json!({
-            "name": state.name,
-            "seed": state.seed,
-            "conns": state.conns,
-            "routed": state.routed,
-            "vias": state.vias,
-            "board": state.board,
-            "geometry": state.geometry,
-            "violations": state.violations,
-        });
-        std::fs::write(path, serde_json::to_string(&all)?)?;
+        // a board with a rule whose key JSON cannot write (a pair of nets) has no dump
+        let dump = || -> serde_json::Result<String> {
+            serde_json::to_string(&json!({
+                "name": state.name,
+                "seed": state.seed,
+                "conns": state.conns,
+                "routed": state.routed,
+                "vias": state.vias,
+                "board": serde_json::to_value(&state.board)?,
+                "geometry": serde_json::to_value(&state.geometry)?,
+                "violations": serde_json::to_value(&state.violations)?,
+            }))
+        };
+        match dump() {
+            Ok(text) => std::fs::write(path, text)?,
+            Err(e) => eprintln!("no dump of this board: {e}"),
+        }
     }
     Ok(state)
 }
@@ -154,12 +160,15 @@ fn main() -> anyhow::Result<()> {
                 "vias": p.vias(),
                 "items": p.items,
                 "chain": p.chain.iter().map(|t| json!({
-                    "is": t.kind.word(), "net": net(t.net), "lo_um": um(t.lo), "hi_um": um(t.hi)})).collect::<Vec<_>>(),
+                    "is": t.kind.word(), "net": net(t.net), "lo_um": um(t.lo), "hi_um": um(t.hi),
+                    "grown_um": um(t.grown)})).collect::<Vec<_>>(),
                 "clearances_um": p.clearances.iter().map(|&c| um(c)).collect::<Vec<_>>(),
                 "available_um": um(p.available()),
                 "own_slack_um": um(p.own_slack()),
                 "needed_um": um(p.needed()),
                 "gaps": p.gaps(),
+                "grown_um": um(p.grown()),
+                "grown_vias_stay_um": um(p.grown_vias_stay()),
                 "open": walls.iter().any(|w| w.kind == Kind::Open),
                 "room_um": MARGINS.iter().map(|&m| um(p.room(m))).collect::<Vec<_>>(),
                 "room_vias_stay_um": MARGINS.iter().map(|&m| um(p.room_vias_stay(m))).collect::<Vec<_>>(),
