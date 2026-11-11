@@ -36,7 +36,7 @@ fn tiny_board() -> String {
 #[test]
 fn options_follow_from_each_other() {
     let d = RouteOptions::default();
-    assert_eq!(d.runs, defaults::RUNS);
+    assert_eq!(d.runs(), defaults::RUNS);
     assert!(d.tune && d.move_parts() && !d.shove() && !d.finishing());
     assert_eq!(d.give(), 0.0);
     assert_eq!((d.air(false), d.air(true)), (0.0, defaults::OPEN_END_AIR));
@@ -173,7 +173,14 @@ fn contradictions_are_errors() {
         let e = o.validate(open_end).expect_err(word);
         assert!(e.contains(word), "{e}");
     };
-    refused(RouteOptions { runs: 0, ..d.clone() }, false, "runs must be at least 1");
+    refused(
+        RouteOptions {
+            runs: Some(0),
+            ..d.clone()
+        },
+        false,
+        "runs must be at least 1",
+    );
     let band = RouteOptions {
         pairs: Pairs::Band,
         ..d.clone()
@@ -347,9 +354,9 @@ fn route_a_file_then_finish_a_net() {
 
     // net A alone, parts fixed
     let opts = RouteOptions {
-        runs: 1,
-        generations: 0,
-        geometry_generations: 0,
+        runs: Some(1),
+        generations: Some(0),
+        geometry_generations: Some(0),
         nets: vec!["A".into()],
         move_parts: Some(false),
         ..Default::default()
@@ -420,7 +427,7 @@ fn route_a_file_then_finish_a_net() {
     assert!(route_file(&pcb, &second, &bad, &Hooks::default()).is_err());
     // the pipeline checks the options itself, whoever calls it
     let bad = RouteOptions {
-        runs: 0,
+        runs: Some(0),
         ..Default::default()
     };
     let e = route_file(&pcb, &second, &bad, &Hooks::default()).err().unwrap();
@@ -453,9 +460,9 @@ fn net_options_from_a_file_and_from_the_front_end_agree() {
     )
     .unwrap();
     let base = RouteOptions {
-        runs: 1,
-        generations: 0,
-        geometry_generations: 0,
+        runs: Some(1),
+        generations: Some(0),
+        geometry_generations: Some(0),
         move_parts: Some(false),
         ..Default::default()
     };
@@ -549,12 +556,12 @@ fn the_time_budget_starts_with_the_open_end() {
         ..Default::default()
     };
     let opts = RouteOptions {
-        runs: 2,
-        generations: 1,
-        geometry_generations: 1,
+        runs: Some(2),
+        generations: Some(1),
+        geometry_generations: Some(1),
         move_parts: Some(false),
         seed: Some(7),
-        open_end_seconds: 0.001,
+        open_end_seconds: Some(0.001),
         ..Default::default()
     };
     assert!(opts.open_end(false));

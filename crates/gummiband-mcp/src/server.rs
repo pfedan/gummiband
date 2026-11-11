@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use gummiband_app::old::Respelled;
-use gummiband_app::{Angles, NetOptions, Pairs, RouteOptions, Scope};
+use gummiband_app::{Angles, NetOptions, Pairs, Preset, RouteOptions, Scope};
 use gummiband_core::board::Board;
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -58,7 +58,7 @@ results scatter strongly between seeds, so compare a setting with the plain run 
 seeds (mean and worst, judged by drc). Rough guide: several chips with buses -> patterns groups, on a \
 tight board also clear_corridors, or track_corridors and place_parts only + corridors + leash 1.5 to \
 decide yourself; FPGA/BGA with pairs -> pairs,groups; DDR -> groups-short; a fixed placement that \
-already routes cleanly -> no hints, try seeds and open_end_seconds; placement from scratch -> \
+already routes cleanly -> no hints, try seeds and preset final (the open end); placement from scratch -> \
 place_parts semantic + corridors + escape_halo over a few seeds. Coordinates are millimetres in KiCad's board coordinates (y grows downwards). \
 Routing is CPU heavy (seconds to minutes); routes run one at a time.";
 
@@ -932,6 +932,10 @@ fn pairs_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     choice_schema("pairs")
 }
 
+fn preset_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    choice_schema("preset")
+}
+
 /// The default of `scope` in a session: the board was loaded with or without its locked copper.
 const SCOPE_DEFAULT: &str = "keep_locked for a board that was loaded with keep_locked and for a working copy (the board id of add_locked_copper, lock, move_part, place_parts and the other tools that edit), else fresh";
 
@@ -949,8 +953,12 @@ fn scope_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
 pub struct RouteIn {
     /// Board id from load_board.
     pub board: String,
-    /// Portfolio size: router runs with different orders (default 14, fixed so that results
-    /// do not depend on the machine).
+    // the description and the words come from the table of gummiband-app
+    #[serde(default)]
+    #[schemars(schema_with = "preset_schema")]
+    pub preset: Option<String>,
+    /// Portfolio size: router runs with different orders (default: what `preset` says, 14 with
+    /// "standard"; fixed so that results do not depend on the machine).
     pub runs: Option<usize>,
     // the description and the words come from the table of gummiband-app
     #[serde(default)]
@@ -1017,10 +1025,12 @@ pub struct RouteIn {
     /// several chips. To decide yourself what moves, use track_corridors and place_parts
     /// instead. Not with scope "finish" or "reroute".
     pub clear_corridors: Option<bool>,
-    /// Generations of the evolutionary order search after the portfolio (default 3).
+    /// Generations of the evolutionary order search after the portfolio (default: what
+    /// `preset` says, 3 with "standard").
     pub generations: Option<usize>,
-    /// Generations that select by clearance violations after the geometry step (default 3, as
-    /// the CLI and the plugin; 0 is about three times faster and leaves many more violations).
+    /// Generations that select by clearance violations after the geometry step (default: what
+    /// `preset` says, 3 with "standard", as the CLI and the plugin; 0 is about three times
+    /// faster and leaves many more violations).
     pub geometry_generations: Option<usize>,
     /// Let parts next to clearance problems and open connections shift a little while the
     /// routed copper follows like rubber bands (default true with scope "fresh" and
@@ -1051,8 +1061,8 @@ pub struct RouteIn {
     /// what has fewer vias (default 4; 0: off), as `gummiband route --via-pass`.
     pub via_pass: Option<f64>,
     /// Open end with a time budget: after the normal search keep improving for this many
-    /// seconds, then finish the best result (default 0: off), as `gummiband route
-    /// --open-end-seconds`. The budget starts when the open end starts, so it never cuts the
+    /// seconds, then finish the best result (default: what `preset` says, 0 = off with
+    /// "standard", 600 with "final"), as `gummiband route --open-end-seconds`. The budget starts when the open end starts, so it never cuts the
     /// normal search short. Mutants take a few connections around one spot out and lay them
     /// again; when that stops helping, bolder side branches take over. No placement rounds
     /// while it runs. Results that differ in vias and length come back in `alternatives`.
@@ -3325,7 +3335,11 @@ fn route_options(p: &RouteIn, loaded_keep: bool) -> Result<(RouteOptions, Vec<Re
         move_parts: p.move_parts,
         fixed: p.fixed.clone(),
         plane_layers: p.plane_layers.clone(),
-        runs: p.runs.unwrap_or(d.runs),
+        preset: match &p.preset {
+            Some(word) => Preset::parse(word).map_err(anyhow::Error::msg)?,
+            None => d.preset,
+        },
+        runs: p.runs,
         via_pitch: p.via_pitch.unwrap_or(d.via_pitch),
         via_cost: p.via_cost.unwrap_or(d.via_cost),
         layer_dirs: p.layer_dirs.unwrap_or(d.layer_dirs),
@@ -3339,10 +3353,10 @@ fn route_options(p: &RouteIn, loaded_keep: bool) -> Result<(RouteOptions, Vec<Re
         breakouts: p.breakouts.unwrap_or(d.breakouts),
         via_pairs: p.via_pairs.unwrap_or(d.via_pairs),
         negotiate: p.negotiate.unwrap_or(d.negotiate),
-        generations: p.generations.unwrap_or(d.generations),
-        geometry_generations: p.geometry_generations.unwrap_or(d.geometry_generations),
+        generations: p.generations,
+        geometry_generations: p.geometry_generations,
         seed: p.seed,
-        open_end_seconds: p.open_end_seconds.unwrap_or(d.open_end_seconds),
+        open_end_seconds: p.open_end_seconds,
         open_via_cost: p.open_via_cost.unwrap_or(d.open_via_cost),
         air: p.air,
         prefer_width: p.prefer_width.unwrap_or(d.prefer_width),
@@ -4071,7 +4085,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Route a loaded board with Gummiband (topological any-angle router, portfolio plus evolutionary order search on all routing threads) and write the routed .kicad_pcb (default <input>.routed.kicad_pcb next to the input). `scope` says what of the copper on the board stays: \"keep_locked\" keeps the locked tracks and vias and lays all unlocked copper anew; \"finish\" keeps all copper and lays only what is still open, which is the scope for \"I laid these nets by hand, finish the rest\" (your nets stay whether they are locked or not; with `nets` only those are finished); \"reroute\" with `nets` takes the unlocked copper of those nets out and lays them again while everything else stays, which is the scope for \"lay net X again\"; \"fresh\" keeps nothing, locked copper goes too. It complements manual routing: locked tracks and vias (add_locked_copper, lock) are kept and routed around, locked parts do not move, and the result can be refined afterwards with move_part, add_locked_copper, lock and another route of single nets. Every option has the name, default and meaning of gummiband route (there as --kebab-case; only the default of scope is the session's: a board loaded with keep_locked and every working copy keeps its locked copper); options that contradict each other are refused with a message that says what to change, and so is an argument that does not exist. Returns routed/total connections, unrouted connections, vias, track length, Gummiband's clearance violations with nets and positions, the portfolio, and with open_end_seconds the alternatives written next to the output. CPU heavy: seconds to minutes; one route at a time. Check the result with drc.",
+        description = "Route a loaded board with Gummiband (topological any-angle router, portfolio plus evolutionary order search on all routing threads) and write the routed .kicad_pcb (default <input>.routed.kicad_pcb next to the input). `scope` says what of the copper on the board stays: \"keep_locked\" keeps the locked tracks and vias and lays all unlocked copper anew; \"finish\" keeps all copper and lays only what is still open, which is the scope for \"I laid these nets by hand, finish the rest\" (your nets stay whether they are locked or not; with `nets` only those are finished); \"reroute\" with `nets` takes the unlocked copper of those nets out and lays them again while everything else stays, which is the scope for \"lay net X again\"; \"fresh\" keeps nothing, locked copper goes too. `preset` says how much search the route gets: \"draft\" for a quick look at whether the board routes, \"quick\" for a first result, \"standard\" (the default) for a usable board, \"final\" for the last run (the open end improves the result for 10 minutes); runs, generations, geometry_generations and open_end_seconds win over it when given. It complements manual routing: locked tracks and vias (add_locked_copper, lock) are kept and routed around, locked parts do not move, and the result can be refined afterwards with move_part, add_locked_copper, lock and another route of single nets. Every option has the name, default and meaning of gummiband route (there as --kebab-case; only the default of scope is the session's: a board loaded with keep_locked and every working copy keeps its locked copper); options that contradict each other are refused with a message that says what to change, and so is an argument that does not exist. Returns routed/total connections, unrouted connections, vias, track length, Gummiband's clearance violations with nets and positions, the portfolio, and with open_end_seconds the alternatives written next to the output. CPU heavy: seconds to minutes; one route at a time. Check the result with drc.",
         output_schema = schema_for_output::<RouteOut>(),
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
@@ -4499,7 +4513,7 @@ mod tests {
         assert!(opts.scope == Scope::Reroute && !opts.tune && opts.breakouts && opts.teardrops);
         assert_eq!(opts.nets, ["A", "B"]);
         assert_eq!((opts.shove, opts.give, opts.move_parts), (Some(false), Some(2.0), None));
-        assert_eq!((opts.open_end_seconds, opts.placements), (30.0, 3));
+        assert_eq!((opts.open_end_seconds, opts.placements), (Some(30.0), 3));
         assert_eq!(opts.plane_layers, ["In1.Cu"]);
         assert_eq!(opts.angles, Angles::Deg45);
         // contradictions are the pipeline's to refuse, in its words
@@ -4522,7 +4536,7 @@ mod tests {
             .filter_map(|v| v.as_str())
             .collect();
         assert_eq!(required, ["board"]);
-        for name in ["pairs", "scope"] {
+        for name in ["pairs", "scope", "preset"] {
             let doc = gummiband_app::option_doc(name).unwrap();
             let prop = &schema["properties"][name];
             let words: Vec<&str> = doc.choices.iter().map(|c| c.value).collect();
@@ -4583,6 +4597,44 @@ mod tests {
                 "{name}: {text}"
             );
         }
+    }
+
+    /// A preset sets four options, and each of them wins over it when given. The schema says
+    /// what each preset sets.
+    #[test]
+    fn a_preset_sets_what_was_not_given() {
+        use serde_json::json;
+        let effort = |v: serde_json::Value| {
+            let (o, notes) = route_call(v);
+            assert!(notes.is_empty());
+            (
+                o.runs(),
+                o.generations(),
+                o.geometry_generations(),
+                o.open_end_seconds(),
+            )
+        };
+        assert_eq!(effort(json!({"board": "b1"})), (14, 3, 3, 0.0));
+        assert_eq!(effort(json!({"board": "b1", "preset": "draft"})), (4, 1, 0, 0.0));
+        assert_eq!(effort(json!({"board": "b1", "preset": "quick"})), (14, 3, 0, 0.0));
+        assert_eq!(effort(json!({"board": "b1", "preset": "final"})), (14, 3, 3, 600.0));
+        assert_eq!(
+            effort(json!({"board": "b1", "preset": "final", "open_end_seconds": 30, "runs": 6})),
+            (6, 3, 3, 30.0)
+        );
+        let schema = serde_json::to_value(schemars::schema_for!(RouteIn)).unwrap();
+        let text = schema["properties"]["preset"]["description"].as_str().unwrap();
+        assert!(text.contains("\ndraft: runs 4, generations 1, geometry_generations 0, open_end_seconds 0: "));
+        assert!(text.ends_with("Default: standard."));
+        for name in ["runs", "generations", "geometry_generations", "open_end_seconds"] {
+            let text = schema["properties"][name]["description"].as_str().unwrap();
+            assert!(text.contains("`preset`"), "{name}: {text}");
+        }
+        let bad = serde_json::from_value::<RouteIn>(json!({"board": "b1", "preset": "fast"})).unwrap();
+        assert_eq!(
+            route_options(&bad, false).unwrap_err().to_string(),
+            "preset must be draft, quick, standard or final, not \"fast\""
+        );
     }
 
     /// Without a scope a call routes with the scope of its session: a board loaded with its

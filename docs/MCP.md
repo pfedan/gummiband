@@ -195,7 +195,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `set_rules` | `board`, `rules`, `replace?` | id of the working copy, path of its `.kicad_dru`, rule count, what Gummiband understood of the rules, `warnings` |
 | `set_net_options` | `board`, `net`, `priority?`, `skip?`, `width?`, `min_width?`, `neck_refs?`, `reset?` | the net's options and effective priority |
 | `try_seeds` | `board`, `seeds?`, `place?`, `route?`, `drc?` | per seed (best first) the placed and routed files, unrouted, Gummiband violations, KiCad DRC errors and unconnected, vias, length; the best seed, the working copy now holding its placement and its routed board |
-| `route` | `board`, `output?`, `max_violations?` and every option of the route pipeline under the name `gummiband route` has it (there as `--kebab-case`): `scope?`, `nets?`, `shove?`, `give?`, `move_parts?`, `fixed?`, `plane_layers?`, `runs?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `patterns?`, `via_pass?`, `pairs?`, `pair_pull?`, `pair_skew?`, `pair_zdiff?`, `pair_all?`, `breakouts?`, `via_pairs?`, `negotiate?`, `generations?`, `geometry_generations?`, `seed?`, `frames?`, `open_end_seconds?`, `open_via_cost?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `tune_spacing?`, `placements?`, `placement_seed?`, `clear_corridors?`, `net_widths?`, `net_priorities?`, `teardrops?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with `pairs` `"band"` one entry per wide track |
+| `route` | `board`, `output?`, `max_violations?` and every option of the route pipeline under the name `gummiband route` has it (there as `--kebab-case`): `scope?`, `nets?`, `preset?`, `shove?`, `give?`, `move_parts?`, `fixed?`, `plane_layers?`, `runs?`, `via_pitch?`, `via_cost?`, `layer_dirs?`, `patterns?`, `via_pass?`, `pairs?`, `pair_pull?`, `pair_skew?`, `pair_zdiff?`, `pair_all?`, `breakouts?`, `via_pairs?`, `negotiate?`, `generations?`, `geometry_generations?`, `seed?`, `frames?`, `open_end_seconds?`, `open_via_cost?`, `air?`, `prefer_width?`, `angles?`, `tune?`, `tune_amplitude?`, `tune_spacing?`, `placements?`, `placement_seed?`, `clear_corridors?`, `net_widths?`, `net_priorities?`, `teardrops?` | the fields of `gummiband route --report` plus session fields (see below): per net numbers, the nets in the way of each unrouted connection, with `pairs` `"band"` one entry per wide track |
 | `angles_45` | `path`, `output?`, `nets?` | path of the written `<input>.45.kicad_pcb`, runs of track looked at and changed, length before and after, pieces off the grid, sharp corners, Gummiband's violations before and after |
 | `power_plan` | `board`, `currents? [{net, amps, short_amps?}]`, `temp_rise?`, `apply?` | per power net the IPC-2221 width per layer, the track width to route with, vias per layer change, planes and zones, advice; board notes (GND plane, reference planes); the widths as `.kicad_dru` rules; with `apply` the widths stored as net options |
 | `current_check` | `path`, `paths? [{net, amps, short_amps?, from?, to?, name?}]`, `temp_rise?`, `refill?`, `max_segments?` | per current path the narrow segments, the narrowest single band and the total cross-section between the terminals (pours and vias included) with their position, vias against the current, verdict `ok` or `FLAG` |
@@ -684,12 +684,13 @@ session's: `scope`. An argument that does not
 exist is refused. Options that contradict each other are refused too, with a message that says
 what to change (for example `move_parts` with `shove`, `scope` `"reroute"` without `nets`,
 an open end with `pairs` `"band"`, `breakouts` without `pairs` `"band"`, `runs` 0); nothing is
-adjusted silently. An option with a fixed list of words (`scope`, `pairs`, `angles`) has the words as an
+adjusted silently. An option with a fixed list of words (`scope`, `preset`, `pairs`, `angles`) has the words as an
 `enum` in the tool's schema, and its description says what each word means and when to pick it;
 the text comes from the same table as the CLI's `--help`. An argument in the spelling of an
 earlier version still works: the result is the same, and `notes` says what to write now
-([Old spellings](#old-spellings-of-route)). The defaults: `runs` 14 (a constant, so results do not depend on the machine), `generations` 3,
-`geometry_generations` 3, `via_pitch` 0.5 mm, `via_cost` 3.0, `layer_dirs` 0.5 (preferred
+([Old spellings](#old-spellings-of-route)). The defaults: `preset` `"standard"` (how much
+search the route gets, see below), `runs` 14 (a constant, so results do not depend on the machine), `generations` 3,
+`geometry_generations` 3 (these three and `open_end_seconds` are what the preset says), `via_pitch` 0.5 mm, `via_cost` 3.0, `layer_dirs` 0.5 (preferred
 directions per layer for every third run, 0 = off), `pairs` `"off"` (how the two nets of a
 differential pair are laid: `"off"` each on its own; `"pull"`, experimental: the search keeps
 the second net near the first one's way on the same layer, and the finished tracks close up to
@@ -731,6 +732,17 @@ working copy, ICs and connectors at most 1.5 mm from where they sit, as `route -
 defaults to `<input>.routed.kicad_pcb` next to the input and must not be the input file; the
 `.kicad_pro` and `.kicad_dru` are copied next to the output if missing (`copied`), so `drc` and
 `load_board` work on it.
+
+`preset` says how much search the route gets. It sets `runs`, `generations`,
+`geometry_generations` and `open_end_seconds`, and each of the four wins over it when given;
+nothing else changes.
+
+| `preset` | `runs` | `generations` | `geometry_generations` | `open_end_seconds` | Pick it for |
+| --- | --- | --- | --- | --- | --- |
+| `"draft"` | 4 | 1 | 0 | 0 | the quickest look at whether the board routes and where it is tight, between two tries of a placement; many clearance violations |
+| `"quick"` | 14 | 3 | 0 | 0 | a first result on a real board, in about a third of the time of `"standard"`; many more clearance violations |
+| `"standard"` | 14 | 3 | 3 | 0 | a usable board; the default |
+| `"final"` | 14 | 3 | 3 | 600 | the last run of a board: the open end improves the result for 10 minutes; not with `pairs` `"band"` |
 
 `scope` says what of the copper on the board stays, and what is laid:
 

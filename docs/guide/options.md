@@ -102,6 +102,22 @@ The sub-options of the wide track (`--pair-all`, `--via-pairs`, `--breakouts`, `
 `--pair-zdiff`) are refused without `--pairs band`, and `--pair-pull` without `--pairs pull` or
 `band`: an option that would do nothing is an error that says what to write.
 
+## How much search: `--preset`
+
+One word for the effort of a run (MCP `preset`). A preset sets the four options
+`--runs`, `--generations`, `--geometry-generations` and `--open-end-seconds`; each of them wins
+over the preset when you give it. It changes no other option, and no hint.
+
+| Preset | Sets | Use it when |
+| --- | --- | --- |
+| `draft` | 4 runs, 1 generation, no geometry generations | You want to know quickly whether the board routes and where it is tight: after a placement, between two tries of an agent. Many clearance violations. |
+| `quick` | 14 runs, 3 generations, no geometry generations | A first result to look at, in about a third of the time of `standard`. |
+| `standard`, the default | 14 runs, 3 generations, 3 geometry generations | A usable board. |
+| `final` | `standard`, then 10 minutes of the open end | The last run of a board. |
+
+Compare options with the preset you will use in the end: a hint that helps the draft may not
+help the final run.
+
 ## What stays on the board: `--scope`
 
 Not a tuning option, but the first choice of every run: what of the copper on the board the

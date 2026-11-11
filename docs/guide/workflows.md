@@ -22,7 +22,8 @@ steps, the plugin is installed ([Installation](installation.md)).
 
 6. Refill zones, run the DRC, look at the unrouted connections.
 7. Iterate: lock what is good, fix the rest by hand or route again with more effort
-   (`--until-stop`, or more `--geometry-generations`).
+   (`--preset final`, `--until-stop`, or more `--geometry-generations`). `--preset draft` tells
+   in the shortest time whether a change of the placement still routes.
 
 ## Finish a partly routed board (experimental)
 

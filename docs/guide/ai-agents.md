@@ -156,6 +156,11 @@ The result names every unrouted connection with the nets that run in its way, th
 position, the length rules that failed and how much of each pair runs coupled. That is what the
 agent iterates on: give a blocked net priority, move a part, route again.
 
+How much search a `route` gets is its `preset`: `"draft"` answers in the shortest time whether a
+placement routes, `"standard"` is the default, `"final"` adds ten minutes of the open end for
+the last run. `runs`, `generations`, `geometry_generations` and `open_end_seconds` still win
+over it.
+
 What a `route` keeps of the copper on the board is its `scope`, and the schema of the tool says
 which word is for what. `"finish"` keeps every track and via and lays what is still open: the
 scope for nets the agent laid by hand, with the rest left to the router. `"reroute"` with `nets`

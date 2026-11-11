@@ -120,6 +120,89 @@ impl Scope {
     }
 }
 
+/// How much search a route gets: a named bundle of `runs`, `generations`,
+/// `geometry_generations` and `open_end_seconds`. Each of the four still has its own option,
+/// and an option that is given wins over the preset. Every value here was measured or is a
+/// default of old; a preset tunes nothing that the four options do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Preset {
+    /// The settings of the benchmark suite and the hash lists: a look at whether the board
+    /// routes at all.
+    Draft,
+    /// The whole order search without the geometry generations: what the plugin's Finish action
+    /// runs.
+    Quick,
+    /// The defaults.
+    #[default]
+    Standard,
+    /// The defaults, then the open end for ten minutes.
+    Final,
+}
+
+/// What a [`Preset`] sets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PresetValues {
+    pub runs: usize,
+    pub generations: usize,
+    pub geometry_generations: usize,
+    pub open_end_seconds: f64,
+}
+
+impl Preset {
+    pub const ALL: [Preset; 4] = [Preset::Draft, Preset::Quick, Preset::Standard, Preset::Final];
+
+    /// The word of the option `preset` ([`crate::OPTIONS`]).
+    pub fn word(self) -> &'static str {
+        match self {
+            Preset::Draft => "draft",
+            Preset::Quick => "quick",
+            Preset::Standard => "standard",
+            Preset::Final => "final",
+        }
+    }
+
+    /// The value of a word; the error names the words there are.
+    pub fn parse(word: &str) -> Result<Preset, String> {
+        let word = crate::option_doc("preset").expect("preset").choice(word)?;
+        Ok(*Preset::ALL
+            .iter()
+            .find(|p| p.word() == word)
+            .expect("a word of the table"))
+    }
+
+    /// The four values of the preset.
+    pub fn values(self) -> PresetValues {
+        let standard = PresetValues {
+            runs: defaults::RUNS,
+            generations: defaults::GENERATIONS,
+            geometry_generations: defaults::GEOMETRY_GENERATIONS,
+            open_end_seconds: defaults::OPEN_END_SECONDS,
+        };
+        match self {
+            // bench/run_suite.sh and bench/hashes.sh route every board with these
+            Preset::Draft => PresetValues {
+                runs: 4,
+                generations: 1,
+                geometry_generations: 0,
+                ..standard
+            },
+            // about a third of the time of the defaults, and many more clearance violations
+            // (Arty 32 instead of 1, ULX3S 54 instead of 4, LED controller 18 instead of 4)
+            Preset::Quick => PresetValues {
+                geometry_generations: 0,
+                ..standard
+            },
+            Preset::Standard => standard,
+            // the open end of the LED controller had 93 % of its saving after 10 minutes, and
+            // two runs of it converged in 9 (docs/MILESTONES.md)
+            Preset::Final => PresetValues {
+                open_end_seconds: 600.0,
+                ..standard
+            },
+        }
+    }
+}
+
 /// How the two nets of a differential pair are laid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Pairs {
@@ -177,7 +260,11 @@ pub struct RouteOptions {
     pub fixed: Vec<String>,
     /// Copper layers treated as planes besides those of KiCad type "power".
     pub plane_layers: Vec<String>,
-    pub runs: usize,
+    /// How much search the route gets: the values of `runs`, `generations`,
+    /// `geometry_generations` and `open_end_seconds` where those are None.
+    pub preset: Preset,
+    /// Portfolio size. None: what the preset says, see [`RouteOptions::runs`].
+    pub runs: Option<usize>,
     pub via_pitch: f64,
     pub via_cost: f64,
     pub layer_dirs: f64,
@@ -197,8 +284,12 @@ pub struct RouteOptions {
     pub breakouts: bool,
     pub via_pairs: bool,
     pub negotiate: usize,
-    pub generations: usize,
-    pub geometry_generations: usize,
+    /// Generations of the order search. None: what the preset says, see
+    /// [`RouteOptions::generations`].
+    pub generations: Option<usize>,
+    /// Generations that select by clearance violations. None: what the preset says, see
+    /// [`RouteOptions::geometry_generations`].
+    pub geometry_generations: Option<usize>,
     pub seed: Option<u64>,
     /// Keep the best candidate of every generation, and [`RouteOutcome::write`] draws them into
     /// this folder ([`Routed::write_frames`]).
@@ -206,8 +297,9 @@ pub struct RouteOptions {
     /// Open end with a time budget: after the normal search the result keeps improving for
     /// this many seconds, then the best one is finished (0: off). The budget starts when the
     /// open end starts, so it never cuts the normal search short. [`Hooks::stop`] is the open
-    /// end without a budget; with both, whichever comes first ends the run.
-    pub open_end_seconds: f64,
+    /// end without a budget; with both, whichever comes first ends the run. None: what the
+    /// preset says, see [`RouteOptions::open_end_seconds`].
+    pub open_end_seconds: Option<f64>,
     pub open_via_cost: f64,
     /// Reserve in mm on top of the clearances. None: [`defaults::OPEN_END_AIR`] in an open ended
     /// run that does not finish nets, else 0, see [`RouteOptions::air`].
@@ -248,7 +340,8 @@ impl Default for RouteOptions {
             move_parts: None,
             fixed: Vec::new(),
             plane_layers: Vec::new(),
-            runs: defaults::RUNS,
+            preset: Preset::Standard,
+            runs: None,
             via_pitch: defaults::VIA_PITCH,
             via_cost: defaults::VIA_COST,
             layer_dirs: defaults::LAYER_DIRS,
@@ -262,11 +355,11 @@ impl Default for RouteOptions {
             breakouts: false,
             via_pairs: false,
             negotiate: defaults::NEGOTIATE,
-            generations: defaults::GENERATIONS,
-            geometry_generations: defaults::GEOMETRY_GENERATIONS,
+            generations: None,
+            geometry_generations: None,
             seed: None,
             frames: None,
-            open_end_seconds: defaults::OPEN_END_SECONDS,
+            open_end_seconds: None,
             open_via_cost: defaults::OPEN_VIA_COST,
             air: None,
             prefer_width: defaults::PREFER_WIDTH,
@@ -331,10 +424,32 @@ impl RouteOptions {
         }
     }
 
+    /// Portfolio size: what was given, else what the preset says.
+    pub fn runs(&self) -> usize {
+        self.runs.unwrap_or(self.preset.values().runs)
+    }
+
+    /// Generations of the order search: what was given, else what the preset says.
+    pub fn generations(&self) -> usize {
+        self.generations.unwrap_or(self.preset.values().generations)
+    }
+
+    /// Generations that select by clearance violations: what was given, else what the preset
+    /// says.
+    pub fn geometry_generations(&self) -> usize {
+        self.geometry_generations
+            .unwrap_or(self.preset.values().geometry_generations)
+    }
+
+    /// Seconds of the open end (0: none): what was given, else what the preset says.
+    pub fn open_end_seconds(&self) -> f64 {
+        self.open_end_seconds.unwrap_or(self.preset.values().open_end_seconds)
+    }
+
     /// Whether the run is open ended: by its time budget, or because the front end may stop it
     /// (`until_stop`, [`Hooks::stop`]).
     pub fn open_end(&self, until_stop: bool) -> bool {
-        until_stop || self.open_end_seconds > 0.0
+        until_stop || self.open_end_seconds() > 0.0
     }
 
     /// Check the options against each other; `until_stop` says that the front end may stop the
@@ -347,7 +462,7 @@ impl RouteOptions {
         let finishing = self.finishing();
         let open_end = self.open_end(until_stop);
         let err = |m: &str| Err(m.to_string());
-        if self.runs == 0 {
+        if self.runs() == 0 {
             return err("runs must be at least 1");
         }
         if self.via_pitch.is_nan() || self.via_pitch <= 0.0 {
@@ -356,7 +471,7 @@ impl RouteOptions {
         if self.give.is_some_and(|g| g.is_nan() || g < 0.0) {
             return err("give must not be negative");
         }
-        if self.open_end_seconds.is_nan() || self.open_end_seconds < 0.0 {
+        if self.open_end_seconds().is_nan() || self.open_end_seconds() < 0.0 {
             return err("open_end_seconds must not be negative");
         }
         if self.scope == Scope::Reroute && self.nets.is_empty() {
@@ -406,7 +521,7 @@ impl RouteOptions {
         }
         if open_end && band {
             return err(
-                "an open ended run does not work with pairs band: write pairs pull or off, or leave out the open end (until_stop, open_end_seconds)",
+                "an open ended run does not work with pairs band: write pairs pull or off, or leave out the open end (until_stop, open_end_seconds, preset final)",
             );
         }
         if self.placements > 0 && (self.scope.keeps_all() || !self.nets.is_empty() || band) {
@@ -490,13 +605,15 @@ impl RouteOptions {
         let stop = open_end.then(|| hooks.stop.cloned().unwrap_or_default());
         let told = hooks.progress.map(|p| p(prefix));
         let progress = match &stop {
-            Some(stop) if self.open_end_seconds > 0.0 => Some(with_budget(told, stop.clone(), self.open_end_seconds)),
+            Some(stop) if self.open_end_seconds() > 0.0 => {
+                Some(with_budget(told, stop.clone(), self.open_end_seconds()))
+            }
             _ => told,
         };
         SearchConfig {
-            population: self.runs,
-            generations: self.generations,
-            geometry_generations: self.geometry_generations,
+            population: self.runs(),
+            generations: self.generations(),
+            geometry_generations: self.geometry_generations(),
             frames: self.frames.is_some(),
             seed: self.seed,
             open_end: stop,

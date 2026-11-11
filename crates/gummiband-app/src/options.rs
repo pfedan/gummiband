@@ -183,10 +183,33 @@ pub const OPTIONS: &[OptionDoc] = &[
         "none",
         "Copper layers treated as planes besides those of KiCad type \"power\": not routed, their zones stay.",
     ),
+    choice(
+        "preset",
+        "standard",
+        "How much search the route gets: a preset sets runs, generations, geometry_generations and open_end_seconds, and each of the four wins over it when given.",
+        &[
+            word(
+                "draft",
+                "runs 4, generations 1, geometry_generations 0, open_end_seconds 0: the quickest look at whether the board routes and where it is tight, as the benchmark suite routes; leaves many clearance violations.",
+            ),
+            word(
+                "quick",
+                "runs 14, generations 3, geometry_generations 0, open_end_seconds 0: the whole order search without the rounds that select by the clearance check, in about a third of the time of standard and with many more clearance violations: for a first result on a real board.",
+            ),
+            word(
+                "standard",
+                "runs 14, generations 3, geometry_generations 3, open_end_seconds 0: the defaults, a usable board in a few minutes.",
+            ),
+            word(
+                "final",
+                "runs 14, generations 3, geometry_generations 3, open_end_seconds 600: standard, then the open end improves the result for 10 minutes (fewer vias, fewer violations, sometimes the last connections), for the last run of a board and not with pairs band.",
+            ),
+        ],
+    ),
     opt(
         "runs",
         Kind::Number,
-        "14",
+        "what the preset says: 14 with standard",
         "Portfolio size: router runs with different orders in every generation.",
     ),
     opt("via_pitch", Kind::Number, "0.5", "Via site grid pitch in mm."),
@@ -270,13 +293,13 @@ pub const OPTIONS: &[OptionDoc] = &[
     opt(
         "generations",
         Kind::Number,
-        "3",
+        "what the preset says: 3 with standard",
         "Generations of the evolutionary order search after the portfolio.",
     ),
     opt(
         "geometry_generations",
         Kind::Number,
-        "3",
+        "what the preset says: 3 with standard",
         "Generations that select by clearance violations after the geometry step (0: fastest, many more violations).",
     ),
     opt(
@@ -294,7 +317,7 @@ pub const OPTIONS: &[OptionDoc] = &[
     opt(
         "open_end_seconds",
         Kind::Number,
-        "0",
+        "what the preset says: 0 with standard",
         "Open end with a time budget: after the normal search keep improving for this many seconds, then finish the best result (0: off).",
     ),
     opt(
@@ -406,6 +429,7 @@ mod tests {
             move_parts,
             fixed,
             plane_layers,
+            preset,
             runs,
             via_pitch,
             via_cost,
@@ -512,7 +536,7 @@ mod tests {
         let on_off = |b: bool| if b { "on" } else { "off" }.to_string();
         let plain = [
             ("scope", d.scope.word().to_string()),
-            ("runs", d.runs.to_string()),
+            ("preset", d.preset.word().to_string()),
             ("via_pitch", d.via_pitch.to_string()),
             ("via_cost", d.via_cost.to_string()),
             ("layer_dirs", d.layer_dirs.to_string()),
@@ -524,9 +548,6 @@ mod tests {
             ("breakouts", on_off(d.breakouts)),
             ("via_pairs", on_off(d.via_pairs)),
             ("negotiate", d.negotiate.to_string()),
-            ("generations", d.generations.to_string()),
-            ("geometry_generations", d.geometry_generations.to_string()),
-            ("open_end_seconds", d.open_end_seconds.to_string()),
             ("open_via_cost", d.open_via_cost.to_string()),
             ("prefer_width", d.prefer_width.to_string()),
             ("tune", on_off(d.tune)),
@@ -554,5 +575,82 @@ mod tests {
         assert!(!d.shove() && text("shove").ends_with("else off"));
         assert_eq!(text("angles"), "any");
         assert_eq!(d.angles, crate::Angles::Any);
+        // the four that a preset sets say so, with the number of the default preset
+        let standard = crate::Preset::Standard.values();
+        let said = |n: String| format!("what the preset says: {n} with standard");
+        assert_eq!(text("runs"), said(standard.runs.to_string()));
+        assert_eq!(text("generations"), said(standard.generations.to_string()));
+        assert_eq!(
+            text("geometry_generations"),
+            said(standard.geometry_generations.to_string())
+        );
+        assert_eq!(text("open_end_seconds"), said(standard.open_end_seconds.to_string()));
+    }
+
+    /// A preset is a word of the table, and its sentence starts with the four values it sets:
+    /// what the help says is what the route gets.
+    #[test]
+    fn a_preset_says_what_it_sets() {
+        use crate::Preset;
+        let doc = option_doc("preset").unwrap();
+        assert_eq!(doc.choices.len(), Preset::ALL.len());
+        for (c, p) in doc.choices.iter().zip(Preset::ALL) {
+            assert_eq!(c.value, p.word());
+            assert_eq!(Preset::parse(c.value), Ok(p));
+            let v = p.values();
+            let sets = format!(
+                "runs {}, generations {}, geometry_generations {}, open_end_seconds {}: ",
+                v.runs, v.generations, v.geometry_generations, v.open_end_seconds
+            );
+            assert!(c.help.starts_with(&sets), "{}: {}", c.value, c.help);
+        }
+        // the default preset is the defaults of old, so a route without a preset is unchanged
+        let d = RouteOptions::default();
+        assert_eq!(d.preset, Preset::Standard);
+        assert_eq!(
+            (
+                d.runs(),
+                d.generations(),
+                d.geometry_generations(),
+                d.open_end_seconds()
+            ),
+            (
+                crate::defaults::RUNS,
+                crate::defaults::GENERATIONS,
+                crate::defaults::GEOMETRY_GENERATIONS,
+                crate::defaults::OPEN_END_SECONDS
+            )
+        );
+        // an option that is given wins over the preset, each on its own
+        let o = RouteOptions {
+            preset: Preset::Draft,
+            geometry_generations: Some(2),
+            ..RouteOptions::default()
+        };
+        assert_eq!((o.runs(), o.generations(), o.geometry_generations()), (4, 1, 2));
+        let o = RouteOptions {
+            preset: Preset::Final,
+            open_end_seconds: Some(0.0),
+            ..RouteOptions::default()
+        };
+        assert!(!o.open_end(false) && o.runs() == crate::defaults::RUNS);
+        assert!(
+            RouteOptions {
+                preset: Preset::Final,
+                ..RouteOptions::default()
+            }
+            .open_end(false)
+        );
+        // final is an open end, which the wide track of pairs does not have: said, not dropped
+        let band = RouteOptions {
+            preset: Preset::Final,
+            pairs: crate::Pairs::Band,
+            ..RouteOptions::default()
+        };
+        assert!(band.validate(false).unwrap_err().contains("preset final"));
+        assert_eq!(
+            Preset::parse("fast").unwrap_err(),
+            "preset must be draft, quick, standard or final, not \"fast\""
+        );
     }
 }

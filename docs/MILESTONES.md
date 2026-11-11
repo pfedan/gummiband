@@ -914,3 +914,18 @@ LED controller (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
   Measured: 15 routes of a half routed `medium` (three nets open, two locked) in every old
   combination and in the new spelling give the files of the build before the change, byte for
   byte, and so do the 12 routes of the pair options; both hash lists are unchanged.
+
+## Consolidation: presets for the search effort
+
+- 2026-11-11: `preset` is one option of the route pipeline with four words, in the CLI and the
+  MCP tool `route`: `draft` (4 runs, 1 generation, no geometry generations: the settings of the
+  benchmark suite), `quick` (the defaults without geometry generations), `standard` (the
+  defaults, and the default) and `final` (the defaults, then 600 s of the open end). A preset
+  sets `runs`, `generations`, `geometry_generations` and `open_end_seconds` and nothing else;
+  each of the four wins over it when given. The values are in `gummiband_app::Preset`, the
+  sentence of each word in `OPTIONS` starts with them, and a test holds the two together.
+  `final` with `pairs` `band` is refused like every open end there.
+  Measured on `medium`: `--preset draft` gives the file of `--runs 4 --generations 1
+  --geometry-generations 0`, `--preset quick` that of `--geometry-generations 0`, `--preset
+  standard` and `--preset final --open-end-seconds 0` that of a run without a preset, byte for
+  byte; both hash lists are unchanged.

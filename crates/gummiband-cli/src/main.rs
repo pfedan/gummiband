@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use gummiband_app::old::Respelled;
-use gummiband_app::{Hooks, Pairs, RouteOptions, Scope, defaults};
+use gummiband_app::{Hooks, Pairs, Preset, RouteOptions, Scope, defaults};
 use gummiband_core::board::ObstacleKind;
 use gummiband_kicad::{KeepCopper, ReadOptions, read_board, write};
 use gummiband_place::auto::PlaceOptions;
@@ -154,10 +154,12 @@ struct RouteArgs {
     /// Single nets on kept copper: the tracks of other nets stay where they are (no shove).
     #[arg(long)]
     no_shove: bool,
+    #[arg(long, value_name = "PRESET", value_parser = words("preset"), help = table_help("preset"))]
+    preset: Option<String>,
     /// Portfolio size (router runs with different orders). A constant, so that results do
-    /// not depend on the machine.
-    #[arg(long, default_value_t = defaults::RUNS)]
-    runs: usize,
+    /// not depend on the machine. [default: what --preset says, 14 with standard]
+    #[arg(long)]
+    runs: Option<usize>,
     /// Via site grid pitch in mm.
     #[arg(long, default_value_t = defaults::VIA_PITCH)]
     via_pitch: f64,
@@ -219,13 +221,15 @@ struct RouteArgs {
     /// open (GB_AUTO_NEGOTIATE=0 switches that off).
     #[arg(long, default_value_t = defaults::NEGOTIATE)]
     negotiate: usize,
-    /// Generations of the evolutionary order search after the portfolio.
-    #[arg(long, default_value_t = defaults::GENERATIONS)]
-    generations: usize,
+    /// Generations of the evolutionary order search after the portfolio. [default: what
+    /// --preset says, 3 with standard]
+    #[arg(long)]
+    generations: Option<usize>,
     /// Generations that select by clearance violations after the geometry step. Each costs
-    /// about one routing pass; 0 is fastest and leaves many more violations.
-    #[arg(long, default_value_t = defaults::GEOMETRY_GENERATIONS)]
-    geometry_generations: usize,
+    /// about one routing pass; 0 is fastest and leaves many more violations. [default: what
+    /// --preset says, 3 with standard]
+    #[arg(long)]
+    geometry_generations: Option<usize>,
     /// Seed of the search (default: GB_EVO_SEED, then a constant). The same seed gives the
     /// same result, another one a different try. The line "best: seed N" and the report
     /// name the seed that was used.
@@ -308,9 +312,10 @@ struct RouteArgs {
     /// Open end with a time budget: after the normal search keep improving for this many
     /// seconds, then finish the best result (0: off). The budget starts when the open end
     /// starts, so it never cuts the normal search short. With --until-stop as well, the
-    /// run ends on the line on stdin or after the budget, whichever comes first.
-    #[arg(long, default_value_t = defaults::OPEN_END_SECONDS)]
-    open_end_seconds: f64,
+    /// run ends on the line on stdin or after the budget, whichever comes first. [default:
+    /// what --preset says, 0 with standard]
+    #[arg(long)]
+    open_end_seconds: Option<f64>,
     /// In the open end (--until-stop, --open-end-seconds): what a via is worth in mm of track when the open end judges its
     /// results. Lower gives more vias and shorter tracks, higher fewer vias and longer ones.
     #[arg(long, default_value_t = defaults::OPEN_VIA_COST)]
@@ -392,6 +397,10 @@ impl RouteArgs {
             move_parts: on_off(self.move_parts, self.no_move_parts),
             fixed: self.fixed.clone(),
             plane_layers: plane_layers.to_vec(),
+            preset: match &self.preset {
+                Some(word) => Preset::parse(word).expect("a word of the table"),
+                None => Preset::default(),
+            },
             runs: self.runs,
             via_pitch: self.via_pitch,
             via_cost: self.via_cost,
@@ -1633,7 +1642,7 @@ mod tests {
         assert!(opts.scope == Scope::Reroute && !opts.tune);
         assert_eq!(opts.nets, ["A", "B"]);
         assert_eq!((opts.shove, opts.give, opts.move_parts), (Some(false), Some(2.0), None));
-        assert_eq!(opts.open_end_seconds, 30.0);
+        assert_eq!(opts.open_end_seconds, Some(30.0));
         assert_eq!(opts.plane_layers, ["In1.Cu"]);
         assert_eq!(opts.frames, Some(PathBuf::from("pictures")));
         assert_eq!(opts.validate(false), Ok(()));
@@ -1642,6 +1651,51 @@ mod tests {
         assert!(opts.validate(until_stop).unwrap_err().contains("pairs band"));
         let (opts, _) = route_args(&["--runs", "0"]);
         assert_eq!(opts.validate(false), Err("runs must be at least 1".to_string()));
+    }
+
+    /// A preset sets four options, and each of them wins over it when given.
+    #[test]
+    fn a_preset_sets_what_was_not_given() {
+        let effort = |o: &RouteOptions| {
+            (
+                o.runs(),
+                o.generations(),
+                o.geometry_generations(),
+                o.open_end_seconds(),
+            )
+        };
+        let (opts, _) = route_args(&[]);
+        assert_eq!(effort(&opts), (14, 3, 3, 0.0));
+        let (opts, _) = route_args(&["--preset", "standard"]);
+        assert_eq!(effort(&opts), (14, 3, 3, 0.0));
+        let (opts, _) = route_args(&["--preset", "draft"]);
+        assert_eq!(effort(&opts), (4, 1, 0, 0.0));
+        let (opts, _) = route_args(&["--preset", "quick"]);
+        assert_eq!(effort(&opts), (14, 3, 0, 0.0));
+        let (opts, until_stop) = route_args(&["--preset", "final"]);
+        assert_eq!(effort(&opts), (14, 3, 3, 600.0));
+        assert!(!until_stop && opts.open_end(until_stop));
+        let (opts, _) = route_args(&["--preset", "draft", "--runs", "8", "--geometry-generations", "1"]);
+        assert_eq!(effort(&opts), (8, 1, 1, 0.0));
+        let (opts, _) = route_args(&["--preset", "final", "--open-end-seconds", "0"]);
+        assert_eq!(effort(&opts), (14, 3, 3, 0.0));
+        // the settings of the hash lists are the draft
+        let (hashes, _) = route_args(&["--runs", "4", "--generations", "1", "--geometry-generations", "0"]);
+        let (draft, _) = route_args(&["--preset", "draft"]);
+        assert_eq!(effort(&hashes), effort(&draft));
+        let e = route_line(&["--preset", "fast"]).unwrap_err();
+        assert!(
+            e.contains("--preset must be draft, quick, standard or final, not \"fast\""),
+            "{e}"
+        );
+        // the help names the words with what each sets
+        let help = Cli::command()
+            .find_subcommand("route")
+            .unwrap()
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("runs 4, generations 1, geometry_generations 0"), "{help}");
     }
 
     /// The pair options: one mode with its words, and the sub-options under their names.

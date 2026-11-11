@@ -128,6 +128,15 @@ Standing decisions of the project owner, kept here so that they survive any sess
   and no `air` where single nets are laid on kept copper (reroute, or finish with `nets`). The
   default of the command line stays `fresh`; the MCP session routes with what its board was
   loaded with and the plugin with `keep_locked`, as before.
+- A preset is a name for values of options that exist, never a setting of its own (2026-11-11).
+  `preset` = `draft`, `quick`, `standard` or `final` sets `runs`, `generations`,
+  `geometry_generations` and `open_end_seconds`; each of the four wins over it when given, and
+  the default `standard` is the defaults of old, so a route without a preset is unchanged. The
+  values are defined once (`gummiband_app::Preset`), each was measured or is a default: `draft`
+  is what the benchmark suite routes with, `quick` leaves out the geometry generations, `final`
+  adds the 10 minutes of open end in which the LED controller had 93 % of its saving. Presets
+  for kinds of boards (hints, pair modes) are left out on purpose: none of those wins on every
+  board, and a second kind of preset under the same name would hide that.
 - A renamed option keeps working under its old spelling for a while: it is mapped onto the new
   one in `gummiband_app::old`, the result is the same, and the output says in one line what to
   write now. The old spelling leaves every help text and schema at once.
