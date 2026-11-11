@@ -120,6 +120,11 @@ Standing decisions of the project owner, kept here so that they survive any sess
   route, in its count, its list and its exit state, like a connection the search could not
   lay. The router's own model decides here, KiCad's fill and DRC keep the last word; the
   report names the pads so that the two can be compared.
+- Where the fill model and KiCad's filler disagree, the model follows KiCad, and a test pins
+  KiCad's answer on the board where the difference showed (`bench/boards/areas/kicad`). What
+  the model takes from KiCad's filler without a measurement of the case is written down as an
+  assumption (`bench/README.md`), and a pad whose answer hangs on it within a raster cell is
+  doubtful, not open.
 - The goal of a connection into an area is copper of the net that hangs together with the
   area, on whatever layer: fill at least half the minimum width inside, or a pad the area
   holds. A via is a change of layer and never a goal by itself: it ends a connection only

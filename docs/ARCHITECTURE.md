@@ -419,12 +419,22 @@ the report of the model per net on the finished copper (`fill::with_copper` puts
 on the board as obstacles).
 
 **Validation.** The model was held against KiCad's fill of the planes of the LED controller
-(0.08 % of the area differs, the same pads are touched by both). Thin strips between tracks on
-a routed outer layer have not been compared; `bench/areas-kicad.sh` holds the commands and
-`bench/README.md` says how to read its table. Four small boards in `bench/boards/areas` hold
-one situation each (strips of fill of six widths, two pour nets on two halves, an area far from
-its pins, a split plane); `crates/gummiband-app/tests/area_boards.rs` pins what the model says
-about them.
+(0.08 % of the area differs, the same pads are touched by both) and against KiCad 10 on routed
+bench boards with a pour; `bench/areas-kicad.sh` holds the commands and `bench/README.md` says
+how to read its table and what KiCad said. Where the two disagreed the model follows KiCad: a
+cell centre at just the clearance is fill (a strip of the minimum width passes), a thermal
+spoke is laid and tested as KiCad lays it (also against the spokes of other pads), and the
+pieces of a zone in which no piece holds anything stay. Five small boards in
+`bench/boards/areas` hold one situation each (strips of fill of six widths, two islands with
+strips that hold nothing, two pour nets on two halves, an area far from its pins, a split
+plane), and `bench/boards/areas/kicad` holds four routed boards as KiCad got them;
+`crates/gummiband-app/tests/area_boards.rs` pins what the model says about them, which on the
+latter is KiCad's answer.
+
+The cells of the area (`NetFill::of_area`) are told by the pieces as `fill_net` labels them,
+before the pieces that hold nothing are taken out of the fill: `AreaGoal` and through it the
+last check (`Board::area_fill_at`) read that mask. Labelling the fill a second time after
+pieces went gives other numbers, and a track end or a via in the fill was then not held.
 
 ## Geometry
 
