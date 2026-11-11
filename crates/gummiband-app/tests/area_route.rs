@@ -154,6 +154,38 @@ fn an_island_of_fill_gets_one_via_and_no_track() {
     assert!(tracks_of(&off, "GND") > 0);
 }
 
+/// `area_island`: two islands of fill on the front get a via each into the fill of the back,
+/// and a pad without a spoke gets a piece of track into the fill of the front. Between the
+/// islands lie strips of fill that hold nothing and that only the fine raster of the last
+/// check sees. That check must still know which cells are fill of the area: it once took the
+/// track back as a stub and the via of an island with it, and counted both pads open.
+#[test]
+fn the_last_check_keeps_what_ends_in_the_fill_where_pieces_of_fill_are_left_out() {
+    let opts = RouteOptions {
+        keep_locked: true,
+        ..quick(Areas::Fill, &[])
+    };
+    let out = route("area_island", "island", &opts);
+    let [gnd] = out.routed.areas.as_slice() else {
+        panic!("one area net")
+    };
+    assert_eq!((gnd.pads, gnd.reached), (6, 6), "{}", gnd.summary);
+    assert_eq!(out.routed.area_vias, 2);
+    assert_eq!(out.routed.legal.trimmed, 0);
+    assert!(
+        out.routed.res.stats.unrouted.is_empty(),
+        "{:?}",
+        out.routed.res.stats.unrouted
+    );
+    assert_eq!(out.routed.res.stats.routed, out.routed.res.stats.conns);
+    let geo = &out.routed.res.geometry;
+    let net = out.routed.board.net_id("GND").unwrap();
+    assert_eq!(geo.vias.iter().filter(|v| v.net == net).count(), 2);
+    // the piece of track of the pad without a spoke
+    assert!(geo.tracks.iter().any(|t| t.net == net && t.origin.is_none()));
+    assert!(out.routed.violations.is_empty());
+}
+
 /// A planned pour makes its net an area net, on the outer layers where none are named.
 #[test]
 fn a_planned_pour_is_an_area_of_its_net() {

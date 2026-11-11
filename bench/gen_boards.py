@@ -1294,6 +1294,44 @@ def board_area_strips():
     return b
 
 
+def board_area_island():
+    """An island of fill on the front whose via lands in fill on the back, on a board where the
+    last check has to tell the pieces of the fill apart. From the top of the board down, all on
+    F.Cu: a region with one GND pad (TP1), two strips of fill 0.21 mm wide between three locked
+    tracks (the pad of the tracks cuts each strip in two), a band with one GND pad (TP2), and
+    the rest of the board with a through hole pin and three pads of GND. The region and the
+    band are islands; one via each joins them to the fill of the back. The strips hold nothing:
+    KiCad leaves them out. They are so thin that the coarse raster of the search does not see
+    them and the fine one of the last check does. G3 sits in a pen of locked track that cuts
+    all four spokes of its thermal relief and is open at one corner: it needs a piece of track
+    into the fill. Nothing is to route here but GND."""
+    b = Board("area_island", 24, 22, title="2 layers, GND pour, two islands on the front, two strips that hold nothing")
+    pitch = 0.2 + 2 * 0.2 + 0.21  # centre lines of two tracks with a strip of 0.21 mm between
+    ys = (3.0, 3.0 + pitch, 3.0 + 2 * pitch)
+    # the tracks run from edge to edge of the board, so near it that no fill passes their ends
+    b.add(test_point("A1", (0.8, 0.8)), 22.4, ys[1]).pad(1).net = "W1"
+    for y in ys:
+        b.tracks.append(("W1", "F.Cu", 0.2, [(0.5, y), (23.5, y)]))
+    b.tracks.append(("W1", "F.Cu", 0.2, [(23.5, ys[0]), (23.5, ys[2])]))
+    b.add(test_point("A2", (0.8, 0.8)), 22.4, 10).pad(1).net = "W2"
+    b.tracks.append(("W2", "F.Cu", 0.2, [(0.5, 10), (23.5, 10)]))
+    b.add(test_point("TP1"), 8, 1.5).pad(1).net = "GND"
+    b.add(test_point("TP2"), 8, 7.3).pad(1).net = "GND"
+    b.add(header("J1", 1), 5, 18).pad(1).net = "GND"
+    for i, x in enumerate((12, 19)):
+        b.add(test_point(f"G{i + 1}"), x, 18.5).pad(1).net = "GND"
+    cx, cy = 16, 14
+    b.add(test_point("G3"), cx, cy).pad(1).net = "GND"
+    b.add(test_point("A3", (0.8, 0.8)), cx - 3, cy - 1).pad(1).net = "W3"
+    b.tracks.append(("W3", "F.Cu", 0.2, [
+        (cx - 3, cy - 1), (cx - 1, cy - 1), (cx - 1, cy + 1), (cx + 0.2, cy + 1)]))
+    b.tracks.append(("W3", "F.Cu", 0.2, [(cx - 1, cy - 1), (cx + 1, cy - 1), (cx + 1, cy + 0.2)]))
+    rules = dict(clearance=0.2, min_width=0.2, gap=0.3, spoke=0.3)
+    b.zones = [("GND", "F.Cu", rules), ("GND", "B.Cu", rules)]
+    b.net_options = {"W1": {"skip": True}, "W2": {"skip": True}, "W3": {"skip": True}}
+    return b
+
+
 def board_area_halves():
     """Two pour nets on two halves: the parts of GND at the left, those of GNDR at the right,
     three signals across. No zone in the file: a pour of both nets (`ground_pour` with
@@ -1384,7 +1422,7 @@ BOARDS = [board_easy, board_medium, board_bus, board_power_mix, board_crossing, 
           board_diff_pairs, board_matching, board_pair_wall, board_pair_traffic, board_parts_easy,
           board_parts_medium, board_parts_hard, board_parts_multi,
           board_parts_multi_feed, board_parts_xhard]
-AREA_BOARDS = [board_area_strips, board_area_halves, board_area_far, board_area_split]
+AREA_BOARDS = [board_area_strips, board_area_island, board_area_halves, board_area_far, board_area_split]
 
 
 def main():

@@ -190,25 +190,15 @@ impl AreaGoal {
         let min_w = if min_w.is_finite() { min_w } else { 0.0 };
         let mut inside: Vec<Option<Vec<bool>>> = vec![None; f.fill.len()];
         let mut of_the_area: Vec<Option<Vec<bool>>> = vec![None; f.fill.len()];
-        for (l, fill) in f.fill.iter().enumerate() {
-            let Some(fill) = fill else { continue };
-            // the pieces of a layer are listed in the order of their labels
-            let main: Vec<bool> = f
-                .pieces
-                .iter()
-                .filter(|p| p.layer as usize == l)
-                .map(|p| p.main)
-                .collect();
-            if !main.contains(&true) {
+        for (l, of_area) in f.of_area.iter().enumerate() {
+            let Some(of_area) = of_area.as_ref().filter(|m| m.contains(&true)) else {
                 continue;
-            }
-            let (lab, _) = pieces_of(fill, g.nx, g.ny);
-            let of_area: Vec<bool> = lab.iter().map(|&k| k != 0 && main[k as usize - 1]).collect();
-            let d = edt(&of_area, g.nx, g.ny);
+            };
+            let d = edt(of_area, g.nx, g.ny);
             // the border of the fill lies half a cell before the first cell outside
             let deep = |d: f32| d > 0.0 && (d as f64 - 0.5) * g.step >= min_w / 2.0 - 1e-9;
             inside[l] = Some(d.iter().map(|&d| deep(d)).collect());
-            of_the_area[l] = Some(of_area);
+            of_the_area[l] = Some(of_area.clone());
         }
         let mut reached: Vec<usize> = f.pins.iter().filter(|p| p.reached()).map(|p| p.pin).collect();
         reached.sort_unstable();
@@ -718,6 +708,10 @@ pub struct NetFill {
     /// Per copper layer the fill, where the net has an area on it.
     #[serde(skip)]
     pub fill: Vec<Option<Vec<bool>>>,
+    /// Per copper layer the cells of the fill that belong to the area (the pieces with
+    /// [`Piece::main`]).
+    #[serde(skip)]
+    pub of_area: Vec<Option<Vec<bool>>>,
     pub pieces: Vec<Piece>,
     /// The pads of the net (kept copper that touches no pad is not listed).
     pub pins: Vec<PinReach>,
@@ -1422,6 +1416,18 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
             pad_site,
         });
     }
+    // the cells of the area, by the pieces as they are labelled here (what goes below changes
+    // the labels of a second count)
+    let of_area: Vec<Option<Vec<bool>>> = piece_at
+        .iter()
+        .map(|pa| {
+            pa.as_ref().map(|(lab, base)| {
+                lab.iter()
+                    .map(|&k| k != 0 && pieces[base + k as usize - 1].main)
+                    .collect()
+            })
+        })
+        .collect();
     // floating pieces go where the zone says so, now that the via sites are found: a piece that
     // a via can anchor counted for those (and never the area itself: a plane that nothing
     // reaches yet is what the pins are to reach)
@@ -1453,6 +1459,7 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
         net,
         raster: g,
         fill,
+        of_area,
         pieces,
         pins: out_pins,
         islands,
@@ -1662,6 +1669,43 @@ mod tests {
         let none = AreaGoal::of(&[], &fill_net(&b, &[], 0, &Options::default()));
         assert!(!none.has_fill());
         assert_eq!(none.apart.len(), 3);
+    }
+
+    /// The cells of the area are told by the pieces as the model has them, also where a piece
+    /// that holds nothing of the net comes before them and is left out of the fill: here the
+    /// piece at the lower left goes, the area is the right half and the pad at the upper left
+    /// sits on an island. With a via in each of the two and fill on the back, both are the area.
+    #[test]
+    fn the_cells_of_the_area_are_right_where_a_piece_before_them_is_left_out() {
+        let mut b = board(&[
+            ("GND", 15., 5., 0),
+            ("GND", 15., 15., 0),
+            ("S", 10., 1., 0),
+            ("S", 10., 19., 0),
+            ("GND", 5., 15., 0),
+        ]);
+        track(&mut b, "S", 0, &[(10., 1.), (10., 19.)], 0.2);
+        track(&mut b, "S", 0, &[(0., 10.), (10., 10.)], 0.2);
+        let areas = [solid(over_board(&b, "GND", 0)), solid(over_board(&b, "GND", 1))];
+        let f = fill_net(&b, &areas, 0, &Options::default());
+        assert_eq!(f.pieces.iter().filter(|p| p.layer == 0 && p.floating).count(), 1);
+        let g = AreaGoal::of(&areas, &f);
+        assert_eq!(
+            (g.reached.as_slice(), g.apart.as_slice()),
+            (&[0, 1][..], &[vec![4]][..])
+        );
+        assert!(g.inside(0, pt(15., 10.)) && g.layers_at(pt(15., 10.)).has(0));
+        assert!(!g.inside(0, pt(3., 17.)) && !g.layers_at(pt(3., 17.)).has(0));
+        assert!(!g.inside(0, pt(3., 3.)), "the piece that holds nothing is no fill");
+        // one via in the area and one in the island, both land in the fill of the back
+        via(&mut b, "GND", 17., 10.);
+        via(&mut b, "GND", 3., 17.);
+        let g = AreaGoal::of(&areas, &fill_net(&b, &areas, 0, &Options::default()));
+        assert_eq!((g.reached.as_slice(), g.apart.len()), (&[0, 1, 4][..], 0));
+        for at in [pt(15., 10.), pt(3., 17.), pt(17., 10.)] {
+            assert!(g.layers_at(at).has(0) && g.layers_at(at).has(1), "{at:?}");
+        }
+        assert!(g.inside(0, pt(3., 15.)) && g.inside(1, pt(3., 3.)));
     }
 
     #[test]
