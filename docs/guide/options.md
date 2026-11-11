@@ -102,13 +102,30 @@ The sub-options of the wide track (`--pair-all`, `--via-pairs`, `--breakouts`, `
 `--pair-zdiff`) are refused without `--pairs band`, and `--pair-pull` without `--pairs pull` or
 `band`: an option that would do nothing is an error that says what to write.
 
+## What stays on the board: `--scope`
+
+Not a tuning option, but the first choice of every run: what of the copper on the board the
+router keeps (MCP `scope`, plugin *Keep locked tracks and vias* and *Finish selected nets*).
+
+| Scope | What it does | Use it when |
+| --- | --- | --- |
+| `fresh`, the default of the command line | Every track and via goes, locked or not, and the board is laid anew. | A benchmark, or a board to start over. |
+| `keep_locked`, the default of the plugin | Locked tracks and vias stay as fixed copper, all unlocked copper is laid anew. | The copper that must stay is locked: a datasheet layout, a power lane, nets you are happy with. |
+| `finish` | All copper stays and only what is still open is laid; with `--nets` only those nets. | You laid some nets by hand and want the rest finished, or a track was started. |
+| `reroute` | The unlocked copper of `--nets` goes and they are laid anew; everything else stays. | One net came out badly on a routed board. |
+
+Some defaults follow from the scope. Parts move (`--move-parts`) with `fresh` and `keep_locked`
+only. Where single nets are laid on kept copper (`reroute`, or `finish` with `--nets`) the tracks
+of other nets shift aside and give way within 8 mm (`--shove`, `--give 8`), and an open ended
+run adds no `--air`.
+
 ## Finishing the result
 
 | Option | What it does | Use it when |
 | --- | --- | --- |
 | `--until-stop` (plugin: *Keep improving*), `--open-end-seconds S` (MCP: `open_end_seconds`) | Keeps improving after the search until you accept, or for S seconds. | The final run of a board. The window says when it has found its level. |
 | `--air MM` | Gives the copper a reserve over the clearance where there is room. 0.03 by default in an open ended run. | Bundles right at the limit, or a fab with tolerance worries. A result with new violations is dropped. |
-| `--move-parts` | Parts next to problems shift a little while the copper follows. On by default. | Almost always; switch it off for a board whose parts must not move at all. |
+| `--move-parts` | Parts next to problems shift a little while the copper follows. On by default where the board is laid anew (scope `fresh` and `keep_locked`). | Almost always; switch it off for a board whose parts must not move at all. |
 | `--placements N` | Places the board N times, routes each and keeps the best. | Early in a design, when the placement is open. Costs N routes. |
 | `--negotiate N` | A negotiated search from the start. | Dense boards that leave connections open; the default takes it up on its own. |
 

@@ -33,7 +33,7 @@ than 45 degree stairs.
 | Copper layers | routing happens on all copper layers that are not planes. Layers of KiCad type *power* (and `--plane-layers`) are planes. |
 | Footprints and pads | every pad is an obstacle for other nets and a pin for its own net. Overlapping pads of one net count as one pin. Non-plated holes are obstacles with the hole clearance. |
 | Solder mask | openings are obstacles for other nets, see [Solder mask openings](#solder-mask-openings). |
-| Locked tracks and vias | kept as fixed copper of their net (`--keep-locked`, the plugin default); their ends are pins. Unlocked ones are removed. |
+| Locked tracks and vias | kept as fixed copper of their net (`--scope keep_locked`, the plugin default); their ends are pins. Unlocked ones are removed. |
 | Zones | pours on plane layers define the planes; a pin of the plane net is connected by a via into the plane outline (or by a through-hole pad). Keepout zones are obstacles on their layers. Other zones stay in the file and are not refilled by the router. |
 | Net classes (`.kicad_pro`) | track width, clearance, via diameter and drill, priority, per net. |
 | Board rules (`.kicad_pro`) | minimum clearance, minimum track width, edge clearance, hole to hole and hole clearance, minimum via diameter. |
@@ -337,8 +337,8 @@ default. See the [environment variables](cli.md#environment-variables).
 Things the router does not do yet. The [milestones](../MILESTONES.md) say what comes next.
 
 - **Partial routing is experimental.** By default a run replaces all unlocked copper; lock what
-  you want to keep. `--keep-all` with `--nets` adds to existing copper, the MCP `route` with
-  `reroute` re-lays named nets on a finished board, and an agent can add locked copper through
+  you want to keep. `--scope finish` adds to existing copper (with `--nets` for single nets),
+  `--scope reroute` re-lays named nets on a finished board, and an agent can add locked copper through
   the MCP server before routing. Follow-me routing from a half drawn
   track is the plugin action *Finish selected nets*, not yet tested live in KiCad.
 - **Automatic placement is new.** `gummiband place`, the plugin button and the MCP tool

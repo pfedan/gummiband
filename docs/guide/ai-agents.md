@@ -154,8 +154,14 @@ width or `skip` before the run.
 
 The result names every unrouted connection with the nets that run in its way, the violations with
 position, the length rules that failed and how much of each pair runs coupled. That is what the
-agent iterates on: give a blocked net priority, move a part, route again. On a finished board
-`route` with `keep_all`, `nets` and `reroute` lays single nets again while everything else stays.
+agent iterates on: give a blocked net priority, move a part, route again.
+
+What a `route` keeps of the copper on the board is its `scope`, and the schema of the tool says
+which word is for what. `"finish"` keeps every track and via and lays what is still open: the
+scope for nets the agent laid by hand, with the rest left to the router. `"reroute"` with `nets`
+lays single nets again on a finished board while everything else stays. `"keep_locked"` keeps
+the locked copper and lays all else anew; it is the default for a working copy. `"fresh"` keeps
+nothing.
 
 `angles_45` turns a finished file into 45 degree routing without routing again.
 
@@ -191,7 +197,7 @@ agent iterates on: give a blocked net priority, move a part, route again. On a f
 ## Limits
 
 - Only one `route` runs at a time; other tools keep answering meanwhile.
-- Re-laying single nets on a finished board (`keep_all`, `nets`, `reroute`) shoves unlocked
+- Re-laying single nets on a finished board (`scope` `"reroute"` with `nets`) shoves unlocked
   tracks of other nets aside and lets those within 8 mm give way, but locked copper and plane
   nets never move; where they leave no room, a net may stay open.
 - Datasheet guided pre-routing (`part_info` and `add_locked_copper`) is new and has seen few real

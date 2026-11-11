@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use gummiband_app::old::Respelled;
-use gummiband_app::{Hooks, Pairs, RouteOptions, defaults};
+use gummiband_app::{Hooks, Pairs, RouteOptions, Scope, defaults};
 use gummiband_core::board::ObstacleKind;
 use gummiband_kicad::{KeepCopper, ReadOptions, read_board, write};
 use gummiband_place::auto::PlaceOptions;
@@ -123,35 +123,37 @@ struct RouteArgs {
     board: PathBuf,
     #[arg(short, long)]
     output: PathBuf,
-    /// Keep only locked tracks and vias as fixed copper (default: remove all).
-    #[arg(long)]
+    #[arg(long, value_name = "SCOPE", value_parser = words("scope"), help = table_help("scope"))]
+    scope: Option<String>,
+    /// The spelling of earlier versions, now `--scope keep_locked`.
+    #[arg(long, hide = true, conflicts_with = "scope")]
     keep_locked: bool,
-    /// Keep all existing tracks and vias as fixed copper and add to them (for completing
-    /// a partly routed board or finishing a started track).
-    #[arg(long)]
+    /// The spelling of earlier versions, now `--scope finish`.
+    #[arg(long, hide = true, conflicts_with = "scope")]
     keep_all: bool,
-    /// With --keep-all --nets: if a connection finds no way, let the unlocked tracks of other
-    /// nets within this many mm of its pin give way (they are routed again), growing in
-    /// steps up to this radius; the try with the fewest open connections is kept. 0: nothing
-    /// gives way [default: 8 with --keep-all --nets, else 0]
-    #[arg(long)]
-    give: Option<f64>,
-    /// With --keep-all --nets: the unlocked tracks of other nets are threaded into the
-    /// topology, so a connection passes between them and they shift aside. What it does not
-    /// touch stays as it is in the file. On by default with --keep-all --nets (not with
-    /// --move-parts); this flag insists on it.
-    #[arg(long, conflicts_with = "no_shove")]
-    shove: bool,
-    /// With --keep-all --nets: the tracks of other nets stay where they are (no shove).
-    #[arg(long)]
-    no_shove: bool,
-    /// Route only these nets, comma separated (the others stay as they are).
+    /// The spelling of earlier versions: with `--keep-all --nets`, now `--scope reroute`.
+    #[arg(long, hide = true, conflicts_with = "scope")]
+    reroute: bool,
+    /// Lay only these nets, comma separated. With --scope finish and reroute the others stay as
+    /// they are; with fresh and keep_locked they stay unrouted. --scope reroute needs them.
     #[arg(long, value_delimiter = ',')]
     nets: Vec<String>,
-    /// With --keep-all --nets: remove the unlocked tracks and vias of those nets first and route
-    /// them anew. Without it a net that is already connected stays as it is.
+    /// Single nets on kept copper (--scope reroute, or --scope finish with --nets): if a
+    /// connection finds no way, let the unlocked tracks of other nets within this many mm of
+    /// its pin give way (they are routed again), growing in steps up to this radius; the try
+    /// with the fewest open connections is kept. 0: nothing gives way [default: 8 with
+    /// --scope reroute and with --scope finish --nets, else 0]
     #[arg(long)]
-    reroute: bool,
+    give: Option<f64>,
+    /// Single nets on kept copper (--scope reroute, or --scope finish with --nets): the
+    /// unlocked tracks of other nets are threaded into the topology, so a connection passes
+    /// between them and they shift aside. What it does not touch stays as it is in the file.
+    /// On by default there (not with --move-parts); this flag insists on it.
+    #[arg(long, conflicts_with = "no_shove")]
+    shove: bool,
+    /// Single nets on kept copper: the tracks of other nets stay where they are (no shove).
+    #[arg(long)]
+    no_shove: bool,
     /// Portfolio size (router runs with different orders). A constant, so that results do
     /// not depend on the machine.
     #[arg(long, default_value_t = defaults::RUNS)]
@@ -248,8 +250,9 @@ struct RouteArgs {
     report: Option<PathBuf>,
     /// Let the geometry generations shift parts next to clearance problems and open
     /// connections; the routed copper follows like rubber bands (locked footprints,
-    /// connectors, modules and mounting holes stay). On by default when the whole board is
-    /// routed (not with --keep-all); this flag insists on it.
+    /// connectors, modules and mounting holes stay). On by default where the board is laid
+    /// anew (--scope fresh and keep_locked), off with finish and reroute; this flag insists
+    /// on it.
     #[arg(long, conflicts_with = "no_move_parts")]
     move_parts: bool,
     /// Parts stay where they are.
@@ -298,7 +301,8 @@ struct RouteArgs {
     /// lay them again, the rest of the result stays; when that stops helping, bolder side
     /// branches take over. Results that differ in vias and length are written next to the
     /// output as alt1, alt2, ... No placement rounds, and no plain search next to --negotiate.
-    /// Finishing nets, the tries of --give run first and the one kept goes on open ended.
+    /// With single nets on kept copper, the tries of --give run first and the one kept goes on
+    /// open ended.
     #[arg(long)]
     until_stop: bool,
     /// Open end with a time budget: after the normal search keep improving for this many
@@ -313,7 +317,7 @@ struct RouteArgs {
     open_via_cost: f64,
     /// Give the finished copper this reserve in mm on top of the clearances where there is
     /// room, instead of leaving it at the limit [default: 0.03 in an open ended run
-    /// (--until-stop, --open-end-seconds), but not when finishing nets with --keep-all
+    /// (--until-stop, --open-end-seconds), but 0 with --scope reroute and with --scope finish
     /// --nets, else 0]
     #[arg(long)]
     air: Option<f64>,
@@ -349,8 +353,9 @@ struct RouteArgs {
 impl RouteArgs {
     /// The options of the pipeline these arguments ask for, and a note for every spelling of an
     /// earlier version among them. What was not given is the default of `RouteOptions`, through
-    /// the clap defaults that name the same constants.
-    fn options(&self, plane_layers: &[String]) -> (RouteOptions, Vec<Respelled>) {
+    /// the clap defaults that name the same constants. An old spelling that never had a meaning
+    /// is an error that says what to write.
+    fn options(&self, plane_layers: &[String]) -> Result<(RouteOptions, Vec<Respelled>), String> {
         // `--name` insists, `--no-name` switches off, neither leaves the default to the pipeline
         let on_off = |on: bool, off: bool| match (on, off) {
             (true, _) => Some(true),
@@ -358,6 +363,19 @@ impl RouteArgs {
             (false, false) => None,
         };
         let mut notes = Vec::new();
+        let scope = match &self.scope {
+            Some(word) => Scope::parse(word).expect("a word of the table"),
+            None => {
+                let (scope, note) = gummiband_app::old::scope(
+                    self.keep_locked.then_some(true),
+                    self.keep_all.then_some(true),
+                    self.reroute.then_some(true),
+                    Scope::default(),
+                )?;
+                notes.extend(note);
+                scope
+            }
+        };
         let pairs = match &self.pairs {
             Some(word) => Pairs::parse(word).expect("a word of the table"),
             None => {
@@ -367,10 +385,8 @@ impl RouteArgs {
             }
         };
         let opts = RouteOptions {
-            keep_locked: self.keep_locked,
-            keep_all: self.keep_all,
+            scope,
             nets: self.nets.clone(),
-            reroute: self.reroute,
             shove: on_off(self.shove, self.no_shove),
             give: self.give,
             move_parts: on_off(self.move_parts, self.no_move_parts),
@@ -413,7 +429,7 @@ impl RouteArgs {
             net_options: Default::default(),
             teardrops: self.teardrops,
         };
-        (opts, notes)
+        Ok((opts, notes))
     }
 }
 
@@ -722,7 +738,7 @@ fn main() -> Result<()> {
         }
         Cmd::Route(args) => {
             use gummiband_app::Event;
-            let (opts, respelled) = args.options(&cli.plane_layers);
+            let (opts, respelled) = args.options(&cli.plane_layers).map_err(anyhow::Error::msg)?;
             // a spelling of an earlier version still works, and says what to write now
             for r in &respelled {
                 println!("note: {}", r.cli());
@@ -1496,7 +1512,7 @@ mod tests {
 
     /// Flags of earlier versions that `route` still takes and maps onto the options of today
     /// (`gummiband_app::old`). They are hidden: no help lists them.
-    const OLD: &[&str] = &["pairs-switch"];
+    const OLD: &[&str] = &["keep-locked", "keep-all", "reroute", "pairs-switch"];
 
     /// The long names of `route`, with the global ones; without the hidden flags of earlier
     /// versions, which have to be exactly those of `OLD`.
@@ -1581,7 +1597,7 @@ mod tests {
         let Cmd::Route(args) = cli.cmd else {
             panic!("route");
         };
-        let (opts, notes) = args.options(&cli.plane_layers);
+        let (opts, notes) = args.options(&cli.plane_layers)?;
         Ok((opts, notes.iter().map(Respelled::cli).collect(), args.until_stop))
     }
 
@@ -1599,10 +1615,10 @@ mod tests {
         assert_eq!(format!("{opts:?}"), format!("{:?}", RouteOptions::default()));
         assert!(!until_stop);
         let (opts, _) = route_args(&[
-            "--keep-all",
+            "--scope",
+            "reroute",
             "--nets",
             "A,B",
-            "--reroute",
             "--no-shove",
             "--give",
             "2",
@@ -1614,7 +1630,7 @@ mod tests {
             "--frames",
             "pictures",
         ]);
-        assert!(opts.keep_all && opts.reroute && !opts.tune);
+        assert!(opts.scope == Scope::Reroute && !opts.tune);
         assert_eq!(opts.nets, ["A", "B"]);
         assert_eq!((opts.shove, opts.give, opts.move_parts), (Some(false), Some(2.0), None));
         assert_eq!(opts.open_end_seconds, 30.0);
@@ -1697,6 +1713,52 @@ mod tests {
                 &["--pairs", "band", "--pair-pull", "1"],
                 &["--pairs is now --pairs band"],
             ),
+            // the switches that scope replaces, in every combination that had a meaning
+            (&[], &["--scope", "fresh"], &[]),
+            (&["--nets", "A"], &["--scope", "fresh", "--nets", "A"], &[]),
+            (
+                &["--keep-locked"],
+                &["--scope", "keep_locked"],
+                &["--keep-locked is now --scope keep_locked"],
+            ),
+            (
+                &["--keep-locked", "--nets", "A"],
+                &["--scope", "keep-locked", "--nets", "A"],
+                &["--keep-locked is now --scope keep_locked"],
+            ),
+            (
+                &["--keep-all"],
+                &["--scope", "finish"],
+                &["--keep-all is now --scope finish"],
+            ),
+            (
+                &["--keep-all", "--keep-locked"],
+                &["--scope", "finish"],
+                &["--keep-locked --keep-all is now --scope finish"],
+            ),
+            (
+                &["--keep-all", "--nets", "A,B"],
+                &["--scope", "finish", "--nets", "A,B"],
+                &["--keep-all is now --scope finish"],
+            ),
+            (
+                &["--keep-all", "--nets", "A,B", "--reroute", "--no-shove", "--give", "2"],
+                &["--scope", "reroute", "--nets", "A,B", "--no-shove", "--give", "2"],
+                &["--keep-all --reroute is now --scope reroute"],
+            ),
+            (
+                &["--keep-locked", "--keep-all", "--reroute", "--nets", "A"],
+                &["--scope", "reroute", "--nets", "A"],
+                &["--keep-locked --keep-all --reroute is now --scope reroute"],
+            ),
+            (
+                &["--keep-locked", "--pairs"],
+                &["--scope", "keep_locked", "--pairs", "band"],
+                &[
+                    "--keep-locked is now --scope keep_locked",
+                    "--pairs is now --pairs band",
+                ],
+            ),
         ];
         // what the router is told, which is what decides the result
         let told = |o: &RouteOptions| {
@@ -1717,6 +1779,28 @@ mod tests {
         assert_eq!((opts.pairs, notes.len()), (Pairs::Band, 1));
         // old and new together contradict each other
         assert!(route_line(&["--pairs", "--pairs", "pull"]).is_err());
+        for old in ["--keep-locked", "--keep-all", "--reroute"] {
+            let e = route_line(&["--scope", "finish", old]).unwrap_err();
+            assert!(e.contains("cannot be used with"), "{e}");
+        }
+        // what had no meaning has none now, and the message says what to write
+        for old in [
+            &["--reroute"][..],
+            &["--reroute", "--nets", "A"],
+            &["--keep-locked", "--reroute"],
+        ] {
+            let e = route_line(old).unwrap_err();
+            assert!(
+                e.starts_with("reroute without keep_all has no meaning: write scope reroute with nets"),
+                "{e}"
+            );
+        }
+        let (opts, _, _) = route_line(&["--keep-all", "--reroute"]).unwrap();
+        assert!(
+            opts.validate(false)
+                .unwrap_err()
+                .starts_with("scope reroute needs nets")
+        );
         // only `route` has the switch
         let args: Vec<std::ffi::OsString> = ["gummiband", "--threads", "2", "lengths", "--pairs"]
             .iter()
@@ -1728,5 +1812,41 @@ mod tests {
         for flag in OLD {
             assert!(!help.contains(&format!("--{flag}")), "the help names --{flag}");
         }
+    }
+
+    /// What stays and what is laid is one option with four words; the defaults that hang on it
+    /// follow.
+    #[test]
+    fn scope_is_one_option_with_four_words() {
+        let (opts, _) = route_args(&[]);
+        assert_eq!(opts.scope, Scope::Fresh);
+        let (opts, _) = route_args(&["--scope", "finish"]);
+        assert!(opts.scope == Scope::Finish && !opts.move_parts() && !opts.shove() && opts.give() == 0.0);
+        let (opts, _) = route_args(&["--scope", "finish", "--nets", "A"]);
+        assert!(opts.shove() && opts.give() == defaults::GIVE && opts.air(true) == 0.0);
+        let (opts, _) = route_args(&["--scope", "reroute", "--nets", "A,B"]);
+        assert_eq!(
+            (opts.scope, opts.reroute_nets().len(), opts.shove()),
+            (Scope::Reroute, 2, true)
+        );
+        assert_eq!(opts.validate(false), Ok(()));
+        let (opts, _) = route_args(&["--scope", "reroute"]);
+        assert_eq!(
+            opts.validate(false).unwrap_err(),
+            "scope reroute needs nets: name the nets to lay again, or write scope finish to lay what is open"
+        );
+        let e = route_line(&["--scope", "all"]).unwrap_err();
+        assert!(
+            e.contains("--scope must be fresh, keep_locked, finish or reroute, not \"all\""),
+            "{e}"
+        );
+        // the help has every word with its sentence, and says which scope a default hangs on
+        let mut cli = Cli::command();
+        let help = cli.find_subcommand_mut("route").unwrap().render_long_help().to_string();
+        assert!(help.contains("--scope <SCOPE>"), "{help}");
+        for c in gummiband_app::option_doc("scope").unwrap().choices {
+            assert!(help.contains(&format!("- {}:", c.value)), "{}", c.value);
+        }
+        assert!(help.contains("lay net X again") && help.contains("finish the rest"));
     }
 }

@@ -70,7 +70,7 @@ target/release/gummiband info my_board.kicad_pcb
 target/release/gummiband place my_board.kicad_pcb -o my_board.placed.kicad_pcb
 
 # route it (or the placed file), keep locked tracks and vias, write a new file next to it
-target/release/gummiband route my_board.kicad_pcb -o my_board.routed.kicad_pcb --keep-locked
+target/release/gummiband route my_board.kicad_pcb -o my_board.routed.kicad_pcb --scope keep_locked
 
 # judge the result with KiCad
 kicad-cli pcb drc --refill-zones --format json -o drc.json my_board.routed.kicad_pcb

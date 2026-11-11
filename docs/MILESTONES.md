@@ -897,3 +897,20 @@ LED controller (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
   Measured: 12 routes of `diff_pairs` in old and new spelling give the files of the build
   before the change, byte for byte; `bench/hashes.sh` now passes `--pairs band` and `--pairs
   pull`, and both hash lists are unchanged.
+
+## Consolidation, phase 2c: one option for what stays on the board
+
+- 2026-11-11: `scope` is one option with four words in the CLI and the MCP tool `route`, in
+  place of the switches `keep_locked`, `keep_all` and `reroute`: `fresh` (no copper stays),
+  `keep_locked` (the locked copper stays), `finish` (all copper stays, what is open is laid) and
+  `reroute` (the unlocked copper of `nets` goes and they are laid again). The sentences of the
+  words say which one is for "I laid these nets by hand, finish the rest" (`finish`) and for
+  "lay net X again" (`reroute`); the MCP schema has them from `gummiband_app::OPTIONS`. The
+  defaults of `move_parts`, `shove`, `give` and `air` hang on the scope and name it in their
+  one line. Of the eight combinations of the three switches four had a meaning and map onto a
+  word; `reroute` without `keep_all` had none, was refused and still is. The old switches still
+  work and say what to write now. The default stays what it was: `fresh` on the command line,
+  in an MCP session what the board was loaded with.
+  Measured: 15 routes of a half routed `medium` (three nets open, two locked) in every old
+  combination and in the new spelling give the files of the build before the change, byte for
+  byte, and so do the 12 routes of the pair options; both hash lists are unchanged.

@@ -68,7 +68,8 @@ Standing decisions of the project owner, kept here so that they survive any sess
   to turn it off; the other ideas of that night stay off.
 - The algorithms use the freedoms a board leaves them by default, a switch only turns one off
   (Daniel, 2026-11-01). Everything that is not locked may give way within the rules. First step:
-  finishing nets (`--keep-all --nets`, MCP `keep_all` with `nets`) shoves the unlocked tracks of
+  finishing nets (`--scope finish --nets`, MCP `scope` `"finish"` with `nets`; then `--keep-all
+  --nets`) shoves the unlocked tracks of
   the other nets aside, and if a connection still finds no way, the nets near its pins give way
   within 8 mm; the try with the fewest open connections is kept, so giving way never costs a
   connection. In the night series of 2026-11-01 plain left 4 of 16 re-laid nets open, shove none.
@@ -117,6 +118,16 @@ Standing decisions of the project owner, kept here so that they survive any sess
   `band`). `pair_pull` is the weight of `pull` (1 unless given) and stays valid with `band`,
   where it pulls the pairs that get no wide track: that combination had an effect before
   (measured on `diff_pairs` with its pair rule taken away), so it keeps its meaning.
+- What a route keeps of the copper on the board is one option, `scope` = `fresh`, `keep_locked`,
+  `finish` or `reroute` (2026-11-11), where there were three switches (`keep_locked`,
+  `keep_all`, `reroute`) of whose eight combinations four meant something. `fresh` keeps
+  nothing, `keep_locked` the locked copper, `finish` all copper and lays what is open,
+  `reroute` takes the unlocked copper of `nets` out and lays them again. `nets` stays an option
+  of its own: it narrows every scope. The defaults that follow from others hang on the scope
+  and say so in one line each: `move_parts` on with fresh and keep_locked; `shove` on, `give` 8
+  and no `air` where single nets are laid on kept copper (reroute, or finish with `nets`). The
+  default of the command line stays `fresh`; the MCP session routes with what its board was
+  loaded with and the plugin with `keep_locked`, as before.
 - A renamed option keeps working under its old spelling for a while: it is mapped onto the new
   one in `gummiband_app::old`, the result is the same, and the output says in one line what to
   write now. The old spelling leaves every help text and schema at once.

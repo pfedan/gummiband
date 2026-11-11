@@ -84,9 +84,9 @@ front end.
 - `RouteOptions` has every option. `Default` gives the documented defaults from the constants in
   `gummiband_app::defaults`; the clap defaults of the CLI name these constants and the MCP server
   falls back to `RouteOptions::default()`. Options that follow from others are `Option`s with one
-  method each that resolves them: `move_parts` (on unless `keep_all`), `shove` (on when finishing
-  nets with fixed parts), `give` (8 mm when finishing nets), `air` (0.03 mm in an open ended run
-  of the whole board), `pair_pull` (1 with `pairs` pull, 0 with band).
+  method each that resolves them: `move_parts` (on with `scope` fresh and keep_locked), `shove` (on for single
+  nets on kept copper with fixed parts: `scope` reroute, or finish with `nets`), `give` (8 mm
+  there), `air` (0.03 mm in every other open ended run), `pair_pull` (1 with `pairs` pull, 0 with band).
 - `OPTIONS` is the table of them: name, kind of value, default in words and one sentence per
   option. The CLI offers each as `--kebab-case`, the MCP tool `route` as an argument of the same
   name. Three tests keep this true: the table against the fields of `RouteOptions`
@@ -281,7 +281,7 @@ the portals, where a wrap around a far pivot could swing past a neighbour.
 
 ## Importing existing copper
 
-For finishing nets on a routed board (`--keep-all --nets`, shove on by default) the unlocked
+For finishing nets on a routed board (`--scope finish --nets` and `--scope reroute`, shove on by default) the unlocked
 tracks and vias of the other nets are no obstacles but part of the topology
 (`gummiband-core::import`). `finish_nets` drives it in the route pipeline: when a
 connection still finds no way, the nets near its pins give way in growing circles, and the try

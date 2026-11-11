@@ -128,7 +128,7 @@ routing order hint `--patterns groups`. See [Room for track groups](options.md#r
 
 ![A track started by hand is continued by the router, and an unlocked track of another net gives way](img/finish-net.svg)
 
-*Finish selected nets* (or `--keep-all --nets`) completes the nets you point at, from where a
+*Finish selected nets* (or `--scope finish --nets`) completes the nets you point at, from where a
 track you started ends, and pushes unlocked tracks of other nets aside where it needs the room.
 See [Finish a partly routed board](workflows.md#finish-a-partly-routed-board-experimental).
 

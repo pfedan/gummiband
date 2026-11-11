@@ -12,5 +12,6 @@ pub use nets::{AppliedNetOptions, NetOptions, apply_net_options, parse_net_optio
 pub use options::{Choice, Kind, OPTIONS, OptionDoc, option_doc};
 pub use route::{
     Alternative, Angles, Angles45, Cleared, Event, Frames, Hooks, Pairs, Placement, Room, RouteOptions, RouteOutcome,
-    Routed, Trial, Tuned, Written, clear_corridors, copy_project_files, defaults, load_board, route_board, route_file,
+    Routed, Scope, Trial, Tuned, Written, clear_corridors, copy_project_files, defaults, load_board, route_board,
+    route_file,
 };

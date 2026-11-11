@@ -78,11 +78,17 @@ impl OptionDoc {
     /// The whole text of the option for a help or a schema: what it does, then one line per
     /// word of a choice, then the default.
     pub fn describe(&self) -> String {
+        self.describe_with(self.default)
+    }
+
+    /// As [`OptionDoc::describe`], for a front end whose default depends on something the table
+    /// does not know (the MCP session and the copper its board was loaded with).
+    pub fn describe_with(&self, default: &str) -> String {
         let mut text = self.help.to_string();
         for c in self.choices {
             text.push_str(&format!("\n{}: {}", c.value, c.help));
         }
-        text.push_str(&format!("\nDefault: {}.", self.default));
+        text.push_str(&format!("\nDefault: {default}."));
         text
     }
 }
@@ -118,41 +124,51 @@ const fn word(value: &'static str, help: &'static str) -> Choice {
 
 /// Every option of a route that a user can set, in the order of `RouteOptions`.
 pub const OPTIONS: &[OptionDoc] = &[
-    opt(
-        "keep_locked",
-        Kind::Switch,
-        "off",
-        "Keep locked tracks and vias as fixed copper and route around them.",
+    choice(
+        "scope",
+        "fresh",
+        "What of the copper on the board stays, and what is laid.",
+        &[
+            word(
+                "fresh",
+                "No copper stays: every track and via goes, locked ones too, and the board is laid anew.",
+            ),
+            word(
+                "keep_locked",
+                "Locked tracks and vias stay as fixed copper that the router connects to, all unlocked copper goes and is laid anew: for a board on which the copper that must stay is locked.",
+            ),
+            word(
+                "finish",
+                "All copper stays, locked or not, and only what is still open is laid, with nets only the open connections of those nets: for \"I laid these nets by hand, finish the rest\" and for a track that was started.",
+            ),
+            word(
+                "reroute",
+                "Needs nets: the unlocked copper of those nets is taken out and they are laid anew, everything else stays: for \"lay net X again\".",
+            ),
+        ],
     ),
     opt(
-        "keep_all",
-        Kind::Switch,
-        "off",
-        "Keep all tracks and vias as fixed copper and add to them.",
-    ),
-    opt("nets", Kind::List, "all nets", "Route only these nets."),
-    opt(
-        "reroute",
-        Kind::Switch,
-        "off",
-        "With keep_all and nets: remove the unlocked copper of those nets first and route them anew.",
+        "nets",
+        Kind::List,
+        "all nets",
+        "Lay only these nets: with scope finish and reroute the others stay as they are, with fresh and keep_locked they stay unrouted.",
     ),
     opt(
         "shove",
         Kind::OnOff,
-        "on when finishing nets (keep_all and nets), else off",
-        "Finishing nets: the unlocked tracks of the other nets shift aside to let a connection pass.",
+        "on with scope reroute and with scope finish and nets, else off",
+        "Single nets on kept copper: the unlocked tracks of the other nets shift aside to let a connection pass.",
     ),
     opt(
         "give",
         Kind::Number,
-        "8 when finishing nets (keep_all and nets), else 0",
-        "Finishing nets: radius in mm within which the unlocked tracks of other nets give way and are routed again when a connection finds no way.",
+        "8 with scope reroute and with scope finish and nets, else 0",
+        "Single nets on kept copper: radius in mm within which the unlocked tracks of other nets give way and are routed again when a connection finds no way.",
     ),
     opt(
         "move_parts",
         Kind::OnOff,
-        "on, off with keep_all",
+        "on with scope fresh and keep_locked, off with finish and reroute",
         "Let parts next to clearance problems and open connections shift a little while the copper follows.",
     ),
     opt(
@@ -290,7 +306,7 @@ pub const OPTIONS: &[OptionDoc] = &[
     opt(
         "air",
         Kind::Number,
-        "0.03 in an open ended run of the whole board, else 0",
+        "0.03 in an open ended run, but 0 with scope reroute and with scope finish and nets, else 0",
         "Reserve in mm on top of the clearances that the finished copper gets where there is room.",
     ),
     opt(
@@ -383,10 +399,8 @@ mod tests {
     #[test]
     fn the_table_has_every_option_of_the_pipeline_once() {
         let fields = fields!(
-            keep_locked,
-            keep_all,
+            scope,
             nets,
-            reroute,
             shove,
             give,
             move_parts,
@@ -479,6 +493,17 @@ mod tests {
             assert_eq!(crate::Pairs::parse(c.value).unwrap().word(), c.value);
         }
         assert_eq!(pairs.choices.len(), crate::Pairs::ALL.len());
+        let scope = option_doc("scope").unwrap();
+        for c in scope.choices {
+            assert_eq!(crate::Scope::parse(c.value).unwrap().word(), c.value);
+        }
+        assert_eq!(scope.choices.len(), crate::Scope::ALL.len());
+        // a front end may spell a word with a dash
+        assert_eq!(crate::Scope::parse("keep-locked"), Ok(crate::Scope::KeepLocked));
+        // the sentences an agent picks a scope by
+        let said = |word: &str| scope.choices.iter().find(|c| c.value == word).unwrap().help;
+        assert!(said("finish").contains("\"I laid these nets by hand, finish the rest\""));
+        assert!(said("reroute").contains("\"lay net X again\"") && said("reroute").starts_with("Needs nets"));
     }
 
     #[test]
@@ -486,9 +511,7 @@ mod tests {
         let d = RouteOptions::default();
         let on_off = |b: bool| if b { "on" } else { "off" }.to_string();
         let plain = [
-            ("keep_locked", on_off(d.keep_locked)),
-            ("keep_all", on_off(d.keep_all)),
-            ("reroute", on_off(d.reroute)),
+            ("scope", d.scope.word().to_string()),
             ("runs", d.runs.to_string()),
             ("via_pitch", d.via_pitch.to_string()),
             ("via_cost", d.via_cost.to_string()),
@@ -523,7 +546,11 @@ mod tests {
         assert!(text("pair_pull").starts_with(&format!("{} with pairs pull", crate::defaults::PAIR_PULL)));
         assert_eq!(d.pair_pull(), 0.0);
         assert!(text("air").starts_with(&crate::defaults::OPEN_END_AIR.to_string()));
-        assert!(d.move_parts() && text("move_parts").starts_with("on"));
+        assert!(d.move_parts() && text("move_parts").starts_with("on with scope fresh"));
+        // the defaults that hang on the scope say so in one line
+        for name in ["shove", "give", "move_parts", "air"] {
+            assert!(text(name).contains("scope") && !text(name).contains('\n'), "{name}");
+        }
         assert!(!d.shove() && text("shove").ends_with("else off"));
         assert_eq!(text("angles"), "any");
         assert_eq!(d.angles, crate::Angles::Any);

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use gummiband_app::old::Respelled;
-use gummiband_app::{Angles, NetOptions, Pairs, RouteOptions};
+use gummiband_app::{Angles, NetOptions, Pairs, RouteOptions, Scope};
 use gummiband_core::board::Board;
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -29,11 +29,13 @@ KiCad boards, and a toolbox for the layouter, not a one-stop shop: you stay the 
 that matter yourself (move_part), route critical copper by hand (add_locked_copper: tracks and vias, \
 always locked), lay out planes and pours (set_layer_type, add_zone, power_copper, ground_pour) and \
 lock what must stay (lock: parts by reference, nets, or all copper; unlock: true releases them). \
-Locked parts never move in place_parts or route, locked copper is kept and routed around; route \
-without keep_all replaces all unlocked copper, with keep_all + nets + reroute only that of the named \
-nets. After place_parts and route keep refining: move_part on the routed board (tracks follow), \
-add_locked_copper then route keep_all + nets + reroute to redraw a net, lock good nets and route the \
-rest again, add pours, angles_45. remove takes zones, tracks, vias and footprints away again (a \
+Locked parts never move in place_parts or route, locked copper is kept and routed around. What a \
+route replaces is its scope: \"keep_locked\" lays all unlocked copper anew, \"finish\" keeps all \
+copper and lays what is still open (you laid some nets by hand: finish the rest), \"reroute\" with \
+nets lays those nets again and keeps the rest (lay net X again), \"fresh\" keeps nothing. After \
+place_parts and route keep refining: move_part on the routed board (tracks follow), \
+add_locked_copper then route scope \"reroute\" with nets to redraw a net, lock good nets and route \
+the rest again, add pours, angles_45. remove takes zones, tracks, vias and footprints away again (a \
 power_copper pour by its gb: name), add_mounting_hole adds a hole, move_part side flips a part, \
 set_rules adds .kicad_dru rules, place_silk moves the reference texts off pads and other silk, and \
 try_seeds compares place_parts + route over several seeds (results scatter widely on tight boards). \
@@ -46,8 +48,8 @@ routed .kicad_pcb and returns stats, unrouted connections and clearance violatio
 the written file (KiCad's own DRC) -> render a region (x0,y0,x1,y1 in mm, board coordinates) to \
 look at problems. To pre-route a critical part by hand (datasheet layout): part_info -> \
 add_locked_copper -> route the returned board id. move_part and add_zone edit the same working \
-copy. To change one net on a routed board: load the routed file -> route with keep_all, nets and \
-reroute (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short; two_sided: true when the parts do not fit on one side), set_layer_type (power) and add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pairs \"pull\" (gentle, every pair) or \"band\" (one wide track, experimental). Good practice around routing (the prompt good_practice walks through a whole board): \
+copy. To change one net on a routed board: load the routed file -> route with scope \"reroute\" and \
+nets (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short; two_sided: true when the parts do not fit on one side), set_layer_type (power) and add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pairs \"pull\" (gentle, every pair) or \"band\" (one wide track, experimental). Good practice around routing (the prompt good_practice walks through a whole board): \
 power_plan before routing (currents -> widths, planes, vias; apply stores the widths), \
 current_check after routing (narrowest cross-section of every current path), ground_pour (GND \
 pours and stitching vias), reference_check (signal tracks over gaps or splits of their reference plane), then drc. Opt-in options (route patterns, clear_corridors, \
@@ -930,6 +932,15 @@ fn pairs_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     choice_schema("pairs")
 }
 
+/// The default of `scope` in a session: the board was loaded with or without its locked copper.
+const SCOPE_DEFAULT: &str = "keep_locked for a board that was loaded with keep_locked and for a working copy (the board id of add_locked_copper, lock, move_part, place_parts and the other tools that edit), else fresh";
+
+fn scope_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let doc = gummiband_app::option_doc("scope").expect("an option of the table");
+    let words: Vec<&str> = doc.choices.iter().map(|c| c.value).collect();
+    schemars::json_schema!({"type": "string", "enum": words, "description": doc.describe_with(SCOPE_DEFAULT)})
+}
+
 /// The arguments of `route`: the options of the pipeline (`gummiband_app::OPTIONS`, each under
 /// its name) and what the session adds (`board`, `output`, `max_violations`). An argument that
 /// does not exist is an error, not a typo that goes unnoticed.
@@ -941,21 +952,24 @@ pub struct RouteIn {
     /// Portfolio size: router runs with different orders (default 14, fixed so that results
     /// do not depend on the machine).
     pub runs: Option<usize>,
-    /// Keep all tracks and vias of the input and add to them; with `nets` only those nets are
-    /// routed and everything else stays.
-    pub keep_all: Option<bool>,
-    /// With `keep_all` and `nets`: remove the unlocked tracks and vias of those nets first and
-    /// route them anew. Without it a net that is already connected stays as it is.
-    pub reroute: Option<bool>,
-    /// With `keep_all` and `nets`: the unlocked tracks of the other nets are part of the topology,
-    /// so a connection passes between them and they shift aside; what it does not touch stays as
-    /// it is in the file (default true; false keeps them where they are). Not together with
-    /// move_parts: with both asked for, the route is refused.
+    // the description and the words come from the table of gummiband-app
+    #[serde(default)]
+    #[schemars(schema_with = "scope_schema")]
+    pub scope: Option<String>,
+    /// The nets this call lays; all others are left out. With scope "finish": only the open
+    /// connections of these nets. With scope "reroute" (which needs them): the nets to lay
+    /// again. With scope "fresh" and "keep_locked": only these nets get copper, the unlocked
+    /// copper of all others is gone from the output.
+    pub nets: Option<Vec<String>>,
+    /// With scope "reroute", and with scope "finish" and `nets`: the unlocked tracks of the
+    /// other nets are part of the topology, so a connection passes between them and they shift
+    /// aside; what it does not touch stays as it is in the file (default true there; false keeps
+    /// them where they are). Refused elsewhere, and together with move_parts.
     pub shove: Option<bool>,
-    /// With `keep_all` and `nets`: if a connection finds no way, the unlocked tracks of other nets
-    /// within this many mm of its pins give way and are routed again, in growing steps up to this
-    /// radius; the try with the fewest open connections is kept (default 8; 0: nothing gives
-    /// way). Locked copper and plane nets never move.
+    /// With scope "reroute", and with scope "finish" and `nets`: if a connection finds no way,
+    /// the unlocked tracks of other nets within this many mm of its pins give way and are routed
+    /// again, in growing steps up to this radius; the try with the fewest open connections is
+    /// kept (default 8 there; 0: nothing gives way). Locked copper and plane nets never move.
     pub give: Option<f64>,
     /// Seed of the search. The same seed gives the same result; another one a different try.
     pub seed: Option<u64>,
@@ -1001,17 +1015,16 @@ pub struct RouteIn {
     /// The result goes into the working copy <input>.prerouted.kicad_pcb, and the route uses it
     /// (`board` of the result). Pairs with patterns groups; it gives most on tight boards with
     /// several chips. To decide yourself what moves, use track_corridors and place_parts
-    /// instead. Not with keep_all.
+    /// instead. Not with scope "finish" or "reroute".
     pub clear_corridors: Option<bool>,
     /// Generations of the evolutionary order search after the portfolio (default 3).
     pub generations: Option<usize>,
     /// Generations that select by clearance violations after the geometry step (default 3, as
     /// the CLI and the plugin; 0 is about three times faster and leaves many more violations).
     pub geometry_generations: Option<usize>,
-    /// Keep locked tracks and vias as fixed copper (default: as given to load_board).
-    pub keep_locked: Option<bool>,
     /// Let parts next to clearance problems and open connections shift a little while the
-    /// routed copper follows like rubber bands (default true without keep_all, false with it).
+    /// routed copper follows like rubber bands (default true with scope "fresh" and
+    /// "keep_locked", false with "finish" and "reroute", where the kept copper would not follow).
     /// Locked footprints, connectors, modules, mounting holes, buttons and test points stay, as
     /// do the references in `fixed`. The output has the footprints at their new positions, and
     /// `moved` lists them.
@@ -1026,8 +1039,6 @@ pub struct RouteIn {
     /// Output .kicad_pcb (default: `<input>.routed.kicad_pcb` next to the input). The
     /// .kicad_pro and .kicad_dru are copied next to it if missing.
     pub output: Option<String>,
-    /// Route only these nets (all others are skipped for this call).
-    pub nets: Option<Vec<String>>,
     /// Via site grid pitch in mm (default 0.5).
     pub via_pitch: Option<f64>,
     /// Via cost in mm of track (default 3, as the CLI).
@@ -1051,8 +1062,9 @@ pub struct RouteIn {
     /// longer ones.
     pub open_via_cost: Option<f64>,
     /// Reserve in mm on top of the clearances that the finished copper gets where there is room
-    /// (default: 0.03 with open_end_seconds, but not when finishing nets with keep_all and nets,
-    /// else 0). The result stays only if it brings no new violation.
+    /// (default: 0.03 with open_end_seconds, but 0 with scope "reroute" and with scope "finish"
+    /// and `nets`, where the kept copper stays as it is; else 0). The result stays only if it
+    /// brings no new violation.
     pub air: Option<f64>,
     /// Tracks of the default net class grow up to this width in mm where there is room, at the
     /// end (default 0: off; a track_width rule with opt sets it per class).
@@ -1074,7 +1086,7 @@ pub struct RouteIn {
     /// violations, vias and length (default 0: the placement stays). The output has the parts
     /// where the best placement put them, `placement` lists every try; the working copy is not
     /// touched. To keep and compare the placements themselves, use try_seeds. Not with
-    /// keep_all, nets or pairs.
+    /// scope "finish" or "reroute", nets or pairs "band".
     pub placements: Option<usize>,
     /// First seed of placements, and the seed of clear_corridors (default 1).
     pub placement_seed: Option<u64>,
@@ -1094,6 +1106,17 @@ pub struct RouteIn {
     pub frames: Option<String>,
     /// Maximum number of violations listed (default 50; the total is always given).
     pub max_violations: Option<usize>,
+    // The three switches of an earlier version that `scope` replaces. They are still taken
+    // and mapped onto it (`gummiband_app::old::scope`), and are in no schema.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub keep_locked: Option<bool>,
+    #[serde(default)]
+    #[schemars(skip)]
+    pub keep_all: Option<bool>,
+    #[serde(default)]
+    #[schemars(skip)]
+    pub reroute: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2521,7 +2544,7 @@ impl Gummiband {
     /// and keeps the placement of `clear_corridors` in the working copy.
     fn route_entry(&self, p: RouteIn) -> Result<(String, RouteOut)> {
         let (options, loaded_keep) = self.with_entry(&p.board, |e| Ok((e.options.clone(), e.keep_locked)))?;
-        let (mut opts, respelled) = route_options(&p, p.keep_locked.unwrap_or(loaded_keep))?;
+        let (mut opts, respelled) = route_options(&p, loaded_keep)?;
         opts.net_options = options;
         opts.validate(false).map_err(anyhow::Error::msg)?;
         let (mut id, mut cleared) = (p.board.clone(), Vec::new());
@@ -3257,10 +3280,31 @@ impl Gummiband {
 
 /// The options of a route call: what the caller gave, and the defaults of the pipeline for
 /// the rest; with them a note for every spelling of an earlier version among the arguments.
-/// `keep_locked` is the caller's or the one the board was loaded with.
-fn route_options(p: &RouteIn, keep_locked: bool) -> Result<(RouteOptions, Vec<Respelled>)> {
+/// `loaded_keep`: the board was loaded with its locked copper, which is then the scope of a call
+/// that names none.
+fn route_options(p: &RouteIn, loaded_keep: bool) -> Result<(RouteOptions, Vec<Respelled>)> {
     let d = RouteOptions::default();
     let mut respelled = Vec::new();
+    let old_scope = [
+        ("keep_locked", p.keep_locked),
+        ("keep_all", p.keep_all),
+        ("reroute", p.reroute),
+    ];
+    let scope = match &p.scope {
+        Some(word) => {
+            if let Some((name, _)) = old_scope.iter().find(|(_, given)| given.is_some()) {
+                bail!("{name} is the spelling of an earlier version and scope says the same: leave {name} out");
+            }
+            Scope::parse(word).map_err(anyhow::Error::msg)?
+        }
+        None => {
+            let session = if loaded_keep { Scope::KeepLocked } else { Scope::Fresh };
+            let (scope, note) =
+                gummiband_app::old::scope(p.keep_locked, p.keep_all, p.reroute, session).map_err(anyhow::Error::msg)?;
+            respelled.extend(note);
+            scope
+        }
+    };
     let pairs = match &p.pairs {
         Some(WordOrSwitch::Word(word)) => Pairs::parse(word).map_err(anyhow::Error::msg)?,
         switch => {
@@ -3274,10 +3318,8 @@ fn route_options(p: &RouteIn, keep_locked: bool) -> Result<(RouteOptions, Vec<Re
         }
     };
     let opts = RouteOptions {
-        keep_locked,
-        keep_all: p.keep_all == Some(true),
+        scope,
         nets: p.nets.clone().unwrap_or_default(),
-        reroute: p.reroute == Some(true),
         shove: p.shove,
         give: p.give,
         move_parts: p.move_parts,
@@ -3926,7 +3968,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Remove zones (by name, net or layer, e.g. a pour of power_copper named \"gb: ...\" or a plane), tracks and vias (of nets, within a box, on layers, locked or unlocked only) and footprints (a mounting hole) from the working copy. Use it to correct power_copper, add_locked_copper, add_zone or a routed net without building the board again; then add the copper anew or route keep_all + nets + reroute. Use the returned board id from now on.",
+        description = "Remove zones (by name, net or layer, e.g. a pour of power_copper named \"gb: ...\" or a plane), tracks and vias (of nets, within a box, on layers, locked or unlocked only) and footprints (a mounting hole) from the working copy. Use it to correct power_copper, add_locked_copper, add_zone or a routed net without building the board again; then add the copper anew or route scope \"reroute\" with nets. Use the returned board id from now on.",
         output_schema = schema_for_output::<RemoveOut>(),
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
@@ -4004,7 +4046,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Add pre-routed copper (tracks as polylines, vias) as locked items: the router keeps it and routes around it, and track ends join their net. Use it for manual routing before or after route: datasheet layouts, power lanes, critical nets, or to redraw a net the router did badly (then route keep_all + nets + reroute for that net). The input file stays untouched: the copper goes into a working copy <input>.prerouted.kicad_pcb, which is loaded with keep_locked; use the returned board id from now on. Check the result with drc and render.",
+        description = "Add pre-routed copper (tracks as polylines, vias) as locked items: the router keeps it and routes around it, and track ends join their net. Use it for manual routing before or after route: datasheet layouts, power lanes, critical nets, or to redraw a net the router did badly (then route scope \"reroute\" with nets for that net). The input file stays untouched: the copper goes into a working copy <input>.prerouted.kicad_pcb, which is loaded with keep_locked, so a route of it keeps the locked copper (scope \"keep_locked\") unless it names another scope; use the returned board id from now on. Check the result with drc and render.",
         output_schema = schema_for_output::<AddLockedOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
@@ -4029,7 +4071,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Route a loaded board with Gummiband (topological any-angle router, portfolio plus evolutionary order search on all routing threads) and write the routed .kicad_pcb (default <input>.routed.kicad_pcb next to the input; unlocked tracks and vias of the input are replaced; with keep_all it adds to them, with keep_all + nets + reroute only those nets are redone). It complements manual routing: locked tracks and vias (add_locked_copper, lock) are kept and routed around, locked parts do not move, and the result can be refined afterwards with move_part, add_locked_copper, lock and another route of single nets. Every option has the name, default and meaning of gummiband route (there as --kebab-case); options that contradict each other are refused with a message that says what to change, and so is an argument that does not exist. Returns routed/total connections, unrouted connections, vias, track length, Gummiband's clearance violations with nets and positions, the portfolio, and with open_end_seconds the alternatives written next to the output. CPU heavy: seconds to minutes; one route at a time. Check the result with drc.",
+        description = "Route a loaded board with Gummiband (topological any-angle router, portfolio plus evolutionary order search on all routing threads) and write the routed .kicad_pcb (default <input>.routed.kicad_pcb next to the input). `scope` says what of the copper on the board stays: \"keep_locked\" keeps the locked tracks and vias and lays all unlocked copper anew; \"finish\" keeps all copper and lays only what is still open, which is the scope for \"I laid these nets by hand, finish the rest\" (your nets stay whether they are locked or not; with `nets` only those are finished); \"reroute\" with `nets` takes the unlocked copper of those nets out and lays them again while everything else stays, which is the scope for \"lay net X again\"; \"fresh\" keeps nothing, locked copper goes too. It complements manual routing: locked tracks and vias (add_locked_copper, lock) are kept and routed around, locked parts do not move, and the result can be refined afterwards with move_part, add_locked_copper, lock and another route of single nets. Every option has the name, default and meaning of gummiband route (there as --kebab-case; only the default of scope is the session's: a board loaded with keep_locked and every working copy keeps its locked copper); options that contradict each other are refused with a message that says what to change, and so is an argument that does not exist. Returns routed/total connections, unrouted connections, vias, track length, Gummiband's clearance violations with nets and positions, the portfolio, and with open_end_seconds the alternatives written next to the output. CPU heavy: seconds to minutes; one route at a time. Check the result with drc.",
         output_schema = schema_for_output::<RouteOut>(),
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
@@ -4176,7 +4218,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Lay out power copper before routing (or, with unlocked: \"clear\", on a routed board: the unlocked tracks and vias of other nets in the way are removed and reroute_nets lists what to route again with keep_all, nets and reroute; by default the new copper gives way to them), for current paths that a track carries badly (a converter's switch node, a pad into a plane through one via): for a net without plane one pour over its from and to pads on their layer (convex hull grown by margin, cut back from other nets' copper, holes and the edge; a long narrow pad between neighbours, like the strips of a DFN eFuse, is left through a narrow stub off an end or through a gap in its side), for a plane net at each terminal a field of locked vias for the current (IPC-2221 per via) and a small pour joining them to the pad. The pours are zones named \"gb: ...\": the router keeps other nets out and treats the pads under one pour as connected. Writes the working copy <input>.prerouted.kicad_pcb; route the returned board id. Reports the pours, what cut them and a current_check of the pours.",
+        description = "Lay out power copper before routing (or, with unlocked: \"clear\", on a routed board: the unlocked tracks and vias of other nets in the way are removed and reroute_nets lists what to route again with scope \"reroute\" and nets; by default the new copper gives way to them), for current paths that a track carries badly (a converter's switch node, a pad into a plane through one via): for a net without plane one pour over its from and to pads on their layer (convex hull grown by margin, cut back from other nets' copper, holes and the edge; a long narrow pad between neighbours, like the strips of a DFN eFuse, is left through a narrow stub off an end or through a gap in its side), for a plane net at each terminal a field of locked vias for the current (IPC-2221 per via) and a small pour joining them to the pad. The pours are zones named \"gb: ...\": the router keeps other nets out and treats the pads under one pour as connected. Writes the working copy <input>.prerouted.kicad_pcb; route the returned board id. Reports the pours, what cut them and a current_check of the pours.",
         output_schema = schema_for_output::<practice::PowerCopperOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
@@ -4407,6 +4449,10 @@ mod tests {
     /// the pipeline.
     const OWN: &[&str] = &["board", "output", "max_violations"];
 
+    /// Arguments of an earlier version that `route` still takes and maps onto the options of
+    /// today (`gummiband_app::old`). None of them is in the schema or in a description.
+    const OLD: &[&str] = &["keep_locked", "keep_all", "reroute"];
+
     /// Every option of the pipeline is an argument of `route` under its name, and `route` has no
     /// option of the pipeline that the table lacks. The CLI has the same test against the same
     /// table, so the two front ends offer the same.
@@ -4446,11 +4492,11 @@ mod tests {
         let opts = args(serde_json::json!({"board": "b1"}));
         assert_eq!(format!("{opts:?}"), format!("{:?}", RouteOptions::default()));
         let opts = args(serde_json::json!({
-            "board": "b1", "keep_all": true, "nets": ["A", "B"], "reroute": true, "shove": false,
+            "board": "b1", "scope": "reroute", "nets": ["A", "B"], "shove": false,
             "give": 2, "tune": false, "open_end_seconds": 30, "plane_layers": ["In1.Cu"],
             "breakouts": true, "placements": 3, "teardrops": true, "angles": "45",
         }));
-        assert!(opts.keep_all && opts.reroute && !opts.tune && opts.breakouts && opts.teardrops);
+        assert!(opts.scope == Scope::Reroute && !opts.tune && opts.breakouts && opts.teardrops);
         assert_eq!(opts.nets, ["A", "B"]);
         assert_eq!((opts.shove, opts.give, opts.move_parts), (Some(false), Some(2.0), None));
         assert_eq!((opts.open_end_seconds, opts.placements), (30.0, 3));
@@ -4476,13 +4522,18 @@ mod tests {
             .filter_map(|v| v.as_str())
             .collect();
         assert_eq!(required, ["board"]);
-        for name in ["pairs"] {
+        for name in ["pairs", "scope"] {
             let doc = gummiband_app::option_doc(name).unwrap();
             let prop = &schema["properties"][name];
             let words: Vec<&str> = doc.choices.iter().map(|c| c.value).collect();
             assert_eq!(prop["enum"], serde_json::json!(words), "{name}");
             let text = prop["description"].as_str().expect("description");
-            assert_eq!(text, doc.describe(), "{name}");
+            if name == "scope" {
+                // the default is the session's: the copper the board was loaded with
+                assert_eq!(text, doc.describe_with(SCOPE_DEFAULT));
+            } else {
+                assert_eq!(text, doc.describe(), "{name}");
+            }
             for c in doc.choices {
                 assert!(
                     text.contains(&format!("\n{}: {}", c.value, c.help)),
@@ -4497,6 +4548,61 @@ mod tests {
         assert_eq!(e, "pairs must be off, pull or band, not \"wide\"");
         let (opts, notes) = route_call(serde_json::json!({"board": "b1", "pairs": "pull"}));
         assert!(opts.pairs == Pairs::Pull && opts.pair_pull() == 1.0 && notes.is_empty());
+        let bad = serde_json::from_value::<RouteIn>(serde_json::json!({"board": "b1", "scope": "all"})).unwrap();
+        let e = route_options(&bad, false).unwrap_err().to_string();
+        assert_eq!(e, "scope must be fresh, keep_locked, finish or reroute, not \"all\"");
+    }
+
+    /// An agent that reads only the schema of `route` knows which scope to pick: for nets it
+    /// laid by hand and for a net to lay again. The tool's description says the same.
+    #[test]
+    fn the_schema_says_which_scope_to_pick() {
+        let schema = serde_json::to_value(schemars::schema_for!(RouteIn)).unwrap();
+        let text = schema["properties"]["scope"]["description"].as_str().unwrap();
+        let line = |word: &str| {
+            text.lines()
+                .find(|l| l.starts_with(&format!("{word}: ")))
+                .unwrap_or_else(|| panic!("no line for {word}"))
+        };
+        assert!(line("finish").contains("\"I laid these nets by hand, finish the rest\""));
+        assert!(line("reroute").contains("\"lay net X again\"") && line("reroute").contains("Needs nets"));
+        assert!(text.ends_with(&format!("Default: {SCOPE_DEFAULT}.")));
+        // the options that hang on the scope name it
+        for name in [
+            "nets",
+            "shove",
+            "give",
+            "move_parts",
+            "air",
+            "placements",
+            "clear_corridors",
+        ] {
+            let text = schema["properties"][name]["description"].as_str().unwrap();
+            assert!(
+                text.contains("scope \"") || text.contains("scope\n\""),
+                "{name}: {text}"
+            );
+        }
+    }
+
+    /// Without a scope a call routes with the scope of its session: a board loaded with its
+    /// locked copper keeps it, and a word says otherwise.
+    #[test]
+    fn the_scope_of_a_call_is_its_word_or_the_session_s() {
+        use serde_json::json;
+        let call = |v: serde_json::Value, loaded_keep: bool| {
+            let (opts, notes) = route_options(&serde_json::from_value::<RouteIn>(v).unwrap(), loaded_keep).unwrap();
+            assert!(notes.is_empty());
+            opts.scope
+        };
+        assert_eq!(call(json!({"board": "b1"}), false), Scope::Fresh);
+        assert_eq!(call(json!({"board": "b1"}), true), Scope::KeepLocked);
+        assert_eq!(call(json!({"board": "b1", "scope": "fresh"}), true), Scope::Fresh);
+        assert_eq!(call(json!({"board": "b1", "scope": "finish"}), true), Scope::Finish);
+        assert_eq!(
+            call(json!({"board": "b1", "scope": "keep-locked"}), false),
+            Scope::KeepLocked
+        );
     }
 
     /// The spellings of earlier versions give the options of the new spelling, with a note that
@@ -4530,6 +4636,31 @@ mod tests {
                 json!({"pairs": "off"}),
                 "pairs: false is now pairs: \"off\"",
             ),
+            (
+                json!({"keep_locked": true}),
+                json!({"scope": "keep_locked"}),
+                "keep_locked: true is now scope: \"keep_locked\"",
+            ),
+            (
+                json!({"keep_all": true}),
+                json!({"scope": "finish"}),
+                "keep_all: true is now scope: \"finish\"",
+            ),
+            (
+                json!({"keep_all": true, "nets": ["A"], "give": 2}),
+                json!({"scope": "finish", "nets": ["A"], "give": 2}),
+                "keep_all: true is now scope: \"finish\"",
+            ),
+            (
+                json!({"keep_locked": true, "keep_all": true, "nets": ["A"], "reroute": true, "shove": false}),
+                json!({"scope": "reroute", "nets": ["A"], "shove": false}),
+                "keep_locked: true, keep_all: true, reroute: true is now scope: \"reroute\"",
+            ),
+            (
+                json!({"keep_all": true, "reroute": false}),
+                json!({"scope": "finish"}),
+                "keep_all: true, reroute: false is now scope: \"finish\"",
+            ),
         ];
         // what the router is told, which is what decides the result
         let told = |o: &RouteOptions| {
@@ -4549,8 +4680,55 @@ mod tests {
             assert!(new_notes.is_empty(), "{new_notes:?}");
             assert_eq!(old_opts.validate(false), Ok(()), "{old}");
         }
-        // the schema knows the word only
+        // the schema knows the word only, and none of the arguments that went
         let schema = serde_json::to_value(schemars::schema_for!(RouteIn)).unwrap();
         assert_eq!(schema["properties"]["pairs"]["type"], json!("string"));
+        // keep_locked and reroute are words of scope today; keep_all is nowhere
+        assert!(!schema.to_string().contains("keep_all"));
+        for old in OLD {
+            assert!(schema["properties"].get(old).is_none(), "{old} is in the schema");
+            // and each is still taken
+            let v = json!({"board": "b1", "keep_all": true, "nets": ["A"], *old: true});
+            assert!(serde_json::from_value::<RouteIn>(v).is_ok(), "{old}");
+        }
+        // in a session that keeps the locked copper, false takes it out and nothing leaves it in
+        let session = |v: serde_json::Value| {
+            let (opts, notes) = route_options(&serde_json::from_value::<RouteIn>(v).unwrap(), true).unwrap();
+            (opts.scope, notes.iter().map(Respelled::mcp).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            session(json!({"board": "b1", "keep_locked": false})),
+            (
+                Scope::Fresh,
+                vec!["keep_locked: false is now scope: \"fresh\"".to_string()]
+            )
+        );
+        assert_eq!(
+            session(json!({"board": "b1", "keep_all": false})),
+            (
+                Scope::KeepLocked,
+                vec!["keep_all: false is now scope: \"keep_locked\"".to_string()]
+            )
+        );
+        // what had no meaning is refused, as it was, and so is an old switch next to the word
+        let refused = |v: serde_json::Value| {
+            route_options(&serde_json::from_value::<RouteIn>(v).unwrap(), false)
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(
+            refused(json!({"board": "b1", "reroute": true, "nets": ["A"]}))
+                .starts_with("reroute without keep_all has no meaning: write scope reroute with nets")
+        );
+        assert_eq!(
+            refused(json!({"board": "b1", "scope": "finish", "keep_all": true})),
+            "keep_all is the spelling of an earlier version and scope says the same: leave keep_all out"
+        );
+        let (opts, _) = route_call(json!({"board": "b1", "keep_all": true, "reroute": true}));
+        assert!(
+            opts.validate(false)
+                .unwrap_err()
+                .starts_with("scope reroute needs nets")
+        );
     }
 }

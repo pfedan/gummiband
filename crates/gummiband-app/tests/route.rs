@@ -1,7 +1,7 @@
 //! The shared route pipeline on a board of two resistors: defaults, a route from file to file,
 //! and finishing a net on the result.
 
-use gummiband_app::{Event, Hooks, Pairs, RouteOptions, defaults, route_file};
+use gummiband_app::{Event, Hooks, Pairs, RouteOptions, Scope, defaults, route_file};
 
 fn pad(num: u32, x: f64, net: &str) -> String {
     format!(
@@ -42,13 +42,104 @@ fn options_follow_from_each_other() {
     assert_eq!((d.air(false), d.air(true)), (0.0, defaults::OPEN_END_AIR));
 
     let finishing = RouteOptions {
-        keep_all: true,
+        scope: Scope::Finish,
         nets: vec!["A".into()],
         ..Default::default()
     };
     assert!(finishing.finishing() && finishing.shove() && !finishing.move_parts());
     assert_eq!(finishing.give(), defaults::GIVE);
     assert_eq!(finishing.air(true), 0.0);
+    // the defaults hang on the scope, and for finish on whether nets are named
+    let of = |scope, nets: &[&str]| RouteOptions {
+        scope,
+        nets: nets.iter().map(|n| n.to_string()).collect(),
+        ..Default::default()
+    };
+    use gummiband_kicad::KeepCopper;
+    // scope, nets, then: copper kept, move_parts, shove, give, air open ended, nets taken out
+    let table = [
+        (
+            Scope::Fresh,
+            false,
+            KeepCopper::None,
+            true,
+            false,
+            0.0,
+            defaults::OPEN_END_AIR,
+            false,
+        ),
+        (
+            Scope::Fresh,
+            true,
+            KeepCopper::None,
+            true,
+            false,
+            0.0,
+            defaults::OPEN_END_AIR,
+            false,
+        ),
+        (
+            Scope::KeepLocked,
+            false,
+            KeepCopper::Locked,
+            true,
+            false,
+            0.0,
+            defaults::OPEN_END_AIR,
+            false,
+        ),
+        (
+            Scope::KeepLocked,
+            true,
+            KeepCopper::Locked,
+            true,
+            false,
+            0.0,
+            defaults::OPEN_END_AIR,
+            false,
+        ),
+        (
+            Scope::Finish,
+            false,
+            KeepCopper::All,
+            false,
+            false,
+            0.0,
+            defaults::OPEN_END_AIR,
+            false,
+        ),
+        (
+            Scope::Finish,
+            true,
+            KeepCopper::All,
+            false,
+            true,
+            defaults::GIVE,
+            0.0,
+            false,
+        ),
+        (
+            Scope::Reroute,
+            true,
+            KeepCopper::All,
+            false,
+            true,
+            defaults::GIVE,
+            0.0,
+            true,
+        ),
+    ];
+    for (scope, nets, keep, move_parts, shove, give, air, taken_out) in table {
+        let o = of(scope, if nets { &["A"] } else { &[] });
+        assert_eq!(o.validate(true), Ok(()), "{scope:?} {nets}");
+        assert_eq!(
+            (o.keep(), o.move_parts(), o.shove(), o.give(), o.air(true)),
+            (keep, move_parts, shove, give, air),
+            "{scope:?} {nets}"
+        );
+        assert_eq!(!o.reroute_nets().is_empty(), taken_out, "{scope:?}");
+        assert_eq!(o.air(false), 0.0);
+    }
     // parts that move leave the other tracks as obstacles; what is asked for counts
     let moving = RouteOptions {
         move_parts: Some(true),
@@ -73,7 +164,7 @@ fn contradictions_are_errors() {
     assert_eq!(d.validate(false), Ok(()));
     assert_eq!(d.validate(true), Ok(()));
     let finishing = RouteOptions {
-        keep_all: true,
+        scope: Scope::Finish,
         nets: vec!["A".into()],
         ..Default::default()
     };
@@ -95,11 +186,33 @@ fn contradictions_are_errors() {
     assert_eq!(band.validate(false), Ok(()));
     refused(
         RouteOptions {
-            reroute: true,
+            scope: Scope::Reroute,
             ..d.clone()
         },
         false,
-        "reroute needs keep_all and nets",
+        "scope reroute needs nets: name the nets to lay again, or write scope finish to lay what is open",
+    );
+    // shove and give act where single nets are laid on kept copper, and nowhere else
+    for scope in [Scope::Fresh, Scope::KeepLocked, Scope::Finish] {
+        refused(
+            RouteOptions {
+                scope,
+                shove: Some(true),
+                ..d.clone()
+            },
+            false,
+            "shove needs single nets on kept copper: write scope finish with nets, or scope reroute, or leave shove out",
+        );
+    }
+    refused(
+        RouteOptions {
+            scope: Scope::KeepLocked,
+            nets: vec!["A".into()],
+            give: Some(4.0),
+            ..d.clone()
+        },
+        false,
+        "give needs single nets on kept copper",
     );
     refused(
         RouteOptions {
@@ -107,7 +220,7 @@ fn contradictions_are_errors() {
             ..d.clone()
         },
         false,
-        "shove needs keep_all and nets",
+        "shove needs single nets on kept copper",
     );
     refused(
         RouteOptions {
@@ -115,7 +228,7 @@ fn contradictions_are_errors() {
             ..d.clone()
         },
         false,
-        "give needs keep_all and nets",
+        "give needs single nets on kept copper",
     );
     // switching off what is off anyway is no contradiction
     let off = RouteOptions {
@@ -203,7 +316,7 @@ fn contradictions_are_errors() {
     refused(
         RouteOptions { placements: 2, ..band },
         false,
-        "placements routes the whole board: not with keep_all, nets or pairs band",
+        "placements routes the whole board: not with scope finish or reroute, nets or pairs band",
     );
     refused(
         RouteOptions {
@@ -277,7 +390,7 @@ fn route_a_file_then_finish_a_net() {
 
     // net B joins on the routed board, as 45 degree tracks; the track of A stays
     let opts = RouteOptions {
-        keep_all: true,
+        scope: Scope::Finish,
         nets: vec!["B".into()],
         angles: gummiband_app::Angles::Deg45,
         ..opts

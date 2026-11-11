@@ -78,6 +78,48 @@ pub enum Angles {
     Deg45,
 }
 
+/// What of the copper on the board stays, and what is laid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scope {
+    /// No copper stays, locked or not; the board is laid anew.
+    #[default]
+    Fresh,
+    /// Locked tracks and vias stay as fixed copper, all unlocked copper goes and is laid anew.
+    KeepLocked,
+    /// All copper stays and what is still open is laid; with `nets` only those nets.
+    Finish,
+    /// The unlocked copper of `nets` goes and they are laid anew; everything else stays.
+    Reroute,
+}
+
+impl Scope {
+    pub const ALL: [Scope; 4] = [Scope::Fresh, Scope::KeepLocked, Scope::Finish, Scope::Reroute];
+
+    /// The word of the option `scope` ([`crate::OPTIONS`]).
+    pub fn word(self) -> &'static str {
+        match self {
+            Scope::Fresh => "fresh",
+            Scope::KeepLocked => "keep_locked",
+            Scope::Finish => "finish",
+            Scope::Reroute => "reroute",
+        }
+    }
+
+    /// The value of a word; the error names the words there are.
+    pub fn parse(word: &str) -> Result<Scope, String> {
+        let word = crate::option_doc("scope").expect("scope").choice(word)?;
+        Ok(*Scope::ALL
+            .iter()
+            .find(|s| s.word() == word)
+            .expect("a word of the table"))
+    }
+
+    /// Whether the copper of the board stays, unlocked copper too: the router adds to it.
+    pub fn keeps_all(self) -> bool {
+        matches!(self, Scope::Finish | Scope::Reroute)
+    }
+}
+
 /// How the two nets of a differential pair are laid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Pairs {
@@ -117,22 +159,19 @@ impl Pairs {
 /// Options that are `None` follow from the others, see the methods of the same name.
 #[derive(Debug, Clone)]
 pub struct RouteOptions {
-    /// Keep locked tracks and vias as fixed copper (without it and `keep_all` all copper goes).
-    pub keep_locked: bool,
-    /// Keep all tracks and vias as fixed copper and add to them.
-    pub keep_all: bool,
-    /// Route only these nets (empty: all).
+    /// What of the copper on the board stays, and what is laid.
+    pub scope: Scope,
+    /// Lay only these nets (empty: all). [`Scope::Reroute`] needs them.
     pub nets: Vec<String>,
-    /// With `keep_all` and `nets`: the unlocked copper of those nets goes first and is routed anew.
-    pub reroute: bool,
-    /// Finishing nets: the unlocked tracks of the other nets are part of the topology and shift
-    /// aside. None: on when finishing nets with fixed parts, see [`RouteOptions::shove`].
+    /// Single nets on kept copper ([`RouteOptions::finishing`]): the unlocked tracks of the
+    /// other nets are part of the topology and shift aside. None: on there unless parts move, see
+    /// [`RouteOptions::shove`].
     pub shove: Option<bool>,
-    /// Finishing nets: radius in mm within which other nets give way. None: [`defaults::GIVE`]
-    /// when finishing nets, else 0, see [`RouteOptions::give`].
+    /// Single nets on kept copper: radius in mm within which other nets give way. None:
+    /// [`defaults::GIVE`] there, else 0, see [`RouteOptions::give`].
     pub give: Option<f64>,
-    /// Let the geometry generations shift parts. None: on unless `keep_all`, see
-    /// [`RouteOptions::move_parts`].
+    /// Let the geometry generations shift parts. None: on with the scopes that lay the board
+    /// anew, off with those that keep its copper, see [`RouteOptions::move_parts`].
     pub move_parts: Option<bool>,
     /// References that never move under `move_parts`, `placements` and `clear_corridors`.
     pub fixed: Vec<String>,
@@ -202,10 +241,8 @@ pub struct RouteOptions {
 impl Default for RouteOptions {
     fn default() -> Self {
         RouteOptions {
-            keep_locked: false,
-            keep_all: false,
+            scope: Scope::Fresh,
             nets: Vec::new(),
-            reroute: false,
             shove: None,
             give: None,
             move_parts: None,
@@ -249,30 +286,32 @@ impl Default for RouteOptions {
 }
 
 impl RouteOptions {
-    /// Finishing nets on a routed board: all copper is kept and only some nets are routed.
+    /// Single nets are laid on a board whose copper stays: scope reroute, or scope finish with
+    /// `nets`. The defaults of `shove`, `give` and `air` hang on it.
     pub fn finishing(&self) -> bool {
-        self.keep_all && !self.nets.is_empty()
+        self.scope.keeps_all() && !self.nets.is_empty()
     }
 
-    /// Parts move by default when the whole board is routed; on a board whose copper is kept
-    /// they stay unless asked.
+    /// Parts move by default where the board is laid anew (scope fresh and keep_locked); on a
+    /// board whose copper is kept (finish, reroute) they stay unless asked.
     pub fn move_parts(&self) -> bool {
-        self.move_parts.unwrap_or(!self.keep_all)
+        self.move_parts.unwrap_or(!self.scope.keeps_all())
     }
 
-    /// Finishing nets, the unlocked tracks of the other nets shift aside unless switched off or
-    /// parts move.
+    /// Where single nets are laid on kept copper, the unlocked tracks of the other nets shift
+    /// aside unless switched off or parts move.
     pub fn shove(&self) -> bool {
         self.shove.unwrap_or(self.finishing() && !self.move_parts())
     }
 
-    /// Finishing nets, other nets give way within [`defaults::GIVE`] mm unless told otherwise.
+    /// Where single nets are laid on kept copper, other nets give way within [`defaults::GIVE`]
+    /// mm unless told otherwise.
     pub fn give(&self) -> f64 {
         self.give.unwrap_or(if self.finishing() { defaults::GIVE } else { 0.0 })
     }
 
-    /// The reserve on the clearances. Finishing nets moves only what the new tracks touch, also
-    /// open ended, so only an open ended route of the board gets one by default.
+    /// The reserve on the clearances. Single nets on kept copper move only what the new tracks
+    /// touch, also open ended, so every other open ended route gets one by default.
     pub fn air(&self, open_end: bool) -> f64 {
         self.air.unwrap_or(if open_end && !self.finishing() {
             defaults::OPEN_END_AIR
@@ -320,14 +359,22 @@ impl RouteOptions {
         if self.open_end_seconds.is_nan() || self.open_end_seconds < 0.0 {
             return err("open_end_seconds must not be negative");
         }
-        if self.reroute && !finishing {
-            return err("reroute needs keep_all and nets");
+        if self.scope == Scope::Reroute && self.nets.is_empty() {
+            return err(
+                "scope reroute needs nets: name the nets to lay again, or write scope finish to lay what is open",
+            );
         }
+        // shove and give act where single nets are laid on kept copper
+        let single = "write scope finish with nets, or scope reroute";
         if self.shove == Some(true) && !finishing {
-            return err("shove needs keep_all and nets");
+            return Err(format!(
+                "shove needs single nets on kept copper: {single}, or leave shove out"
+            ));
         }
         if self.give.is_some_and(|g| g > 0.0) && !finishing {
-            return err("give needs keep_all and nets");
+            return Err(format!(
+                "give needs single nets on kept copper: {single}, or leave give out"
+            ));
         }
         if finishing && self.move_parts == Some(true) && self.shove != Some(false) {
             return err("move_parts does not work with shove: switch shove off, or leave move_parts out");
@@ -362,29 +409,33 @@ impl RouteOptions {
                 "an open ended run does not work with pairs band: write pairs pull or off, or leave out the open end (until_stop, open_end_seconds)",
             );
         }
-        if self.placements > 0 && (self.keep_all || !self.nets.is_empty() || band) {
-            return err("placements routes the whole board: not with keep_all, nets or pairs band");
+        if self.placements > 0 && (self.scope.keeps_all() || !self.nets.is_empty() || band) {
+            return err("placements routes the whole board: not with scope finish or reroute, nets or pairs band");
         }
-        if self.clear_corridors && self.keep_all {
-            return err("clear_corridors places parts before the whole board is routed: not with keep_all");
+        if self.clear_corridors && self.scope.keeps_all() {
+            return err(
+                "clear_corridors places parts before the whole board is routed: not with scope finish or reroute",
+            );
         }
         Ok(())
     }
 
     /// The copper of the input that stays.
     pub fn keep(&self) -> KeepCopper {
-        if self.keep_all {
-            KeepCopper::All
-        } else if self.keep_locked {
-            KeepCopper::Locked
-        } else {
-            KeepCopper::None
+        match self.scope {
+            Scope::Fresh => KeepCopper::None,
+            Scope::KeepLocked => KeepCopper::Locked,
+            Scope::Finish | Scope::Reroute => KeepCopper::All,
         }
     }
 
     /// The nets whose unlocked copper goes before routing.
     pub fn reroute_nets(&self) -> Vec<String> {
-        if self.reroute { self.nets.clone() } else { Vec::new() }
+        if self.scope == Scope::Reroute {
+            self.nets.clone()
+        } else {
+            Vec::new()
+        }
     }
 
     /// How the board file is read for these options.
@@ -610,8 +661,7 @@ pub struct Routed {
 /// What of the options the writer needs.
 #[derive(Debug, Clone)]
 struct WriteOptions {
-    keep_all: bool,
-    keep_locked: bool,
+    scope: Scope,
     reroute: Vec<String>,
     teardrops: bool,
 }
@@ -794,8 +844,7 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
         legal,
         legal_alternatives,
         write: WriteOptions {
-            keep_all: opts.keep_all,
-            keep_locked: opts.keep_locked,
+            scope: opts.scope,
             reroute: opts.reroute_nets(),
             teardrops: opts.teardrops,
         },
@@ -887,8 +936,8 @@ impl Routed {
         let mut nets = w.reroute.clone();
         nets.extend(self.given.iter().cloned());
         let opts = write::StripOptions {
-            unlocked: !w.keep_all,
-            locked: !w.keep_locked && !w.keep_all,
+            unlocked: !w.scope.keeps_all(),
+            locked: w.scope == Scope::Fresh,
             zone_layers: vec![],
             nets,
             items: changes.strip.clone(),
