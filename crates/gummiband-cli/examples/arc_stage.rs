@@ -255,9 +255,12 @@ fn main() -> anyhow::Result<()> {
     let d = RouteOptions::default();
     let opts = RouteOptions {
         seed: Some(flag("--seed").map_or(Ok(1), |s| s.parse())?),
-        runs: flag("--runs").map_or(Ok(d.runs), |s| s.parse())?,
-        generations: flag("--generations").map_or(Ok(d.generations), |s| s.parse())?,
-        geometry_generations: flag("--geometry-generations").map_or(Ok(d.geometry_generations), |s| s.parse())?,
+        runs: flag("--runs").map(|s| s.parse()).transpose()?.or(d.runs),
+        generations: flag("--generations").map(|s| s.parse()).transpose()?.or(d.generations),
+        geometry_generations: flag("--geometry-generations")
+            .map(|s| s.parse())
+            .transpose()?
+            .or(d.geometry_generations),
         move_parts: Some(false),
         // one net name per line: only these nets are routed (a net that gets a pour is left out)
         nets: match flag("--nets-file") {
