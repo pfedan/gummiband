@@ -85,6 +85,9 @@ pub const OUTCOMES: [&str; 11] = [
     "soft copper or a tuning pattern",
     "a minimum width with neck zones",
 ];
+/// How often the end with the arcs had more findings than the end without, so that the copper
+/// without them was finished and got the pass last (`route_fixed`), for measurements.
+pub static LAST_INSTEAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static OUTCOME: [AtomicU64; OUTCOMES.len()] = [const { AtomicU64::new(0) }; OUTCOMES.len()];
 pub(crate) const NEW_FORM: usize = 1;
 pub(crate) const NO_CORNER: usize = 2;

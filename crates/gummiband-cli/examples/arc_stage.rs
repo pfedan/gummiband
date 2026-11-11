@@ -1,8 +1,10 @@
-//! The finished copper of a board with and without the arcs around pivots (`GB_PIVOT_ARCS`).
+//! The finished copper of a board with and without the arcs around pivots (`GB_PIVOT_ARCS=0`
+//! turns them off).
 //! Routes the board (parts stay where they are), with the knobs as the environment sets them,
 //! and writes what the pipeline gave: open connections (as the pipeline counts them, and the
 //! nets whose finished copper is not one piece), the own check, vias, length, CPU time,
-//! the shape of the copper (lines, arcs, pieces under 50 µm, corners, per track), and what
+//! the shape of the copper (lines, arcs, pieces under 50 µm, corners, per track), the tracks
+//! that pass a via of another net at its clearance and in how many pieces, and what
 //! became of the tracks in the last pass (`gummiband_core::pivot::OUTCOME`, summed over the
 //! passes of the run: the winner and its alternatives): how many are built from their pivots
 //! in the end, and why the others are not. Then it runs that pass
@@ -10,12 +12,13 @@
 //! pass at the very end of the pipeline, after the widths are fitted; with the knob on it shows
 //! what a second pass still changes.
 //! Usage: arc_stage BOARD OUT.json [--seed N] [--runs N] [--generations N]
-//!        [--geometry-generations N]
+//!        [--geometry-generations N] [--nets-file FILE]
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use gummiband_app::{Hooks, RouteOptions, route_file};
+use gummiband_core::board::Board;
 use gummiband_core::check::{self, Violation};
 use gummiband_core::geom::{Point, arc_from_three, pt};
 use gummiband_core::math;
@@ -159,6 +162,72 @@ fn element_at(geo: &Geometry, net: u32, p: Point) -> Value {
     }
 }
 
+/// Where tracks pass vias of other nets within 30 µm of their clearance: the passages (a track
+/// and a via), their elements, those under 50 µm, the elements more than half a micrometre
+/// nearer than the clearance, and the twelve passages with the most pieces under 50 µm (net,
+/// place of the via, elements, short ones, what the nearest lacks or has to spare in µm).
+fn via_passages(board: &Board, geo: &Geometry) -> Value {
+    let (mut passages, mut elems, mut short, mut near, mut short_near, mut most) = (0, 0, 0, 0, 0, 0);
+    let mut one_elem = 0;
+    let mut list: Vec<(usize, Value)> = Vec::new();
+    for t in &geo.tracks {
+        let flat: Vec<(Vec<Point>, f64)> = t
+            .elems
+            .iter()
+            .map(|e| (flatten(std::slice::from_ref(e)), elem_len(e)))
+            .collect();
+        for v in geo.vias.iter().filter(|v| v.drill > 0.0 && v.net != t.net) {
+            let c = board.clearance(Some(t.net), Some(v.net));
+            if t.pts
+                .iter()
+                .all(|p| p.dist(v.at) > v.diameter / 2.0 + c + t.width + 0.1)
+            {
+                continue;
+            }
+            let (mut n, mut s, mut close, mut s_close, mut spare) = (0, 0, 0, 0, f64::INFINITY);
+            for (pts, l) in &flat {
+                let d = pts
+                    .windows(2)
+                    .map(|w| gummiband_core::geom::point_seg_dist(v.at, w[0], w[1]))
+                    .fold(f64::INFINITY, f64::min);
+                let (Some(&a), Some(&b)) = (pts.first(), pts.last()) else {
+                    continue;
+                };
+                let gap = d - v.diameter / 2.0 - t.piece_width(a, b) / 2.0 - c;
+                if gap > 0.03 {
+                    continue;
+                }
+                n += 1;
+                s += (*l < 0.05) as usize;
+                close += (gap < -0.0005) as usize;
+                s_close += (*l < 0.05 && gap < -0.0005) as usize;
+                spare = spare.min(gap);
+            }
+            if n == 0 {
+                continue;
+            }
+            passages += 1;
+            one_elem += (n == 1) as usize;
+            elems += n;
+            short += s;
+            near += close;
+            short_near += s_close;
+            most = most.max(n);
+            if s > 0 {
+                list.push((
+                    s,
+                    json!({"net": board.nets[t.net as usize].name, "via": [v.at.x, v.at.y], "elements": n,
+                           "under_50um": s, "nearer_than_clearance": close, "spare_um": (spare * 1e4).round() / 10.0}),
+                ));
+            }
+        }
+    }
+    list.sort_by(|a, b| b.0.cmp(&a.0));
+    json!({"passages": passages, "of_one_element": one_elem, "elements": elems, "under_50um": short,
+           "nearer_than_clearance": near, "under_50um_and_nearer": short_near, "most_elements": most,
+           "worst": list.into_iter().take(12).map(|x| x.1).collect::<Vec<_>>()})
+}
+
 /// What became of the tracks in the last passes since the call before (`pivot::OUTCOMES`).
 fn outcomes() -> Value {
     let mut m = serde_json::Map::new();
@@ -190,6 +259,15 @@ fn main() -> anyhow::Result<()> {
         generations: flag("--generations").map_or(Ok(d.generations), |s| s.parse())?,
         geometry_generations: flag("--geometry-generations").map_or(Ok(d.geometry_generations), |s| s.parse())?,
         move_parts: Some(false),
+        // one net name per line: only these nets are routed (a net that gets a pour is left out)
+        nets: match flag("--nets-file") {
+            Some(f) => std::fs::read_to_string(f)?
+                .lines()
+                .map(str::to_string)
+                .filter(|l| !l.is_empty())
+                .collect(),
+            None => Vec::new(),
+        },
         ..d
     };
     let board = Path::new(&args[1]);
@@ -208,6 +286,7 @@ fn main() -> anyhow::Result<()> {
     let apart = gummiband_core::legal::open_in_copper(&routed.board, fin, &nets).len();
     let whole_run = tally();
     let in_pipeline = outcomes();
+    let last_instead = gummiband_core::pivot::LAST_INSTEAD.load(Ordering::Relaxed);
 
     // the last pass once more, on the finished copper
     let mut again = fin.clone();
@@ -236,9 +315,11 @@ fn main() -> anyhow::Result<()> {
         "shorts": spots.iter().filter(|s| s.short).count(),
         "width_findings": routed.violations.len() - clear.len(),
         "shape": shape(fin),
+        "via_passages": via_passages(&routed.board, fin),
         "rough_tracks": rough(fin, 12),
         "tally_whole_run": whole_run,
         "outcomes": in_pipeline,
+        "pass_last_instead": last_instead,
         "again": {"tally": on_finished, "outcomes": again_outcomes, "shape": shape(&again), "tracks_with_a_new_form": again_built, "wall_s": again_s,
                   "violations": after.iter().filter(|v| !v.is_width()).count()},
         "violation_list": clear.iter().map(|v| json!({

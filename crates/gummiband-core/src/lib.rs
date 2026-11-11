@@ -1509,7 +1509,8 @@ fn search_fixed(
     let pairs: Vec<NetId> = board.diff_pairs().into_iter().flat_map(|(a, b)| [a, b]).collect();
     let target = |n: NetId| board.target_width(n, search.prefer_width, &pairs);
     let grows = (0..board.nets.len() as NetId).any(|n| target(n) > 0.0);
-    let finish = |mut best: Candidate, report: bool| -> Candidate {
+    // room first: these steps relax again
+    let prepare = |mut best: Candidate, report: bool| -> Candidate {
         if search.air > 0.0 {
             if let Some(c) = improve::give_air(board, &sub, &best, search.air) {
                 best = c;
@@ -1526,8 +1527,12 @@ fn search_fixed(
                 }
             }
         }
+        best
+    };
+    // the steps on the finished copper, with the arcs around pivots before them or without
+    let tail = |mut best: Candidate, arcs: bool| -> Candidate {
         // the last form of the tracks: arcs around their pivots and tangent lines
-        if knobs::PIVOT_ARCS.on() {
+        if arcs {
             relax::pivot_pass(board, &sub, &mut best.geo);
         }
         // tracks as wide as the surroundings allow; a net that gets a new violation by it falls back
@@ -1589,39 +1594,77 @@ fn search_fixed(
     let kept = KEEP_WINNERS
         .load(std::sync::atomic::Ordering::Relaxed)
         .then(|| (best.order.clone(), best.cfg.clone(), best.geo.clone()));
-    let mut best = finish(best, true);
     // tracks with a clearance problem at their pad go back onto the middle of their fine pitch
     // pad, one by one, where that leaves fewer problems
-    let mut now = check::check(board, &best.geo);
-    let mut straightened = 0;
-    for ti in 0..best.geo.tracks.len() {
-        let t = &best.geo.tracks[ti];
-        let (Some(&first), Some(&last)) = (t.pts.first(), t.pts.last()) else {
-            continue;
-        };
-        let near = |v: &check::Violation| {
-            (v.nets.0 == t.net || v.nets.1 == Some(t.net)) && (v.at.dist(first) < 1.5 || v.at.dist(last) < 1.5)
-        };
-        if !now.iter().any(near) {
-            continue;
-        }
-        let mut g = best.geo.clone();
-        if relax::straighten_exits(board, &mut g, Some(ti)) > 0 {
-            let after = check::check(board, &g);
-            if after.len() < now.len() {
-                best.stats.violations = Some(after.len());
-                best.geo = g;
-                now = after;
-                straightened += 1;
+    let exits = |mut best: Candidate| -> (Candidate, usize, usize) {
+        let mut now = check::check(board, &best.geo);
+        let mut straightened = 0;
+        for ti in 0..best.geo.tracks.len() {
+            let t = &best.geo.tracks[ti];
+            let (Some(&first), Some(&last)) = (t.pts.first(), t.pts.last()) else {
+                continue;
+            };
+            let near = |v: &check::Violation| {
+                (v.nets.0 == t.net || v.nets.1 == Some(t.net)) && (v.at.dist(first) < 1.5 || v.at.dist(last) < 1.5)
+            };
+            if !now.iter().any(near) {
+                continue;
+            }
+            let mut g = best.geo.clone();
+            if relax::straighten_exits(board, &mut g, Some(ti)) > 0 {
+                let after = check::check(board, &g);
+                if after.len() < now.len() {
+                    best.stats.violations = Some(after.len());
+                    best.geo = g;
+                    now = after;
+                    straightened += 1;
+                }
             }
         }
-    }
-    if straightened > 0 {
-        eprintln!(
-            "pad exits: {straightened} tracks back on the middle of their pads, {} violations left",
-            now.len()
-        );
-    }
+        let left = now.len();
+        (best, straightened, left)
+    };
+    // The arcs around pivots are judged at the very end. The steps after them start from other
+    // copper and each keeps what its own check likes, so the end with the arcs is not bound by
+    // the end without them. Where it has more clearance findings, more spots or more width
+    // findings, the copper without the arcs is finished instead and gets the pass last, where
+    // nothing follows it and its own check bounds it.
+    let score = |g: &Geometry| -> [usize; 3] {
+        let all = check::check(board, g);
+        let clear: Vec<check::Violation> = all.iter().filter(|v| !v.is_width()).cloned().collect();
+        [clear.len(), check::spots(&clear).len(), all.len() - clear.len()]
+    };
+    let finish = |best: Candidate, winner: bool| -> Candidate {
+        let best = prepare(best, winner);
+        let last = |c: Candidate, arcs: bool| -> (Candidate, usize, usize) {
+            let c = tail(c, arcs);
+            if winner { exits(c) } else { (c, 0, 0) }
+        };
+        let (best, straightened, left) = if !knobs::PIVOT_ARCS.on() {
+            last(best, false)
+        } else {
+            let with = last(best.clone(), true);
+            let a = score(&with.0.geo);
+            if a == [0; 3] {
+                with
+            } else {
+                let mut plain = last(best, false);
+                let b = score(&plain.0.geo);
+                if a.iter().zip(&b).all(|(a, b)| a <= b) {
+                    with
+                } else {
+                    pivot::LAST_INSTEAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    relax::pivot_pass(board, &sub, &mut plain.0.geo);
+                    plain
+                }
+            }
+        };
+        if straightened > 0 {
+            eprintln!("pad exits: {straightened} tracks back on the middle of their pads, {left} violations left");
+        }
+        best
+    };
+    let best = finish(best, true);
     if let Some((order, cfg, before_finish)) = kept {
         WINNERS.lock().unwrap().push(Winner {
             order,

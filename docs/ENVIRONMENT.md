@@ -60,6 +60,7 @@ Each turns off a behaviour that is on by default (or, for the `GB_NO_*` names, a
 | `GB_AUTO_NEGOTIATE` | `0` turns it off | on | A plain search that leaves at most 15 % of the connections open starts a negotiated search on its own. |
 | `GB_TAPER` | `0` turns it off | on | The last step tapers a track at a spot that misses its clearance by a little. |
 | `GB_STITCH` | `0` turns it off | on | Layer changes of current paths get the vias that carry their current (`relax::stitch_vias`). |
+| `GB_PIVOT_ARCS` | `0` turns it off | on | The finished copper gets its last form from its pivots (`relax::pivot_pass`): one arc around each pad corner, via or bundle a track bends around, with the radius of what lies between, and tangent lines. A track keeps the corners the shortcuts gave it where such an arc or line comes too close, and where the own check finds something new. |
 | `GB_ZIP` | `0` turns it off | on | Pairs the search pulled together close up to their gap at the end (`pairs::zip`). |
 | `GB_GOAL_CHECK` | `0` turns it off | on | A search asks early whether its goal is shut in. The results are the same without, only slower. |
 | `GB_BANDIT` | `0` turns it off | on | Open end, combination A: the via price of a move is drawn by what has won on this board (Thompson sampling). |
@@ -78,7 +79,6 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | Variable | Value | Without it | What it does |
 | --- | --- | --- | --- |
 | `GB_BAND` | set to anything | off | The band of a track takes the radius of the stack where the track lies next to the vertex it bends around, and where a wrap has no tangent, leaves its portal or its triangles, that wrap alone becomes a corner; today such a track loses all its arcs. |
-| `GB_PIVOT_ARCS` | set to anything | off | The finished copper gets its last form from its pivots: one arc around each pad corner, via or bundle a track bends around, with the radius of what lies between, and tangent lines. A track keeps the corners of today where such an arc or line comes too close, and where the own check finds something new. |
 | `GB_EVO_SEED` | value | 0x5eed | Seed of the search when the caller gives none (`route --seed`). Search changes are judged over several seeds with it. |
 | `GB_GPU` | set to anything | off | Relaxation rounds on the GPU; needs a binary built with the `gpu` feature. |
 | `GB_OPEN_GENERATIONS` | value | no limit | Benchmarks: the open end stops by itself after this many generations. |

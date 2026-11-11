@@ -332,12 +332,30 @@ of the nets that gave way; the soft copper shifts aside in its relaxation as in 
 3. Taut pass: straight shortcuts wherever they keep all clearances (removes the waves).
 4. Fillets: every corner is rounded with the largest arc that keeps all clearances; the output
    uses real KiCad arcs.
-5. Clearance check in the core; for the nets with such a rule the pieces below the minimum out
+5. Arcs around pivots (`relax::pivot_pass`, `pivot.rs`; `GB_PIVOT_ARCS=0`: off): the shortcuts
+   leave a corner every 40 to 100 µm where a track turns around a pad corner or a via, and each
+   gets its own small arc. Once, on the finished copper and before the widths are fitted, every
+   track is built again from the corners it has (the ends of its lines and, for an arc, the
+   point where its tangents meet): one arc per thing it bends around (a vertex of an obstacle,
+   a rounded pad corner as one circle, the outline, a via), with the radius of what lies
+   between (the pivot, its clearance, and for every track further in its width and the
+   clearance to the next), and tangent lines. Every line and every chord of an arc passes the
+   clearance test of the shortcuts; a wrap that fails is taken out alone, and a corner that
+   had an arc keeps it. A track takes the new form only where that is fewer pieces under 50 µm,
+   or as many and fewer elements. The check has the last word twice. In the pass: of two nets
+   with more findings between them than before, the changed tracks next to those findings go
+   back to the copper they had, then all their tracks, then the whole board. At the end of the
+   pipeline: the steps after the pass (fitted widths, preferred width, the zip of the pairs,
+   the taper, straight pad exits) start from other copper than without it, so `route_fixed`
+   finishes the copper without the arcs as well wherever the end with them has a finding left,
+   and if that end has fewer clearance findings, fewer spots or fewer width findings, it is the
+   one that stays and gets the pass last, where nothing follows it.
+6. Clearance check in the core; for the nets with such a rule the pieces below the minimum out
    of exempt courtyards (`width`) and the widest way through their copper between the pins that
    can take the minimum (`current` where it carries less: copper by layer and thickness, a layer
    change by the barrels of all vias that join the same copper, `Board::current_width`,
    `Board::via_current_width`); the KiCad DRC is the final judge in the benchmark.
-6. Optional, `--angles 45` (`octo.rs`): the finished tracks become conventional 45 degree
+7. Optional, `--angles 45` (`octo.rs`): the finished tracks become conventional 45 degree
    routing. Per track a greedy walk along its path: the farthest point reachable with two legs on
    the grid (or a Z of three), else a staircase or the old piece; then 45 degree chamfers on the
    90 and 135 degree corners. Every leg is tested with the clearance rules of `check` against the

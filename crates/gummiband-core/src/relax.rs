@@ -2454,27 +2454,52 @@ pub fn pivot_pass(board: &Board, sub: &Substrate, geo: &mut Geometry) -> usize {
             break;
         }
     }
-    for _ in 0..6 {
-        let now = findings(geo);
-        let bad: Vec<u32> = now
-            .iter()
-            .filter(|(k, n)| **n > before.get(*k).copied().unwrap_or(0))
-            .flat_map(|(k, _)| [Some(k.0), k.1])
-            .flatten()
-            .collect();
-        if bad.is_empty() {
+    // First the tracks of the two nets that pass within half a millimetre of a finding of
+    // theirs; if none of those has changed, or after three rounds, all their tracks.
+    for round in 0..6 {
+        let list = crate::check::check(board, geo);
+        let mut now: std::collections::HashMap<Pair, usize> = Default::default();
+        for v in &list {
+            *now.entry(v.nets).or_default() += 1;
+        }
+        let more = |k: &Pair| now[k] > before.get(k).copied().unwrap_or(0);
+        let spots: Vec<(Pair, Point)> = list.iter().filter(|v| more(&v.nets)).map(|v| (v.nets, v.at)).collect();
+        if spots.is_empty() {
             break;
         }
-        for (ti, t) in geo.tracks.iter_mut().enumerate() {
-            if changed[ti] && bad.contains(&t.net) {
-                *t = plain.tracks[ti].clone();
-                changed[ti] = false;
-                outcome[ti] = crate::pivot::BACK;
-            }
+        let of = |k: &Pair, net: u32| k.0 == net || k.1 == Some(net);
+        let near = |t: &Track| {
+            spots.iter().any(|(k, at)| {
+                of(k, t.net)
+                    && t.pts
+                        .windows(2)
+                        .any(|w| crate::geom::point_seg_dist(*at, w[0], w[1]) < 0.5)
+            })
+        };
+        let mut back: Vec<usize> = (0..geo.tracks.len())
+            .filter(|&ti| changed[ti] && round < 3 && near(&geo.tracks[ti]))
+            .collect();
+        if back.is_empty() {
+            back = (0..geo.tracks.len())
+                .filter(|&ti| changed[ti] && spots.iter().any(|(k, _)| of(k, geo.tracks[ti].net)))
+                .collect();
+        }
+        for ti in back {
+            geo.tracks[ti] = plain.tracks[ti].clone();
+            changed[ti] = false;
+            outcome[ti] = crate::pivot::BACK;
         }
     }
+    // the pieces of a pair can be as many and lie at one place more
+    let spots = |g: &Geometry| {
+        let clear: Vec<crate::check::Violation> = crate::check::check(board, g)
+            .into_iter()
+            .filter(|v| !v.is_width())
+            .collect();
+        crate::check::spots(&clear).len()
+    };
     let total = |by: &std::collections::HashMap<Pair, usize>| by.values().sum::<usize>();
-    if total(&findings(geo)) > total(&before) {
+    if total(&findings(geo)) > total(&before) || spots(geo) > spots(&plain) {
         *geo = plain;
         for (ti, c) in changed.iter_mut().enumerate().filter(|(_, c)| **c) {
             *c = false;
