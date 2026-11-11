@@ -593,6 +593,30 @@ fn candidate(
     }
 }
 
+/// The winner of a search, for a measurement that wants its router again
+/// ([`rebuild_router`], `examples/band_stage.rs`).
+pub struct Winner {
+    pub order: Vec<(NetId, usize)>,
+    pub cfg: RouterConfig,
+    /// After the geometry stage, before the finishing steps.
+    pub before_finish: Geometry,
+    pub finished: Geometry,
+}
+
+/// Set by a measurement: every search then leaves its winner in [`WINNERS`].
+pub static KEEP_WINNERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static WINNERS: std::sync::Mutex<Vec<Winner>> = std::sync::Mutex::new(Vec::new());
+
+/// The router of a winner again, from its order and configuration.
+pub fn rebuild_router<'a>(board: &'a Board, sub: &Substrate, w: &Winner) -> Router<'a> {
+    let identity: Genome = w.order.iter().enumerate().map(|(i, &k)| (k, i as f64)).collect();
+    let mut r = Router::new(board, sub, w.cfg.clone());
+    r.plan();
+    r.reorder(|c| identity.get(&(c.net, c.from)).copied().unwrap_or(f64::MAX));
+    r.run();
+    r
+}
+
 /// Environment controlled debugging output of a finished router run.
 fn debug_hooks(board: &Board, r: &mut Router) {
     if let Some(pin) = knobs::WHY.text() {
@@ -1557,6 +1581,9 @@ fn search_fixed(
         }
         best
     };
+    let kept = KEEP_WINNERS
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .then(|| (best.order.clone(), best.cfg.clone(), best.geo.clone()));
     let mut best = finish(best, true);
     // tracks with a clearance problem at their pad go back onto the middle of their fine pitch
     // pad, one by one, where that leaves fewer problems
@@ -1589,6 +1616,14 @@ fn search_fixed(
             "pad exits: {straightened} tracks back on the middle of their pads, {} violations left",
             now.len()
         );
+    }
+    if let Some((order, cfg, before_finish)) = kept {
+        WINNERS.lock().unwrap().push(Winner {
+            order,
+            cfg,
+            before_finish,
+            finished: best.geo.clone(),
+        });
     }
     let alternatives = others
         .into_iter()
