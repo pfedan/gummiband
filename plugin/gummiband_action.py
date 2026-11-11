@@ -616,12 +616,12 @@ def main() -> int:
         nets=nets, **saved))
     if opts is None:
         return 0
-    # the next run tries placements this one has not seen
-    runner.save_options("route", runner.next_placement_seed(opts), runner.ROUTE_SAVED)
     problem = runner.problem(opts)
     if problem:
         ui.error(problem)
         return 1
+    # the next run tries placements this one has not seen (a refused run saves nothing)
+    runner.save_options("route", runner.next_placement_seed(opts), runner.ROUTE_SAVED)
     # what the scope switches off is off from here on
     opts = runner.settled(opts)
 
