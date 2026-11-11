@@ -955,6 +955,12 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
         .iter_mut()
         .map(|(stats, geometry)| gummiband_core::legal::enforce(b, geometry, stats))
         .collect();
+    // and no joint that is no corner, no change of width and no junction (the lines that grow
+    // in width are cut into pieces for it, and neighbours end up with one width)
+    res.geometry.join_lines(b);
+    res.alternatives.iter_mut().for_each(|(_, g)| {
+        g.join_lines(b);
+    });
     let matching = gummiband_core::matching::check(b, &res.geometry);
     let violations = gummiband_core::check::check(b, &res.geometry);
     let soft = gummiband_core::import::soft_changes(b, &res.geometry);

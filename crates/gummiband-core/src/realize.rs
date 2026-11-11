@@ -74,6 +74,89 @@ impl Track {
     }
 }
 
+/// How far a joint between two lines may lie off the line through their far ends, in mm, and
+/// still be no corner: the last digit of a board file.
+const JOIN_TOL: f64 = 1e-6;
+
+/// Neighbouring lines on one straight line and of one width become one line: a joint that is
+/// no corner and no change of width is nothing the copper needs, and every piece is an item
+/// of the file. `width` is the width of a piece; a joint that `keep` names stays (something
+/// ends there). The joints go from `pts` as well. Returns how many went.
+pub fn join_lines(
+    pts: &mut Vec<Point>,
+    elems: &mut Vec<Elem>,
+    width: &dyn Fn(Point, Point) -> f64,
+    keep: &dyn Fn(Point) -> bool,
+) -> usize {
+    let mut out: Vec<Elem> = Vec::with_capacity(elems.len());
+    // the joints the last line of `out` has swallowed: they all stay on it
+    let mut inside: Vec<Point> = Vec::new();
+    let mut gone: Vec<Point> = Vec::new();
+    for &e in elems.iter() {
+        if let (Elem::Line(b, c), Some(&Elem::Line(a, b0))) = (e, out.last())
+            && b0.dist(b) < 1e-9
+            && (b - a).dot(c - b) > 0.0
+            && (width(a, b) - width(b, c)).abs() < 1e-9
+            && inside
+                .iter()
+                .chain([&b])
+                .all(|j| crate::geom::point_seg_dist(*j, a, c) < JOIN_TOL)
+            && !keep(b)
+        {
+            inside.push(b);
+            gone.push(b);
+            *out.last_mut().unwrap() = Elem::Line(a, c);
+            continue;
+        }
+        inside.clear();
+        out.push(e);
+    }
+    for j in &gone {
+        if let Some(k) = (1..pts.len().saturating_sub(1)).find(|&k| pts[k].dist(*j) < 1e-9) {
+            pts.remove(k);
+        }
+    }
+    *elems = out;
+    gone.len()
+}
+
+impl Geometry {
+    /// [`join_lines`] on every track of the route (soft copper and tuning patterns keep the
+    /// pieces they have). A joint stays where something ends: another track (KiCad does not
+    /// take every end in the middle of a track for a connection, see
+    /// `legal::split_at_junctions`), a via, or a pad with its centre there. Returns the joints
+    /// that went.
+    pub fn join_lines(&mut self, board: &crate::board::Board) -> usize {
+        let mut stops: Vec<Point> = self
+            .tracks
+            .iter()
+            .filter(|t| t.pts.len() >= 2)
+            .flat_map(|t| [t.pts[0], *t.pts.last().unwrap()])
+            .chain(self.vias.iter().map(|v| v.at))
+            .chain(board.pins.iter().map(|p| p.pos))
+            .collect();
+        stops.sort_by(|a, b| a.x.total_cmp(&b.x));
+        let keep = |j: Point| {
+            let from = stops.partition_point(|s| s.x < j.x - 1e-6);
+            stops[from..]
+                .iter()
+                .take_while(|s| s.x <= j.x + 1e-6)
+                .any(|s| s.dist(j) < 1e-6)
+        };
+        let mut n = 0;
+        for t in self
+            .tracks
+            .iter_mut()
+            .filter(|t| t.origin.is_none() && t.pattern.is_none())
+        {
+            let (mut pts, mut elems) = (std::mem::take(&mut t.pts), std::mem::take(&mut t.elems));
+            n += join_lines(&mut pts, &mut elems, &|a, b| t.piece_width(a, b), &keep);
+            (t.pts, t.elems) = (pts, elems);
+        }
+        n
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Via {
     pub at: Point,
@@ -1345,6 +1428,51 @@ pub fn funnel(portals: &[(Point, Point)]) -> Vec<Point> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lines_on_one_line_with_one_width_become_one_and_corners_widths_and_junctions_stay() {
+        let line = |p: &[Point]| -> Vec<Elem> { p.windows(2).map(|w| Elem::Line(w[0], w[1])).collect() };
+        let p = vec![pt(0., 0.), pt(1., 0.), pt(2., 0.), pt(3., 0.), pt(3., 1.)];
+        // three pieces of one line and a corner: two elements
+        let (mut pts, mut elems) = (p.clone(), line(&p));
+        assert_eq!(join_lines(&mut pts, &mut elems, &|_, _| 0.2, &|_| false), 2);
+        assert_eq!(elems, line(&[p[0], p[3], p[4]]));
+        assert_eq!(pts, [p[0], p[3], p[4]]);
+        // the piece in the middle is narrower: nothing to join
+        let (mut pts, mut elems) = (p.clone(), line(&p));
+        let narrow = |a: Point, b: Point| if a.x.min(b.x) == 1.0 && a.y == b.y { 0.15 } else { 0.2 };
+        assert_eq!(join_lines(&mut pts, &mut elems, &narrow, &|_| false), 0);
+        assert_eq!((pts.len(), elems.len()), (5, 4));
+        // something ends at (2, 0): that joint stays
+        let (mut pts, mut elems) = (p.clone(), line(&p));
+        assert_eq!(join_lines(&mut pts, &mut elems, &|_, _| 0.2, &|j| j == pt(2., 0.)), 1);
+        assert_eq!(elems, line(&[p[0], p[2], p[3], p[4]]));
+        // a line that turns back on itself is no line, and an arc between two lines parts them
+        let back = vec![pt(0., 0.), pt(2., 0.), pt(1., 0.)];
+        let (mut pts, mut elems) = (back.clone(), line(&back));
+        assert_eq!(join_lines(&mut pts, &mut elems, &|_, _| 0.2, &|_| false), 0);
+        let mut elems = vec![
+            Elem::Line(pt(0., 0.), pt(1., 0.)),
+            Elem::Arc(pt(1., 0.), pt(1.5, 0.5), pt(2., 0.)),
+            Elem::Line(pt(2., 0.), pt(3., 0.)),
+        ];
+        let mut pts = flatten(&elems);
+        let n = pts.len();
+        assert_eq!(join_lines(&mut pts, &mut elems, &|_, _| 0.2, &|_| false), 0);
+        assert_eq!((pts.len(), elems.len()), (n, 3));
+        // a slow curve is not straightened piece by piece: every joint taken out stays within
+        // a millionth of a mm of the line
+        let curve: Vec<Point> = (0..8).map(|i| pt(i as f64, 4e-7 * (i * i) as f64)).collect();
+        let (mut pts, mut elems) = (curve.clone(), line(&curve));
+        join_lines(&mut pts, &mut elems, &|_, _| 0.2, &|_| false);
+        assert!(elems.len() > 1, "{elems:?}");
+        for e in &elems {
+            let Elem::Line(a, b) = *e else { unreachable!() };
+            for q in curve.iter().filter(|q| q.x > a.x && q.x < b.x) {
+                assert!(crate::geom::point_seg_dist(*q, a, b) < 1e-6);
+            }
+        }
+    }
 
     /// A line is cut where a track of its width would start to reach into the neck zone it
     /// enters or leaves, and nowhere else.

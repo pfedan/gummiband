@@ -2320,7 +2320,13 @@ fn taut(
             if let Err(e) = built {
                 why = e;
             }
-            built.ok()
+            // two tangents of one circle that the track passes without a turn are one line
+            built.ok().map(|(mut flat, mut elems)| {
+                crate::realize::join_lines(&mut flat, &mut elems, &|a, b| t.piece_width(a, b), &|j| {
+                    fixed.iter().any(|f| f.dist(j) < 1e-9)
+                });
+                (flat, elems)
+            })
         } else {
             None
         };

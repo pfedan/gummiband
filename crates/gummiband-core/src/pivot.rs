@@ -1103,6 +1103,8 @@ mod tests {
             same += (t.pts.len() == o.pts.len() && t.elems.len() == o.elems.len()) as usize;
         }
         assert_eq!(same + n, new.tracks.len());
+        // and no new form has a joint between two lines that is no corner
+        assert_eq!(new.clone().join_lines(&b), old.clone().join_lines(&b));
         // a second pass has nothing to shorten that the first one left
         let mut twice = new.clone();
         crate::relax::pivot_pass(&b, &sub, &mut twice);
