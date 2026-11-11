@@ -12,7 +12,6 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
-from typing import List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -21,14 +20,8 @@ from gb_plugin import board_file as bf  # noqa: E402
 from gb_plugin import runner  # noqa: E402
 
 
-def selected_nets(board) -> List[str]:
-    names = set()
-    for item in board.get_selection():
-        net = getattr(item, "net", None)
-        name = getattr(net, "name", "")
-        if name:
-            names.add(name)
-    return sorted(names)
+# the nets of the selection, as the route dialog takes them
+selected_nets = action.selected_nets
 
 
 def main() -> int:
@@ -52,7 +45,9 @@ def main() -> int:
     try:
         src = action.save_copy(board, work)
         out = work / f"{src.stem}-routed.kicad_pcb"
-        opts = runner.RouteOptions(geometry_generations=0, finish_nets=nets)
+        # all copper stays and the nets are finished, with the router's preset "quick" and
+        # without the open end: there is no window to accept a result in
+        opts = runner.with_preset(runner.RouteOptions(scope="finish", nets=nets), "quick")
         cmd = runner.build_command(runner.find_binary(), src, out, opts)
         res = ui.run_with_progress(lambda keep_going: runner.run_route(cmd, out, work, keep_going))
         plan = bf.plan_addition(bf.read_copper(src.read_text(encoding="utf-8")),

@@ -2,6 +2,7 @@
 //! (`gummiband-mcp`) map their arguments to the options here, call, and present the result: an
 //! option, its default and what it does exist once.
 
+pub mod export;
 pub mod nets;
 pub mod old;
 pub mod options;

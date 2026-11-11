@@ -929,3 +929,22 @@ LED controller (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
   --geometry-generations 0`, `--preset quick` that of `--geometry-generations 0`, `--preset
   standard` and `--preset final --open-end-seconds 0` that of a run without a preset, byte for
   byte; both hash lists are unchanged.
+
+## Consolidation: the plugin's route dialog follows
+
+- 2026-11-11: the route dialog of the KiCad plugin has a choice for each of the three options
+  with words. *Copper that stays* is the router's `scope` (with a field for the nets of
+  `finish` and `reroute`, filled in from the selection), *Preset* its `preset`, *Pairs* its
+  `pairs`. A field is greyed out where it means nothing: the options of the wide track
+  without `band`, the pull weight with `off`, the nets with `fresh` and `keep_locked`, moving
+  parts, placements and clearing corridors with `finish` and `reroute`. The words, their
+  sentences and what a preset sets come from `gummiband_app::OPTIONS` through
+  `plugin/gb_plugin/route_options.json`; a test of gummiband-app fails when the copy differs
+  from the table. The plugin passes `--scope` and `--pairs MODE` and no old spelling any more;
+  *Finish selected nets* is scope `finish` with the nets and the preset `quick`. Settings
+  remembered by an earlier version are mapped as the router maps its old switches.
+  Measured: the commands the plugin builds for its default, for the Finish action, for
+  `finish`, `reroute` and both pair modes run on the router without a note about an old
+  spelling, and give the files of the same options before the change (the Finish action byte
+  for byte against the build before). The dialog itself was run only against a stand-in for
+  wxPython, not in KiCad: this machine has neither.

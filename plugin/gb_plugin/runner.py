@@ -14,6 +14,8 @@ from dataclasses import MISSING, dataclass, fields, replace
 from pathlib import Path
 from typing import Callable, List, Mapping, Optional, Sequence, Tuple
 
+from . import table
+
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 SETTINGS_FILE = PLUGIN_DIR / "settings.json"
 ENV_VAR = "GUMMIBAND_BIN"
@@ -27,17 +29,26 @@ class RunnerError(RuntimeError):
     pass
 
 
+# The scopes that keep all copper of the board and add to it.
+KEEP_ALL = ("finish", "reroute")
+# What the dialog shows as preset when the values are none of the router's presets.
+CUSTOM = "custom"
+
+
 @dataclass
 class RouteOptions:
-    keep_locked: bool = True
+    # what of the copper on the board stays, the router's --scope: "fresh", "keep_locked",
+    # "finish" or "reroute"
+    scope: str = "keep_locked"
+    # with the scopes "finish" and "reroute": the nets to lay (finish without nets lays
+    # everything that is open)
+    nets: Optional[List[str]] = None
     runs: int = 14  # fixed, so that results do not depend on the machine
     via_cost: float = 3.0
     # generations that select by the clearance check after the geometry step (0 = fastest)
     geometry_generations: int = 3
     # folder for one image per generation and an animated evolution.gif (None = no images)
     frames_dir: Optional[str] = None
-    # finish started tracks: route only these nets and add to the copper that is there
-    finish_nets: Optional[List[str]] = None
     # whether the dialog asks for the animation; frames_dir is what the router gets
     animate: bool = False
     # let the geometry generations shift parts (the router's default); the plugin takes the
@@ -60,7 +71,11 @@ class RouteOptions:
     plane_layers: Optional[List[str]] = None
     net_widths: Optional[str] = None  # JSON file
     net_priorities: Optional[str] = None  # JSON file
-    pairs: bool = False
+    # how the two nets of a differential pair are laid, the router's --pairs: "off", "pull"
+    # or "band"
+    pairs: str = "off"
+    # weight of the pull, 0 = the router's: 1 with "pull", none with "band", where a weight
+    # pulls the pairs that get no wide track
     pair_pull: float = 0.0
     pair_skew: float = 0.1
     pair_zdiff: float = 0.0  # 0 = keep the track widths of the net class
@@ -85,8 +100,8 @@ class RouteOptions:
     hint_shares: bool = False
     # place the parts in the way of a bus again before routing
     clear_corridors: bool = False
-    # with pairs: every pair recognised by name, vias side by side as a capsule, single tracks
-    # into the pads
+    # with pairs "band": every pair recognised by name, vias side by side as a capsule, single
+    # tracks into the pads
     pair_all: bool = False
     via_pairs: bool = False
     breakouts: bool = False
@@ -123,7 +138,7 @@ class PlaceOptions:
 
 # Options the dialogs remember in settings.json. What only makes sense on one board (references,
 # layer names, net files) starts empty every time.
-ROUTE_SAVED = ("keep_locked", "runs", "via_cost", "geometry_generations", "animate", "move_parts", "placements",
+ROUTE_SAVED = ("scope", "runs", "via_cost", "geometry_generations", "animate", "move_parts", "placements",
                "teardrops", "generations", "via_pitch", "layer_dirs", "via_pass", "negotiate", "threads", "pairs", "pair_pull",
                "pair_skew", "pair_zdiff", "until_stop", "open_via_cost", "prefer_width", "gpu",
                "angles_45", "seed", "placement_seed", "hint_groups", "group_order", "hint_pairs",
@@ -135,8 +150,7 @@ PLACE_SAVED = ("starts", "gap", "halo", "seed", "iters", "margin", "threads", "s
 # Options of the command line that are left out at their default value.
 ROUTE_FLAGS = (("generations", "--generations"), ("via_pitch", "--via-pitch"),
                ("layer_dirs", "--layer-dirs"), ("via_pass", "--via-pass"),
-               ("negotiate", "--negotiate"), ("pair_pull", "--pair-pull"),
-               ("placements", "--placements"), ("prefer_width", "--prefer-width"))
+               ("negotiate", "--negotiate"), ("prefer_width", "--prefer-width"))
 PAIR_FLAGS = (("pair_skew", "--pair-skew"), ("pair_zdiff", "--pair-zdiff"))
 PAIR_SWITCHES = (("pair_all", "--pair-all"), ("via_pairs", "--via-pairs"),
                  ("breakouts", "--breakouts"))
@@ -165,24 +179,49 @@ def _default(cls, name: str):
     return next(f.default for f in fields(cls) if f.name == name and f.default is not MISSING)
 
 
+def renamed(stored: dict) -> dict:
+    """Route settings of an earlier version in the names of today, as the router maps its old
+    switches: "keep_locked" was a switch and is a scope, "pairs" was the switch for the wide
+    track and the pull was on whenever its weight was above 0."""
+    out = dict(stored)
+    if "scope" not in out and isinstance(out.get("keep_locked"), bool):
+        out["scope"] = "keep_locked" if out["keep_locked"] else "fresh"
+    if isinstance(out.get("pairs"), bool):
+        pull = out.get("pair_pull")
+        pulls = type(pull) in (int, float) and pull > 0
+        out["pairs"] = "band" if out["pairs"] else "pull" if pulls else "off"
+    return out
+
+
+# The words a remembered choice may have. A scope that needs the nets of one board (finish,
+# reroute) is not remembered: the next dialog starts with the plugin's default.
+SAVED_WORDS = {"scope": ("fresh", "keep_locked"), "pairs": table.words("pairs"),
+               "group_order": ("long", "short")}
+
+
 def load_options(cls, section: str, saved: tuple, path: Path = SETTINGS_FILE) -> dict:
     """The values of ``saved`` that the dialog of ``cls`` stored under ``section``, as keyword
-    arguments. Unknown keys, values of another type and an unreadable file are ignored: a
-    bad setting must not keep the dialog from opening."""
+    arguments. Unknown keys, values of another type, words a choice does not have and an
+    unreadable file are ignored: a bad setting must not keep the dialog from opening."""
     try:
         stored = load_settings(path).get(section)
     except RunnerError:
         return {}
     if not isinstance(stored, dict):
         return {}
+    if cls is RouteOptions:
+        stored = renamed(stored)
     out = {}
     for name in saved:
         value = stored.get(name)
         kind = type(_default(cls, name))
         if kind is float and type(value) is int:
             value = float(value)
-        if type(value) is kind:
-            out[name] = value
+        if type(value) is not kind:
+            continue
+        if cls is RouteOptions and name in SAVED_WORDS and value not in SAVED_WORDS[name]:
+            continue
+        out[name] = value
     return out
 
 
@@ -270,10 +309,57 @@ def patterns(opts: RouteOptions) -> Optional[str]:
     return ",".join(hints) or None
 
 
+def keeps_all(opts: RouteOptions) -> bool:
+    """Whether the copper of the board stays and the router adds to it (scope finish and
+    reroute): no parts move there, and no placement is tried."""
+    return opts.scope in KEEP_ALL
+
+
 def open_ended(opts: RouteOptions) -> bool:
-    """Whether the run goes on until the user accepts it: not with the wide tracks of pairs, and
-    not for finishing tracks, a quick action without a window to accept the result in."""
-    return opts.until_stop and not opts.pairs and not opts.finish_nets
+    """Whether the run goes on until the user accepts it: not with the wide tracks of pairs."""
+    return opts.until_stop and opts.pairs != "band"
+
+
+def preset_values(name: str) -> dict:
+    """What a preset of the router sets, in the fields of the dialog. The router's open end has
+    a time budget; in the plugin it goes on until the user accepts the result."""
+    sets = table.PRESETS[name]
+    return {"runs": int(sets["runs"]), "generations": int(sets["generations"]),
+            "geometry_generations": int(sets["geometry_generations"]),
+            "until_stop": sets["open_end_seconds"] > 0}
+
+
+def preset_of(values) -> str:
+    """The preset whose values these are (options, or the values of a dialog), or "custom"."""
+    get = values.get if isinstance(values, dict) else lambda name: getattr(values, name)
+    for name in table.PRESETS:
+        if all(get(field) == value for field, value in preset_values(name).items()):
+            return name
+    return CUSTOM
+
+
+def with_preset(opts: RouteOptions, name: str) -> RouteOptions:
+    """The options with the values of a preset."""
+    return replace(opts, **preset_values(name))
+
+
+def settled(opts: RouteOptions) -> RouteOptions:
+    """The options as they run: what the scope switches off is off. Where the copper of the
+    board stays (finish, reroute) no parts move and no placement is tried; elsewhere the nets
+    are not narrowed, because a run of single nets there would take the copper of all others
+    away."""
+    if keeps_all(opts):
+        return replace(opts, move_parts=False, placements=0, clear_corridors=False)
+    return replace(opts, nets=None)
+
+
+def problem(opts: RouteOptions) -> Optional[str]:
+    """What keeps these options from running, in the words of the dialog, or None. The router
+    refuses the same, in the words of the command line."""
+    if opts.scope == "reroute" and not opts.nets:
+        return ("Laying nets again needs the nets: name them in the dialog, or select a track, "
+                "via or pad of each before you open it.")
+    return None
 
 
 def _global_flags(opts) -> List[str]:
@@ -286,33 +372,39 @@ def _global_flags(opts) -> List[str]:
 
 
 def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) -> List[str]:
-    cmd = [binary, "route", str(board), "-o", str(output), "--progress"]
-    if opts.finish_nets:
-        cmd += ["--keep-all", "--nets", ",".join(opts.finish_nets), "--shove", "--give", "8"]
-    elif opts.keep_locked:
-        cmd.append("--keep-locked")
+    cmd = [binary, "route", str(board), "-o", str(output), "--progress", "--scope", opts.scope]
+    # single nets on kept copper: the tracks of other nets shift aside and give way, the
+    # router's defaults there
+    if keeps_all(opts) and opts.nets:
+        cmd += ["--nets", ",".join(opts.nets)]
     # always passed, so that 0 stays 0 whatever the default of the router is
     cmd += ["--runs", str(int(opts.runs)), "--via-cost", repr(float(opts.via_cost)),
             "--geometry-generations", str(int(opts.geometry_generations))]
     cmd += _changed(opts, ROUTE_FLAGS)
     if opts.seed:
         cmd += ["--seed", str(int(opts.seed))]
-    if opts.placements:
-        cmd += ["--placement-seed", str(int(opts.placement_seed))]
+    # placements route the whole board: not where its copper stays
+    placements = 0 if keeps_all(opts) else int(opts.placements)
+    if placements:
+        cmd += ["--placements", str(placements), "--placement-seed", str(int(opts.placement_seed))]
     hints = patterns(opts)
     if hints:
         cmd += ["--patterns", hints]
-    # the corridors are cleared by placing parts: not for finishing nets
-    if opts.clear_corridors and not opts.finish_nets:
+    # the corridors are cleared by placing parts: not where the copper of the board stays
+    if opts.clear_corridors and not keeps_all(opts):
         cmd.append("--clear-corridors")
-    # parts move by default when the whole board is routed; finishing nets keeps them in place
-    if not opts.move_parts and not opts.finish_nets:
+    # parts move by default where the board is laid anew; where its copper stays they stay
+    if not opts.move_parts and not keeps_all(opts):
         cmd.append("--no-move-parts")
-    if ((opts.move_parts and not opts.finish_nets) or opts.placements) and opts.fixed:
+    if ((opts.move_parts and not keeps_all(opts)) or placements) and opts.fixed:
         cmd += ["--fixed", ",".join(opts.fixed)]
-    if opts.pairs:
-        cmd.append("--pairs")
-        cmd += _changed(opts, PAIR_FLAGS) + _switches(opts, PAIR_SWITCHES)
+    if opts.pairs != "off":
+        cmd += ["--pairs", opts.pairs]
+        if opts.pair_pull > 0:
+            cmd += ["--pair-pull", repr(float(opts.pair_pull))]
+        # the sub-options of the wide track
+        if opts.pairs == "band":
+            cmd += _changed(opts, PAIR_FLAGS) + _switches(opts, PAIR_SWITCHES)
     if opts.net_widths:
         cmd += ["--net-widths", str(opts.net_widths)]
     if opts.net_priorities:
@@ -378,6 +470,12 @@ def next_placement_seed(opts: RouteOptions) -> RouteOptions:
 def random_seed() -> int:
     """A new seed for the "New" buttons of the dialogs."""
     return random.randint(1, 999_999)
+
+
+def parse_nets(text: str) -> List[str]:
+    """Net names from a text field: separated by commas, as ``--nets`` takes them. A name may
+    hold spaces."""
+    return [n.strip() for n in text.split(",") if n.strip()]
 
 
 def parse_references(text: str) -> List[str]:

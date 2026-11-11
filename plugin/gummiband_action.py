@@ -66,6 +66,7 @@ class OptionForm:
 
     def __init__(self, dlg, tabs, opts, header=None):
         self.fields = fields.all_fields(tabs)
+        self.by_name = {f.name: f for f in self.fields}
         self.controls = {}
         self.labels = {}
         self.buttons = {}
@@ -148,6 +149,8 @@ class OptionForm:
         if f.kind == "choice":
             ctrl = wx.Choice(parent, choices=[label for _value, label in f.choices])
             ctrl.SetToolTip(f.tip)
+            # a choice can set other fields, as a preset does, and switch fields on and off
+            ctrl.Bind(wx.EVT_CHOICE, lambda _event: self.on_choice(f))
             return ctrl
         if f.kind == "float":
             ctrl = wx.SpinCtrlDouble(parent, min=f.low, max=f.high, inc=f.step)
@@ -157,46 +160,72 @@ class OptionForm:
             ctrl = wx.CheckBox(parent, label=f.label)
             ctrl.Bind(wx.EVT_CHECKBOX, lambda _event: self.update_enabled())
             return ctrl
-        if f.kind == "refs":
+        if f.kind in ("refs", "nets"):
             return wx.TextCtrl(parent, size=(320, -1))
         return wx.FilePickerCtrl(parent, wildcard="JSON files (*.json)|*.json",
                                  style=wx.FLP_OPEN | wx.FLP_FILE_MUST_EXIST | wx.FLP_USE_TEXTCTRL)
 
+    def set_value(self, f: fields.Field, value):
+        ctrl = self.controls[f.name]
+        if f.kind in ("refs", "nets"):
+            ctrl.SetValue(", ".join(value or []))
+        elif f.kind == "file":
+            ctrl.SetPath(value or "")
+        elif f.kind == "choice":
+            keys = [v for v, _label in f.choices]
+            ctrl.SetSelection(keys.index(value) if value in keys else 0)
+        else:
+            ctrl.SetValue(value)
+
     def set_values(self, opts):
         for f in self.fields:
-            ctrl, value = self.controls[f.name], getattr(opts, f.name)
-            if f.kind == "refs":
-                ctrl.SetValue(", ".join(value or []))
-            elif f.kind == "file":
-                ctrl.SetPath(value or "")
-            elif f.kind == "choice":
-                keys = [v for v, _label in f.choices]
-                ctrl.SetSelection(keys.index(value) if value in keys else 0)
-            else:
-                ctrl.SetValue(value)
+            # a derived field has no option of its own: update_enabled sets it
+            if not f.derived:
+                self.set_value(f, getattr(opts, f.name))
         self.update_enabled()
 
+    def chosen(self, f: fields.Field):
+        return f.choices[max(self.controls[f.name].GetSelection(), 0)][0]
+
     def values(self) -> dict:
+        """The options of the dialog, without the derived fields."""
         out = {}
         for f in self.fields:
             ctrl = self.controls[f.name]
+            if f.derived:
+                continue
             if f.kind == "refs":
                 out[f.name] = runner.parse_references(ctrl.GetValue()) or None
+            elif f.kind == "nets":
+                out[f.name] = runner.parse_nets(ctrl.GetValue()) or None
             elif f.kind == "file":
                 out[f.name] = ctrl.GetPath() or None
             elif f.kind == "choice":
-                out[f.name] = f.choices[max(ctrl.GetSelection(), 0)][0]
+                out[f.name] = self.chosen(f)
             else:
                 out[f.name] = ctrl.GetValue()
         return out
 
+    def on_choice(self, f: fields.Field):
+        """The user picked a word: set the fields that follow from it (a preset sets its
+        four), then grey out what no longer means anything."""
+        for name, value in fields.follows(f.name, self.chosen(f)).items():
+            if name in self.by_name:
+                self.set_value(self.by_name[name], value)
+        self.update_enabled()
+
     def update_enabled(self):
+        values = self.values()
         for f in self.fields:
             if f.requires is not None:
-                on = bool(self.controls[f.requires].GetValue())
+                on = fields.enabled(f, values)
                 for widget in (self.controls, self.labels, self.buttons):
                     if f.name in widget:
                         widget[f.name].Enable(on)
+        # what follows from the other fields: the preset that the values are
+        for name, value in fields.derived(values).items():
+            if name in self.by_name:
+                self.set_value(self.by_name[name], value)
 
 
 def options_dialog(title: str, tabs, opts, factory, note: str, header=None):
@@ -247,8 +276,8 @@ class WxUi:
         """``defaults.frames_dir`` is where the animation would go; the check box decides
         whether it is made."""
         dlg, form = options_dialog(TITLE, fields.ROUTE_TABS, defaults, runner.RouteOptions(), (
-            "All unlocked tracks and vias are replaced by the routed ones.\n"
-            "Without \"keep locked\", locked ones are replaced as well."))
+            "\"Copper that stays\" says what the routed tracks and vias replace:\n"
+            "by default all unlocked ones, and locked ones stay."))
         form.controls["animate"].SetToolTip(
             f"One image per generation and evolution.gif in {defaults.frames_dir}")
         try:
@@ -458,6 +487,17 @@ class MetricsWindow(wx.Frame if wx is not None else object):
 # Steps -------------------------------------------------------------------------------------
 
 
+def selected_nets(board) -> list:
+    """The nets of the tracks, vias and pads that are selected in the board editor."""
+    names = set()
+    for item in board.get_selection():
+        net = getattr(item, "net", None)
+        name = getattr(net, "name", "")
+        if name:
+            names.add(name)
+    return sorted(names)
+
+
 def save_copy(board, folder: Path) -> Path:
     """Save the open board (unsaved edits included) and its project into ``folder``; the open
     document and its files stay untouched."""
@@ -565,14 +605,25 @@ def main() -> int:
             frames_default = str(Path(proj.path) / "gummiband-evolution")
     except Exception:
         pass
+    # the nets of the selection are the ones to finish or to lay again, if the user picks that
+    try:
+        nets = selected_nets(board) or None
+    except Exception:
+        nets = None
     saved = runner.load_options(runner.RouteOptions, "route", runner.ROUTE_SAVED)
     opts = ui.ask_options(runner.RouteOptions(
         frames_dir=frames_default or str(Path(tempfile.gettempdir()) / "gummiband-evolution"),
-        **saved))
+        nets=nets, **saved))
     if opts is None:
         return 0
     # the next run tries placements this one has not seen
     runner.save_options("route", runner.next_placement_seed(opts), runner.ROUTE_SAVED)
+    problem = runner.problem(opts)
+    if problem:
+        ui.error(problem)
+        return 1
+    # what the scope switches off is off from here on
+    opts = runner.settled(opts)
 
     work = Path(tempfile.mkdtemp(prefix="gummiband-"))
     try:
@@ -588,7 +639,11 @@ def main() -> int:
         if chosen:
             out = Path(chosen)
         before, after = src.read_text(encoding="utf-8"), out.read_text(encoding="utf-8")
-        plan = bf.plan_from_texts(before, after, opts.keep_locked)
+        if runner.keeps_all(opts):
+            # the copper of the board stays: only what the router added, moved or laid again
+            plan = bf.plan_addition(bf.read_copper(before), bf.read_copper(after))
+        else:
+            plan = bf.plan_from_texts(before, after, opts.scope == "keep_locked")
         moves = (bf.plan_moves(before, after)
                  if opts.move_parts or opts.placements or opts.clear_corridors else None)
         zones = []

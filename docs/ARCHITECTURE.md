@@ -93,12 +93,18 @@ front end.
   (`options.rs`), the flags of `gummiband route` against the table (`gummiband-cli`), the
   arguments of the tool against the table (`gummiband-mcp`). What a front end adds of its own
   is listed in its test (`OWN`): where the result goes and how it is shown. An option with a
-  fixed list of words (`Kind::Choice`: `pairs`, `angles`) has its words in the table, each with
+  fixed list of words (`Kind::Choice`: `scope`, `preset`, `pairs`, `angles`) has its words in the table, each with
   one sentence. The CLI's `--help` and the schema of the MCP tool take the words and the text
   from there (`OptionDoc::describe`), and the type of the option parses with the table
   (`Pairs::parse`). The other help texts are to follow.
+- `gummiband_app::export` writes the table and the presets as JSON for the front end that is
+  not Rust: the KiCad plugin keeps a copy (`plugin/gb_plugin/route_options.json`) and takes the
+  words of `scope`, `preset` and `pairs`, their sentences and the values of the presets from it.
+  A test (`tests/plugin_table.rs`) fails when the copy differs and names the command that
+  writes it anew (`cargo run -p gummiband-app --example plugin_table`).
 - `gummiband_app::old` holds the spellings of earlier versions that the front ends still take
-  (`pairs` as a switch, `pair_pull` without `pairs`): one function per option that gives the
+  (`pairs` as a switch, `pair_pull` without `pairs`, the switches `keep_locked`, `keep_all` and
+  `reroute` that `scope` replaced): one function per option that gives the
   value of today and a `Respelled`, the line that says what to write now. The CLI prints it as
   `note: ...`, the MCP tool returns it in `notes`. The old spellings are hidden flags of the
   CLI and no part of the MCP schema; the tests there pin each mapping.

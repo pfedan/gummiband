@@ -84,7 +84,7 @@ Off by default: without it every part keeps its side and both sides share one ro
 
 ## Differential pairs
 
-`--pairs` (MCP `pairs`, plugin *Differential pairs*) says how the two nets of a pair are laid:
+`--pairs` (MCP `pairs`, plugin *Pairs*) says how the two nets of a pair are laid:
 `off`, the default, each net on its own; `pull`, the gentle way; `band`, one wide track.
 
 ![How --pairs band routes a pair: one wide track, split in two at the pair gap, with single tracks into the pads under --breakouts](img/pairs.svg)
@@ -104,7 +104,7 @@ The sub-options of the wide track (`--pair-all`, `--via-pairs`, `--breakouts`, `
 
 ## How much search: `--preset`
 
-One word for the effort of a run (MCP `preset`). A preset sets the four options
+One word for the effort of a run (MCP `preset`, plugin *Preset*). A preset sets the four options
 `--runs`, `--generations`, `--geometry-generations` and `--open-end-seconds`; each of them wins
 over the preset when you give it. It changes no other option, and no hint.
 
@@ -113,7 +113,7 @@ over the preset when you give it. It changes no other option, and no hint.
 | `draft` | 4 runs, 1 generation, no geometry generations | You want to know quickly whether the board routes and where it is tight: after a placement, between two tries of an agent. Many clearance violations. |
 | `quick` | 14 runs, 3 generations, no geometry generations | A first result to look at, in about a third of the time of `standard`. |
 | `standard`, the default | 14 runs, 3 generations, 3 geometry generations | A usable board. |
-| `final` | `standard`, then 10 minutes of the open end | The last run of a board. |
+| `final` | `standard`, then 10 minutes of the open end | The last run of a board. In the plugin it keeps improving until you accept. |
 
 Compare options with the preset you will use in the end: a hint that helps the draft may not
 help the final run.
@@ -121,7 +121,7 @@ help the final run.
 ## What stays on the board: `--scope`
 
 Not a tuning option, but the first choice of every run: what of the copper on the board the
-router keeps (MCP `scope`, plugin *Keep locked tracks and vias* and *Finish selected nets*).
+router keeps (MCP `scope`, plugin *Copper that stays* and *Finish selected nets*).
 
 | Scope | What it does | Use it when |
 | --- | --- | --- |

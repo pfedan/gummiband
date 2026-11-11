@@ -63,7 +63,8 @@ of its class and the shortest path. For power you usually know better. So:
 1. Route the power paths by hand in KiCad (or let the router do a first pass and keep the lanes
    you like).
 2. Select those tracks and vias, right click, *Locking > Lock*.
-3. Route with *Keep locked tracks and vias* on (the plugin default) or `--scope keep_locked`.
+3. Route with *Copper that stays* on *Locked tracks and vias* (the plugin default) or
+   `--scope keep_locked`.
 
 Locked copper is an obstacle of its net. Its ends count as pins, so a signal that has to reach a
 locked lane ends on the lane instead of on the far pad. The same works for the layout a datasheet

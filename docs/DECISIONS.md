@@ -109,7 +109,10 @@ Standing decisions of the project owner, kept here so that they survive any sess
 - Highest quality standard with maximum usability (Daniel, 2026-11-10). Consolidation merges
   switches that are duplicates or contradict each other; it never removes a way to tune. Each
   knob has one name, one default and one description, the same in the CLI, the MCP server and
-  the plugin (`gummiband_app::OPTIONS` for a route; tests hold the front ends to it).
+  the plugin (`gummiband_app::OPTIONS` for a route; tests hold the front ends to it). The
+  plugin, which is Python, reads the words of the choices, their sentences and the presets from
+  a copy of the table that a test keeps equal to it (`plugin/gb_plugin/route_options.json`);
+  its other fields are still written by hand.
 - Switches that are modes of one thing are one option with words (2026-11-11). The
   handling of differential pairs is `pairs` = `off`, `pull` or `band`, where there were two
   switches whose combination the user had to know (`pair_pull` above 0, `pairs`). The default
