@@ -963,6 +963,17 @@ fn main() -> Result<()> {
             print_matching(matching);
             let viol = &r.violations;
             let spots = gummiband_core::check::spots(&viol).len();
+            if let Some(s) = r.spread.as_ref().filter(|s| s.tried > 0) {
+                println!(
+                    "squeezed places with room: {} laid again ({} tracks), {} kept their copper",
+                    s.laid,
+                    s.tracks,
+                    s.back.len()
+                );
+                for k in &s.back {
+                    println!("  {} at ({:.3}, {:.3}): {}", k.what, k.at.x, k.at.y, k.why);
+                }
+            }
             println!("clearance check: {} violations at {spots} spots", viol.len());
             for t in r.tight_pads() {
                 println!("  {t}");

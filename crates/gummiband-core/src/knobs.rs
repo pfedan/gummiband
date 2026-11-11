@@ -316,6 +316,8 @@ knobs! {
         "Layer changes of current paths get the vias that carry their current (`relax::stitch_vias`).";
     PIVOT_ARCS = "GB_PIVOT_ARCS", Switch, NotZero, "on",
         "The finished copper gets its last form from its pivots (`relax::pivot_pass`): one arc around each pad corner, via or bundle a track bends around, with the radius of what lies between, and tangent lines. A track keeps the corners the shortcuts gave it where such an arc or line comes too close, and where the own check finds something new.";
+    SPREAD = "GB_SPREAD", Switch, NotZero, "on",
+        "Where the own check finds tracks too near to something and the passage has room for them, the tracks through it are laid again as one group (`spread::spread`): from one side outwards with the clearance and 2 um, lines and arcs, taken only if the check then finds nothing new.";
     ZIP = "GB_ZIP", Switch, NotZero, "on",
         "Pairs the search pulled together close up to their gap at the end (`pairs::zip`).";
     GOAL_CHECK = "GB_GOAL_CHECK", Switch, NotZero, "on",
