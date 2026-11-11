@@ -21,7 +21,8 @@ while read -r name dir planes; do
     "$GB" --plane-layers "$planes" strip "$S/$dir/"*.kicad_pcb -o "$W/$name/$name.kicad_pcb"
     # mark the plane layers as KiCad "power" layers, so the board describes itself
     for l in $(echo "$planes" | tr , ' '); do
-        sed -i '' -E "s/^([[:space:]]*\([0-9]+ \"$l\") [a-z]+\)/\1 power)/" "$W/$name/$name.kicad_pcb"
+        sed -i.bak -E "s/^([[:space:]]*\([0-9]+ \"$l\") [a-z]+\)/\1 power)/" "$W/$name/$name.kicad_pcb"
+        rm -f "$W/$name/$name.kicad_pcb.bak"
     done
 done <<LIST
 corne 01_corne-cherry -
