@@ -14,6 +14,7 @@ pub mod matching;
 pub mod math;
 pub mod octo;
 pub mod pairs;
+pub mod passage;
 pub mod patterns;
 pub mod pivot;
 pub mod prof;

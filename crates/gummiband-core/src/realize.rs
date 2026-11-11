@@ -11,13 +11,13 @@ use crate::board::{LayerId, NetId, ObstacleKind};
 use crate::geom::{Point, arc_polyline, orient, pt};
 use crate::route::{End, Item, Router};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Elem {
     Line(Point, Point),
     Arc(Point, Point, Point),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Track {
     /// Polyline (arcs flattened), for checks and drawing.
     pub pts: Vec<Point>,
@@ -74,7 +74,7 @@ impl Track {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Via {
     pub at: Point,
     pub diameter: f64,
@@ -152,7 +152,7 @@ pub fn turn_pairs(geo: &mut Geometry) {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Geometry {
     pub tracks: Vec<Track>,
     pub vias: Vec<Via>,

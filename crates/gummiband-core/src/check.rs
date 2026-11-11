@@ -7,7 +7,7 @@ use crate::geom::{Point, Rect, Shape, point_seg_dist, seg_seg_dist};
 use crate::index::GridIndex;
 use crate::realize::Geometry;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Violation {
     pub what: String,
     /// Nets involved (the routed item first).
