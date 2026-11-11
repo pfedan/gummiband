@@ -192,3 +192,34 @@ lengths and the KiCad DRC summary.
 head is an ancestor of its main branch, and prints the `git push origin --delete ...` command for
 them. It is read-only: it asks the remote for its heads, fetches nothing and deletes nothing. A
 head whose commit is not in the local clone is listed as unknown, never as merged.
+
+## Geometry test stand
+
+`geostand/` holds small boards with one basic situation each, where the right copper is known:
+one track around a via, a round pad or a corner; one to three tracks between two pads, a pad and a
+via, two vias; a row of pads at 0.4 and 0.5 mm whose tracks turn hard behind the pads; bundles of
+three and six around a corner; a turn with a neighbour on the inside; a tangent from via to via; a
+track and a via next to a cutout of the board; a via between two pads and between two rows of
+pads; a pad with a clearance of its own. Rules: clearance 0.2 mm, track 0.2 mm.
+
+Every case comes in five forms, named by the room its channel has beyond what the copper needs:
+`loose` (0.3 mm), `tight20` (20 um), `tight` (5 um), `exact` (none: the copper fits to the
+micrometre, as boards are often laid out) and `short` (10 um missing: the right answer is "does
+not fit"). `gen_geostand.py DIR` writes the 130 boards, and for each a reference solution
+(`.ref.kicad_pcb`), the copper as it should be, with the spare room shared between the gaps.
+The boards are not in the repository; the generator writes them in a second.
+
+- `check_refs.py DIR` (needs `kicad-cli`) runs KiCad's DRC on the unrouted boards and on the
+  references: clean and connected for every form but `short`, at least one entry there. A case
+  whose reference fails does not measure what it claims. KiCad 10.0.7 passes 130 of 130.
+- `run_geostand.py ROUTER DIR OUT` routes every board (`--seed 1 --no-move-parts`) and judges it
+  with KiCad's DRC (`--all-track-errors`, every kind that concerns copper, counted by place);
+  `table.py OUT` prints the table.
+- `run_own.py ROUTER DIR OUT` does the same with the router's own check and needs no KiCad. On the
+  130 boards the two agree: the own check is clean exactly where KiCad reports no place.
+- `check.sh [--update] [ROUTER]` generates, routes and compares routed connections and spots per
+  board with `expected.txt`: the stand as a regression test (about five minutes on four cores).
+
+A board is right if it is fully routed and clean, or for `short` clean and not fully routed.
+`expected.txt` records where the router stands, not where it should be: 47 of 130 are right at
+the time of writing. A change that moves a board is meant to show up in that file.
