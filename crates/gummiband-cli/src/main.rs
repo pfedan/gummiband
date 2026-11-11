@@ -794,7 +794,7 @@ fn main() -> Result<()> {
             }
             if !r.areas.is_empty() {
                 println!(
-                    "areas: {} vias set for islands of fill; the fill model ran {} times in the search, {:.1} s of CPU",
+                    "areas: {} vias set for islands of fill; the fill model ran {} times in the search, {:.1} s over its threads",
                     r.area_vias, r.area_model_runs, r.area_model_seconds
                 );
             }

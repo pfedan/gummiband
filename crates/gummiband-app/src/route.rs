@@ -642,7 +642,8 @@ pub struct Routed {
     pub areas: Vec<crate::areas::NetReport>,
     /// Of the vias written, those set for islands of fill (`area_stitch`).
     pub area_vias: usize,
-    /// CPU seconds the fill model took inside the search, and how often it ran.
+    /// Seconds the fill model took inside the search, summed over the threads of the search,
+    /// and how often it ran.
     pub area_model_seconds: f64,
     pub area_model_runs: u64,
     write: WriteOptions,
