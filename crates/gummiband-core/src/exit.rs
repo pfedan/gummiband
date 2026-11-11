@@ -569,7 +569,7 @@ pub fn with_stubs(board: &Board, geo: &Geometry) -> Geometry {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::board::{LayerSet, Net, Obstacle, Pin};
     use crate::geom::pt;
@@ -585,7 +585,7 @@ mod tests {
     /// A row of `n` pads of part U at `pitch`, each `w` wide and 0.9 mm long with a net of its
     /// own, and for each net a square pad of part J in a row 1.6 mm apart, 5 mm further up.
     /// Tracks are `track` wide and keep `clearance`.
-    fn row_board(n: usize, pitch: f64, w: f64, clearance: f64, track: f64) -> Board {
+    pub(crate) fn row_board(n: usize, pitch: f64, w: f64, clearance: f64, track: f64) -> Board {
         let mut b = crate::topo::tests::two_pad_board();
         b.outline = vec![rect(0.0, 0.0, 20.0, 20.0)];
         b.classes[0].track_width = track;

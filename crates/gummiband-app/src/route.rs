@@ -772,6 +772,8 @@ pub struct Routed {
     pub legal: gummiband_core::legal::Legal,
     /// The same for every alternative of the open end, in their order.
     pub legal_alternatives: Vec<gummiband_core::legal::Legal>,
+    /// The squeezed places laid again at the end (`spread.rs`). None: the step was off.
+    pub spread: Option<gummiband_core::spread::Report>,
     write: WriteOptions,
 }
 
@@ -961,6 +963,14 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     res.alternatives.iter_mut().for_each(|(_, g)| {
         g.join_lines(b);
     });
+    // and where tracks are too near to something in a passage that has room for them, they are
+    // laid again as one group
+    let spread = gummiband_core::knobs::SPREAD.on().then(|| {
+        res.alternatives.iter_mut().for_each(|(_, g)| {
+            gummiband_core::spread::spread(b, g);
+        });
+        gummiband_core::spread::spread(b, &mut res.geometry)
+    });
     let matching = gummiband_core::matching::check(b, &res.geometry);
     let violations = gummiband_core::check::check(b, &res.geometry);
     let soft = gummiband_core::import::soft_changes(b, &res.geometry);
@@ -984,6 +994,7 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
         violations,
         legal,
         legal_alternatives,
+        spread,
         write: WriteOptions {
             scope: opts.scope,
             reroute: opts.reroute_nets(),
