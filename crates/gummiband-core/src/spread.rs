@@ -43,8 +43,8 @@ use crate::geom::{Point, Rect, Shape, arc_from_three, arc_polyline, point_seg_di
 use crate::passage::{self, Kind, Passage};
 use crate::realize::{Elem, Geometry, Track, flatten};
 
-/// What a laid piece keeps on top of every clearance, in mm.
-pub const MARGIN: f64 = 0.002;
+/// What a laid piece keeps on top of every clearance, in mm: the one margin of finished copper.
+pub const MARGIN: f64 = check::MARGIN;
 /// The least margin a passage is laid with: below it the check of the file may see it as too
 /// near (KiCad compares to about half a micrometre).
 pub const LEAST: f64 = 0.0005;
@@ -1938,11 +1938,11 @@ pub fn spread(board: &Board, geo: &mut Geometry) -> Report {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::realize::Via;
 
-    fn track(pts: &[Point], net: NetId, width: f64) -> Track {
+    pub(crate) fn track(pts: &[Point], net: NetId, width: f64) -> Track {
         Track {
             pts: pts.to_vec(),
             elems: pts.windows(2).map(|p| Elem::Line(p[0], p[1])).collect(),
@@ -2126,7 +2126,8 @@ mod tests {
         let pad = 0.2f64.max(c);
         // The corner of the pad at (10.2, 10.2). Three tracks turn around it by one radian, each
         // with one corner on the diagonal. Their ends leave room, 30 um in every gap; at the
-        // corner the first is 10 um too near to the pad and the others 5 um to the one before.
+        // corner the first is too near to the pad, and the others lie too near to it to stay
+        // when it gives way.
         let corner = pt(10.2, 10.2);
         let d = pt(1.0, 1.0).norm();
         let geo = Geometry {
@@ -2150,7 +2151,7 @@ mod tests {
             ..Default::default()
         };
         let before = check::check(&b, &geo);
-        assert!(before.len() >= 3, "{before:?}");
+        assert!(before.len() >= 2, "{before:?}");
         let mut g = geo.clone();
         let report = spread(&b, &mut g);
         assert!(check::check(&b, &g).is_empty(), "{report:?}");

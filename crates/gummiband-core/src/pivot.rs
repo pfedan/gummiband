@@ -10,13 +10,17 @@
 //! This module asks of every corner what it bends around and builds the track again from the
 //! answers: one arc around each pivot and tangent lines between the arcs. The radius of an arc
 //! is the sum of what lies between the pivot and the track: the size of the pivot, its
-//! clearance, and for every track further in its width and the clearance to the next. The
+//! clearance, and for every track further in its width and the clearance to the next, and on
+//! top of every clearance the one margin of finished copper ([`crate::check::MARGIN`]). The
 //! tracks of a bundle get arcs around one centre that way, each its gap outside the one before.
 //!
-//! Nothing is taken on trust: every line and every piece of an arc passes the same clearance
-//! test as the shortcuts, against the copper as it is at that moment. Where one does not, a
-//! wrap next to it is taken out again, and a corner that no wrap stands for any more comes
-//! back and is rounded as before.
+//! Nothing is taken on trust: every line and every arc is put to the check itself
+//! (`check::Copper::keeps`) with that margin on top of every clearance, against the
+//! copper as it is at that moment, a line as a line and an arc as an arc. So an arc lies at
+//! clearance and margin from the arc inside it and passes, and nothing but the margin lies
+//! between the copper and a finding. Where a piece does not pass, a wrap next to it is taken
+//! out again, and a corner that no wrap stands for any more comes back and is rounded as
+//! before.
 //!
 //! The relaxations of the search do not use this: their copper is an intermediate state, and a
 //! relaxation that starts from it ends elsewhere than one that starts from the corners of
@@ -27,7 +31,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::board::{Board, ObstacleKind};
-use crate::geom::{Point, Polygon, Rect, arc_from_three, arc_polyline, orient, point_seg_dist, pt, segs_intersect};
+use crate::geom::{
+    Point, Polygon, Rect, Shape, arc_from_three, arc_polyline, orient, point_seg_dist, pt, segs_intersect,
+};
 use crate::index::GridIndex;
 use crate::math;
 use crate::realize::{Elem, Geometry, Wrap, tangent};
@@ -35,8 +41,6 @@ use crate::topo::Substrate;
 
 /// How far inside the radius of its stack a polyline may pass a pivot, per track in between.
 const TOL: f64 = 0.03;
-/// What an arc keeps beyond the margin of the test: its chords lie inside it.
-const SAG: f64 = 0.003;
 /// Chord error of an arc in the points of a track, as for the rounded corners.
 pub(crate) const FLAT: f64 = 0.002;
 /// An arc shorter than this becomes the corner of its two tangents.
@@ -165,7 +169,7 @@ pub(crate) struct Scene<'a> {
     /// The pieces of the tracks as they are now: (a, b, track), `u32::MAX` for a removed one.
     pub pieces: &'a [(Point, Point, u32)],
     pub idx: &'a GridIndex,
-    /// What the test of the shortcuts keeps beyond the clearance.
+    /// What the copper keeps beyond every clearance.
     pub m: f64,
 }
 
@@ -297,7 +301,7 @@ impl Scene<'_> {
             return None;
         }
         between.sort_by(|x, y| x.0.total_cmp(&y.0));
-        let keep = self.m + SAG;
+        let keep = self.m;
         let (mut sum, mut last) = (r0, None::<(u32, f64)>);
         for (net, w) in between
             .iter()
@@ -386,7 +390,18 @@ impl Scene<'_> {
                     && orient(a, b, poly.pts[vi]) * turn > 0.0
                     && orient(b, c, poly.pts[vi]) * turn > 0.0
                 {
-                    let (pc, r0) = rounding(poly, vi, e);
+                    // round copper is its circle, not the polygon around it
+                    let (pc, r0) = match o.shape {
+                        Shape::Circle { c, r } => (c, r),
+                        Shape::Capsule { a: s, b: t, r } => {
+                            if poly.pts[vi].dist(s) < poly.pts[vi].dist(t) {
+                                (s, r)
+                            } else {
+                                (t, r)
+                            }
+                        }
+                        Shape::Polygon(_) => rounding(poly, vi, e),
+                    };
                     take(pc, r0, pnet, &gap);
                 }
             }
@@ -563,8 +578,8 @@ fn chain(start: Point, end: Point, nodes: &[Node]) -> Result<Vec<Part>, (usize, 
 }
 
 /// The polyline `out` of track `ti` (the shortcuts of `relax::taut`) as lines and arcs around
-/// its pivots, with its points. `clear` is the clearance test of the shortcuts for one straight
-/// piece, `fillet` rounds a corner a-b-c that starts at `cur` as before (the arc as three
+/// its pivots, with its points. `clear` is the clearance test for one straight piece and
+/// `clear_arc` for an arc (start, middle, end), `fillet` rounds a corner a-b-c that starts at `cur` as before (the arc as three
 /// points and as chords), here with up to half of each leg, so that the arcs of two corners
 /// meet and leave no short line between them. `fixed` are corners that stay (the ends of the
 /// rails). A piece of `out` that is left in the result is not tested again: it is the track
@@ -579,6 +594,7 @@ pub(crate) fn rebuild(
     fixed: &[Point],
     rounded: &Rounded,
     clear: &dyn Fn(Point, Point) -> bool,
+    clear_arc: &dyn Fn(Point, Point, Point) -> bool,
     fillet: &dyn Fn(Point, Point, Point, Point) -> Option<(Point, Point, Point, Vec<Point>)>,
 ) -> Result<(Vec<Point>, Vec<Elem>), usize> {
     tally("tracks", 1);
@@ -801,7 +817,7 @@ pub(crate) fn rebuild(
         }
         let bad = built.iter().find(|p| match p.elem {
             Elem::Line(a, b) => !ok(a, b),
-            Elem::Arc(a, m, b) => !arc_polyline(a, m, b, FLAT).windows(2).all(|w| ok(w[0], w[1])),
+            Elem::Arc(a, m, b) => !clear_arc(a, m, b),
         });
         let Some(p) = bad else {
             done = Some((built, nodes));
@@ -1020,17 +1036,12 @@ mod tests {
             around >= 4 && around * 2 > arcs,
             "{around} of {arcs} arcs around a pad corner"
         );
-        // two tracks around one corner: the outer one a width and a clearance further out, and
-        // what the test of the shortcuts and the chords of an arc ask for on top
+        // an arc around a corner lies at the clearance and the one margin from it
         let cl = b.class_of(0);
-        let step = cl.track_width + cl.clearance;
-        let pair = rings
-            .iter()
-            .flat_map(|x| rings.iter().map(move |y| (x, y)))
-            .find(|(x, y)| x.0.dist(y.0) < 1e-6 && y.1 > x.1 + 1e-6);
-        let (x, y) = pair.expect("two tracks around one corner");
-        let more = y.1 - x.1 - step;
-        assert!((0.0..0.012).contains(&more), "{} and {}: {more}", x.1, y.1);
+        let want = cl.track_width / 2.0 + cl.clearance + crate::check::MARGIN;
+        for (centre, r) in &rings {
+            assert!((r - want).abs() < 1e-9, "{r} around {centre:?}, not {want}");
+        }
     }
 
     #[test]
@@ -1110,6 +1121,151 @@ mod tests {
         crate::relax::pivot_pass(&b, &sub, &mut twice);
         assert!(short(&twice) <= short(&new) && count(&twice) <= count(&new));
     }
+    /// Tracks that turn by sixty degrees around `centre`, as the rounds leave them: forty
+    /// corners on a circle about the centre and a straight leg of one millimetre at each end.
+    /// Track i has net 1 + i and lies on the circle of radius `first + step * i`.
+    fn fan(b: &Board, centre: Point, n: usize, first: f64, step: f64) -> Geometry {
+        let d = pt(1.0, 1.0).norm();
+        let tracks = (0..n)
+            .map(|i| {
+                let rad = first + step * i as f64;
+                let at = |turn: f64| centre + d.rotate(turn) * rad;
+                let h = std::f64::consts::FRAC_PI_6;
+                let mut pts = vec![at(h) + d.rotate(h).perp()];
+                pts.extend((0..=40).map(|k| at(h - h * k as f64 / 20.0)));
+                pts.push(at(-h) - d.rotate(-h).perp());
+                crate::spread::tests::track(&pts, 1 + i as u32, b.class_of(1 + i as u32).track_width)
+            })
+            .collect();
+        Geometry {
+            tracks,
+            ..Default::default()
+        }
+    }
+
+    /// The arcs of a track: centre and radius.
+    fn arcs_of(t: &crate::realize::Track) -> Vec<(Point, f64)> {
+        t.elems
+            .iter()
+            .filter_map(|e| match *e {
+                Elem::Arc(a, m, c) => arc_from_three(a, m, c).map(|x| (x.0, x.1)),
+                Elem::Line(..) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_stack_around_a_pad_corner_keeps_the_one_margin_in_every_gap() {
+        // The corner of a pad at (10.2, 10.2), and on its diagonal the corner of another pad,
+        // 1.412 mm away. Three tracks of 0.2 with clearance 0.2 turn between them: three
+        // widths and four clearances are 1.4, so the four gaps have 12 um to spare between
+        // them. The rounds left the tracks with 3 um in each of the first three.
+        let corner = pt(10.2, 10.2);
+        let d = pt(1.0, 1.0).norm();
+        let other = corner + d * 1.412 + pt(0.2, 0.2);
+        let b = crate::route::tests::pad_board(&[
+            ("U", "X", 10.0, 10.0),
+            ("J", "A", 2.0, 2.0),
+            ("J", "B", 3.0, 2.0),
+            ("J", "C", 4.0, 2.0),
+            ("V", "Y", other.x, other.y),
+        ]);
+        let (w, c) = (b.class_of(1).track_width, b.track_clearance(1, 2));
+        assert!((w - 0.2).abs() < 1e-12 && (c - 0.2).abs() < 1e-12);
+        let m = crate::check::MARGIN;
+        let old = fan(&b, corner, 3, c + w / 2.0 + 0.003, w + c + 0.003);
+        assert!(
+            crate::check::check(&b, &old).is_empty(),
+            "{:?}",
+            crate::check::check(&b, &old)
+        );
+        let sub = Substrate::build(&b, &crate::topo::SubstrateConfig::default());
+        let mut new = old.clone();
+        // every track gets its arc: a line, an arc about the corner, a line; each arc the
+        // width, the clearance and the margin outside the one before, to the nanometre
+        assert_eq!(crate::relax::pivot_pass(&b, &sub, &mut new), 3);
+        for (i, t) in new.tracks.iter().enumerate() {
+            assert_eq!(t.elems.len(), 3, "track {i}: {:?}", t.elems);
+            let arcs = arcs_of(t);
+            assert_eq!(arcs.len(), 1, "track {i}");
+            let want = c + w / 2.0 + m + (w + c + m) * i as f64;
+            assert!(
+                arcs[0].0.dist(corner) < 1e-9 && (arcs[0].1 - want).abs() < 1e-9,
+                "track {i}: {:?}, not {want}",
+                arcs[0]
+            );
+        }
+        assert!(
+            crate::check::check(&b, &new).is_empty(),
+            "{:?}",
+            crate::check::check(&b, &new)
+        );
+        // what is left of the 12 um lies between the last track and the other pad
+        let last = arcs_of(&new.tracks[2])[0].1 + w / 2.0;
+        assert!((1.412 - last - c - 0.006).abs() < 1e-9, "{}", 1.412 - last - c);
+        // with one micrometre less than the margins need the last track does not get the arc
+        // of the stack (this pass shares nothing out: a margin that has to give way is the
+        // business of `spread`), and the two inside it get theirs all the same
+        let other = corner + d * 1.407 + pt(0.2, 0.2);
+        let mut b = b;
+        b.obstacles[4].shape =
+            crate::geom::Shape::Polygon(crate::geom::roundrect_polygon(other, 0.4, 0.4, 0.0, 0.0, 0.005));
+        b.pins[4].pos = other;
+        let sub = Substrate::build(&b, &crate::topo::SubstrateConfig::default());
+        let old = fan(&b, corner, 3, c + w / 2.0 + 0.002, w + c + 0.002);
+        let mut new = old.clone();
+        crate::relax::pivot_pass(&b, &sub, &mut new);
+        for (i, t) in new.tracks.iter().enumerate() {
+            let want = c + w / 2.0 + m + (w + c + m) * i as f64;
+            match i {
+                2 => assert!(arcs_of(t).iter().all(|x| x.1 < want - 1e-7), "{:?}", arcs_of(t)),
+                _ => assert!((arcs_of(t)[0].1 - want).abs() < 1e-9, "track {i}"),
+            }
+        }
+        assert!(crate::check::check(&b, &new).is_empty());
+    }
+
+    #[test]
+    fn an_arc_around_round_copper_lies_at_the_clearance_and_the_margin_from_the_circle() {
+        // a round pad of radius 0.3 at (10, 10) and a via of radius 0.3 at (14, 10), a track
+        // around each
+        let mut b =
+            crate::route::tests::pad_board(&[("U", "X", 10.0, 10.0), ("J", "A", 2.0, 2.0), ("J", "B", 3.0, 2.0)]);
+        b.obstacles[0].shape = crate::geom::Shape::Circle {
+            c: pt(10.0, 10.0),
+            r: 0.3,
+        };
+        let (w, c) = (b.class_of(1).track_width, b.track_clearance(1, 2));
+        let m = crate::check::MARGIN;
+        let mut old = fan(&b, pt(10.0, 10.0), 1, 0.3 + c + w / 2.0 + 0.004, 0.0);
+        let mut second = fan(&b, pt(14.0, 10.0), 1, 0.3 + c + w / 2.0 + 0.004, 0.0);
+        old.tracks.append(&mut second.tracks);
+        old.vias.push(crate::realize::Via {
+            at: pt(14.0, 10.0),
+            diameter: 0.6,
+            drill: 0.3,
+            net: 2,
+            layer: None,
+            origin: None,
+            resting: false,
+            half: Point::default(),
+        });
+        assert!(crate::check::check(&b, &old).is_empty());
+        let sub = Substrate::build(&b, &crate::topo::SubstrateConfig::default());
+        let mut new = old.clone();
+        assert_eq!(crate::relax::pivot_pass(&b, &sub, &mut new), 2);
+        for (t, centre) in new.tracks.iter().zip([pt(10.0, 10.0), pt(14.0, 10.0)]) {
+            let arcs = arcs_of(t);
+            assert_eq!((t.elems.len(), arcs.len()), (3, 1), "{:?}", t.elems);
+            assert!(
+                arcs[0].0.dist(centre) < 1e-9 && (arcs[0].1 - (0.3 + c + w / 2.0 + m)).abs() < 1e-9,
+                "{:?}",
+                arcs[0]
+            );
+        }
+        assert!(crate::check::check(&b, &new).is_empty());
+    }
+
     #[test]
     fn the_corners_of_rounded_copper_are_where_its_tangents_meet() {
         // a right angle at (2, 0) rounded with radius 0.5, then a slight bend rounded as well
