@@ -1019,9 +1019,10 @@ pub fn fill_net(board: &Board, areas: &[Area], net: NetId, o: &Options) -> NetFi
             }
         }
     }
+    // the way to a site is measured over the whole raster: its border is no site
     let to_site = {
         let inv: Vec<bool> = lands.iter().map(|&x| !x).collect();
-        edt(&inv, nx, ny)
+        edt_open(&inv, nx, ny)
     };
     let any_site = lands.iter().any(|&x| x);
 
@@ -1611,6 +1612,21 @@ mod tests {
         let f = fill_net(&b, &areas, 0, &Options::default());
         assert_eq!(f.pins[2].reach, Reach::Copper);
         assert_eq!(f.unreached().count(), 0);
+    }
+
+    #[test]
+    fn the_distance_to_a_via_site_is_not_cut_short_by_the_edge_of_the_board() {
+        // the area lies at the right on layer 1, the pad in the corner at the left on layer 0:
+        // the corner is 3 mm from the board edge and more than 10 mm from the area
+        let b = board(&[("GND", 3., 3., 0), ("GND", 17., 10., 1), ("GND", 17., 14., 1)]);
+        let right = Polygon::new(vec![pt(14., 0.), pt(20., 0.), pt(20., 20.), pt(14., 20.)]);
+        let f = fill_net(&b, &[solid(Area::pour(0, 1, vec![right]))], 0, &Options::default());
+        assert_eq!(f.pins[0].reach, Reach::OtherLayer);
+        assert!(
+            f.pins[0].site_dist > 10.5 && f.pins[0].site_dist < 12.0,
+            "{}",
+            f.pins[0].site_dist
+        );
     }
 
     #[test]

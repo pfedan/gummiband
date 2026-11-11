@@ -2,7 +2,7 @@
 """Generate the synthetic Gummiband benchmark boards (KiCad 10 format).
 
 Writes <name>.kicad_pcb and <name>.kicad_pro per board into bench/boards/ (or the directory
-given as first argument). Plain Python 3, no third party packages. Deterministic: fixed seeds
+given as first argument), the boards for areas into its subdirectory areas/. Plain Python 3, no third party packages. Deterministic: fixed seeds
 and UUIDs derived from the board name, so a rerun produces identical files.
 
 Boards, roughly by difficulty:
@@ -23,6 +23,17 @@ Boards, roughly by difficulty:
   parts_multi         4 layers (planes), MCU and PHY with a 12 net bus, peripherals, shared I2C, 3 pairs, debug header
   parts_multi_feed    the same with 40 scattered 0603 parts (chicken feed), half of them with a plane via
   parts_xhard         parts_multi_feed on a board 25 % smaller in each direction
+
+Boards for areas (pours and planes), written into the subdirectory areas/ so that the routing
+suite and the hash lists leave them alone. They are fixtures for the fill model of
+`gummiband areas` and for its comparison with KiCad's fill (bench/areas-kicad.sh):
+  area_strips         2 layers, GND pour on both; six pens of locked track around a GND pad, each
+                      open through a strip of fill 0.10 to 0.40 mm wide (minimum width 0.2 mm)
+  area_halves         2 layers, GND parts left and GNDR parts right, no zone: for a pour of both
+                      nets (area_halves.nets.json leaves the two nets out of a route)
+  area_far            2 layers, VBUS with an area on B.Cu at the right, most of its pins far left
+  area_split          4 layers, In1 GND, In2 split into +3V3 (left) and +5V (right), pins of both
+                      on both sides
 """
 import json
 import math
@@ -163,6 +174,13 @@ def fpc(ref, n, pitch, pad=(0.3, 1.2), value="FPC"):
     return Footprint(f"Bench:FPC-{n}P-{pitch}mm", ref, value, pads, (-e, -2.75, e, pad[1] / 2 + 0.5))
 
 
+def test_point(ref, size=(1.0, 1.0), value="TP"):
+    """One SMD pad."""
+    pads = [Pad("1", "smd", "rect", (0, 0), size, SMD)]
+    ex, ey = size[0] / 2 + 0.25, size[1] / 2 + 0.25
+    return Footprint("Bench:TestPoint", ref, value, pads, (-ex, -ey, ex, ey))
+
+
 def header(ref, n, rows=1, value="Conn"):
     """THT pin header, 2.54 mm, pins along local x."""
     pads = []
@@ -236,7 +254,11 @@ class Board:
         """inner: None (2 layers), "power" (In1/In2 planes) or "signal" (4 routing layers)."""
         self.name, self.w, self.h, self.inner, self.title = name, w, h, inner, title
         self.fps = []
-        self.zones = []  # (net, layer)
+        # (net, layer): over the board; (net, layer, settings) with any of box (x0, y0, x1, y1
+        # relative to the board), name, clearance, min_width, gap, spoke
+        self.zones = []
+        self.tracks = []  # locked copper: (net, layer, width, points relative to the board)
+        self.net_options = None  # options per net for `route --net-widths` (<name>.nets.json)
         self.classes = [("Default", 0.2, 0.15, 0.6, 0.3)]  # name, width, clearance, via dia, drill
         self.patterns = []  # (pattern, class)
         self.dru = None  # custom rules (.kicad_dru), if any
@@ -358,13 +380,25 @@ class Board:
         w(f"\t(gr_rect\n\t\t(start {fmt(x0)} {fmt(y0)})\n\t\t(end {fmt(x1)} {fmt(y1)})"
           f'\n\t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\t\t(fill no)'
           f'\n\t\t(layer "Edge.Cuts")\n\t\t(uuid "{u()}")\n\t)')
-        for net, layer in self.zones:
+        for net, layer, width, line in self.tracks:
+            for a, e in zip(line, line[1:]):
+                w(f"\t(segment\n\t\t(locked yes)\n\t\t(start {fmt(x0 + a[0])} {fmt(y0 + a[1])})"
+                  f"\n\t\t(end {fmt(x0 + e[0])} {fmt(y0 + e[1])})\n\t\t(width {fmt(width)})"
+                  f'\n\t\t(layer "{layer}")\n\t\t(net "{net}")\n\t\t(uuid "{u()}")\n\t)')
+        for net, layer, *rest in self.zones:
+            o = rest[0] if rest else {}
             m = 0.5
+            bx = o.get("box", (m, m, self.w - m, self.h - m))
             pts = " ".join(f"(xy {fmt(x)} {fmt(y)})" for x, y in
-                           ((x0 + m, y0 + m), (x1 - m, y0 + m), (x1 - m, y1 - m), (x0 + m, y1 - m)))
+                           ((x0 + bx[0], y0 + bx[1]), (x0 + bx[2], y0 + bx[1]),
+                            (x0 + bx[2], y0 + bx[3]), (x0 + bx[0], y0 + bx[3])))
+            name = o.get("name", f"{net} plane")
             w(f'\t(zone\n\t\t(net "{net}")\n\t\t(layer "{layer}")\n\t\t(uuid "{u()}")'
-              f'\n\t\t(name "{net} plane")\n\t\t(hatch edge 0.5)\n\t\t(connect_pads\n\t\t\t(clearance 0.2)\n\t\t)'
-              f"\n\t\t(min_thickness 0.25)\n\t\t(fill yes\n\t\t\t(thermal_gap 0.3)\n\t\t\t(thermal_bridge_width 0.4)"
+              f'\n\t\t(name "{name}")\n\t\t(hatch edge 0.5)\n\t\t(connect_pads'
+              f'\n\t\t\t(clearance {fmt(o.get("clearance", 0.2))})\n\t\t)'
+              f'\n\t\t(min_thickness {fmt(o.get("min_width", 0.25))})\n\t\t(fill yes'
+              f'\n\t\t\t(thermal_gap {fmt(o.get("gap", 0.3))})'
+              f'\n\t\t\t(thermal_bridge_width {fmt(o.get("spoke", 0.4))})'
               f"\n\t\t\t(island_removal_mode 0)\n\t\t)\n\t\t(polygon\n\t\t\t(pts\n\t\t\t\t{pts}\n\t\t\t)\n\t\t)\n\t)")
         w(")")
         return "\n".join(L) + "\n"
@@ -468,6 +502,10 @@ class Board:
         if self.dru:
             with open(os.path.join(outdir, f"{self.name}.kicad_dru"), "w") as f:
                 f.write("(version 1)\n" + self.dru.strip() + "\n")
+        if self.net_options:
+            with open(os.path.join(outdir, f"{self.name}.nets.json"), "w") as f:
+                json.dump(self.net_options, f, indent=2, sort_keys=True)
+                f.write("\n")
         nets = self.nets()
         pins = sum(len(v) for v in nets.values())
         conns = sum(len(v) - 1 for v in nets.values())
@@ -1225,11 +1263,128 @@ def scatter(b, rng, prefix, n, keep_out=(), tries=4000):
     return placed
 
 
+# ---------------------------------------------------------------- boards for areas
+
+
+STRIPS = (0.10, 0.15, 0.20, 0.25, 0.30, 0.40)
+
+
+def board_area_strips():
+    """Thin strips of fill between tracks. Six pens, each a locked track of its own net around
+    one GND pad on F.Cu; the pen is open only through a channel 4 mm long between the two ends of
+    the track, and the channel leaves a strip of fill STRIPS[k] wide (copper to copper is the
+    strip plus the zone clearance of 0.2 mm on both sides). The GND pour on F.Cu and B.Cu has a
+    minimum width of 0.2 mm: the fill passes the wide strips and not the narrow ones, and the
+    pad of a closed pen sits on an island. Nothing is to route here but GND."""
+    b = Board("area_strips", 40, 16, title="2 layers, GND pour, six pens open through strips of fill 0.10 to 0.40 mm")
+    for k, strip in enumerate(STRIPS):
+        cx = 5 + 6 * k
+        b.add(test_point(f"TP{k + 1}"), cx, 4).pad(1).net = "GND"
+        c = (strip + 2 * 0.2 + 0.2) / 2  # half the distance of the two centre lines of the channel
+        b.add(test_point(f"A{k + 1}", (0.8, 0.8)), cx - 1.5, 11).pad(1).net = f"PEN{k + 1}"
+        b.tracks.append((f"PEN{k + 1}", "F.Cu", 0.2, [
+            (cx - 1.5, 11), (cx - c, 10), (cx - c, 6), (cx - 2, 6), (cx - 2, 2), (cx + 2, 2), (cx + 2, 6),
+            (cx + c, 6), (cx + c, 10)]))
+    for i, x in enumerate((7, 20, 33)):
+        b.add(test_point(f"G{i + 1}"), x, 13.5).pad(1).net = "GND"
+    b.add(header("J1", 1), 13.5, 13.5).pad(1).net = "GND"
+    rules = dict(clearance=0.2, min_width=0.2, gap=0.3, spoke=0.3)
+    b.zones = [("GND", "F.Cu", rules), ("GND", "B.Cu", rules)]
+    b.net_options = {f"PEN{k + 1}": {"skip": True} for k in range(len(STRIPS))}
+    return b
+
+
+def board_area_halves():
+    """Two pour nets on two halves: the parts of GND at the left, those of GNDR at the right,
+    three signals across. No zone in the file: a pour of both nets (`ground_pour` with
+    nets GND, GNDR) has to share the board between them."""
+    b = Board("area_halves", 50, 30, title="2 layers, GND parts left and GNDR parts right, a pour of both nets")
+    sides = []
+    for n, (gnd, vcc, x, out) in enumerate((("GND", "VCC", 14, -1), ("GNDR", "VCCR", 36, 1))):
+        u = b.add(soic(f"U{n + 1}", 8), x, 15)
+        u.pad(4).net, u.pad(8).net = gnd, vcc
+        for i, y in enumerate((7.5, 22.5)):
+            c = b.add(two_terminal("C", f"C{2 * n + i + 1}", "100n"), x, y)
+            c.pad(1).net, c.pad(2).net = vcc, gnd
+        j = b.add(header(f"J{n + 1}", 2), x + out * 11, 16.27, 90)
+        j.pad(1).net, j.pad(2).net = vcc, gnd
+        sides.append(u)
+        # two pull resistors on the outer side of the chip
+        pins = (1, 2) if n == 0 else (6, 5)
+        for i, (pin, y) in enumerate(zip(pins, (10.5, 19.5))):
+            r = b.add(two_terminal("R", f"R{2 * n + i + 1}"), x + out * 6.5, y, 90)
+            r.pad(1).net = u.pad(pin).net = f"P{2 * n + i + 1}"
+            r.pad(2).net = gnd
+    for i, (a, c) in enumerate(((7, 1), (6, 2), (5, 3))):
+        sides[0].pad(a).net = sides[1].pad(c).net = f"X{i + 1}"
+    b.net_options = {"GND": {"skip": True}, "GNDR": {"skip": True}}
+    return b
+
+
+def board_area_far():
+    """A net whose area is far from its pins: VBUS has an area on B.Cu over the right third of
+    the board with two through-hole pins in it; its other pins are SMD pads up to 35 mm to the
+    left and one above the area on F.Cu."""
+    b = Board("area_far", 50, 25, title="2 layers, VBUS area on B.Cu at the right, most VBUS pins far left")
+    j1 = b.add(header("J1", 2), 3, 13.77, 90)
+    j1.pad(1).net, j1.pad(2).net = "VBUS", "GND"
+    u = b.add(soic("U1", 8), 14, 12.5)
+    u.pad(8).net, u.pad(4).net = "VBUS", "GND"
+    c1 = b.add(two_terminal("C", "C1", "100n"), 14, 6)
+    c1.pad(1).net, c1.pad(2).net = "GND", "VBUS"
+    for i, (pin, y) in enumerate(((7, 8.5), (6, 12.5), (5, 16.5))):
+        r = b.add(two_terminal("R", f"R{i + 1}"), 23, y)
+        r.pad(1).net = u.pad(pin).net = f"S{i + 1}"
+        r.pad(2).net = "GND"
+    for i, (pin, y) in enumerate(((1, 19), (2, 21.5))):
+        r = b.add(two_terminal("R", f"R{i + 4}"), 9, y)
+        r.pad(1).net = u.pad(pin).net = f"T{i + 1}"
+        r.pad(2).net = "VBUS"
+    j2 = b.add(header("J2", 2), 45, 9.27, 90)
+    j2.pad(1).net, j2.pad(2).net = "VBUS", "GND"
+    c2 = b.add(radial_cap("C2"), 38, 17)
+    c2.pad(1).net, c2.pad(2).net = "VBUS", "GND"
+    c3 = b.add(two_terminal("C", "C3", "100n"), 38, 6)
+    c3.pad(1).net, c3.pad(2).net = "VBUS", "GND"
+    b.zones = [("VBUS", "B.Cu", dict(box=(31, 2, 48.5, 23), name="VBUS area", min_width=0.2, spoke=0.5))]
+    return b
+
+
+def board_area_split():
+    """A split plane: In1.Cu is GND, In2.Cu holds +3V3 at the left and +5V at the right with a gap
+    of 0.6 mm between the two outlines. Each net has two through-hole pins and two SMD pins in
+    its own half, one SMD pin over the other half and one through-hole pin in the other half."""
+    b = Board("area_split", 50, 30, inner="power", title="4 layers, In1 GND, In2 split into +3V3 and +5V")
+    sides = []
+    for n, (vcc, other, x, out) in enumerate((("+3V3", "+5V", 14, -1), ("+5V", "+3V3", 36, 1))):
+        u = b.add(soic(f"U{n + 1}", 8), x, 13)
+        u.pad(4).net, u.pad(8).net = "GND", vcc
+        c = b.add(two_terminal("C", f"C{n + 1}", "100n"), x, 6)
+        c.pad(1).net, c.pad(2).net = vcc, "GND"
+        j = b.add(header(f"J{n + 1}", 3), x + out * 11, 15.54, 90)
+        j.pad(1).net, j.pad(2).net, j.pad(3).net = vcc, "GND", vcc
+        # the pins of the other net on this half: a pull resistor and one pin of a header
+        r = b.add(two_terminal("R", f"R{n + 1}"), x + out * 5, 22, 90)
+        r.pad(1).net = other
+        r.pad(2).net = u.pad(1 if n == 0 else 5).net = f"P{n + 1}"
+        k = b.add(header(f"J{n + 3}", 2), x - out * 3 - 1.27, 26.5)
+        k.pad(1).net, k.pad(2).net = (other, "GND") if n == 0 else ("GND", other)
+        sides.append(u)
+    for i, (a, c) in enumerate(((7, 1), (6, 2), (5, 3))):
+        sides[0].pad(a).net = sides[1].pad(c).net = f"X{i + 1}"
+    half = dict(min_width=0.2)
+    b.zones = [("GND", "In1.Cu"),
+               ("+3V3", "In2.Cu", dict(half, box=(0.5, 0.5, 24.7, 29.5), name="+3V3 plane")),
+               ("+5V", "In2.Cu", dict(half, box=(25.3, 0.5, 49.5, 29.5), name="+5V plane"))]
+    return b
+
+
 BOARDS = [board_easy, board_medium, board_bus, board_power_mix, board_crossing, board_qfn_fanout,
           board_four_signal_layers, board_bga_escape, board_bga_dense, board_fine_pitch, board_fine_pitch_mixed,
           board_diff_pairs, board_matching, board_pair_wall, board_pair_traffic, board_parts_easy,
           board_parts_medium, board_parts_hard, board_parts_multi,
           board_parts_multi_feed, board_parts_xhard]
+AREA_BOARDS = [board_area_strips, board_area_halves, board_area_far, board_area_split]
 
 
 def main():
@@ -1237,6 +1392,10 @@ def main():
     os.makedirs(outdir, exist_ok=True)
     for make in BOARDS:
         make().write(outdir)
+    areas = os.path.join(outdir, "areas")
+    os.makedirs(areas, exist_ok=True)
+    for make in AREA_BOARDS:
+        make().write(areas)
 
 
 if __name__ == "__main__":

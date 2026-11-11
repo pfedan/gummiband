@@ -5,18 +5,28 @@
 # the planes of the LED controller only; this script is for thin strips between tracks on routed
 # outer layers, where the two may differ.
 #
-# Usage: bench/areas-kicad.sh BOARD.kicad_pcb [BOARD.kicad_pcb ...]
-#        (default: bench/boards/area_*.kicad_pcb, routed first)
-# Environment:
-#   ROUTE=1        route each board first (default 1; 0: take the file as it is)
-#   ROUTE_ARGS     extra arguments for `gummiband route` (default: --runs 4 --generations 1
-#                  --geometry-generations 0, as the suite)
-#   AREAS_ARGS     extra arguments for `gummiband areas` (for a board without zones:
-#                  AREAS_ARGS="--nets GND --pour F.Cu,B.Cu" reports what a pour would reach, but
-#                  then KiCad has nothing to fill: write the pour first, see bench/README.md)
+# Usage: bench/areas-kicad.sh                  the four boards of bench/boards/areas, each as
+#                                              it is meant (see below)
+#        bench/areas-kicad.sh BOARD.kicad_pcb [BOARD.kicad_pcb ...]
+# Environment, for boards given by name:
+#   ROUTE=1        route each board first (default 1; 0: take the file as it is). A file
+#                  <board>.nets.json next to the board is passed as --net-widths.
+#   ROUTE_ARGS     arguments for `gummiband route` (default: --runs 4 --generations 1
+#                  --geometry-generations 0 --no-move-parts, as the suite)
+#   POUR           NETS:LAYERS, for a board without zones: these nets are left out of the
+#                  route, and after it a pour of them on these layers is written with one via
+#                  per island (the example pour_stitch of gummiband-cli, the same step as the
+#                  MCP tool ground_pour), for instance POUR=GND:F.Cu,B.Cu
+#   AREAS_ARGS     extra arguments for `gummiband areas`
+#
+# Without arguments:
+#   area_strips    as the file is (ROUTE=0): locked tracks and the pour are in the file
+#   area_far       routed, the VBUS area is in the file
+#   area_split     routed, the planes are in the file
+#   area_halves    routed without GND and GNDR, then POUR=GND,GNDR:F.Cu,B.Cu
 #
 # For every board, in bench/boards/out/areas/:
-#   <name>.kicad_pcb       the routed board (or a copy with ROUTE=0)
+#   <name>.kicad_pcb       the board KiCad gets: routed and poured as asked for, or a copy
 #   <name>.filled/         a copy that KiCad refilled:
 #                          kicad-cli pcb drc --refill-zones --save-board
 #   <name>.drc.json        KiCad's DRC of that copy
@@ -36,19 +46,26 @@ ROOT=$(cd "$BENCH/.." && pwd)
 command -v kicad-cli >/dev/null 2>&1 || { echo "kicad-cli not found: run this where KiCad is installed"; exit 1; }
 echo "building gummiband-cli ..."
 (cd "$ROOT" && cargo build --release -q -p gummiband-cli) || { echo "build failed"; exit 1; }
-if [ $# -eq 0 ]; then
-    set -- "$BENCH"/boards/area_*.kicad_pcb
-fi
+(cd "$ROOT" && cargo build --release -q -p gummiband-cli --example pour_stitch) || { echo "build failed"; exit 1; }
 exec python3 - "$ROOT" "$@" <<'PY'
 import json, os, re, shutil, subprocess, sys
 
 root, boards = sys.argv[1], sys.argv[2:]
-gb = os.path.join(root, "target", "release", "gummiband")
+target = os.environ.get("CARGO_TARGET_DIR", os.path.join(root, "target"))
+gb = os.path.join(target, "release", "gummiband")
+pour_stitch = os.path.join(target, "release", "examples", "pour_stitch")
 out = os.path.join(root, "bench", "boards", "out", "areas")
 os.makedirs(out, exist_ok=True)
-route = os.environ.get("ROUTE", "1") != "0"
-route_args = os.environ.get("ROUTE_ARGS", "--runs 4 --generations 1 --geometry-generations 0").split()
+route_args = os.environ.get("ROUTE_ARGS", "--runs 4 --generations 1 --geometry-generations 0 --no-move-parts").split()
 areas_args = os.environ.get("AREAS_ARGS", "").split()
+if boards:
+    # (board, route first, pour)
+    plan = [(b, os.environ.get("ROUTE", "1") != "0", os.environ.get("POUR", "")) for b in boards]
+else:
+    own = os.path.join(root, "bench", "boards", "areas")
+    plan = [(os.path.join(own, n + ".kicad_pcb"), r, p) for n, r, p in (
+        ("area_strips", False, ""), ("area_far", True, ""), ("area_split", True, ""),
+        ("area_halves", True, "GND,GNDR:F.Cu,B.Cu"))]
 
 def with_project(src, dst):
     for ext in (".kicad_pro", ".kicad_dru"):
@@ -57,21 +74,43 @@ def with_project(src, dst):
             shutil.copy(s, os.path.splitext(dst)[0] + ext)
 
 rows = []
-for board in boards:
+for board, route, pour in plan:
     if not os.path.isfile(board):
         print(f"{board}: no such file")
         continue
     name = os.path.splitext(os.path.basename(board))[0]
     work = os.path.join(out, name + ".kicad_pcb")
+    if os.path.abspath(board) == os.path.abspath(work):
+        print(f"{name}: the board lies where the results go, give a file outside {out}")
+        continue
     if route:
+        nets = os.path.splitext(board)[0] + ".nets.json"
+        if pour and not os.path.isfile(nets):
+            # the nets of the pour are left out of the route: the pour is to connect them
+            nets = os.path.join(out, name + ".nets.json")
+            json.dump({n: {"skip": True} for n in pour.partition(":")[0].split(",")}, open(nets, "w"))
+        extra = ["--net-widths", nets] if os.path.isfile(nets) else []
         with open(os.path.join(out, name + ".route.log"), "w") as log:
-            r = subprocess.run([gb, "route", board, "-o", work] + route_args, stdout=log, stderr=subprocess.STDOUT)
+            r = subprocess.run([gb, "route", board, "-o", work] + extra + route_args, stdout=log, stderr=subprocess.STDOUT)
         if r.returncode != 0 or not os.path.isfile(work):
             print(f"{name}: route failed, see {name}.route.log")
             continue
     else:
         shutil.copy(board, work)
     with_project(board, work)
+    if pour:
+        nets, _, layers = pour.partition(":")
+        poured = os.path.join(out, name + ".poured.kicad_pcb")
+        with open(os.path.join(out, name + ".pour.log"), "w") as log:
+            r = subprocess.run([pour_stitch, work, "--net", nets, "--pour", layers or "F.Cu,B.Cu", "-o", poured],
+                               stdout=log, stderr=subprocess.STDOUT)
+        if r.returncode != 0 or not os.path.isfile(poured):
+            print(f"{name}: the pour failed, see {name}.pour.log")
+            continue
+        os.replace(poured, work)
+        for ext in (".kicad_pro", ".kicad_dru"):
+            if os.path.isfile(os.path.splitext(poured)[0] + ext):
+                os.remove(os.path.splitext(poured)[0] + ext)
     filled_dir = os.path.join(out, name + ".filled")
     os.makedirs(filled_dir, exist_ok=True)
     filled = os.path.join(filled_dir, name + ".kicad_pcb")

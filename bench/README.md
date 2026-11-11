@@ -94,6 +94,72 @@ QUICK=1 bench/hashes.sh --update    # rewrites hashes.quick.txt
 
 Never update the reference to make a refactoring pass: there a changed hash is a bug. A new board
 from `gen_boards.py` needs `--update` too, since the full list covers every board in `boards/`.
+The boards for areas in `boards/areas/` are in neither list, see below.
+
+## Areas: pours and planes
+
+`gen_boards.py` also writes four small boards into `boards/areas/`, each with one situation of a
+pour or a plane. They are fixtures for the fill model behind `gummiband areas` (what the copper
+fill of a net with a zone reaches), not routing problems: each routes in under a second.
+
+| Board | Layers | What it holds | What the fill model says |
+| --- | --- | --- | --- |
+| `area_strips` | 2 | a GND pour on both layers (minimum width 0.2 mm, clearance 0.2 mm); six pens of locked track around one GND pad each, open only through a channel 4 mm long that leaves a strip of fill 0.10, 0.15, 0.20, 0.25, 0.30 or 0.40 mm wide | the pads behind 0.10, 0.15 and 0.20 mm sit on islands (one via site each), the others are reached; the pad behind 0.20 mm is doubtful |
+| `area_halves` | 2 | GND parts at the left, GNDR parts at the right, three signals across, no zone; `area_halves.nets.json` leaves the two nets out of a route | a pour of both nets gives each a zone per layer around its own pads; no spot lies in two zones; all 6 pads of each are reached |
+| `area_far` | 2 | VBUS with an area on B.Cu over the right third of the board, two through hole pins in it, six pins outside it | 2 of 8 pads reached; the farthest pad is 28.0 mm from a spot where a via lands in the area |
+| `area_split` | 4 (In1 GND, In2 split) | In2.Cu holds +3V3 at the left and +5V at the right, 0.6 mm between the outlines; each net has one SMD pin over the other half and one through hole pin in it | each half reaches its two through hole pins; the pin in the other half lies outside the outline |
+
+`cargo test -p gummiband-app --test area_boards` holds the model to the last column. The boards
+are **not in the hash lists**: `hashes.sh` lists the boards of `boards/` only. They are quick
+and their routed files are the same from run to run, but the hash of a routed file does not see
+what they are for, the fill, and a board in the lists costs a reference line that every change
+of the router has to carry.
+
+### The model against KiCad's fill
+
+The model has been held against KiCad's fill on the planes of the LED controller only. Whether
+it is right at thin strips between tracks on routed outer layers is not known: no KiCad on the
+machine it was written on. On a machine with `kicad-cli` (KiCad 9 or 10) on the PATH:
+
+```sh
+python3 bench/gen_boards.py          # only if bench/boards/areas is missing
+bench/areas-kicad.sh                 # the four boards above
+```
+
+and, for thin strips as a router leaves them, ten boards of the suite routed without GND, with
+a pour of GND on both layers and one via per island:
+
+```sh
+for seed in 1 2 3; do
+    POUR=GND:F.Cu,B.Cu \
+    ROUTE_ARGS="--runs 4 --generations 1 --geometry-generations 0 --no-move-parts --seed $seed" \
+    bench/areas-kicad.sh bench/boards/bus.kicad_pcb bench/boards/diff_pairs.kicad_pcb \
+        bench/boards/fine_pitch.kicad_pcb bench/boards/fine_pitch_mixed.kicad_pcb \
+        bench/boards/matching.kicad_pcb bench/boards/medium.kicad_pcb \
+        bench/boards/parts_easy.kicad_pcb bench/boards/parts_hard.kicad_pcb \
+        bench/boards/parts_medium.kicad_pcb bench/boards/power_mix.kicad_pcb
+    cp bench/boards/out/areas/results.txt bench/boards/out/areas/results.seed$seed.txt
+done
+```
+
+`areas-kicad.sh` routes a board (and pours it where asked), lets KiCad refill a copy
+(`kicad-cli pcb drc --refill-zones --save-board`) and runs `gummiband areas --json` on that
+copy, so that the model and KiCad's fill are compared on the same copper. It prints one line per
+net and layer, also into `boards/out/areas/results.txt`:
+
+- `mm2 model only / file only`: fill only one of the two has, beyond what the raster explains;
+- `pads m/f`: pads only the model's fill touches, and pads only KiCad's fill touches;
+- `unconn model/kicad`: the unconnected items the model expects for the net, and those KiCad's
+  DRC counts;
+- `doubtful`: the pads whose answer changes within one raster cell.
+
+The model holds on a board where both pad lists are empty and the two unconnected counts agree.
+A pad in `pads m/f` that is not in the doubtful list is a finding: send the line and the two
+files `<name>.areas.json` and `<name>.filled/<name>.kicad_pcb`. On `area_strips` the question
+is at which strip width KiCad's fill passes: the model says above 0.20 mm. On `area_halves` it
+is also whether KiCad reads the outlines as written (a region enclosed by another is cut into
+its outline through a slit; this board has none, a board with an island of the other ground
+has).
 
 ## Two sided placement
 

@@ -797,7 +797,8 @@ pub fn net_report(
         step: r3(f.raster.step * 100.0) / 100.0,
         layers,
         area: r3(f.area_main),
-        apart: r3(f.area_rest),
+        // plus zero: a sum over no piece is a negative zero
+        apart: r3(f.area_rest) + 0.0,
         joins: f.main_pads,
         groups_apart: f.groups_apart,
         expected_unconnected: f.groups_apart - (f.main_pads == 0 && f.groups_apart > 0) as usize,

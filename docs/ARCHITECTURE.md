@@ -368,7 +368,11 @@ connections stays as the router has it.
 
 **Validation.** The model was held against KiCad's fill of the planes of the LED controller
 (0.08 % of the area differs, the same pads are touched by both). Thin strips between tracks on
-a routed outer layer have not been compared; `bench/areas-kicad.sh` holds the commands.
+a routed outer layer have not been compared; `bench/areas-kicad.sh` holds the commands and
+`bench/README.md` says how to read its table. Four small boards in `bench/boards/areas` hold
+one situation each (strips of fill of six widths, two pour nets on two halves, an area far from
+its pins, a split plane); `crates/gummiband-app/tests/area_boards.rs` pins what the model says
+about them.
 
 ## Geometry
 
