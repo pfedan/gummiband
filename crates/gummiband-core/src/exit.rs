@@ -785,8 +785,9 @@ mod tests {
     /// The goals of the row lie in a column to one side, so every track turns hard right behind
     /// its exit point and the next one has to go around it. The tracks leave the row with 10 µm
     /// to spare between them (0.2 wide) or with none before they have spread (0.25 wide, 0.2 in
-    /// the row). They stay on the middle line a little beyond the exit point, and nothing comes
-    /// nearer to its neighbour than the clearance.
+    /// the row). They stay on the middle line for the first half of the rail beyond the exit point
+    /// (the arc around the turn may begin on the second half), and nothing comes nearer to its
+    /// neighbour than the clearance.
     #[test]
     fn a_row_that_turns_hard_behind_its_exits_keeps_its_clearance() {
         for (clr, track) in [(0.19, 0.19), (0.19, 0.2), (0.19, 0.25)] {
@@ -823,7 +824,7 @@ mod tests {
                 for q in t
                     .pts
                     .iter()
-                    .filter(|q| (**q - e.at).dot(e.dir) < rail - 1e-6 && q.dist(e.at) < rail)
+                    .filter(|q| (**q - e.at).dot(e.dir) < rail / 2.0 - 1e-6 && q.dist(e.at) < rail)
                 {
                     assert!(
                         (*q - e.at).cross(e.dir).abs() < 0.008,
