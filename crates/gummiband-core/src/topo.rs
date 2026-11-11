@@ -236,18 +236,93 @@ impl Mesh {
         // an exposed pad (or the board edge) is then measured across, by a short mesh edge,
         // and not by the long diagonals to the far corners
         let refine = crate::knobs::REFINE.num::<f64>();
-        let mut add_poly = |cdt: &mut ConstrainedDelaunayTriangulation<Point2<f64>>, poly: &Polygon, split: bool| {
+        let on_layer = |o: &crate::board::Obstacle| {
+            o.layers.has(l) && !matches!(o.kind, ObstacleKind::Keepout { tracks: false, .. })
+        };
+        // The width of a channel between a corner and a side is the distance from the corner to
+        // its foot on the side. That foot becomes a vertex, so that a mesh edge measures the
+        // channel straight across; the edges to the vertices the side happens to have are longer
+        // than the channel is wide (by 75 um at 0.6 mm width and 0.3 mm to the side).
+        let reach = crate::knobs::FEET.num::<f64>();
+        let mut feet: FastMap<(usize, usize), Vec<f64>> = FastMap::default();
+        if reach > 0.0 {
+            let n_out = board.outline.len();
+            let poly_of = |id: usize| {
+                if id < n_out {
+                    &board.outline[id]
+                } else {
+                    &shared.obs_polys[id - n_out]
+                }
+            };
+            let mut drop = |from: usize, v: Point, onto: usize| {
+                let poly = poly_of(onto);
+                for (si, (a, b)) in poly.edges().enumerate() {
+                    let ab = b - a;
+                    let len = ab.len();
+                    if len < 0.02 {
+                        continue;
+                    }
+                    let t = (v - a).dot(ab) / (len * len);
+                    if t * len < 0.01 || (1.0 - t) * len < 0.01 {
+                        continue;
+                    }
+                    let f = a + ab * t;
+                    let d = v.dist(f);
+                    if d > reach || d < 1e-6 {
+                        continue;
+                    }
+                    // not through the copper the corner belongs to
+                    if from >= n_out && poly_of(from).contains(v + (f - v) * (1e-4 / d)) {
+                        continue;
+                    }
+                    feet.entry((onto, si)).or_default().push(t);
+                }
+            };
+            for id in 0..n_out + board.obstacles.len() {
+                if id >= n_out && !on_layer(&board.obstacles[id - n_out]) {
+                    continue;
+                }
+                for &v in &poly_of(id).pts {
+                    for k in (0..n_out).filter(|&k| k != id) {
+                        drop(id, v, k);
+                    }
+                    for oi in shared.obs_index.query_point(v, reach) {
+                        let onto = n_out + oi as usize;
+                        if onto != id && on_layer(&board.obstacles[oi as usize]) {
+                            drop(id, v, onto);
+                        }
+                    }
+                }
+            }
+        }
+        let mut add_poly = |cdt: &mut ConstrainedDelaunayTriangulation<Point2<f64>>,
+                            poly: &Polygon,
+                            split: bool,
+                            id: Option<usize>| {
             let mut pts = Vec::with_capacity(poly.pts.len());
             for i in 0..poly.pts.len() {
                 let (a, b) = (poly.pts[i], poly.pts[(i + 1) % poly.pts.len()]);
                 pts.push(a);
+                let len = a.dist(b);
                 let n = if split && refine > 0.0 {
-                    (a.dist(b) / refine).floor() as usize
+                    (len / refine).floor() as usize
                 } else {
                     0
                 };
+                // the feet first, then the even split where no foot lies
+                let mut ts: Vec<f64> = id.and_then(|id| feet.get(&(id, i))).cloned().unwrap_or_default();
+                ts.sort_by(f64::total_cmp);
+                ts.dedup_by(|x, y| (*x - *y).abs() * len < 0.01);
+                let n_feet = ts.len();
                 for k in 1..=n {
-                    pts.push(a + (b - a) * (k as f64 / (n + 1) as f64));
+                    let t = k as f64 / (n + 1) as f64;
+                    if ts[..n_feet].iter().all(|f| (f - t).abs() * len >= 0.01) {
+                        ts.push(t);
+                    }
+                }
+                ts.sort_by(f64::total_cmp);
+                for t in ts {
+                    pts.push(a + (b - a) * t);
                 }
             }
             let mut hs = Vec::new();
@@ -283,22 +358,18 @@ impl Mesh {
                 pt(frame.min.x, frame.max.y),
             ]),
             false,
+            None,
         );
-        for o in &board.outline {
-            add_poly(&mut cdt, o, true);
+        for (k, o) in board.outline.iter().enumerate() {
+            add_poly(&mut cdt, o, true, Some(k));
         }
         for (i, o) in board.obstacles.iter().enumerate() {
-            if !o.layers.has(l) {
-                continue;
-            }
-            if let ObstacleKind::Keepout { tracks, .. } = o.kind
-                && !tracks
-            {
+            if !on_layer(o) {
                 continue;
             }
             let p = &shared.obs_polys[i];
             if p.bbox().overlaps(&frame) {
-                add_poly(&mut cdt, p, true);
+                add_poly(&mut cdt, p, true, Some(board.outline.len() + i));
             }
         }
         // Steiner points in free space, away from all obstacles of this layer

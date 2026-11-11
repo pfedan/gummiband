@@ -113,9 +113,12 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_MAXEXP` | number | 400000 | Most expansions of one search for a connection. |
 | `GB_RIPUP` | number | 3 | Rip-up passes of a router run. |
 | `GB_ESCAPE` | number | 0 | Extra cost in mm for passing right next to a pad of another net that still waits for its route. |
+| `GB_SEARCH_MARGIN` | number | 0.01 | Search: room a track or via asks for beyond its clearance, in mm. |
 | `GB_SHARE_KIND` | value | all kinds | `--patterns shares`: only the shares of this kind (`neighbours` or `decap`). |
 | `GB_SKEW_WEIGHT` | number | 0.5 | Weight of a mm of skew need in the cost of a candidate. |
 | `GB_REFINE` | number | 0.6 | Triangulation: long obstacle sides get a vertex every this many mm. |
+| `GB_FEET` | number | 0 | Triangulation: a corner within this many mm of a side of other copper puts a vertex at its foot on that side (0: none). |
+| `GB_ROUND_EXACT` | set to anything | off | Search: room next to round copper is measured from the circle, not from the corners of the polygon around it. |
 | `GB_RELAX_IT` | number | 400 | Rounds of a full relaxation. |
 | `GB_RELAX_SETTLE` | number | 0 | Relaxation: up to this many further rounds that only resolve clearances, until nothing moves. |
 | `GB_SPACING` | number | 0.05 | Relaxation: distance of the points on a track in mm. |

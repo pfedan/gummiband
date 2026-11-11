@@ -100,7 +100,7 @@ impl Default for RouterConfig {
             ripup_passes: knobs::RIPUP.num::<f64>() as usize,
             negotiate: 0,
             sites_per_tri: 3,
-            margin: 0.01,
+            margin: knobs::SEARCH_MARGIN.num(),
             via_in_pad: false,
             escape_cost: knobs::ESCAPE.num(),
             taps: false,
@@ -824,12 +824,39 @@ impl<'a> Router<'a> {
             if self.obs_net(d.obs) == Some(it.net) {
                 continue;
             }
-            need = need.max((self.eff_clearance(d.obs, it.c, it.net) + it.w / 2.0) * d.factor as f64);
+            let round = self.round_excess(li, e, end, d.obs);
+            need = need.max((self.eff_clearance(d.obs, it.c, it.net) + it.w / 2.0 - round) * d.factor as f64);
         }
         if let Some(via) = self.via_at(li, m.edges[e as usize][end]) {
             need = need.max(Self::via_need(self.board, &via, it));
         }
         need
+    }
+
+    /// How far the vertex at this end of e lies outside the round copper it stands for, measured
+    /// along the edge. A circle is triangulated as a polygon around it, whose corners stick out by
+    /// up to the board's largest error (5 um); a channel that is measured from such a corner is
+    /// that much wider than the mesh edge says. Never more than the true room: for a wall square
+    /// to the edge it is exact, for anything else the copper is at least this far away.
+    fn round_excess(&self, li: usize, e: u32, end: usize, obs: u32) -> f64 {
+        if obs == OUTSIDE || !knobs::ROUND_EXACT.on() {
+            return 0.0;
+        }
+        let m = self.m(li);
+        let [u, v] = m.edges[e as usize];
+        let (at, other) = if end == 0 { (u, v) } else { (v, u) };
+        let (p, q) = (m.verts[at as usize], m.verts[other as usize]);
+        let len = p.dist(q);
+        if len <= 0.0 {
+            return 0.0;
+        }
+        let dir = (q - p) * (1.0 / len);
+        let reach = match &self.board.obstacles[obs as usize].shape {
+            crate::geom::Shape::Circle { c, r } => c.dot(dir) + r,
+            crate::geom::Shape::Capsule { a, b, r } => a.dot(dir).max(b.dot(dir)) + r,
+            crate::geom::Shape::Polygon(_) => return 0.0,
+        };
+        (p.dot(dir) - reach).clamp(0.0, self.board.rules.max_error)
     }
 
     /// [`Router::end_need`] counted squarely from the vertex: without the factor that an edge

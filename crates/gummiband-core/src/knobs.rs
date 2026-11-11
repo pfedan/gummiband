@@ -402,12 +402,18 @@ knobs! {
         "Rip-up passes of a router run.";
     ESCAPE = "GB_ESCAPE", Experiment, Num, "0",
         "Extra cost in mm for passing right next to a pad of another net that still waits for its route.";
+    SEARCH_MARGIN = "GB_SEARCH_MARGIN", Experiment, Num, "0.01",
+        "Search: room a track or via asks for beyond its clearance, in mm.";
     SHARE_KIND = "GB_SHARE_KIND", Experiment, Value, "all kinds",
         "`--patterns shares`: only the shares of this kind (`neighbours` or `decap`).";
     SKEW_WEIGHT = "GB_SKEW_WEIGHT", Experiment, Num, "0.5",
         "Weight of a mm of skew need in the cost of a candidate.";
     REFINE = "GB_REFINE", Experiment, Num, "0.6",
         "Triangulation: long obstacle sides get a vertex every this many mm.";
+    FEET = "GB_FEET", Experiment, Num, "0",
+        "Triangulation: a corner within this many mm of a side of other copper puts a vertex at its foot on that side (0: none).";
+    ROUND_EXACT = "GB_ROUND_EXACT", Experiment, Set, "off",
+        "Search: room next to round copper is measured from the circle, not from the corners of the polygon around it.";
     RELAX_IT = "GB_RELAX_IT", Experiment, Num, "400",
         "Rounds of a full relaxation.";
     RELAX_SETTLE = "GB_RELAX_SETTLE", Experiment, Num, "0",
