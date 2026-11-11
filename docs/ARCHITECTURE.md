@@ -306,9 +306,8 @@ of the nets that gave way; the soft copper shifts aside in its relaxation as in 
    All tracks relax in parallel (Jacobi rounds); the last quarter resolves clearances only.
    Every tenth round the chains get new points at an even spacing, and there a fold goes: a
    point that the pushes moved past its neighbour, so that the chain turns back by more than 90
-   degrees. It is dropped where the straight piece in its place comes no nearer to a pad, a
-   hole, the board edge or a via than the track needs, or no nearer than the fold was. The GPU
-   rounds take their tracks from the same step.
+   degrees. Every such point is dropped; the tracks and the fixed copper answer in the rounds
+   that follow. The GPU rounds take their tracks from the same step.
    Experimental: with the `gpu` cargo feature and `GB_GPU=1` the rounds before the last quarter
    run as a compute shader (`relax_gpu.rs`, `relax_gpu.wgsl`, wgpu on Metal), see M4b in
    `MILESTONES.md`.
