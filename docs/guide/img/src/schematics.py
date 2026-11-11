@@ -427,7 +427,7 @@ def placement_terms():
 
 def pairs():
     s = Svg(820, 260)
-    s.title(20, 30, "--pairs: one wide track, split in two at the gap")
+    s.title(20, 30, "--pairs band: one wide track, split in two at the gap")
     y = 130
     s.rect(30, y - 30, 16, 12, fill=PAD)
     s.rect(30, y + 18, 16, 12, fill=PAD)
@@ -446,7 +446,7 @@ def pairs():
     s.path(f"M 46 {y+24} L 90 {y+24} L 120 {y+4}", TOP, 5)
     s.text(70, y + 60, "--breakouts: single", 11, MUTED, "middle")
     s.text(70, y + 74, "tracks into the pads", 11, MUTED, "middle")
-    s.text(20, 248, "--pair-pull is the lighter way: two nets routed on their own, the second pulled to the way of the first.", 12, MUTED)
+    s.text(20, 248, "--pairs pull is the lighter way: two nets routed on their own, the second pulled to the way of the first.", 12, MUTED)
     s.save("pairs.svg")
 
 

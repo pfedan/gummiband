@@ -177,8 +177,8 @@ pub struct PowerCopperIn {
     /// What to do with unlocked tracks and vias of other nets already on the board (a routed
     /// board): "avoid" (default) lays the pours and vias out around them, "clear" lays them out
     /// as on an unrouted board and removes the unlocked tracks and vias of other nets in the
-    /// way; reroute the nets in `reroute_nets` afterwards (route with keep_all, nets and
-    /// reroute).
+    /// way; reroute the nets in `reroute_nets` afterwards (route with scope "reroute" and
+    /// nets).
     pub unlocked: Option<String>,
 }
 
@@ -736,7 +736,7 @@ pub struct PowerCopperOut {
     /// With unlocked "clear": per net the tracks and vias removed because they were in the way.
     pub cleared: Vec<ClearedOut>,
     /// The nets to route again after a clear (the cleared nets and the nets of the paths), for
-    /// route with keep_all, nets and reroute; empty without a clear.
+    /// route with scope "reroute" and nets; empty without a clear.
     pub reroute_nets: Vec<String>,
 }
 
@@ -1094,7 +1094,7 @@ pub fn current_check(p: &CurrentCheckIn) -> Result<CurrentCheckOut> {
         .collect::<Result<_>>()?;
     let flagged = out.iter().filter(|o| o.verdict.starts_with("FLAG")).count();
     if flagged > 0 {
-        notes.push("fix a neck: reroute the net wider (set_net_options width, route with keep_all, nets and reroute), add a pour over the neck (add_zone) or locked copper, then check again".into());
+        notes.push("fix a neck: reroute the net wider (set_net_options width, route with scope \"reroute\" and nets), add a pour over the neck (add_zone) or locked copper, then check again".into());
     }
     Ok(CurrentCheckOut {
         path: path.display().to_string(),
@@ -1566,7 +1566,7 @@ pub fn power_copper(all: &KicadBoard, locked: &KicadBoard, p: &PowerCopperIn) ->
         });
         if gave_way {
             warnings.push(format!(
-                "the board has {unlocked_items} unlocked tracks and vias of other nets and the new copper gave way to them; unlocked: \"clear\" removes those in the way instead, then route reroute_nets with keep_all, nets and reroute"
+                "the board has {unlocked_items} unlocked tracks and vias of other nets and the new copper gave way to them; unlocked: \"clear\" removes those in the way instead, then route reroute_nets with scope \"reroute\" and nets"
             ));
         }
     }
@@ -1582,7 +1582,7 @@ pub fn power_copper(all: &KicadBoard, locked: &KicadBoard, p: &PowerCopperIn) ->
             }
         }
         warnings.push(format!(
-            "removed {} unlocked tracks and vias of {} nets in the way: route {} with keep_all, nets and reroute before anything else",
+            "removed {} unlocked tracks and vias of {} nets in the way: route {} with scope \"reroute\" and nets before anything else",
             hit.len(),
             cleared.len(),
             reroute_nets.join(", ")
@@ -1872,8 +1872,8 @@ would change the design intent (moving a connector, dropping a part); then stop 
 You are the layouter and Gummiband is your toolbox: place_parts and route do the bulk, but what has \
 its place (connectors, power stages, datasheet layouts, planes, critical nets) you place, route, pour \
 and lock yourself, and after every automatic step you refine by hand (move_part, add_locked_copper, \
-lock, route keep_all + nets + reroute for single nets). Locked parts and copper stay; unlocked copper \
-is replaced by the next route without keep_all. guide (no topic) has the workflow, guide with a tool \
+lock, route scope \"reroute\" with nets for single nets). Locked parts and copper stay; unlocked copper \
+is replaced by the next route unless its scope is \"finish\" or \"reroute\". guide (no topic) has the workflow, guide with a tool \
 name its reference.
 {currents}{notes}
 1. Look: load_board, list_nets. Note the layers and which are planes, the net classes, the \
@@ -1904,11 +1904,12 @@ references, or pass them as fixed to place_parts and route). Keep the switch nod
 small and the input capacitor loop short. Place parts first if they are not placed (move_part for \
 connectors and power stages, place_parts with semantic true for the rest).
 
-4. Route: route the latest board id (keep_locked when you added locked copper). Use pair_pull or \
-pairs for differential pairs that need coupling. Read unrouted and blocked; fix with set_net_options \
-(priority, width) and route again, or finish single nets with keep_all, nets and reroute. Nets that came out well: lock them \
+4. Route: route the latest board id (it keeps the locked copper you added: its scope is \"keep_locked\"; \
+scope \"finish\" keeps the unlocked copper too and lays only what is open). Use pairs \"pull\" or \
+\"band\" for differential pairs that need coupling. Read unrouted and blocked; fix with set_net_options \
+(priority, width) and route again, or lay single nets again with scope \"reroute\" and nets. Nets that came out well: lock them \
 before routing others again. A net the router did badly: draw the critical stretch with \
-add_locked_copper, then route that net with keep_all, nets and reroute. A part in the way: move_part \
+add_locked_copper, then route that net with scope \"reroute\" and nets. A part in the way: move_part \
 on the routed board (its tracks follow), then lock it. Opt-in \
 hints are worth a try only against the plain run over the same 2 or 3 seeds: patterns groups (or \
 pairs,groups with many pairs) where several chips share buses, with track_corridors to see what sits \
@@ -1917,8 +1918,8 @@ hints on a fixed placement that already routes cleanly. Keep what wins by the me
 
 5. Check the copper: current_check on the routed file with from and to for every current path \
 of step 2. A FLAG names the neck with its position: widen the net (set_net_options width, then \
-route keep_all + nets + reroute), add a pour over the neck (add_zone), or on the routed board \
-power_copper with unlocked \"clear\" and route its reroute_nets with keep_all, nets and reroute, and \
+route scope \"reroute\" with nets), add a pour over the neck (add_zone), or on the routed board \
+power_copper with unlocked \"clear\" and route its reroute_nets with scope \"reroute\" and nets, and \
 check again until every path is ok. Too few vias where the current changes layer count as a neck too.
 
 6. Ground: ground_pour on the routed file (GND pours on the outer layers, stitching vias on a grid \

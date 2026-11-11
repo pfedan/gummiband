@@ -17,31 +17,43 @@ steps, the plugin is installed ([Installation](installation.md)).
 5. Route from the plugin with the defaults, or on the command line:
 
    ```bash
-   gummiband route board.kicad_pcb -o board.routed.kicad_pcb --keep-locked
+   gummiband route board.kicad_pcb -o board.routed.kicad_pcb --scope keep_locked
    ```
 
 6. Refill zones, run the DRC, look at the unrouted connections.
 7. Iterate: lock what is good, fix the rest by hand or route again with more effort
-   (`--until-stop`, or more `--geometry-generations`).
+   (`--preset final`, `--until-stop`, or more `--geometry-generations`). `--preset draft` tells
+   in the shortest time whether a change of the placement still routes.
 
 ## Finish a partly routed board (experimental)
 
 ![A track started by hand is continued by the router, and an unlocked track of another net gives way](img/finish-net.svg)
 
 ```bash
-gummiband route board.kicad_pcb -o out.kicad_pcb --keep-all --nets /SDA,/SCL
+gummiband route board.kicad_pcb -o out.kicad_pcb --scope finish --nets /SDA,/SCL
 ```
 
-`--keep-all` keeps every existing track and via, locked or not, and `--nets` limits the run to
-the named nets. In KiCad the same is the toolbar action *Finish selected nets with Gummiband*:
+`--scope finish` keeps every existing track and via, locked or not, and lays only what is still
+open; `--nets` limits the run to the named nets, and without it every open connection of the
+board is laid. In KiCad the same is the toolbar action *Finish selected nets with Gummiband*:
 select a track, via or pad of the nets and click, see [Routing in KiCad](kicad-plugin.md).
 The router adds to what is there: pins that already sit on one piece of copper count as
 connected, and a connection may ride along existing copper of its net instead of drawing a new
 track beside it. Unlocked tracks of other nets shift aside where the new track needs room
 (`--shove`), and when even that is not enough, those within 8 mm of the pins are rerouted
 (`--give 8`); a try that leaves more open than the one before is dropped. Both are on by
-default, `--no-shove` and `--give 0` switch them off. Locked copper and plane nets stay in any
-case. This is new, so refill the zones and run the DRC afterwards.
+default with `--nets`, `--no-shove` and `--give 0` switch them off. Locked copper and plane nets
+stay in any case. This is new, so refill the zones and run the DRC afterwards.
+
+A net that is already connected stays as it is under `finish`. To lay it again, take its copper
+out first:
+
+```bash
+gummiband route board.kicad_pcb -o out.kicad_pcb --scope reroute --nets /SDA
+```
+
+`--scope reroute` removes the unlocked tracks and vias of the named nets and lays them anew;
+everything else stays, and the other nets shift aside and give way as above.
 
 ## Pre-route and lock power lanes
 
@@ -51,7 +63,8 @@ of its class and the shortest path. For power you usually know better. So:
 1. Route the power paths by hand in KiCad (or let the router do a first pass and keep the lanes
    you like).
 2. Select those tracks and vias, right click, *Locking > Lock*.
-3. Route with *Keep locked tracks and vias* on (the plugin default) or `--keep-locked`.
+3. Route with *Copper that stays* on *Locked tracks and vias* (the plugin default) or
+   `--scope keep_locked`.
 
 Locked copper is an obstacle of its net. Its ends count as pins, so a signal that has to reach a
 locked lane ends on the lane instead of on the far pad. The same works for the layout a datasheet
@@ -95,26 +108,31 @@ them: `diff_pair_gap` and `track_width` constraints, also per `(layer inner)` or
 and a `skew` constraint. Then:
 
 ```bash
-gummiband route board.kicad_pcb -o out.kicad_pcb --keep-locked --pairs
+# the gentle way: two nets, the second pulled to the way of the first
+gummiband route board.kicad_pcb -o out.kicad_pcb --scope keep_locked --pairs pull
+# one wide track per pair that has a pair rule or a net class of its own
+gummiband route board.kicad_pcb -o out.kicad_pcb --scope keep_locked --pairs band
 # with an impedance target: width per layer from the stackup, the gap stays
-gummiband route board.kicad_pcb -o out.kicad_pcb --keep-locked --pairs --pair-zdiff 90
+gummiband route board.kicad_pcb -o out.kicad_pcb --scope keep_locked --pairs band --pair-zdiff 90
 ```
 
-Each pair is routed as one wide track and split into two parallel tracks afterwards; the shorter
+`--pairs pull` works for every pair recognised by name and suits a board that is not dense; the
+tracks close up to the pair gap where nothing lies between, and `--pair-pull W` sets the weight
+(1 by default). With `--pairs band` each pair is routed as one wide track and split into two parallel tracks afterwards; the shorter
 track gets bumps until the length difference is below `--pair-skew` (0.1 mm by default) or the
 `skew` rule. The console and the JSON report list every pair with width, gap, estimated
 impedance, lengths, skew and vias. Where a pair could not be routed wide, the line says why and
 the pair is routed as two single nets.
 
 This is new. It costs connections on dense boards and can leave clearance errors or shorts next
-to pads and vias, so compare the KiCad DRC with and without `--pairs` before you keep the result.
+to pads and vias, so compare the KiCad DRC with and without `--pairs band` before you keep the result.
 
-![How --pairs routes a pair: one wide track, split into two at the pair gap, optionally with single tracks into the pads](img/pairs.svg)
+![How --pairs band routes a pair: one wide track, split into two at the pair gap, optionally with single tracks into the pads](img/pairs.svg)
 
-At connector rows `--breakouts` ends the wide track just outside the pads and runs two short
+At connector rows `--breakouts` (with `--pairs band`) ends the wide track just outside the pads and runs two short
 tracks in, which avoids the shorts the split can leave right at the pads:
 
-![A connector row with --pairs, without and with --breakouts](img/pair-breakouts-before-after.png)
+![A connector row with --pairs band, without and with --breakouts](img/pair-breakouts-before-after.png)
 
 ## Judge a result
 
@@ -156,7 +174,7 @@ result on every machine as well (verified on x86_64 Linux with glibc and with mu
 ## Let parts move
 
 ```bash
-gummiband route board.kicad_pcb -o out.kicad_pcb --keep-locked \
+gummiband route board.kicad_pcb -o out.kicad_pcb --scope keep_locked \
     --geometry-generations 3 --fixed U1,Y1
 ```
 
@@ -248,11 +266,11 @@ of the same design. It is specific to that board's part roles today; the scripts
 The MCP server lets Claude Code, Claude Desktop and other MCP clients drive the whole sequence:
 `create_board` or `load_board`, `set_layer_type` and `add_zone` for the planes, `power_plan` and
 `power_copper` for the current paths, `place_parts`, `route` (with the search options of the CLI,
-including `seed` and `keep_all`), then `current_check`, `ground_pour`, `reference_check`, `drc`
+including `seed` and `scope`), then `current_check`, `ground_pour`, `reference_check`, `drc`
 and `render`. An agent can give the critical nets priority, route, read the violations with
 positions and the nets that block each unrouted connection, look at a PNG of the region, nudge a
-part and iterate. On a finished board it can re-lay single nets: `route` with `keep_all`, `nets`
-and `reroute` removes the unlocked copper of those nets and routes them anew while everything
+part and iterate. On a finished board it can re-lay single nets: `route` with `scope`
+`"reroute"` and `nets` removes the unlocked copper of those nets and routes them anew while everything
 else stays, and unlocked tracks of other nets shift aside where needed. The automatic steps
 complement the agent's own work: it can place and route by hand, lock parts and nets (`lock`) and
 refine the result after `place_parts` and `route`, and the tool `guide` gives it this workflow and

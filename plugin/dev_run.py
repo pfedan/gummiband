@@ -55,7 +55,8 @@ def main(argv=None) -> int:
 
     routed = args.routed
     if args.route:
-        opts = runner.RouteOptions(args.keep_locked, args.runs, args.via_cost)
+        opts = runner.RouteOptions(scope="keep_locked" if args.keep_locked else "fresh",
+                                   runs=args.runs, via_cost=args.via_cost)
         work = Path(tempfile.mkdtemp(prefix="gummiband-dev-"))
         routed = work / f"{args.board.stem}-routed.kicad_pcb"
         cmd = runner.build_command(runner.find_binary(), args.board.resolve(), routed, opts)

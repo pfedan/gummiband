@@ -68,7 +68,8 @@ Standing decisions of the project owner, kept here so that they survive any sess
   to turn it off; the other ideas of that night stay off.
 - The algorithms use the freedoms a board leaves them by default, a switch only turns one off
   (Daniel, 2026-11-01). Everything that is not locked may give way within the rules. First step:
-  finishing nets (`--keep-all --nets`, MCP `keep_all` with `nets`) shoves the unlocked tracks of
+  finishing nets (`--scope finish --nets`, MCP `scope` `"finish"` with `nets`; then `--keep-all
+  --nets`) shoves the unlocked tracks of
   the other nets aside, and if a connection still finds no way, the nets near its pins give way
   within 8 mm; the try with the fewest open connections is kept, so giving way never costs a
   connection. In the night series of 2026-11-01 plain left 4 of 16 re-laid nets open, shove none.
@@ -108,7 +109,40 @@ Standing decisions of the project owner, kept here so that they survive any sess
 - Highest quality standard with maximum usability (Daniel, 2026-11-10). Consolidation merges
   switches that are duplicates or contradict each other; it never removes a way to tune. Each
   knob has one name, one default and one description, the same in the CLI, the MCP server and
-  the plugin (`gummiband_app::OPTIONS` for a route; tests hold the front ends to it).
+  the plugin (`gummiband_app::OPTIONS` for a route; tests hold the front ends to it). The
+  plugin, which is Python, reads the words of the choices, their sentences and the presets from
+  a copy of the table that a test keeps equal to it (`plugin/gb_plugin/route_options.json`);
+  its other fields are still written by hand.
+- Switches that are modes of one thing are one option with words (2026-11-11). The
+  handling of differential pairs is `pairs` = `off`, `pull` or `band`, where there were two
+  switches whose combination the user had to know (`pair_pull` above 0, `pairs`). The default
+  stays `off`: no pair was pulled unless a weight was given. Sub-options name the mode they
+  belong to and are refused elsewhere (`breakouts`, `via_pairs`, `pair_all`, `pair_zdiff` with
+  `band`). `pair_pull` is the weight of `pull` (1 unless given) and stays valid with `band`,
+  where it pulls the pairs that get no wide track: that combination had an effect before
+  (measured on `diff_pairs` with its pair rule taken away), so it keeps its meaning.
+- What a route keeps of the copper on the board is one option, `scope` = `fresh`, `keep_locked`,
+  `finish` or `reroute` (2026-11-11), where there were three switches (`keep_locked`,
+  `keep_all`, `reroute`) of whose eight combinations four meant something. `fresh` keeps
+  nothing, `keep_locked` the locked copper, `finish` all copper and lays what is open,
+  `reroute` takes the unlocked copper of `nets` out and lays them again. `nets` stays an option
+  of its own: it narrows every scope. The defaults that follow from others hang on the scope
+  and say so in one line each: `move_parts` on with fresh and keep_locked; `shove` on, `give` 8
+  and no `air` where single nets are laid on kept copper (reroute, or finish with `nets`). The
+  default of the command line stays `fresh`; the MCP session routes with what its board was
+  loaded with and the plugin with `keep_locked`, as before.
+- A preset is a name for values of options that exist, never a setting of its own (2026-11-11).
+  `preset` = `draft`, `quick`, `standard` or `final` sets `runs`, `generations`,
+  `geometry_generations` and `open_end_seconds`; each of the four wins over it when given, and
+  the default `standard` is the defaults of old, so a route without a preset is unchanged. The
+  values are defined once (`gummiband_app::Preset`), each was measured or is a default: `draft`
+  is what the benchmark suite routes with, `quick` leaves out the geometry generations, `final`
+  adds the 10 minutes of open end in which the LED controller had 93 % of its saving. Presets
+  for kinds of boards (hints, pair modes) are left out on purpose: none of those wins on every
+  board, and a second kind of preset under the same name would hide that.
+- A renamed option keeps working under its old spelling for a while: it is mapped onto the new
+  one in `gummiband_app::old`, the result is the same, and the output says in one line what to
+  write now. The old spelling leaves every help text and schema at once.
 - The MCP server is a toolbox, not an automaton. An agent brings its own knowledge of
   electronics and must be able to do any part of a board by hand: place and lock parts, route
   single nets itself, prescribe widths and currents. It leaves only the rest to the router,

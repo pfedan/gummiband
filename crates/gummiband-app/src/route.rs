@@ -38,8 +38,8 @@ pub mod defaults {
     pub const PATTERNS: &str = "none";
     /// Factor on the via cost in the via pass.
     pub const VIA_PASS: f64 = 4.0;
-    /// Weight of the pull between the nets of differential pairs.
-    pub const PAIR_PULL: f64 = 0.0;
+    /// Weight of the pull between the two nets of a differential pair, with `pairs` pull.
+    pub const PAIR_PULL: f64 = 1.0;
     /// Length difference left within a pair in mm.
     pub const PAIR_SKEW: f64 = 0.1;
     /// Rounds of negotiated routing from the start.
@@ -78,49 +78,218 @@ pub enum Angles {
     Deg45,
 }
 
+/// What of the copper on the board stays, and what is laid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scope {
+    /// No copper stays, locked or not; the board is laid anew.
+    #[default]
+    Fresh,
+    /// Locked tracks and vias stay as fixed copper, all unlocked copper goes and is laid anew.
+    KeepLocked,
+    /// All copper stays and what is still open is laid; with `nets` only those nets.
+    Finish,
+    /// The unlocked copper of `nets` goes and they are laid anew; everything else stays.
+    Reroute,
+}
+
+impl Scope {
+    pub const ALL: [Scope; 4] = [Scope::Fresh, Scope::KeepLocked, Scope::Finish, Scope::Reroute];
+
+    /// The word of the option `scope` ([`crate::OPTIONS`]).
+    pub fn word(self) -> &'static str {
+        match self {
+            Scope::Fresh => "fresh",
+            Scope::KeepLocked => "keep_locked",
+            Scope::Finish => "finish",
+            Scope::Reroute => "reroute",
+        }
+    }
+
+    /// The value of a word; the error names the words there are.
+    pub fn parse(word: &str) -> Result<Scope, String> {
+        let word = crate::option_doc("scope").expect("scope").choice(word)?;
+        Ok(*Scope::ALL
+            .iter()
+            .find(|s| s.word() == word)
+            .expect("a word of the table"))
+    }
+
+    /// Whether the copper of the board stays, unlocked copper too: the router adds to it.
+    pub fn keeps_all(self) -> bool {
+        matches!(self, Scope::Finish | Scope::Reroute)
+    }
+}
+
+/// How much search a route gets: a named bundle of `runs`, `generations`,
+/// `geometry_generations` and `open_end_seconds`. Each of the four still has its own option,
+/// and an option that is given wins over the preset. Every value here was measured or is a
+/// default of old; a preset tunes nothing that the four options do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Preset {
+    /// The settings of the benchmark suite and the hash lists: a look at whether the board
+    /// routes at all.
+    Draft,
+    /// The whole order search without the geometry generations: what the plugin's Finish action
+    /// runs.
+    Quick,
+    /// The defaults.
+    #[default]
+    Standard,
+    /// The defaults, then the open end for ten minutes.
+    Final,
+}
+
+/// What a [`Preset`] sets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PresetValues {
+    pub runs: usize,
+    pub generations: usize,
+    pub geometry_generations: usize,
+    pub open_end_seconds: f64,
+}
+
+impl Preset {
+    pub const ALL: [Preset; 4] = [Preset::Draft, Preset::Quick, Preset::Standard, Preset::Final];
+
+    /// The word of the option `preset` ([`crate::OPTIONS`]).
+    pub fn word(self) -> &'static str {
+        match self {
+            Preset::Draft => "draft",
+            Preset::Quick => "quick",
+            Preset::Standard => "standard",
+            Preset::Final => "final",
+        }
+    }
+
+    /// The value of a word; the error names the words there are.
+    pub fn parse(word: &str) -> Result<Preset, String> {
+        let word = crate::option_doc("preset").expect("preset").choice(word)?;
+        Ok(*Preset::ALL
+            .iter()
+            .find(|p| p.word() == word)
+            .expect("a word of the table"))
+    }
+
+    /// The four values of the preset.
+    pub fn values(self) -> PresetValues {
+        let standard = PresetValues {
+            runs: defaults::RUNS,
+            generations: defaults::GENERATIONS,
+            geometry_generations: defaults::GEOMETRY_GENERATIONS,
+            open_end_seconds: defaults::OPEN_END_SECONDS,
+        };
+        match self {
+            // bench/run_suite.sh and bench/hashes.sh route every board with these
+            Preset::Draft => PresetValues {
+                runs: 4,
+                generations: 1,
+                geometry_generations: 0,
+                ..standard
+            },
+            // about a third of the time of the defaults, and many more clearance violations
+            // (Arty 32 instead of 1, ULX3S 54 instead of 4, LED controller 18 instead of 4)
+            Preset::Quick => PresetValues {
+                geometry_generations: 0,
+                ..standard
+            },
+            Preset::Standard => standard,
+            // the open end of the LED controller had 93 % of its saving after 10 minutes, and
+            // two runs of it converged in 9 (docs/MILESTONES.md)
+            Preset::Final => PresetValues {
+                open_end_seconds: 600.0,
+                ..standard
+            },
+        }
+    }
+}
+
+/// How the two nets of a differential pair are laid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pairs {
+    /// Each net on its own, like any other net.
+    #[default]
+    Off,
+    /// Two nets, the second pulled to the way of the first ([`RouteOptions::pair_pull`]); the
+    /// finished tracks close up to the pair gap where nothing lies between.
+    Pull,
+    /// One wide track per pair that is split into two parallel tracks.
+    Band,
+}
+
+impl Pairs {
+    pub const ALL: [Pairs; 3] = [Pairs::Off, Pairs::Pull, Pairs::Band];
+
+    /// The word of the option `pairs` ([`crate::OPTIONS`]).
+    pub fn word(self) -> &'static str {
+        match self {
+            Pairs::Off => "off",
+            Pairs::Pull => "pull",
+            Pairs::Band => "band",
+        }
+    }
+
+    /// The value of a word; the error names the words there are.
+    pub fn parse(word: &str) -> Result<Pairs, String> {
+        let word = crate::option_doc("pairs").expect("pairs").choice(word)?;
+        Ok(*Pairs::ALL
+            .iter()
+            .find(|p| p.word() == word)
+            .expect("a word of the table"))
+    }
+}
+
 /// Every option of the route pipeline. `Default` gives the documented defaults ([`defaults`]).
 /// Options that are `None` follow from the others, see the methods of the same name.
 #[derive(Debug, Clone)]
 pub struct RouteOptions {
-    /// Keep locked tracks and vias as fixed copper (without it and `keep_all` all copper goes).
-    pub keep_locked: bool,
-    /// Keep all tracks and vias as fixed copper and add to them.
-    pub keep_all: bool,
-    /// Route only these nets (empty: all).
+    /// What of the copper on the board stays, and what is laid.
+    pub scope: Scope,
+    /// Lay only these nets (empty: all). [`Scope::Reroute`] needs them.
     pub nets: Vec<String>,
-    /// With `keep_all` and `nets`: the unlocked copper of those nets goes first and is routed anew.
-    pub reroute: bool,
-    /// Finishing nets: the unlocked tracks of the other nets are part of the topology and shift
-    /// aside. None: on when finishing nets with fixed parts, see [`RouteOptions::shove`].
+    /// Single nets on kept copper ([`RouteOptions::finishing`]): the unlocked tracks of the
+    /// other nets are part of the topology and shift aside. None: on there unless parts move, see
+    /// [`RouteOptions::shove`].
     pub shove: Option<bool>,
-    /// Finishing nets: radius in mm within which other nets give way. None: [`defaults::GIVE`]
-    /// when finishing nets, else 0, see [`RouteOptions::give`].
+    /// Single nets on kept copper: radius in mm within which other nets give way. None:
+    /// [`defaults::GIVE`] there, else 0, see [`RouteOptions::give`].
     pub give: Option<f64>,
-    /// Let the geometry generations shift parts. None: on unless `keep_all`, see
-    /// [`RouteOptions::move_parts`].
+    /// Let the geometry generations shift parts. None: on with the scopes that lay the board
+    /// anew, off with those that keep its copper, see [`RouteOptions::move_parts`].
     pub move_parts: Option<bool>,
     /// References that never move under `move_parts`, `placements` and `clear_corridors`.
     pub fixed: Vec<String>,
     /// Copper layers treated as planes besides those of KiCad type "power".
     pub plane_layers: Vec<String>,
-    pub runs: usize,
+    /// How much search the route gets: the values of `runs`, `generations`,
+    /// `geometry_generations` and `open_end_seconds` where those are None.
+    pub preset: Preset,
+    /// Portfolio size. None: what the preset says, see [`RouteOptions::runs`].
+    pub runs: Option<usize>,
     pub via_pitch: f64,
     pub via_cost: f64,
     pub layer_dirs: f64,
     /// Hints from local patterns, comma separated (`gummiband_core::patterns::hints`).
     pub patterns: String,
     pub via_pass: f64,
-    pub pair_pull: f64,
-    /// Route differential pairs as one wide track.
-    pub pairs: bool,
+    /// How differential pairs are laid.
+    pub pairs: Pairs,
+    /// Weight of the pull between the two nets of a pair. None: [`defaults::PAIR_PULL`] with
+    /// `pairs` pull, and 0 with band, where it is the pull for the pairs that get no wide track,
+    /// see [`RouteOptions::pair_pull`].
+    pub pair_pull: Option<f64>,
+    /// With `pairs` band, as are the four below.
     pub pair_skew: f64,
     pub pair_zdiff: Option<f64>,
     pub pair_all: bool,
     pub breakouts: bool,
     pub via_pairs: bool,
     pub negotiate: usize,
-    pub generations: usize,
-    pub geometry_generations: usize,
+    /// Generations of the order search. None: what the preset says, see
+    /// [`RouteOptions::generations`].
+    pub generations: Option<usize>,
+    /// Generations that select by clearance violations. None: what the preset says, see
+    /// [`RouteOptions::geometry_generations`].
+    pub geometry_generations: Option<usize>,
     pub seed: Option<u64>,
     /// Keep the best candidate of every generation, and [`RouteOutcome::write`] draws them into
     /// this folder ([`Routed::write_frames`]).
@@ -128,8 +297,9 @@ pub struct RouteOptions {
     /// Open end with a time budget: after the normal search the result keeps improving for
     /// this many seconds, then the best one is finished (0: off). The budget starts when the
     /// open end starts, so it never cuts the normal search short. [`Hooks::stop`] is the open
-    /// end without a budget; with both, whichever comes first ends the run.
-    pub open_end_seconds: f64,
+    /// end without a budget; with both, whichever comes first ends the run. None: what the
+    /// preset says, see [`RouteOptions::open_end_seconds`].
+    pub open_end_seconds: Option<f64>,
     pub open_via_cost: f64,
     /// Reserve in mm on top of the clearances. None: [`defaults::OPEN_END_AIR`] in an open ended
     /// run that does not finish nets, else 0, see [`RouteOptions::air`].
@@ -163,34 +333,33 @@ pub struct RouteOptions {
 impl Default for RouteOptions {
     fn default() -> Self {
         RouteOptions {
-            keep_locked: false,
-            keep_all: false,
+            scope: Scope::Fresh,
             nets: Vec::new(),
-            reroute: false,
             shove: None,
             give: None,
             move_parts: None,
             fixed: Vec::new(),
             plane_layers: Vec::new(),
-            runs: defaults::RUNS,
+            preset: Preset::Standard,
+            runs: None,
             via_pitch: defaults::VIA_PITCH,
             via_cost: defaults::VIA_COST,
             layer_dirs: defaults::LAYER_DIRS,
             patterns: defaults::PATTERNS.to_string(),
             via_pass: defaults::VIA_PASS,
-            pair_pull: defaults::PAIR_PULL,
-            pairs: false,
+            pairs: Pairs::Off,
+            pair_pull: None,
             pair_skew: defaults::PAIR_SKEW,
             pair_zdiff: None,
             pair_all: false,
             breakouts: false,
             via_pairs: false,
             negotiate: defaults::NEGOTIATE,
-            generations: defaults::GENERATIONS,
-            geometry_generations: defaults::GEOMETRY_GENERATIONS,
+            generations: None,
+            geometry_generations: None,
             seed: None,
             frames: None,
-            open_end_seconds: defaults::OPEN_END_SECONDS,
+            open_end_seconds: None,
             open_via_cost: defaults::OPEN_VIA_COST,
             air: None,
             prefer_width: defaults::PREFER_WIDTH,
@@ -210,30 +379,32 @@ impl Default for RouteOptions {
 }
 
 impl RouteOptions {
-    /// Finishing nets on a routed board: all copper is kept and only some nets are routed.
+    /// Single nets are laid on a board whose copper stays: scope reroute, or scope finish with
+    /// `nets`. The defaults of `shove`, `give` and `air` hang on it.
     pub fn finishing(&self) -> bool {
-        self.keep_all && !self.nets.is_empty()
+        self.scope.keeps_all() && !self.nets.is_empty()
     }
 
-    /// Parts move by default when the whole board is routed; on a board whose copper is kept
-    /// they stay unless asked.
+    /// Parts move by default where the board is laid anew (scope fresh and keep_locked); on a
+    /// board whose copper is kept (finish, reroute) they stay unless asked.
     pub fn move_parts(&self) -> bool {
-        self.move_parts.unwrap_or(!self.keep_all)
+        self.move_parts.unwrap_or(!self.scope.keeps_all())
     }
 
-    /// Finishing nets, the unlocked tracks of the other nets shift aside unless switched off or
-    /// parts move.
+    /// Where single nets are laid on kept copper, the unlocked tracks of the other nets shift
+    /// aside unless switched off or parts move.
     pub fn shove(&self) -> bool {
         self.shove.unwrap_or(self.finishing() && !self.move_parts())
     }
 
-    /// Finishing nets, other nets give way within [`defaults::GIVE`] mm unless told otherwise.
+    /// Where single nets are laid on kept copper, other nets give way within [`defaults::GIVE`]
+    /// mm unless told otherwise.
     pub fn give(&self) -> f64 {
         self.give.unwrap_or(if self.finishing() { defaults::GIVE } else { 0.0 })
     }
 
-    /// The reserve on the clearances. Finishing nets moves only what the new tracks touch, also
-    /// open ended, so only an open ended route of the board gets one by default.
+    /// The reserve on the clearances. Single nets on kept copper move only what the new tracks
+    /// touch, also open ended, so every other open ended route gets one by default.
     pub fn air(&self, open_end: bool) -> f64 {
         self.air.unwrap_or(if open_end && !self.finishing() {
             defaults::OPEN_END_AIR
@@ -242,10 +413,43 @@ impl RouteOptions {
         })
     }
 
+    /// The weight of the pull between the two nets of a pair: with `pairs` pull
+    /// [`defaults::PAIR_PULL`] unless told otherwise, with band what was given (there it pulls the
+    /// pairs that get no wide track together), without pairs none.
+    pub fn pair_pull(&self) -> f64 {
+        match self.pairs {
+            Pairs::Off => 0.0,
+            Pairs::Pull => self.pair_pull.unwrap_or(defaults::PAIR_PULL),
+            Pairs::Band => self.pair_pull.unwrap_or(0.0),
+        }
+    }
+
+    /// Portfolio size: what was given, else what the preset says.
+    pub fn runs(&self) -> usize {
+        self.runs.unwrap_or(self.preset.values().runs)
+    }
+
+    /// Generations of the order search: what was given, else what the preset says.
+    pub fn generations(&self) -> usize {
+        self.generations.unwrap_or(self.preset.values().generations)
+    }
+
+    /// Generations that select by clearance violations: what was given, else what the preset
+    /// says.
+    pub fn geometry_generations(&self) -> usize {
+        self.geometry_generations
+            .unwrap_or(self.preset.values().geometry_generations)
+    }
+
+    /// Seconds of the open end (0: none): what was given, else what the preset says.
+    pub fn open_end_seconds(&self) -> f64 {
+        self.open_end_seconds.unwrap_or(self.preset.values().open_end_seconds)
+    }
+
     /// Whether the run is open ended: by its time budget, or because the front end may stop it
     /// (`until_stop`, [`Hooks::stop`]).
     pub fn open_end(&self, until_stop: bool) -> bool {
-        until_stop || self.open_end_seconds > 0.0
+        until_stop || self.open_end_seconds() > 0.0
     }
 
     /// Check the options against each other; `until_stop` says that the front end may stop the
@@ -258,7 +462,7 @@ impl RouteOptions {
         let finishing = self.finishing();
         let open_end = self.open_end(until_stop);
         let err = |m: &str| Err(m.to_string());
-        if self.runs == 0 {
+        if self.runs() == 0 {
             return err("runs must be at least 1");
         }
         if self.via_pitch.is_nan() || self.via_pitch <= 0.0 {
@@ -267,22 +471,42 @@ impl RouteOptions {
         if self.give.is_some_and(|g| g.is_nan() || g < 0.0) {
             return err("give must not be negative");
         }
-        if self.open_end_seconds.is_nan() || self.open_end_seconds < 0.0 {
+        if self.open_end_seconds().is_nan() || self.open_end_seconds() < 0.0 {
             return err("open_end_seconds must not be negative");
         }
-        if self.reroute && !finishing {
-            return err("reroute needs keep_all and nets");
+        if self.scope == Scope::Reroute && self.nets.is_empty() {
+            return err(
+                "scope reroute needs nets: name the nets to lay again, or write scope finish to lay what is open",
+            );
         }
+        // shove and give act where single nets are laid on kept copper
+        let single = "write scope finish with nets, or scope reroute";
         if self.shove == Some(true) && !finishing {
-            return err("shove needs keep_all and nets");
+            return Err(format!(
+                "shove needs single nets on kept copper: {single}, or leave shove out"
+            ));
         }
         if self.give.is_some_and(|g| g > 0.0) && !finishing {
-            return err("give needs keep_all and nets");
+            return Err(format!(
+                "give needs single nets on kept copper: {single}, or leave give out"
+            ));
         }
         if finishing && self.move_parts == Some(true) && self.shove != Some(false) {
             return err("move_parts does not work with shove: switch shove off, or leave move_parts out");
         }
-        if !self.pairs {
+        if self.pair_pull.is_some_and(|w| w.is_nan() || w < 0.0) {
+            return err("pair_pull must not be negative");
+        }
+        let band = self.pairs == Pairs::Band;
+        if self.pairs == Pairs::Off && self.pair_pull.is_some_and(|w| w > 0.0) {
+            return err("pair_pull needs pairs pull: write pairs pull, or leave pair_pull out");
+        }
+        if self.pairs == Pairs::Pull && self.pair_pull == Some(0.0) {
+            return err(
+                "pairs pull with pair_pull 0 pulls nothing: write pairs off, or leave pair_pull out (the weight is then 1)",
+            );
+        }
+        if !band {
             let given = [
                 ("pair_zdiff", self.pair_zdiff.is_some()),
                 ("pair_all", self.pair_all),
@@ -290,37 +514,43 @@ impl RouteOptions {
                 ("via_pairs", self.via_pairs),
             ];
             if let Some((name, _)) = given.iter().find(|(_, on)| *on) {
-                return Err(format!("{name} needs pairs"));
+                return Err(format!(
+                    "{name} acts on the wide track of pairs band only: write pairs band, or leave {name} out"
+                ));
             }
         }
-        if open_end && self.pairs {
+        if open_end && band {
             return err(
-                "an open ended run does not work with pairs: leave out pairs, or the open end (until_stop, open_end_seconds)",
+                "an open ended run does not work with pairs band: write pairs pull or off, or leave out the open end (until_stop, open_end_seconds, preset final)",
             );
         }
-        if self.placements > 0 && (self.keep_all || !self.nets.is_empty() || self.pairs) {
-            return err("placements routes the whole board: not with keep_all, nets or pairs");
+        if self.placements > 0 && (self.scope.keeps_all() || !self.nets.is_empty() || band) {
+            return err("placements routes the whole board: not with scope finish or reroute, nets or pairs band");
         }
-        if self.clear_corridors && self.keep_all {
-            return err("clear_corridors places parts before the whole board is routed: not with keep_all");
+        if self.clear_corridors && self.scope.keeps_all() {
+            return err(
+                "clear_corridors places parts before the whole board is routed: not with scope finish or reroute",
+            );
         }
         Ok(())
     }
 
     /// The copper of the input that stays.
     pub fn keep(&self) -> KeepCopper {
-        if self.keep_all {
-            KeepCopper::All
-        } else if self.keep_locked {
-            KeepCopper::Locked
-        } else {
-            KeepCopper::None
+        match self.scope {
+            Scope::Fresh => KeepCopper::None,
+            Scope::KeepLocked => KeepCopper::Locked,
+            Scope::Finish | Scope::Reroute => KeepCopper::All,
         }
     }
 
     /// The nets whose unlocked copper goes before routing.
     pub fn reroute_nets(&self) -> Vec<String> {
-        if self.reroute { self.nets.clone() } else { Vec::new() }
+        if self.scope == Scope::Reroute {
+            self.nets.clone()
+        } else {
+            Vec::new()
+        }
     }
 
     /// How the board file is read for these options.
@@ -358,7 +588,7 @@ impl RouteOptions {
         Ok(RouterConfig {
             via_cost: self.via_cost,
             layer_dirs: self.layer_dirs,
-            pair_pull: self.pair_pull,
+            pair_pull: self.pair_pull(),
             via_pass: self.via_pass,
             negotiate: self.negotiate,
             ..Default::default()
@@ -375,13 +605,15 @@ impl RouteOptions {
         let stop = open_end.then(|| hooks.stop.cloned().unwrap_or_default());
         let told = hooks.progress.map(|p| p(prefix));
         let progress = match &stop {
-            Some(stop) if self.open_end_seconds > 0.0 => Some(with_budget(told, stop.clone(), self.open_end_seconds)),
+            Some(stop) if self.open_end_seconds() > 0.0 => {
+                Some(with_budget(told, stop.clone(), self.open_end_seconds()))
+            }
             _ => told,
         };
         SearchConfig {
-            population: self.runs,
-            generations: self.generations,
-            geometry_generations: self.geometry_generations,
+            population: self.runs(),
+            generations: self.generations(),
+            geometry_generations: self.geometry_generations(),
             frames: self.frames.is_some(),
             seed: self.seed,
             open_end: stop,
@@ -506,7 +738,7 @@ pub struct Routed {
     pub sub: Substrate,
     /// Geometry, stats, portfolio, frames, part offsets and the alternatives of the open end.
     pub res: RouteResult,
-    /// One report per differential pair (`pairs`).
+    /// One report per differential pair (`pairs` band).
     pub pairs: Vec<gummiband_core::pairs::PairReport>,
     /// The nets whose unlocked copper gave way: the result replaces it.
     pub given: std::collections::BTreeSet<String>,
@@ -546,8 +778,7 @@ pub struct Routed {
 /// What of the options the writer needs.
 #[derive(Debug, Clone)]
 struct WriteOptions {
-    keep_all: bool,
-    keep_locked: bool,
+    scope: Scope,
     reroute: Vec<String>,
     teardrops: bool,
 }
@@ -572,7 +803,8 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     let search_cfg = opts.search_config(hooks, "");
     let seed = search_cfg.seed_used();
     let with_zdiff;
-    let board = match (opts.pairs, opts.pair_zdiff) {
+    let band = opts.pairs == Pairs::Band;
+    let board = match (band, opts.pair_zdiff) {
         (true, Some(z)) => {
             let mut b = board.clone();
             gummiband_core::pairs::apply_zdiff(&mut b, z);
@@ -609,7 +841,7 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     let shove = opts.shove();
     // the nets asked for, and the nets that give way when a connection finds no way
     let finished = gummiband_core::finish_nets(b, &opts.nets, shove, opts.give(), &search_cfg, |board, search| {
-        let out = if opts.pairs {
+        let out = if band {
             let pair_cfg = gummiband_core::pairs::PairConfig {
                 skew: opts.pair_skew,
                 zdiff: opts.pair_zdiff,
@@ -647,7 +879,7 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     // room for the meanders: the copper next to the nets that want length steps aside
     // (the pairs make it while they are one wide track)
     let mut room = None;
-    if !opts.pairs && tune_room && !b.match_rules.is_empty() {
+    if !band && tune_room && !b.match_rules.is_empty() {
         let t1 = Instant::now();
         let want = gummiband_core::tune::room_wanted(b, &res.geometry, &tune_cfg, &[]);
         if !want.is_empty() {
@@ -729,8 +961,7 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
         legal,
         legal_alternatives,
         write: WriteOptions {
-            keep_all: opts.keep_all,
-            keep_locked: opts.keep_locked,
+            scope: opts.scope,
             reroute: opts.reroute_nets(),
             teardrops: opts.teardrops,
         },
@@ -822,8 +1053,8 @@ impl Routed {
         let mut nets = w.reroute.clone();
         nets.extend(self.given.iter().cloned());
         let opts = write::StripOptions {
-            unlocked: !w.keep_all,
-            locked: !w.keep_locked && !w.keep_all,
+            unlocked: !w.scope.keeps_all(),
+            locked: w.scope == Scope::Fresh,
             zone_layers: vec![],
             nets,
             items: changes.strip.clone(),

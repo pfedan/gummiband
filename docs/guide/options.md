@@ -25,12 +25,12 @@ about an option.
 | --- | --- | --- |
 | Several chips with buses between them (MCU and PHY, SPI, parallel interfaces) | `--patterns groups`; on a tight board also `--clear-corridors` | `groups-short` |
 | FPGA or BGA board with differential pairs and buses (Arty) | `--patterns pairs,groups` | `shares` |
-| DDR memory fan-out | `--patterns groups-short`; `--pairs --via-pairs` for the strobes and clocks | `--breakouts` |
+| DDR memory fan-out | `--patterns groups-short`; `--pairs band --via-pairs` for the strobes and clocks | `--breakouts` |
 | Fine pitch keyboard style board, no planes (Corne) | nothing; `rows` in the open end | `decaps`, `pairs,groups` |
 | Fixed placement that already routes cleanly (LED controller) | nothing, or `decaps`; spend the time on seeds and the open end | `groups`, `pairs,groups`, `--clear-corridors` |
 | Placement from scratch | `place --semantic --corridors --escape-halo`, several placement seeds, then route without hints | `--starts` above 1 instead of seeds |
 | Parts that do not fit on one side | `place --two-sided`; `--back-max-pads` or `--on-back` when the ICs that keep the front are the problem | `--back-cost 0` unless the back is meant to be full |
-| Differential pairs that must couple, board not dense | `--pair-pull 1`; `--pairs` if the pairs have their own rule or class | `--pairs` on dense boards |
+| Differential pairs that must couple, board not dense | `--pairs pull`; `--pairs band` if the pairs have their own rule or class | `--pairs band` on dense boards |
 
 ## Routing order hints: `--patterns`
 
@@ -84,15 +84,56 @@ Off by default: without it every part keeps its side and both sides share one ro
 
 ## Differential pairs
 
-![How --pairs routes a pair: one wide track, split in two at the pair gap, with single tracks into the pads under --breakouts](img/pairs.svg)
+`--pairs` (MCP `pairs`, plugin *Pairs*) says how the two nets of a pair are laid:
+`off`, the default, each net on its own; `pull`, the gentle way; `band`, one wide track.
+
+![How --pairs band routes a pair: one wide track, split in two at the pair gap, with single tracks into the pads under --breakouts](img/pairs.svg)
 
 | Option | What it does | Use it when |
 | --- | --- | --- |
-| `--pair-pull W` | The second net of a pair is pulled to the way of the first; the tracks close up to the pair gap afterwards. `1` is a good start. | Pairs should run together but the board is not dense. Works for every recognised pair. |
-| `--pairs` | Each pair is one wide track, split in two at the end. Only pairs with a `diff_pair_gap` rule or their own net class. | Pairs that must stay coupled and have room. Costs connections on dense boards; check with the DRC. Not with `--until-stop`. |
-| `--pair-all` | With `--pairs`: every pair recognised by name, also in the default class. | Pairs without a rule or class of their own. |
-| `--via-pairs` | With `--pairs`: two vias side by side are one capsule that turns with the pair. | Pairs that change layers often (DDR5: 185 instead of 206 errors). |
-| `--breakouts` | With `--pairs`: the wide track ends just outside the pads, two short tracks go in. | Connector rows (diff_pairs, matching). Still worse on DDR5. |
+| `--pairs pull` | The second net of a pair is pulled to the way of the first; the tracks close up to the pair gap afterwards. `--pair-pull W` sets the weight, 1 by default and a good start. | Pairs should run together but the board is not dense. Works for every recognised pair. |
+| `--pairs band` | Each pair is one wide track, split in two at the end. Only pairs with a `diff_pair_gap` rule or their own net class. | Pairs that must stay coupled and have room. Costs connections on dense boards; check with the DRC. Not with `--until-stop`. |
+| `--pair-all` | With `--pairs band`: every pair recognised by name, also in the default class. | Pairs without a rule or class of their own. |
+| `--pair-pull W` | With `--pairs band`: the pull of `--pairs pull` for the pairs that get no wide track, 0 by default. | A board with marked pairs and a few pairs by name only that should still run together. |
+| `--via-pairs` | With `--pairs band`: two vias side by side are one capsule that turns with the pair. | Pairs that change layers often (DDR5: 185 instead of 206 errors). |
+| `--breakouts` | With `--pairs band`: the wide track ends just outside the pads, two short tracks go in. | Connector rows (diff_pairs, matching). Still worse on DDR5. |
+
+The sub-options of the wide track (`--pair-all`, `--via-pairs`, `--breakouts`, `--pair-skew`,
+`--pair-zdiff`) are refused without `--pairs band`, and `--pair-pull` without `--pairs pull` or
+`band`: an option that would do nothing is an error that says what to write.
+
+## How much search: `--preset`
+
+One word for the effort of a run (MCP `preset`, plugin *Preset*). A preset sets the four options
+`--runs`, `--generations`, `--geometry-generations` and `--open-end-seconds`; each of them wins
+over the preset when you give it. It changes no other option, and no hint.
+
+| Preset | Sets | Use it when |
+| --- | --- | --- |
+| `draft` | 4 runs, 1 generation, no geometry generations | You want to know quickly whether the board routes and where it is tight: after a placement, between two tries of an agent. Many clearance violations. |
+| `quick` | 14 runs, 3 generations, no geometry generations | A first result to look at, in about a third of the time of `standard`. |
+| `standard`, the default | 14 runs, 3 generations, 3 geometry generations | A usable board. |
+| `final` | `standard`, then 10 minutes of the open end | The last run of a board. In the plugin it keeps improving until you accept. |
+
+Compare options with the preset you will use in the end: a hint that helps the draft may not
+help the final run.
+
+## What stays on the board: `--scope`
+
+Not a tuning option, but the first choice of every run: what of the copper on the board the
+router keeps (MCP `scope`, plugin *Copper that stays* and *Finish selected nets*).
+
+| Scope | What it does | Use it when |
+| --- | --- | --- |
+| `fresh`, the default of the command line | Every track and via goes, locked or not, and the board is laid anew. | A benchmark, or a board to start over. |
+| `keep_locked`, the default of the plugin | Locked tracks and vias stay as fixed copper, all unlocked copper is laid anew. | The copper that must stay is locked: a datasheet layout, a power lane, nets you are happy with. |
+| `finish` | All copper stays and only what is still open is laid; with `--nets` only those nets. | You laid some nets by hand and want the rest finished, or a track was started. |
+| `reroute` | The unlocked copper of `--nets` goes and they are laid anew; everything else stays. | One net came out badly on a routed board. |
+
+Some defaults follow from the scope. Parts move (`--move-parts`) with `fresh` and `keep_locked`
+only. Where single nets are laid on kept copper (`reroute`, or `finish` with `--nets`) the tracks
+of other nets shift aside and give way within 8 mm (`--shove`, `--give 8`), and an open ended
+run adds no `--air`.
 
 ## Finishing the result
 
@@ -100,7 +141,7 @@ Off by default: without it every part keeps its side and both sides share one ro
 | --- | --- | --- |
 | `--until-stop` (plugin: *Keep improving*), `--open-end-seconds S` (MCP: `open_end_seconds`) | Keeps improving after the search until you accept, or for S seconds. | The final run of a board. The window says when it has found its level. |
 | `--air MM` | Gives the copper a reserve over the clearance where there is room. 0.03 by default in an open ended run. | Bundles right at the limit, or a fab with tolerance worries. A result with new violations is dropped. |
-| `--move-parts` | Parts next to problems shift a little while the copper follows. On by default. | Almost always; switch it off for a board whose parts must not move at all. |
+| `--move-parts` | Parts next to problems shift a little while the copper follows. On by default where the board is laid anew (scope `fresh` and `keep_locked`). | Almost always; switch it off for a board whose parts must not move at all. |
 | `--placements N` | Places the board N times, routes each and keeps the best. | Early in a design, when the placement is open. Costs N routes. |
 | `--negotiate N` | A negotiated search from the start. | Dense boards that leave connections open; the default takes it up on its own. |
 

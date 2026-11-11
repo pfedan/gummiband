@@ -33,7 +33,7 @@ than 45 degree stairs.
 | Copper layers | routing happens on all copper layers that are not planes. Layers of KiCad type *power* (and `--plane-layers`) are planes. |
 | Footprints and pads | every pad is an obstacle for other nets and a pin for its own net. Overlapping pads of one net count as one pin. Non-plated holes are obstacles with the hole clearance. |
 | Solder mask | openings are obstacles for other nets, see [Solder mask openings](#solder-mask-openings). |
-| Locked tracks and vias | kept as fixed copper of their net (`--keep-locked`, the plugin default); their ends are pins. Unlocked ones are removed. |
+| Locked tracks and vias | kept as fixed copper of their net (`--scope keep_locked`, the plugin default); their ends are pins. Unlocked ones are removed. |
 | Zones | pours on plane layers define the planes; a pin of the plane net is connected by a via into the plane outline (or by a through-hole pad). Keepout zones are obstacles on their layers. Other zones stay in the file and are not refilled by the router. |
 | Net classes (`.kicad_pro`) | track width, clearance, via diameter and drill, priority, per net. |
 | Board rules (`.kicad_pro`) | minimum clearance, minimum track width, edge clearance, hole to hole and hole clearance, minimum via diameter. |
@@ -194,7 +194,7 @@ step:
   because the rule allows a neck only where it touches the courtyard.
 - Where no 45 degree path fits, typically inside tight bundles at an odd angle, the piece keeps
   its angle. The output counts these pieces and their length.
-- With `--pairs` the wide track of a pair goes onto the grid before it is split, together with
+- With `--pairs band` the wide track of a pair goes onto the grid before it is split, together with
   the tracks around it, so the two tracks of the pair stay parallel at their gap (the outer track
   of a corner gets a corner too, not an arc). Near the pads and vias of the pair, where the split
   decides how the tracks leave the wide one, the wide track keeps its direction for about three
@@ -239,7 +239,7 @@ step (after `--angles 45`):
   in small steps. Only the widened nets and what they push move; near pads, vias and their ends
   the tracks keep their width, so the breakout stays as it was. The pushed nets are pulled taut
   again and get their widths back. If that leaves a clearance error that was not there before,
-  the set is halved and tried again, so the nets that find room keep it. With `--pairs` this
+  the set is halved and tried again, so the nets that find room keep it. With `--pairs band` this
   happens on the wide track of each pair, before it is split into its two nets.
 
 - Aims: a net below the `min` of its `length` rule goes into the window (to `opt`, else the
@@ -337,8 +337,8 @@ default. See the [environment variables](cli.md#environment-variables).
 Things the router does not do yet. The [milestones](../MILESTONES.md) say what comes next.
 
 - **Partial routing is experimental.** By default a run replaces all unlocked copper; lock what
-  you want to keep. `--keep-all` with `--nets` adds to existing copper, the MCP `route` with
-  `reroute` re-lays named nets on a finished board, and an agent can add locked copper through
+  you want to keep. `--scope finish` adds to existing copper (with `--nets` for single nets),
+  `--scope reroute` re-lays named nets on a finished board, and an agent can add locked copper through
   the MCP server before routing. Follow-me routing from a half drawn
   track is the plugin action *Finish selected nets*, not yet tested live in KiCad.
 - **Automatic placement is new.** `gummiband place`, the plugin button and the MCP tool
@@ -351,13 +351,13 @@ Things the router does not do yet. The [milestones](../MILESTONES.md) say what c
   the MCP tools `part_info` and `add_locked_copper` exist but have not been tried on a real
   board yet; expect rough edges.
 - **Differential pairs are experimental.** Pairs are recognised by name (`_P`/`_N`, `P`/`N`,
-  `+`/`-`) and routed as two nets by default. `--pairs` routes a pair as one wide track, splits it
+  `+`/`-`) and routed as two nets by default. `--pairs band` routes a pair as one wide track, splits it
   into two parallel tracks with the gap and width from the rules or an impedance target, and tunes
   the skew within the pair; it keeps pairs together but still costs connections on dense boards
-  and can leave DRC errors near pads and vias. `--pair-pull` is the lighter variant: the second
+  and can leave DRC errors near pads and vias. `--pairs pull` is the lighter variant: the second
   net is pulled towards the first one's way on the same layer, and afterwards the tracks close
   up to the pair's gap wherever they run within 1.5 mm of each other with nothing between; it
-  works for every recognised pair. With `--pairs` a pair is coupled only if a pair rule or a net
+  works for every recognised pair. With `--pairs band` a pair is coupled only if a pair rule or a net
   class of its own marks it as one (`--pair-all` for all). Polarity awareness is
   not there yet.
 - **Length matching makes room only after routing.** The router itself does not keep room free

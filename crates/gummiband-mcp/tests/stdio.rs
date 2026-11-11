@@ -312,14 +312,27 @@ fn initialize_list_load_route() {
     assert!(short.to_string().contains("touches A"), "{short}");
     assert!(!dir.join("tiny.routed.prerouted.kicad_pcb").exists());
 
-    // keep_all adds to a routed board: net B joins, the tracks of A stay
+    // scope finish adds to a routed board: net B joins, the tracks of A stay
     let keep_out = dir.join("tiny.kept.kicad_pcb");
     let r = s.call(
         "route",
-        json!({"board": routed["board"], "keep_all": true, "nets": ["B"], "runs": 1, "generations": 0,
+        json!({"board": routed["board"], "scope": "finish", "nets": ["B"], "runs": 1, "generations": 0,
                "output": keep_out}),
     );
     assert_eq!(r["routed"], 1, "{r}");
+    assert!(!r["notes"].to_string().contains("is now"), "{r}");
+    // the switches of an earlier version give the same file, and a note says what to write now
+    let old_out = dir.join("tiny.kept.old.kicad_pcb");
+    let old = s.call(
+        "route",
+        json!({"board": routed["board"], "keep_all": true, "nets": ["B"], "runs": 1, "generations": 0,
+               "output": old_out}),
+    );
+    assert_eq!(old["notes"][0], "keep_all: true is now scope: \"finish\"", "{old}");
+    assert_eq!(
+        std::fs::read_to_string(&old_out).unwrap(),
+        std::fs::read_to_string(&keep_out).unwrap()
+    );
     let before = std::fs::read_to_string(dir.join("tiny.routed.kicad_pcb"))
         .unwrap()
         .matches("(segment")
@@ -332,7 +345,7 @@ fn initialize_list_load_route() {
     let done = dir.join("tiny.done.kicad_pcb");
     let r = s.call(
         "route",
-        json!({"board": kept["board"], "keep_all": true, "nets": ["B"], "output": done}),
+        json!({"board": kept["board"], "scope": "finish", "nets": ["B"], "output": done}),
     );
     assert_eq!(r["connections"], 0, "{r}");
     assert_eq!(
@@ -383,32 +396,36 @@ fn initialize_list_load_route() {
     );
     assert_eq!(g["structuredContent"]["topic"], "index", "{g}");
 
-    // reroute replaces the copper of the net, the other nets stay
+    // scope reroute replaces the copper of the net, the other nets stay
     let again = dir.join("tiny.again.kicad_pcb");
     let r = s.call(
         "route",
-        json!({"board": kept["board"], "keep_all": true, "reroute": true, "nets": ["B"], "runs": 1,
+        json!({"board": kept["board"], "scope": "reroute", "nets": ["B"], "runs": 1,
                "generations": 0, "output": again}),
     );
     assert_eq!(r["routed"], 1, "{r}");
     assert!(std::fs::read_to_string(&again).unwrap().contains("(segment"));
+    assert_eq!(
+        s.call_err("route", json!({"board": kept["board"], "scope": "reroute"})),
+        "error: scope reroute needs nets: name the nets to lay again, or write scope finish to lay what is open"
+    );
     assert!(
         s.call_err("route", json!({"board": kept["board"], "reroute": true}))
-            .contains("reroute")
+            .starts_with("error: reroute without keep_all has no meaning")
     );
     assert!(r["blocked"].as_array().unwrap().is_empty(), "{r}");
     // the other nets shift aside or give way by default; both can be switched off
     let still = dir.join("tiny.still.kicad_pcb");
     let r = s.call(
         "route",
-        json!({"board": kept["board"], "keep_all": true, "reroute": true, "nets": ["B"], "runs": 1,
+        json!({"board": kept["board"], "scope": "reroute", "nets": ["B"], "runs": 1,
                "generations": 0, "shove": false, "give": 0, "output": still}),
     );
     assert_eq!(r["routed"], 1, "{r}");
     // contradictions come back in the words of the pipeline, the same as from the CLI
     assert_eq!(
         s.call_err("route", json!({"board": kept["board"], "shove": true})),
-        "error: shove needs keep_all and nets"
+        "error: shove needs single nets on kept copper: write scope finish with nets, or scope reroute, or leave shove out"
     );
     assert_eq!(
         s.call_err("route", json!({"board": kept["board"], "runs": 0})),
@@ -417,7 +434,7 @@ fn initialize_list_load_route() {
     assert_eq!(
         s.call_err(
             "route",
-            json!({"board": kept["board"], "keep_all": true, "nets": ["B"], "move_parts": true})
+            json!({"board": kept["board"], "scope": "finish", "nets": ["B"], "move_parts": true})
         ),
         "error: move_parts does not work with shove: switch shove off, or leave move_parts out"
     );
@@ -841,8 +858,8 @@ fn track_corridors_list_the_parts_in_the_way() {
 
     let err = s.call_err(
         "route",
-        json!({"board": "b1", "clear_corridors": true, "keep_all": true}),
+        json!({"board": "b1", "clear_corridors": true, "scope": "finish"}),
     );
-    assert!(err.contains("not with keep_all"), "{err}");
+    assert!(err.contains("not with scope finish or reroute"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }

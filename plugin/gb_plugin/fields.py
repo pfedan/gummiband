@@ -6,23 +6,56 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+from . import runner, table
+
 
 @dataclass(frozen=True)
 class Field:
     name: str
     label: str
     tip: str
-    # "int", "float", "check", "refs", "file", "choice" (one of ``choices``) or "seed" (an int
-    # with a button that draws a new one)
+    # "int", "float", "check", "refs", "nets" (names separated by commas), "file", "choice" (one
+    # of ``choices``) or "seed" (an int with a button that draws a new one)
     kind: str
     low: float = 0
     high: float = 0
     step: float = 1
     digits: int = 2
-    # the field is greyed out unless this check box is on (or this number is not 0)
+    # the field is greyed out unless this check box is on (or this number is not 0); for a
+    # choice "name=word|word": unless it has one of these words
     requires: Optional[str] = None
     # kind "choice": (value, label) pairs
     choices: Tuple[Tuple[str, str], ...] = ()
+    # the field is no option of its own: its value follows from other fields (``derived``),
+    # and choosing one sets them (``follows``)
+    derived: bool = False
+
+
+def enabled(f: Field, values: dict) -> bool:
+    """Whether a field means something with these values of the dialog."""
+    if f.requires is None:
+        return True
+    name, _, words = f.requires.partition("=")
+    return values.get(name) in words.split("|") if words else bool(values.get(name))
+
+
+def follows(name: str, value) -> dict:
+    """The fields a choice sets when the user picks ``value``: a preset sets its four."""
+    if name == "preset" and value in table.PRESETS:
+        return runner.preset_values(value)
+    return {}
+
+
+def derived(values: dict) -> dict:
+    """The fields whose value follows from the others: the preset these values are."""
+    return {"preset": runner.preset_of(values)}
+
+
+def worded(name: str, labels: dict) -> Tuple[Tuple[str, str], ...]:
+    """The choices of an option of the router: its words in the order of the router's table,
+    each under the label the dialog shows. A word without a label is an error at import, so a
+    new word of the router cannot go missing here."""
+    return tuple((word, labels[word]) for word in table.words(name))
 
 
 def int_field(name, label, tip, low, high, step=1, requires=None) -> Field:
@@ -57,14 +90,42 @@ PLANE_LAYERS = Field("plane_layers", "Plane layers:",
                      "They are not routed and their zones stay. Layers of KiCad type power are "
                      "planes anyway. Not remembered.", "refs")
 
+SCOPE_LABELS = {
+    "fresh": "Nothing: locked tracks and vias are replaced too",
+    "keep_locked": "Locked tracks and vias; the rest is laid anew",
+    "finish": "Everything; lay what is still open",
+    "reroute": "Everything but the nets below, which are laid again",
+}
+PRESET_LABELS = {"draft": "Draft", "quick": "Quick", "standard": "Standard", "final": "Final"}
+PAIRS_LABELS = {
+    "off": "Each net on its own",
+    "pull": "Pull the two nets together (experimental)",
+    "band": "One wide track per pair (experimental)",
+}
+# the scopes that lay the board anew: parts may move and placements can be tried
+LAID_ANEW = "scope=fresh|keep_locked"
+
 # A tab is (title, sections), a section is (title or None, fields) or (title or None, fields,
 # intro): the intro is a short text above the fields, for advice that should not hide in a
 # tooltip.
 ROUTE_TABS: Tuple = (
     ("Basic", ((None, (
-        Field("keep_locked", "Keep locked tracks and vias",
-              "Locked copper stays and the router connects to it. Off: locked tracks and vias are "
-              "replaced as well.", "check"),
+        Field("scope", "Copper that stays:",
+              table.describe("scope", SCOPE_LABELS), "choice",
+              choices=worded("scope", SCOPE_LABELS)),
+        Field("nets", "Nets:",
+              "The nets to lay, separated by commas. Filled in from the tracks, vias and pads "
+              "that are selected when the dialog opens. Laying nets again needs them; with "
+              "\"lay what is still open\" an empty field means every open connection. The "
+              "unlocked tracks of other nets shift aside for them and give way within 8 mm. "
+              "Not remembered.", "nets", requires="scope=finish|reroute"),
+        Field("preset", "Preset:",
+              table.describe("preset", PRESET_LABELS) + "\n\nA preset sets the four fields "
+              "below it; change any of them afterwards and it reads Custom. Final keeps "
+              "improving until you accept the result, where the command line stops after 10 "
+              "minutes.", "choice",
+              choices=worded("preset", PRESET_LABELS) + ((runner.CUSTOM, "Custom"),),
+              derived=True),
         int_field("runs", "Parallel runs:",
                   "Routing attempts with different orders in every phase. A constant, so that the "
                   "result does not depend on the machine. More runs explore more orders.",
@@ -100,12 +161,13 @@ ROUTE_TABS: Tuple = (
               "connections, so it needs at least one of them; the routed tracks follow like "
               "rubber bands. On by default. Locked footprints, connectors, modules, mounting "
               "holes, switches, jumpers and test points stay. The moves arrive in the same undo "
-              "step.",
-              "check"),
+              "step. Not where all copper stays: there the parts stay too.",
+              "check", requires=LAID_ANEW),
         int_field("placements", "Placements to try:",
                   "Places the parts that are not locked or mechanical from the netlist this many "
                   "times, routes each result with these settings and keeps the best. Each one "
-                  "costs a full route. 0 keeps the placement.", 0, 64),
+                  "costs a full route. 0 keeps the placement. Not where all copper stays.",
+                  0, 64, requires=LAID_ANEW),
         seed_field("placement_seed", "First placement seed:",
                    "The placements to try use this seed and the ones after it. After every run "
                    "it moves on by the number of placements, so the next run tries placements "
@@ -176,7 +238,8 @@ ROUTE_TABS: Tuple = (
                   "The moves arrive in the same undo step.\n\n"
                   "Helps tight boards with several chips, together with the blocks: up to 18 % "
                   "fewer vias and 8 % less length.\n"
-                  "Not for a board whose placement you have settled: it moves parts."),
+                  "Not for a board whose placement you have settled: it moves parts.",
+                  requires=LAID_ANEW),
         ), "For tight boards with several chips, together with the blocks above."),
     )),
     ("Advanced", (
@@ -225,32 +288,33 @@ ROUTE_TABS: Tuple = (
                   "keep the priority of their class. Not remembered.", "file"),
         )),
         ("Differential pairs", (
-            Field("pairs", "Route pairs as one wide track (experimental)",
-                  "Routes each pair as one wide track and splits it into two parallel tracks. "
-                  "Costs connections on dense boards, so check the result with the DRC.", "check"),
+            Field("pairs", "Pairs:", table.describe("pairs", PAIRS_LABELS), "choice",
+                  choices=worded("pairs", PAIRS_LABELS)),
+            float_field("pair_pull", "Pair pull (0 = the router's):",
+                        "How strongly the two nets of a pair attract each other while routing. "
+                        "0 leaves it to the router: 1 with the pull, a good start. With the wide "
+                        "track a weight pulls the pairs that get none (those without a pair "
+                        "rule or class of their own), and 0 leaves them alone.", 0, 20, 0.1,
+                        requires="pairs=pull|band"),
             float_field("pair_skew", "Length difference (mm):",
-                        "Length difference left within a pair; the shorter track gets bumps down "
-                        "to this.", 0, 10, 0.05, requires="pairs"),
+                        "With the wide track: length difference left within a pair; the shorter "
+                        "track gets bumps down to this.", 0, 10, 0.05, requires="pairs=band"),
             float_field("pair_zdiff", "Differential impedance (ohm):",
-                        "Sets the track width per layer from the stackup, the gap stays. 0 keeps "
-                        "the widths of the net class.", 0, 500, 5, requires="pairs"),
+                        "With the wide track: sets the track width per layer from the stackup, "
+                        "the gap stays. 0 keeps the widths of the net class.", 0, 500, 5,
+                        requires="pairs=band"),
             check("pair_all", "Also pairs without a pair rule or class",
-                  "Couples every pair recognised by name (_P/_N, +/-). Without it only pairs "
-                  "that a diff_pair_gap rule or a net class of their own marks.",
-                  requires="pairs"),
+                  "With the wide track: one for every pair recognised by name (_P/_N, +/-). "
+                  "Without it only pairs that a diff_pair_gap rule or a net class of their own "
+                  "marks.", requires="pairs=band"),
             check("via_pairs", "Vias of a pair as one capsule (experimental)",
-                  "Two vias side by side are one via pair that turns with the wide track, "
-                  "instead of the circle around both. Helps pairs that change layers often "
-                  "(DDR5: 10 % fewer DRC errors).", requires="pairs"),
+                  "With the wide track: two vias side by side are one via pair that turns with "
+                  "it, instead of the circle around both. Helps pairs that change layers often "
+                  "(DDR5: 10 % fewer DRC errors).", requires="pairs=band"),
             check("breakouts", "Single tracks into the pads (experimental)",
-                  "The wide track ends just outside the pads, two short single tracks go in, "
-                  "and their room stays free. Helps at connector rows, still worse on a DDR "
-                  "fan-out.", requires="pairs"),
-            float_field("pair_pull", "Pair pull:",
-                        "How strongly the two nets of a pair attract each other while routing, "
-                        "also without the wide track. 0 = off, 1 is a good start. The gentle way "
-                        "to couple pairs on a board that is not dense; the wide track keeps them "
-                        "closer but costs connections there.", 0, 20, 0.1),
+                  "With the wide track: it ends just outside the pads, two short single tracks "
+                  "go in, and their room stays free. Helps at connector rows, still worse on a "
+                  "DDR fan-out.", requires="pairs=band"),
         )),
     )),
 )

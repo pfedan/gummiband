@@ -20,9 +20,9 @@ fn bench(board: &str) -> std::path::PathBuf {
 
 fn quick(board: &str) -> gummiband_app::RouteOutcome {
     let opts = RouteOptions {
-        runs: 4,
-        generations: 1,
-        geometry_generations: 0,
+        runs: Some(4),
+        generations: Some(1),
+        geometry_generations: Some(0),
         move_parts: Some(false),
         ..Default::default()
     };
@@ -146,12 +146,12 @@ fn an_open_end_result_and_its_alternatives_are_written_without_a_short() {
     use gummiband_core::legal;
     let dir = out_dir("open");
     let opts = RouteOptions {
-        runs: 2,
-        generations: 1,
-        geometry_generations: 1,
+        runs: Some(2),
+        generations: Some(1),
+        geometry_generations: Some(1),
         move_parts: Some(false),
         seed: Some(1),
-        open_end_seconds: 3.0,
+        open_end_seconds: Some(3.0),
         ..Default::default()
     };
     assert!(opts.open_end(false));

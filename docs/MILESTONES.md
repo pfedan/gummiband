@@ -882,3 +882,69 @@ LED controller (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
     `via_pairs`; an argument that does not exist is refused.
   - The CLI removes its folder `gummiband-corridors-<pid>` from the temp directory.
   The route hashes did not change. Still to come: help texts generated from the table (2f).
+
+## Consolidation, phase 2b: one option for differential pairs
+
+- 2026-11-11: `pairs` is one option with three words in the CLI and the MCP tool `route`:
+  `off` (the default, as before), `pull` (what `pair_pull` above 0 did) and `band` (what the
+  switch `pairs` did). `pair_pull` is the weight of the pull, 1 unless given, and with `band`
+  the pull for the pairs that get no wide track (0 unless given). `breakouts`, `via_pairs`,
+  `pair_all` and `pair_zdiff` belong to `band` and are refused without it, with a message that
+  says what to write. The words and their sentences are in `gummiband_app::OPTIONS`
+  (`Kind::Choice`); `--help` and the MCP schema take them from there. The old spellings still
+  work and say what to write now (`gummiband_app::old`): `--pairs` alone is `--pairs band`,
+  `--pair-pull W` alone is `--pairs pull --pair-pull W`, `pairs: true` is `pairs: "band"`.
+  Measured: 12 routes of `diff_pairs` in old and new spelling give the files of the build
+  before the change, byte for byte; `bench/hashes.sh` now passes `--pairs band` and `--pairs
+  pull`, and both hash lists are unchanged.
+
+## Consolidation, phase 2c: one option for what stays on the board
+
+- 2026-11-11: `scope` is one option with four words in the CLI and the MCP tool `route`, in
+  place of the switches `keep_locked`, `keep_all` and `reroute`: `fresh` (no copper stays),
+  `keep_locked` (the locked copper stays), `finish` (all copper stays, what is open is laid) and
+  `reroute` (the unlocked copper of `nets` goes and they are laid again). The sentences of the
+  words say which one is for "I laid these nets by hand, finish the rest" (`finish`) and for
+  "lay net X again" (`reroute`); the MCP schema has them from `gummiband_app::OPTIONS`. The
+  defaults of `move_parts`, `shove`, `give` and `air` hang on the scope and name it in their
+  one line. Of the eight combinations of the three switches four had a meaning and map onto a
+  word; `reroute` without `keep_all` had none, was refused and still is. The old switches still
+  work and say what to write now. The default stays what it was: `fresh` on the command line,
+  in an MCP session what the board was loaded with.
+  Measured: 15 routes of a half routed `medium` (three nets open, two locked) in every old
+  combination and in the new spelling give the files of the build before the change, byte for
+  byte, and so do the 12 routes of the pair options; both hash lists are unchanged.
+
+## Consolidation: presets for the search effort
+
+- 2026-11-11: `preset` is one option of the route pipeline with four words, in the CLI and the
+  MCP tool `route`: `draft` (4 runs, 1 generation, no geometry generations: the settings of the
+  benchmark suite), `quick` (the defaults without geometry generations), `standard` (the
+  defaults, and the default) and `final` (the defaults, then 600 s of the open end). A preset
+  sets `runs`, `generations`, `geometry_generations` and `open_end_seconds` and nothing else;
+  each of the four wins over it when given. The values are in `gummiband_app::Preset`, the
+  sentence of each word in `OPTIONS` starts with them, and a test holds the two together.
+  `final` with `pairs` `band` is refused like every open end there.
+  Measured on `medium`: `--preset draft` gives the file of `--runs 4 --generations 1
+  --geometry-generations 0`, `--preset quick` that of `--geometry-generations 0`, `--preset
+  standard` and `--preset final --open-end-seconds 0` that of a run without a preset, byte for
+  byte; both hash lists are unchanged.
+
+## Consolidation: the plugin's route dialog follows
+
+- 2026-11-11: the route dialog of the KiCad plugin has a choice for each of the three options
+  with words. *Copper that stays* is the router's `scope` (with a field for the nets of
+  `finish` and `reroute`, filled in from the selection), *Preset* its `preset`, *Pairs* its
+  `pairs`. A field is greyed out where it means nothing: the options of the wide track
+  without `band`, the pull weight with `off`, the nets with `fresh` and `keep_locked`, moving
+  parts, placements and clearing corridors with `finish` and `reroute`. The words, their
+  sentences and what a preset sets come from `gummiband_app::OPTIONS` through
+  `plugin/gb_plugin/route_options.json`; a test of gummiband-app fails when the copy differs
+  from the table. The plugin passes `--scope` and `--pairs MODE` and no old spelling any more;
+  *Finish selected nets* is scope `finish` with the nets and the preset `quick`. Settings
+  remembered by an earlier version are mapped as the router maps its old switches.
+  Measured: the commands the plugin builds for its default, for the Finish action, for
+  `finish`, `reroute` and both pair modes run on the router without a note about an old
+  spelling, and give the files of the same options before the change (the Finish action byte
+  for byte against the build before). The dialog itself was run only against a stand-in for
+  wxPython, not in KiCad: this machine has neither.
