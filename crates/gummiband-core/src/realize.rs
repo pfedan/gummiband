@@ -419,19 +419,21 @@ impl Router<'_> {
                 None => break,
             }
         }
-        // the band must stay inside the triangles its topology passes through; where the wraps
-        // would leave them (and could cross a neighbour), the funnel polyline is the safe choice
-        // (after a negotiation the routes leave more slack in the portals, so that a wrap can
-        // swing wide around a far pivot: then the band must also keep to its portals)
+        // the band must stay inside the triangles its topology passes through, and it must keep
+        // to its portals: where the wraps would leave them (and could cross a neighbour), the
+        // funnel polyline is the safe choice. A wrap takes the largest radius any of its portals
+        // has at that pivot, and on a long edge with slack that is far more than the track needs
+        // there: the band then swings wide around the pivot, inside its triangles but across the
+        // track next to it (two crossings, a short on the board). The portals of neighbours are
+        // disjoint, so a band that passes through all of its own crosses none of them.
         let portals_ok = |path: &[Point]| {
-            self.cfg.negotiate == 0
-                || portals[1..portals.len() - 1].iter().all(|(l, r)| {
-                    path.windows(2).any(|w| {
-                        crate::geom::segs_intersect(w[0], w[1], l.p, r.p)
-                            || crate::geom::point_seg_dist(l.p, w[0], w[1]) < 1e-6
-                            || crate::geom::point_seg_dist(r.p, w[0], w[1]) < 1e-6
-                    })
+            portals[1..portals.len() - 1].iter().all(|(l, r)| {
+                path.windows(2).any(|w| {
+                    crate::geom::segs_intersect(w[0], w[1], l.p, r.p)
+                        || crate::geom::point_seg_dist(l.p, w[0], w[1]) < 1e-6
+                        || crate::geom::point_seg_dist(r.p, w[0], w[1]) < 1e-6
                 })
+            })
         };
         match best {
             Some(b) if self.in_corridor(sid, &flatten(&b)) && portals_ok(&flatten(&b)) => b,

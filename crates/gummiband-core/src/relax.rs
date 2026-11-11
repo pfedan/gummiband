@@ -543,6 +543,28 @@ pub(crate) fn resample(pts: &[Point], spacing: f64) -> Vec<Point> {
     out
 }
 
+/// The chain without its folds. The rounds move every point by tension and pushes with no
+/// regard for the order of the points along the track, so a point pushed along the track can
+/// pass its neighbour: the chain then runs forth, back and forth again, and neither `simplify`
+/// nor `resample` opens that. A point at which the chain turns back by more than 90 degrees is
+/// left out, again and again until none is left. The first and the last point stay.
+fn unfold(pts: &[Point]) -> Vec<Point> {
+    let mut out: Vec<Point> = Vec::with_capacity(pts.len());
+    for (i, &p) in pts.iter().enumerate() {
+        out.push(p);
+        let Some(&c) = pts.get(i + 1) else { break };
+        while out.len() >= 2 {
+            let (a, b) = (out[out.len() - 2], out[out.len() - 1]);
+            if (b - a).dot(c - b) < 0.0 {
+                out.pop();
+            } else {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Drop points that lie on the line of their neighbours (within `tol`).
 pub fn simplify(pts: &[Point], tol: f64) -> Vec<Point> {
     if pts.len() <= 2 {
@@ -1023,6 +1045,11 @@ pub fn relax_while(
                     if !awake[ti] {
                         return p.clone();
                     }
+                    // every fold goes: the tracks and the fixed copper answer in the rounds that
+                    // follow, and a fold that stays gets in the way of the tracks next to it
+                    // (the rounds on the GPU run from one resampling to the next and take
+                    // their tracks from here, so they get them unfolded as well)
+                    let p = &unfold(p);
                     resample(
                         &simplify(p, 0.0005),
                         if it * 4 >= cfg.iterations * 3 {
@@ -2802,6 +2829,22 @@ pub fn prefer_width(board: &Board, sub: &Substrate, geo: &mut Geometry, target: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fold_is_taken_out_and_the_ends_stay() {
+        // forth, back and forth again: the point that passed its neighbour goes
+        let chain = [pt(0.0, 0.0), pt(1.2, 0.0), pt(1.0, 0.01), pt(2.0, 0.0)];
+        assert_eq!(unfold(&chain), [chain[0], chain[2], chain[3]]);
+        // two points that passed the third: one after the other
+        let two = [pt(0.0, 0.0), pt(1.0, 0.0), pt(1.2, 0.0), pt(0.9, 0.01), pt(2.0, 0.0)];
+        assert_eq!(unfold(&two), [two[0], two[3], two[4]]);
+        // a corner is no fold, and the ends stay whatever the chain does
+        let corner = [pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0)];
+        assert_eq!(unfold(&corner), corner);
+        assert_eq!(unfold(&chain[..2]), chain[..2]);
+        let back = [pt(0.0, 0.0), pt(1.0, 0.0), pt(0.5, 0.01)];
+        assert_eq!(unfold(&back), [back[0], back[2]]);
+    }
 
     #[test]
     fn a_rail_lets_go_of_a_track_that_turns_away() {

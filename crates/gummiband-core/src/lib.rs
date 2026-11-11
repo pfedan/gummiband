@@ -8,6 +8,7 @@ pub mod import;
 mod improve;
 pub mod index;
 pub mod knobs;
+pub mod legal;
 pub mod matching;
 pub mod math;
 pub mod octo;

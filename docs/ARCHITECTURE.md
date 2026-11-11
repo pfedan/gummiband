@@ -103,8 +103,26 @@ front end.
   `RouteOptions::net_options`, which the MCP server fills from its session.
 - `route_board(board, options, hooks)` takes a board model and returns `Routed`: the search
   (`finish_nets` around `route_pairs` or `route_board` of the core), then room for meanders, the
-  45 degree step, length tuning, the length rules, the clearance check and the soft copper that
-  moved. `Routed::seconds` is the wall time of the route and `Routed::seed` the seed of the
+  45 degree step, length tuning, the last check on the finished copper, the length rules, the
+  clearance check and the soft copper that moved. The last check (`gummiband_core::legal`) is the
+  final word on what was routed: a track that still touches copper of another net is taken out
+  with what hangs on it, and every net is followed through its pads, tracks, vias and planes
+  (pads that touch are one piece, a via joins the pad its copper overlaps and the track it sits
+  on, a via or a through hole pad inside a plane of its net reaches the plane). A connection that is not there in copper is reported as open, whatever the search
+  counted. Then the stubs go: a track of the route whose end lies on nothing of its net is cut
+  back to where it is last held (or goes as a whole, with a via that then joins nothing: a via
+  of the route must join on two layers), and the copper is counted once more as the final word.
+  Only copper of the file is spared in all of this, told by its origin; that a track rested in
+  the last round of the relaxation says nothing. At the very end a line of the route that a
+  track end of its net meets in its middle gets a corner there, so that every junction is one of
+  ends, which is how KiCad reads a connection for certain. It prints a line when it had to step in; a routed file holds no short between two
+  nets. Every way to a routed file passes it: the plain run, the open end with each of its
+  alternatives and with what it has when it is stopped, finishing nets, the pairs, and so both
+  front ends, which write through `RouteOutcome::write` only. The writer (`Routed::board_text`)
+  looks once more at whatever geometry it is handed and leaves out a track of the route that
+  shorts another net. The two commands that change copper they did not lay (`angles45`,
+  `move-part`) may not take a track out; they refuse to write a result with a short that their
+  input does not have (`legal::new_shorts`). `Routed::seconds` is the wall time of the route and `Routed::seed` the seed of the
   search, the numbers every front end reports. The reports of both front ends are built from
   `Routed`.
 - `route_file(board, output, options, hooks)` is the whole way from a file: the checks,
@@ -290,6 +308,10 @@ of the nets that gave way; the soft copper shifts aside in its relaxation as in 
 2. Elastic optimizer (`relax`): every track is a chain of points under tension, obstacles,
    vias and other tracks push with their clearance, vias move as well and drag their tracks.
    All tracks relax in parallel (Jacobi rounds); the last quarter resolves clearances only.
+   Every tenth round the chains get new points at an even spacing, and there a fold goes: a
+   point that the pushes moved past its neighbour, so that the chain turns back by more than 90
+   degrees. Every such point is dropped; the tracks and the fixed copper answer in the rounds
+   that follow. The GPU rounds take their tracks from the same step.
    Experimental: with the `gpu` cargo feature and `GB_GPU=1` the rounds before the last quarter
    run as a compute shader (`relax_gpu.rs`, `relax_gpu.wgsl`, wgpu on Metal), see M4b in
    `MILESTONES.md`.

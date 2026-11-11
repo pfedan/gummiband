@@ -2415,6 +2415,12 @@ impl<'a> Router<'a> {
                     it_in.w = self.width_at_edge(lu, e_in, cls.track_width, &necks, neck_w);
                     let si = m.edge_tris[e_in as usize].iter().position(|&x| x == t).unwrap();
                     it_in.sides[si] = self.side_of_pos(lu, t, e_in, CPos::Edge(k));
+                    // Only the apex of t is taken here. The side of the apex before the edge is
+                    // known as well, and the two together leave the track less than each alone,
+                    // which is what `validate` counts as an edge over capacity. Testing both was
+                    // measured and left out: the search then takes other ways and the finished
+                    // copper of the synthetic boards has more clearance spots, not fewer (65
+                    // against 42 over 39 quick runs). The geometry step settles these edges.
                     let view = views
                         .entry((lu as u8, e_in))
                         .or_insert_with(|| self.edge_view(lu, e_in, &it_in));
@@ -2967,6 +2973,81 @@ impl<'a> Router<'a> {
                 {
                     return false;
                 }
+            }
+        }
+        // The chords at the chain's vias were tested in the mesh the search saw. A second new via
+        // of the chain in the same triangle splits it again and threads the tracks there anew
+        // (a chord becomes a bent line through the new triangles), so a via can end up on the
+        // other side of a track than the search assumed: test those chords in the mesh as it is
+        // now. (In a negotiation crossings are allowed, for a price.)
+        if split_tris.len() > self.nl() && !self.soft() {
+            for w in chain.windows(2) {
+                match (w[0].kind, w[1].kind) {
+                    (NK::Tri { t, li, entry, slot }, NK::Vert { site, .. } | NK::GoalVia { site }) if entry < 3 => {
+                        let m = self.m(li as usize);
+                        if m.status[t as usize] == NONE
+                            && let Some(&v) = m.site_vert.get(&site)
+                            && let Some(i) = m.tris[t as usize].iter().position(|&x| x == v)
+                            && !self.chord_ok(
+                                t,
+                                li as usize,
+                                net,
+                                CPos::Edge(entry),
+                                Some(slot as usize),
+                                CPos::Vertex(i as u8),
+                                None,
+                            )
+                        {
+                            return false;
+                        }
+                    }
+                    (NK::Vert { site, li }, NK::Tri { t, li: l2, entry, slot }) if li == l2 && entry < 3 => {
+                        let m = self.m(li as usize);
+                        let e = m.tri_edges[t as usize][entry as usize];
+                        let from = m.other_tri(e, t);
+                        if from != NONE
+                            && m.status[from as usize] == NONE
+                            && let Some(&v) = m.site_vert.get(&site)
+                            && let Some(i) = m.tris[from as usize].iter().position(|&x| x == v)
+                            && !self.chord_ok(
+                                from,
+                                li as usize,
+                                net,
+                                CPos::Vertex(i as u8),
+                                None,
+                                CPos::Edge(m.local_edge(from, e) as u8),
+                                Some(slot as usize),
+                            )
+                        {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Each new via was tested alone against the tracks around it, and two new vias of one
+        // chain can leave a track less room between them than each does alone (`validate` then
+        // counts an edge over capacity). Refusing such a way was measured and left out: on the
+        // LED controller the search then took 14 % more vias and the finished copper had more
+        // clearance spots (7 against 2 over three seeds). The geometry step settles these edges.
+        // A chain may cross an edge twice: it dives under a track through two vias and comes
+        // back on the other side. Its slots count the tracks on the edge as the search saw them,
+        // so the second crossing has to step over the chain's own first one, or it would land on
+        // the wrong side of a track of another net.
+        let mut crossed: Vec<(u8, u32, u16)> = Vec::new();
+        for n in chain.iter_mut() {
+            if let NK::Tri { t, li, entry, slot } = &mut n.kind
+                && *entry < 3
+            {
+                let e = self.m(*li as usize).tri_edges[*t as usize][*entry as usize];
+                let seen = *slot;
+                let before = crossed
+                    .iter()
+                    .filter(|&&(l, x, s)| l == *li && x == e && s <= seen)
+                    .count();
+                crossed.push((*li, e, seen));
+                *slot += before as u16;
             }
         }
         let conn = self.conns[ci].clone();
@@ -4009,49 +4090,91 @@ impl<'a> Router<'a> {
         self.net_pieces(net).saturating_sub(open.count())
     }
 
-    /// The segments connection `ci` may end on: of its net, and not on its side of the gap it
-    /// closes. That goes for plane fan-outs too: a track of the net leads to a via into the plane.
+    /// The segments connection `ci` may end on: of its net, not on its side of the gap it closes,
+    /// and hanging together with its goal, be that one of its goal pins or, for a plane fan-out,
+    /// a via or pin that reaches the plane. Other copper of the net leads nowhere it has to go:
+    /// a connection that ended there counted as routed and left its goal pins an island. So
+    /// while nothing is laid on the goal's side, nothing can be ended on.
     /// Pairs stay out, their tracks must run together to the end.
     fn tappable(&self, ci: usize) -> HashSet<u32> {
         let c = &self.conns[ci];
         if !self.cfg.taps || self.partner.contains_key(&c.net) {
             return HashSet::new();
         }
-        let mine = self.net_side(c.net, c.from);
+        let mine = self.net_side(c.net, &[c.from]);
+        let goal = match &c.goal {
+            Goal::Pins(p) => self.net_side(c.net, p),
+            Goal::Plane => self.net_side(c.net, &self.plane_pins(c.net)),
+        };
+        let on = |side: &[End], e: End| side.iter().any(|&x| self.same_end(x, e));
         (0..self.conns.len())
             .filter(|&cj| cj != ci && self.conns[cj].net == c.net)
             .flat_map(|cj| self.conn_segs[cj].iter().copied())
             .filter(|&sid| {
                 let s = self.segs[sid as usize].as_ref().unwrap();
-                !mine.contains(&s.start) && !mine.contains(&s.end)
+                let end = self.held_end(s.end);
+                !on(&mine, s.start) && !on(&mine, end) && (on(&goal, s.start) || on(&goal, end))
             })
             .collect()
     }
 
-    /// The ends of the routed segments of `net` that hang together with pin `from`.
-    fn net_side(&self, net: NetId, from: usize) -> Vec<End> {
+    /// The pins of `net` that reach one of its planes: those that stand in it, and those whose
+    /// fan-out is laid and ends in the plane itself and not on another track.
+    fn plane_pins(&self, net: NetId) -> Vec<usize> {
+        let b = self.board;
+        let stands_in = |p: usize| {
+            let pn = &b.pins[p];
+            b.planes
+                .iter()
+                .any(|pl| pl.net == net && pn.layers.has(pl.layer) && pl.covers(pn.pos))
+        };
+        let mut pins: Vec<usize> = b.nets[net as usize]
+            .pins
+            .iter()
+            .copied()
+            .filter(|&p| stands_in(p))
+            .collect();
+        for (cj, c) in self.conns.iter().enumerate() {
+            let last = self.conn_segs[cj]
+                .last()
+                .and_then(|&sid| self.segs[sid as usize].as_ref());
+            if c.net == net && c.goal == Goal::Plane && last.is_some_and(|s| !matches!(s.end, End::Tap(..))) {
+                pins.push(c.from);
+            }
+        }
+        pins
+    }
+
+    /// Two ends at the same place: pins of one group, or the same via.
+    fn same_end(&self, a: End, b: End) -> bool {
+        match (a, b) {
+            (End::Pin(a), End::Pin(b)) => self.pin_group[a] == self.pin_group[b],
+            (End::Via(a), End::Via(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// What ends on a segment hangs together with that segment: its start stands for it.
+    fn held_end(&self, e: End) -> End {
+        match e {
+            End::Tap(sid, _) => self.segs[sid as usize].as_ref().map_or(e, |o| o.start),
+            e => e,
+        }
+    }
+
+    /// The ends of the routed segments of `net` that hang together with one of the pins `from`.
+    fn net_side(&self, net: NetId, from: &[usize]) -> Vec<End> {
         let segs: Vec<&Seg> = (0..self.conns.len())
             .filter(|&cj| self.conns[cj].net == net)
             .flat_map(|cj| self.conn_segs[cj].iter())
             .filter_map(|&sid| self.segs[sid as usize].as_ref())
             .collect();
-        let group = self.pin_group[from];
-        let mut side: Vec<End> = vec![End::Pin(from)];
+        let mut side: Vec<End> = from.iter().map(|&p| End::Pin(p)).collect();
         loop {
-            let holds = |side: &[End], e: End| {
-                side.iter().any(|&x| match (x, e) {
-                    (End::Pin(a), End::Pin(b)) => self.pin_group[a] == self.pin_group[b],
-                    (End::Via(a), End::Via(b)) => a == b,
-                    _ => false,
-                }) || matches!(e, End::Pin(p) if self.pin_group[p] == group)
-            };
+            let holds = |side: &[End], e: End| side.iter().any(|&x| self.same_end(x, e));
             let before = side.len();
             for s in &segs {
-                let end = match s.end {
-                    // what ends on a segment hangs together with that segment
-                    End::Tap(sid, _) => self.segs[sid as usize].as_ref().map_or(s.end, |o| o.start),
-                    e => e,
-                };
+                let end = self.held_end(s.end);
                 match (holds(&side, s.start), holds(&side, end)) {
                     (true, false) => side.push(end),
                     (false, true) => side.push(s.start),
@@ -4116,11 +4239,47 @@ impl<'a> Router<'a> {
         if over > 0 {
             out.push(format!("{over} edges over capacity"));
         }
+        // no two chords of different nets in a triangle may cross
+        let mut coords: Vec<(f64, f64, u32)> = Vec::new();
+        for li in 0..self.nl() {
+            for (t, list) in self.chords[li].iter().enumerate() {
+                if list.len() < 2 {
+                    continue;
+                }
+                coords.clear();
+                coords.extend(list.iter().map(|ch| {
+                    (
+                        self.coord(t as u32, li, ch.a, Some(ch.seg), None),
+                        self.coord(t as u32, li, ch.b, Some(ch.seg), None),
+                        ch.seg,
+                    )
+                }));
+                for (i, &(x, y, sa)) in coords.iter().enumerate() {
+                    for &(c, d, sb) in &coords[i + 1..] {
+                        let net = |s: u32| self.segs[s as usize].as_ref().map(|s| s.net);
+                        if net(sa) != net(sb) && !Self::chord_fits(&[(c, d)], x, y) {
+                            out.push(format!(
+                                "layer {li} triangle {t}: the chords of seg {sa} and seg {sb} cross"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         for (sid, s) in self.segs.iter().enumerate() {
             let Some(s) = s else { continue };
             let m = self.m(s.li as usize);
             for w in s.crossings.windows(2) {
-                if m.other_tri(w[0].e, w[0].from) != w[1].from {
+                let into = m.other_tri(w[0].e, w[0].from);
+                if into == w[1].from {
+                    continue;
+                }
+                // a track may run through copper of its own net (a pad, a kept track): there it
+                // crosses no edge, so the chain goes on where it leaves that copper
+                let own = |t: u32| {
+                    t != NONE && m.status[t as usize] != NONE && self.obs_net(m.status[t as usize]) == Some(s.net)
+                };
+                if !(own(into) && own(w[1].from)) {
                     out.push(format!(
                         "seg {sid}: crossing chain broken at edge {} -> {}",
                         w[0].e, w[1].e
@@ -4243,6 +4402,40 @@ mod tests {
             });
         }
         b
+    }
+
+    /// Four pins of one net. P1 is to reach P0, and the track from P3 to P2 lies across its
+    /// way: ending on that track would count as routed and leave P0 an island. A connection
+    /// may only end on copper that hangs on one of its goal pins.
+    #[test]
+    fn a_connection_ends_only_on_copper_of_its_goal() {
+        let b = pad_board(&[
+            ("P0", "A", 10.0, 4.0),
+            ("P1", "A", 10.0, 10.0),
+            ("P2", "A", 3.0, 7.0),
+            ("P3", "A", 17.0, 7.0),
+        ]);
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        let conn = |r: &Router, from: usize| (0..r.conns.len()).find(|&ci| r.conns[ci].from == from).unwrap();
+        let (a, mid, far) = (conn(&r, 1), conn(&r, 2), conn(&r, 3));
+        assert_eq!(r.conns[a].goal, Goal::Pins(vec![0]));
+        // the tree as another placement would have planned it: P3 hangs on P2
+        r.conns[far].goal = Goal::Pins(vec![2]);
+        r.cfg.taps = true;
+        assert!(r.route_one(far));
+        // only P3 to P2 is laid: nothing of it hangs on P0
+        assert!(r.tappable(a).is_empty(), "{:?}", r.tappable(a));
+        assert!(r.route_one(a));
+        let end = r.segs[*r.conn_segs[a].last().unwrap() as usize].as_ref().unwrap().end;
+        assert_eq!(end, End::Pin(0));
+        assert_eq!(r.net_pieces(0), 2);
+        // P2 may end on the track from P1 to P0, its goal pins, and not on its own side
+        let on_goal: HashSet<u32> = r.conn_segs[a].iter().copied().collect();
+        assert_eq!(r.tappable(mid), on_goal);
+        assert!(r.route_one(mid));
+        assert_eq!(r.net_pieces(0), 1);
     }
 
     fn planned_nets(b: &Board, cfg: RouterConfig) -> Vec<String> {

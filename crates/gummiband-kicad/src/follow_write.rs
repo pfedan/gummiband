@@ -61,6 +61,16 @@ pub fn move_part_following(kb: &KicadBoard, reference: &str, x: f64, y: f64) -> 
     let mut b = kb.board.clone();
     let (geo, changes, reached, stats) = move_with_copper(&mut b, reference, pt(x, y) - from);
     let refs = moving_refs(&b, reference);
+    // this step changes copper it did not lay: it may not take a track out, so a result with
+    // a short that the file does not have is not written
+    let moved = b.with_offsets(&refs.iter().map(|r| (r.clone(), reached)).collect());
+    let shorts = gummiband_core::legal::new_shorts(&b, &gummiband_core::follow::soft_geometry(&b), &moved, &geo);
+    if !shorts.is_empty() {
+        bail!(
+            "moving {reference} would short {}: nothing written, please report this board",
+            shorts.join(", ")
+        );
+    }
     let mut items = Vec::new();
     for t in geo
         .tracks
