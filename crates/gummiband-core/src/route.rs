@@ -304,6 +304,8 @@ pub struct Router<'a> {
     pub disc_corridor: bool,
     /// A track takes over the discs of the tracks inside it (`Router::inherit_discs`).
     pub disc_inherit: bool,
+    /// Bands of the discs that cross go back to the band along the edges (`Router::tagged_from`).
+    pub disc_planar: bool,
     /// Discs a segment's band keeps besides those of its own triangles: taken over from the
     /// band of a neighbour where the check found the two too close ([`Router::disc_band`]).
     pub(crate) extra_discs: HashMap<u32, Vec<crate::realize::Disc>>,
@@ -678,6 +680,7 @@ impl<'a> Router<'a> {
             disc_local: true,
             disc_corridor: false,
             disc_inherit: true,
+            disc_planar: true,
             extra_discs: HashMap::new(),
         };
         if !board.soft.chains.is_empty() {
@@ -1078,7 +1081,7 @@ impl<'a> Router<'a> {
     }
 
     /// Item of segment `seg` crossing edge e, with its sides relative to the two apexes.
-    fn item_on(&self, li: usize, e: u32, seg: u32) -> Item {
+    pub(crate) fn item_on(&self, li: usize, e: u32, seg: u32) -> Item {
         let mut it = self.item_of(seg);
         {
             let s = self.segs[seg as usize].as_ref().unwrap();
