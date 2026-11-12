@@ -7,6 +7,7 @@
 //! rounds leaves of each.
 //! Usage: band_stage BOARD OUT.json [--seed N] [--runs N] [--generations N]
 //!        [--geometry-generations N] [--rounds 100,200,400] [--svg FILE [--svg-layer N]]
+//!        [--trace SEG,SEG]
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -331,6 +332,12 @@ fn main() -> anyhow::Result<()> {
             idle += i.idle;
         }
         let v = clearance(b, &g);
+        // --trace SEG[,SEG]: what the band of the discs did for these segments
+        if let (true, Some(list)) = (mode == "disc", flag("--trace")) {
+            for sid in list.split(',').filter_map(|x| x.parse::<u32>().ok()) {
+                eprint!("{}", r.debug_disc_trace(sid));
+            }
+        }
         // --svg FILE [--svg-layer N]: a drawing of the bands of the discs, the discs and the spots of the check
         if let (true, Some(file)) = (mode == "disc", flag("--svg")) {
             use gummiband_core::geom::Shape;

@@ -558,6 +558,11 @@ impl Router<'_> {
 
     /// [`Router::seg_path`], and how the band came about.
     pub fn seg_path_info(&self, sid: u32) -> (Vec<Elem>, PathInfo) {
+        self.seg_path_info_with(sid, self.disc_band)
+    }
+
+    /// [`Router::seg_path_info`] with the band of the discs or, `disc` false, without it.
+    fn seg_path_info_with(&self, sid: u32, disc: bool) -> (Vec<Elem>, PathInfo) {
         let mut info = PathInfo::default();
         let portals = self.seg_portals(sid);
         let (start, end) = (portals[0].0.p, portals[portals.len() - 1].0.p);
@@ -578,7 +583,7 @@ impl Router<'_> {
             info.fallback = 4;
             return (polyline(), info);
         }
-        if self.disc_band {
+        if disc {
             return match self.disc_path(sid, &mut info) {
                 Some(b) => (b, info),
                 None => (polyline(), info),
@@ -886,6 +891,19 @@ impl Router<'_> {
     /// until the string keeps every disc. None where that does not settle, where two discs
     /// leave no tangent, or where the string leaves its triangles.
     fn disc_path(&self, sid: u32, info: &mut PathInfo) -> Option<Vec<Elem>> {
+        self.disc_path_traced(sid, info, &mut None)
+    }
+
+    /// What [`Router::disc_path`] did for one segment, step by step, for a reader: its
+    /// crossings, its discs, every wrap put on and taken off, and the wraps of the result.
+    pub fn debug_disc_trace(&self, sid: u32) -> String {
+        let mut trace = Some(String::new());
+        self.disc_path_traced(sid, &mut PathInfo::default(), &mut trace);
+        trace.unwrap_or_default()
+    }
+
+    fn disc_path_traced(&self, sid: u32, info: &mut PathInfo, trace: &mut Option<String>) -> Option<Vec<Elem>> {
+        use std::fmt::Write;
         let start = self.seg_end(sid, true);
         let end = self.seg_end(sid, false);
         // a vertex that asks for no distance (its own net, a free Steiner point) is still passed
@@ -932,6 +950,48 @@ impl Router<'_> {
                 }
             }
         }
+        if let Some(t) = trace {
+            let _ = writeln!(
+                t,
+                "seg {sid} layer {} net {} from {:?} ({:.3},{:.3}) to {:?} ({:.3},{:.3})",
+                s.li, s.net, s.start, start.x, start.y, s.end, end.x, end.y
+            );
+            for e in [s.start, s.end] {
+                if let End::Via(site) = e {
+                    let _ = match m.site_vert.get(&site) {
+                        Some(&v) => writeln!(
+                            t,
+                            "  via {site} is vertex {v} ({:.3},{:.3})",
+                            m.verts[v as usize].x, m.verts[v as usize].y
+                        ),
+                        None => writeln!(t, "  via {site} is no vertex of the layer"),
+                    };
+                }
+            }
+            for (k, c) in s.crossings.iter().enumerate() {
+                let [u, v] = m.edges[c.e as usize];
+                let (pu, pv) = (m.verts[u as usize], m.verts[v as usize]);
+                let _ = writeln!(
+                    t,
+                    "  crossing {k}: {u} ({:.3},{:.3}) - {v} ({:.3},{:.3})",
+                    pu.x, pu.y, pv.x, pv.y
+                );
+            }
+            for d in &discs {
+                let _ = writeln!(
+                    t,
+                    "  disc {} ({:.3},{:.3}) r {:.4} side {:+} crossings {}..{}{}",
+                    d.id,
+                    d.c.x,
+                    d.c.y,
+                    d.r,
+                    d.side,
+                    d.first,
+                    d.last,
+                    if d.sure { "" } else { " taken over" }
+                );
+            }
+        }
         // discs that are out of the game: inside another on the same side, or on the same centre
         let mut dead = vec![false; discs.len()];
         // the wraps of the string, each with its place along the track (in crossings). The
@@ -971,6 +1031,9 @@ impl Router<'_> {
                 Ok(e) => e,
                 Err((i, 5)) if i >= 1 && i <= on.len() => {
                     // lifted off: the string turns the wrong way round this disc
+                    if let Some(t) = trace {
+                        let _ = writeln!(t, "  off {}: more than 270 degrees", discs[on[i - 1]].id);
+                    }
                     on.remove(i - 1);
                     place.remove(i - 1);
                     continue;
@@ -988,6 +1051,12 @@ impl Router<'_> {
                     }
                     let a = (i >= 1).then(|| on[i - 1]);
                     let b = (i < on.len()).then(|| on[i]);
+                    if let Some(t) = trace {
+                        let name = |x: Option<usize>| {
+                            x.map_or("end".to_string(), |x| format!("{} r {:.4}", discs[x].id, discs[x].r))
+                        };
+                        let _ = writeln!(t, "  no tangent, kind {kind}: {} | {}", name(a), name(b));
+                    }
                     info.gave_way[(kind as usize).clamp(1, 4) - 1] += 1;
                     match (kind, a, b) {
                         (1, None, Some(j)) => discs[j].r = (start.dist(discs[j].c) * 0.999).max(POINT_DISC / 2.0),
@@ -1112,21 +1181,93 @@ impl Router<'_> {
                         side: discs[i].side,
                         id: discs[i].id,
                     };
-                    let mut pick: Option<(f64, usize)> = None;
-                    for &(_, k) in lines.iter().take(2) {
+                    // a place is tried as the string would settle there: a wrap it lifts off
+                    // by taking the new one on is dropped with it
+                    let mut pick: Option<(f64, usize, Vec<usize>)> = None;
+                    // only a stretch the disc reaches into can be the one it bends
+                    let reach = discs[i].r + 1e-6;
+                    let nearest = lines[0].0;
+                    for &(far, k) in lines.iter().take(3).filter(|l| l.0 <= reach.max(nearest)) {
                         let mut w = wraps.clone();
                         w.insert(k, new);
-                        if let Ok(e) = band_why(start, end, &w) {
+                        // indices into `on` of the wraps that lifted off
+                        let mut lifted: Vec<usize> = Vec::new();
+                        let mut live: Vec<Option<usize>> = (0..on.len()).map(Some).collect();
+                        live.insert(k, None);
+                        let tried = loop {
+                            match band_why(start, end, &w) {
+                                Err((i, 5)) if i >= 1 && i <= w.len() && live[i - 1].is_some() => {
+                                    lifted.push(live[i - 1].unwrap());
+                                    w.remove(i - 1);
+                                    live.remove(i - 1);
+                                }
+                                other => break other,
+                            }
+                        };
+                        if let Some(t) = trace {
+                            let _ = writeln!(
+                                t,
+                                "    place {k}: {:.4} from the stretch, lifts {:?}, {}",
+                                far,
+                                lifted.iter().map(|&x| discs[on[x]].id).collect::<Vec<_>>(),
+                                match &tried {
+                                    Ok(e) => format!(
+                                        "length {:.3}",
+                                        flatten(e).windows(2).map(|p| p[0].dist(p[1])).sum::<f64>()
+                                    ),
+                                    Err((i, kind)) => format!("no band (circle {i}, kind {kind})"),
+                                }
+                            );
+                        }
+                        if let Ok(e) = tried {
                             let len: f64 = flatten(&e).windows(2).map(|p| p[0].dist(p[1])).sum();
-                            if pick.is_none_or(|p| len < p.0 - 1e-9) {
-                                pick = Some((len, k));
+                            if pick.as_ref().is_none_or(|p| len < p.0 - 1e-9) {
+                                pick = Some((len, k, lifted));
                             }
                         }
                     }
-                    let pos = pick.map_or(lines[0].1, |p| p.1);
+                    let pos = pick.as_ref().map_or(lines[0].1, |p| p.1);
+                    if let Some(t) = trace {
+                        let _ = writeln!(
+                            t,
+                            "  on {} r {:.4} side {:+} at {pos} of {:?}, missing {:.4}",
+                            discs[i].id,
+                            discs[i].r,
+                            discs[i].side,
+                            on.iter().map(|&w| discs[w].id).collect::<Vec<_>>(),
+                            worst.map_or(0.0, |w| w.0)
+                        );
+                    }
                     on.insert(pos, i);
                     place.insert(pos, at);
+                    if let Some((_, _, lifted)) = pick {
+                        // the indices are those before the insert
+                        let mut gone: Vec<usize> = lifted.iter().map(|&x| if x >= pos { x + 1 } else { x }).collect();
+                        gone.sort_unstable_by(|a, b| b.cmp(a));
+                        for x in gone {
+                            on.remove(x);
+                            place.remove(x);
+                        }
+                    }
                 }
+            }
+        }
+        if let Some(t) = trace {
+            let _ = writeln!(
+                t,
+                "  {}: wraps {:?}",
+                if best.is_some() { "band" } else { "no band" },
+                on.iter().map(|&w| (discs[w].id, discs[w].side)).collect::<Vec<_>>()
+            );
+            for e in best.iter().flatten() {
+                let _ = match e {
+                    Elem::Line(a, b) => writeln!(t, "  line ({:.3},{:.3}) ({:.3},{:.3})", a.x, a.y, b.x, b.y),
+                    Elem::Arc(a, mid, b) => writeln!(
+                        t,
+                        "  arc ({:.3},{:.3}) ({:.3},{:.3}) ({:.3},{:.3})",
+                        a.x, a.y, mid.x, mid.y, b.x, b.y
+                    ),
+                };
             }
         }
         let Some(b) = best else {
@@ -1334,9 +1475,30 @@ impl Router<'_> {
         let ids: Vec<u32> = (first..self.segs.len() as u32)
             .filter(|&i| self.segs[i as usize].is_some())
             .collect();
-        let (tracks, segs): (Vec<Track>, Vec<u32>) = ids
-            .par_iter()
-            .flat_map_iter(|&sid| self.seg_tracks(sid).into_iter().map(move |t| (t, sid)))
+        let mut built: Vec<Vec<Track>> = ids.par_iter().map(|&sid| self.seg_tracks(sid)).collect();
+        if self.disc_band && self.disc_planar {
+            // The band of the discs is not held between the neighbours of its track on every
+            // edge, as the band along the edges is. Where two of them cross (a passage with
+            // less room than its tracks ask for), both go back to the band along the edges,
+            // and so does what crosses that, until nothing crosses.
+            let mut plain = vec![false; ids.len()];
+            for _ in 0..6 {
+                let crossed = crossing_segments(&built);
+                let again: Vec<usize> = crossed.into_iter().filter(|&i| !plain[i]).collect();
+                if again.is_empty() {
+                    break;
+                }
+                let fresh: Vec<Vec<Track>> = again.par_iter().map(|&i| self.seg_tracks_with(ids[i], false)).collect();
+                for (i, t) in again.into_iter().zip(fresh) {
+                    plain[i] = true;
+                    built[i] = t;
+                }
+            }
+        }
+        let (tracks, segs): (Vec<Track>, Vec<u32>) = built
+            .into_iter()
+            .zip(&ids)
+            .flat_map(|(t, &sid)| t.into_iter().map(move |t| (t, sid)))
             .unzip();
         let mut vias: Vec<(Via, u32)> = self
             .vias
@@ -1350,16 +1512,20 @@ impl Router<'_> {
 
     /// The tracks of a routed segment: its band without the stretches on kept copper.
     pub(crate) fn seg_tracks(&self, sid: u32) -> Vec<Track> {
-        let mut tracks = self.seg_pieces(sid);
+        self.seg_tracks_with(sid, self.disc_band)
+    }
+
+    fn seg_tracks_with(&self, sid: u32, disc: bool) -> Vec<Track> {
+        let mut tracks = self.seg_pieces(sid, disc);
         tracks.retain(|t| t.pts.len() >= 2);
         tracks
     }
 
-    fn seg_pieces(&self, sid: u32) -> Vec<Track> {
+    fn seg_pieces(&self, sid: u32, disc: bool) -> Vec<Track> {
         {
             {
                 let s = self.segs[sid as usize].as_ref().unwrap();
-                let mut elems = self.seg_path(sid);
+                let mut elems = self.seg_path_info_with(sid, disc).0;
                 if self.board.class_of(s.net).min_width.is_some() && !s.necks.is_empty() {
                     elems = elems
                         .into_iter()
@@ -1418,6 +1584,62 @@ impl Router<'_> {
             }
         }
     }
+}
+
+/// The segments (indices into `built`) whose tracks cross a track of another net on their
+/// layer.
+fn crossing_segments(built: &[Vec<Track>]) -> Vec<usize> {
+    let flat: Vec<(usize, &Track, Point, Point)> = built
+        .iter()
+        .enumerate()
+        .flat_map(|(i, ts)| ts.iter().map(move |t| (i, t)))
+        .map(|(i, t)| {
+            let lo = t
+                .pts
+                .iter()
+                .fold(pt(f64::INFINITY, f64::INFINITY), |a, p| pt(a.x.min(p.x), a.y.min(p.y)));
+            let hi = t.pts.iter().fold(pt(f64::NEG_INFINITY, f64::NEG_INFINITY), |a, p| {
+                pt(a.x.max(p.x), a.y.max(p.y))
+            });
+            (i, t, lo, hi)
+        })
+        .collect();
+    let hits: Vec<(usize, usize)> = (0..flat.len())
+        .into_par_iter()
+        .flat_map_iter(|a| {
+            let (ia, ta, alo, ahi) = flat[a];
+            let flat = &flat;
+            (a + 1..flat.len()).filter_map(move |b| {
+                let (ib, tb, blo, bhi) = flat[b];
+                if ta.net == tb.net
+                    || ta.layer != tb.layer
+                    || alo.x > bhi.x
+                    || blo.x > ahi.x
+                    || alo.y > bhi.y
+                    || blo.y > ahi.y
+                {
+                    return None;
+                }
+                let hit = ta.pts.windows(2).any(|p| {
+                    let (plo, phi) = (
+                        pt(p[0].x.min(p[1].x), p[0].y.min(p[1].y)),
+                        pt(p[0].x.max(p[1].x), p[0].y.max(p[1].y)),
+                    );
+                    if plo.x > bhi.x || blo.x > phi.x || plo.y > bhi.y || blo.y > phi.y {
+                        return false;
+                    }
+                    tb.pts
+                        .windows(2)
+                        .any(|q| crate::geom::segs_intersect(p[0], p[1], q[0], q[1]))
+                });
+                hit.then_some((ia, ib))
+            })
+        })
+        .collect();
+    let mut out: Vec<usize> = hits.into_iter().flat_map(|(a, b)| [a, b]).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The pieces of a route `pts` off the kept copper of its net (`on_kept`), each with one point
