@@ -702,6 +702,104 @@ impl Router<'_> {
     /// right in the direction of travel): from the radius at one end to the radius at the
     /// other, the point in between in proportion where the two take more than the edge has.
     fn discs_and_portals(&self, sid: u32) -> (Vec<Disc>, Vec<(Point, Point)>) {
+        let (mut discs, portals) = self.own_discs(sid);
+        if self.disc_inherit {
+            self.inherit_discs(sid, &mut discs);
+        }
+        if let Some(extra) = self.extra_discs.get(&sid) {
+            for x in extra {
+                match discs.iter_mut().find(|d| d.id == x.id && d.side == x.side) {
+                    Some(d) => d.r = d.r.max(x.r),
+                    None => discs.push(*x),
+                }
+            }
+        }
+        discs.sort_by(|a, b| (a.first + a.last).cmp(&(b.first + b.last)).then(a.first.cmp(&b.first)));
+        (discs, portals)
+    }
+
+    /// The discs a track takes over from the tracks inside it. Its own discs come from the
+    /// vertices of its triangles. Where it cuts one corner of a triangle, a track that cuts
+    /// another corner leaves through the third edge and may bend around the vertex beyond it:
+    /// its band there bulges back into the triangle, into the way of the outer track, which
+    /// has no edge at that vertex and so no disc. The outer track keeps, around that vertex,
+    /// the radius of the inner one plus what lies between the two at the corner they share.
+    fn inherit_discs(&self, sid: u32, discs: &mut Vec<Disc>) {
+        let s = self.segs[sid as usize].as_ref().unwrap();
+        let li = s.li as usize;
+        let m = &self.sub.m[li];
+        let own = discs.clone();
+        let mut theirs: std::collections::HashMap<u32, Vec<Disc>> = std::collections::HashMap::new();
+        let mut new: Vec<Disc> = Vec::new();
+        for (k, w) in s.crossings.windows(2).enumerate() {
+            // the triangle between two crossings, its third edge and the vertex beyond it
+            let t = w[1].from as usize;
+            let Some(j) = (0..3).find(|&j| m.tri_edges[t][j] != w[0].e && m.tri_edges[t][j] != w[1].e) else {
+                continue;
+            };
+            let (c, n) = (m.tri_edges[t][j], m.tri_nbrs[t][j]);
+            if n == crate::topo::NONE {
+                continue;
+            }
+            let [q, r] = m.edges[c as usize];
+            let Some(&apex) = m.tris[n as usize].iter().find(|&&v| v != q && v != r) else {
+                continue;
+            };
+            if own.iter().any(|d| d.id == apex) {
+                continue;
+            }
+            for &o in &self.cross[li][c as usize] {
+                if o == sid {
+                    continue;
+                }
+                let Some(os) = self.segs[o as usize].as_ref() else {
+                    continue;
+                };
+                // the same way through the shared edge, or against it
+                let Some(dir) = os.crossings.iter().find_map(|x| {
+                    if x.e == w[0].e {
+                        Some(if x.from == w[0].from { 1.0 } else { -1.0 })
+                    } else if x.e == w[1].e {
+                        Some(if x.from == w[1].from { 1.0 } else { -1.0 })
+                    } else {
+                        None
+                    }
+                }) else {
+                    continue;
+                };
+                let od = theirs.entry(o).or_insert_with(|| self.own_discs(o).0);
+                for far in od.iter().filter(|d| d.id == apex && d.r > POINT_DISC) {
+                    for corner in od.iter().filter(|d| (d.id == q || d.id == r) && d.side == far.side) {
+                        let Some(me) = own.iter().find(|x| x.id == corner.id && x.side == corner.side * dir) else {
+                            continue;
+                        };
+                        let off = me.r - corner.r;
+                        if off <= 1e-9 {
+                            continue;
+                        }
+                        let rad = far.r + off;
+                        match new.iter_mut().find(|d| d.id == apex && d.side == me.side) {
+                            Some(d) => d.r = d.r.max(rad),
+                            None => new.push(Disc {
+                                c: far.c,
+                                r: rad,
+                                side: me.side,
+                                id: apex,
+                                first: k,
+                                last: k + 1,
+                                sure: false,
+                            }),
+                        }
+                    }
+                }
+            }
+        }
+        discs.extend(new);
+    }
+
+    /// The discs of the vertices of the track's own triangles, and the portals of
+    /// [`Router::discs_and_portals`].
+    fn own_discs(&self, sid: u32) -> (Vec<Disc>, Vec<(Point, Point)>) {
         let mut portals = Vec::new();
         let s = self.segs[sid as usize].as_ref().unwrap();
         let li = s.li as usize;
@@ -768,15 +866,6 @@ impl Router<'_> {
                 }
             }
         }
-        if let Some(extra) = self.extra_discs.get(&sid) {
-            for x in extra {
-                match discs.iter_mut().find(|d| d.id == x.id && d.side == x.side) {
-                    Some(d) => d.r = d.r.max(x.r),
-                    None => discs.push(*x),
-                }
-            }
-        }
-        discs.sort_by(|a, b| (a.first + a.last).cmp(&(b.first + b.last)).then(a.first.cmp(&b.first)));
         (discs, portals)
     }
 
@@ -798,6 +887,15 @@ impl Router<'_> {
                 ..d
             })
             .collect();
+        // an end of the track inside a disc: the disc reaches as far as the end, there is no
+        // tangent from a point inside a circle
+        for d in &mut discs {
+            let near = start.dist(d.c).min(end.dist(d.c));
+            if d.r > near * 0.999 {
+                d.r = (near * 0.999).max(POINT_DISC / 2.0);
+                info.gave_way[0] += 1;
+            }
+        }
         // discs that are out of the game: inside another on the same side, or on the same centre
         let mut dead = vec![false; discs.len()];
         // the wraps of the string, each with its place along the track (in crossings). The
@@ -904,8 +1002,86 @@ impl Router<'_> {
                     break;
                 }
                 Some((_, i)) => {
+                    // where along the string the disc comes in: between the two wraps whose
+                    // straight stretch passes it nearest. Next to a wrap two stretches are
+                    // about as near, and the shorter string is the one in the right order.
                     let at = (discs[i].first + discs[i].last) as f64 / 2.0;
-                    let pos = place.iter().position(|&p| p > at).unwrap_or(on.len());
+                    let mut ends = vec![(start, start)];
+                    ends.extend(
+                        wraps
+                            .windows(2)
+                            .map(|w| tangent(&w[0], &w[1]).unwrap_or((w[0].c, w[1].c))),
+                    );
+                    let mut lines: Vec<(f64, usize)> = Vec::with_capacity(on.len() + 1);
+                    for k in 0..=on.len() {
+                        let a = if k == 0 {
+                            start
+                        } else if k == on.len() {
+                            tangent(
+                                &wraps[k - 1],
+                                &Wrap {
+                                    c: end,
+                                    r: 0.0,
+                                    side: 1.0,
+                                    id: u32::MAX,
+                                },
+                            )
+                            .map_or(wraps[k - 1].c, |t| t.0)
+                        } else {
+                            ends[k].0
+                        };
+                        let b = if k == on.len() {
+                            end
+                        } else if k == 0 {
+                            tangent(
+                                &Wrap {
+                                    c: start,
+                                    r: 0.0,
+                                    side: 1.0,
+                                    id: u32::MAX,
+                                },
+                                &wraps[0],
+                            )
+                            .map_or(wraps[0].c, |t| t.1)
+                        } else {
+                            ends[k].1
+                        };
+                        lines.push((crate::geom::point_seg_dist(discs[i].c, a, b), k));
+                    }
+                    // vertices on one side of the track are wrapped in the order the track
+                    // passes them: after every one it has left before it reaches this one,
+                    // before every one it reaches only after it has left this one
+                    let same = |w: usize| discs[w].side == discs[i].side && discs[w].sure && discs[i].sure;
+                    let lo = on
+                        .iter()
+                        .rposition(|&w| same(w) && discs[w].last < discs[i].first)
+                        .map_or(0, |x| x + 1);
+                    let hi = on
+                        .iter()
+                        .position(|&w| same(w) && discs[w].first > discs[i].last)
+                        .unwrap_or(on.len());
+                    if lo <= hi {
+                        lines.retain(|l| l.1 >= lo && l.1 <= hi);
+                    }
+                    lines.sort_by(|x, y| x.0.total_cmp(&y.0));
+                    let new = Wrap {
+                        c: discs[i].c,
+                        r: discs[i].r,
+                        side: discs[i].side,
+                        id: discs[i].id,
+                    };
+                    let mut pick: Option<(f64, usize)> = None;
+                    for &(_, k) in lines.iter().take(2) {
+                        let mut w = wraps.clone();
+                        w.insert(k, new);
+                        if let Ok(e) = band_why(start, end, &w) {
+                            let len: f64 = flatten(&e).windows(2).map(|p| p[0].dist(p[1])).sum();
+                            if pick.is_none_or(|p| len < p.0 - 1e-9) {
+                                pick = Some((len, k));
+                            }
+                        }
+                    }
+                    let pos = pick.map_or(lines[0].1, |p| p.1);
                     on.insert(pos, i);
                     place.insert(pos, at);
                 }

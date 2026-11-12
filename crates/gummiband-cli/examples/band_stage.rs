@@ -284,9 +284,11 @@ fn main() -> anyhow::Result<()> {
         ("stack", true, false, false, false),
         ("disc strict", false, true, false, true),
         ("disc local", false, true, true, true),
+        ("disc alone", false, true, true, false),
         ("disc", false, true, true, false),
         ("disc repaired", false, true, true, false),
     ] {
+        r.disc_inherit = mode != "disc alone";
         r.stack_band = on;
         r.disc_band = disc;
         r.disc_local = local;
@@ -365,7 +367,7 @@ fn main() -> anyhow::Result<()> {
                 "shape": shape(&g),
                 "crossings": crossings(&g).iter().map(|&(i, j, at)| json!({
                     "nets": [b.nets[g.tracks[i].net as usize].name.clone(), b.nets[g.tracks[j].net as usize].name.clone()],
-                    "classes": [class[i], class[j]], "at": [at.x, at.y], "layer": g.tracks[i].layer,
+                    "classes": [class[i], class[j]], "at": [at.x, at.y], "layer": g.tracks[i].layer, "segs": [g.tracks[i].seg, g.tracks[j].seg], "netids": [g.tracks[i].net, g.tracks[j].net],
                 })).collect::<Vec<_>>(),
                 "check": counts(&v),
                 "pairs": pairs(&g, &v, &class),

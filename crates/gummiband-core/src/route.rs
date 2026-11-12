@@ -291,6 +291,8 @@ pub struct Router<'a> {
     /// measurements.
     pub disc_local: bool,
     pub disc_corridor: bool,
+    /// A track takes over the discs of the tracks inside it (`Router::inherit_discs`).
+    pub disc_inherit: bool,
     /// Discs a segment's band keeps besides those of its own triangles: taken over from the
     /// band of a neighbour where the check found the two too close ([`Router::disc_band`]).
     pub(crate) extra_discs: HashMap<u32, Vec<crate::realize::Disc>>,
@@ -664,6 +666,7 @@ impl<'a> Router<'a> {
             disc_band: crate::knobs::DISC.on(),
             disc_local: true,
             disc_corridor: false,
+            disc_inherit: true,
             extra_discs: HashMap::new(),
         };
         if !board.soft.chains.is_empty() {
