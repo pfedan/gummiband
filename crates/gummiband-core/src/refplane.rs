@@ -100,7 +100,7 @@ impl RefMap {
             .map(|&l| {
                 // the highest priority first: KiCad fills it first, `cut` says the same
                 let mut planes: Vec<_> = board.planes.iter().filter(|p| p.layer == l).collect();
-                planes.sort_by(|a, b| b.priority.cmp(&a.priority));
+                planes.sort_by_key(|p| std::cmp::Reverse(p.priority));
                 let cells = (0..h)
                     .into_par_iter()
                     .flat_map_iter(|j| {
