@@ -946,7 +946,11 @@ impl<'a> Router<'a> {
     /// Extra cost of the step a-b on routing layer li for leaving the layer's preferred
     /// direction (even layers horizontal, odd ones vertical).
     fn across(&self, li: usize, a: Point, b: Point) -> f64 {
-        let back = if self.cfg.back_cost > 0.0 && li + 1 == self.nl() && li > 0 { self.cfg.back_cost * a.dist(b) } else { 0.0 };
+        let back = if self.cfg.back_cost > 0.0 && li + 1 == self.nl() && li > 0 {
+            self.cfg.back_cost * a.dist(b)
+        } else {
+            0.0
+        };
         if self.cfg.layer_dirs <= 0.0 {
             return back;
         }
@@ -4341,7 +4345,9 @@ impl<'a> Router<'a> {
             };
             let mut through: FastMap<u32, Vec<(Place, Place, u32)>> = FastMap::default();
             for (sid, s) in self.segs.iter().enumerate() {
-                let Some(s) = s.as_ref().filter(|s| s.li as usize == li) else { continue };
+                let Some(s) = s.as_ref().filter(|s| s.li as usize == li) else {
+                    continue;
+                };
                 for w in s.crossings.windows(2) {
                     let t = w[1].from;
                     if t == NONE || m.other_tri(w[0].e, w[0].from) != t || m.status[t as usize] != NONE {
@@ -4355,14 +4361,19 @@ impl<'a> Router<'a> {
                             && matches!((c.a, c.b), (CPos::Edge(x), CPos::Edge(y)) if (x, y) == (a.0, b.0) || (x, y) == (b.0, a.0))
                     });
                     if !stored {
-                        out.push(format!("layer {li} triangle {t}: seg {sid} passes through without a chord"));
+                        out.push(format!(
+                            "layer {li} triangle {t}: seg {sid} passes through without a chord"
+                        ));
                     }
                     through.entry(t).or_default().push((a.min(b), a.max(b), sid as u32));
                 }
             }
             for (t, list) in self.chords[li].iter().enumerate() {
                 let have = through.get(&(t as u32)).map_or(0, |l| l.len());
-                let want = list.iter().filter(|c| matches!((c.a, c.b), (CPos::Edge(_), CPos::Edge(_)))).count();
+                let want = list
+                    .iter()
+                    .filter(|c| matches!((c.a, c.b), (CPos::Edge(_), CPos::Edge(_))))
+                    .count();
                 if want != have {
                     out.push(format!(
                         "layer {li} triangle {t}: {want} chords from edge to edge, {have} passes in the chains"
@@ -4375,7 +4386,9 @@ impl<'a> Router<'a> {
                     for &(c, d, sb) in &list[i + 1..] {
                         let inside = |p: Place| lo < p && p < hi;
                         if net(sa) != net(sb) && inside(c) != inside(d) {
-                            out.push(format!("layer {li} triangle {t}: seg {sa} and seg {sb} cross by their places"));
+                            out.push(format!(
+                                "layer {li} triangle {t}: seg {sa} and seg {sb} cross by their places"
+                            ));
                         }
                     }
                 }
@@ -4668,7 +4681,8 @@ mod tests {
         let mut told = 0;
         for li in 0..r.nl() {
             for e in 0..r.cross[li].len() {
-                let Some(i) = (1..r.cross[li][e].len()).find(|&i| net(&r, r.cross[li][e][i - 1]) != net(&r, r.cross[li][e][i]))
+                let Some(i) =
+                    (1..r.cross[li][e].len()).find(|&i| net(&r, r.cross[li][e][i - 1]) != net(&r, r.cross[li][e][i]))
                 else {
                     continue;
                 };
@@ -4681,7 +4695,11 @@ mod tests {
         assert!(chains(&r).is_empty());
         let (li, t) = (0..r.nl())
             .flat_map(|li| (0..r.chords[li].len()).map(move |t| (li, t)))
-            .find(|&(li, t)| r.chords[li][t].iter().any(|c| matches!((c.a, c.b), (CPos::Edge(_), CPos::Edge(_)))))
+            .find(|&(li, t)| {
+                r.chords[li][t]
+                    .iter()
+                    .any(|c| matches!((c.a, c.b), (CPos::Edge(_), CPos::Edge(_))))
+            })
             .unwrap();
         r.chords[li][t].retain(|c| !matches!((c.a, c.b), (CPos::Edge(_), CPos::Edge(_))));
         assert!(chains(&r).iter().any(|l| l.contains("without a chord")));
