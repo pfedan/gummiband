@@ -282,6 +282,18 @@ pub struct Router<'a> {
     /// (`GB_BAND`, see [`Router::seg_path`]). A field, so that a measurement can build both
     /// bands of one topology.
     pub stack_band: bool,
+    /// The band of a track is constructed from discs around the vertices of its triangles,
+    /// with the radius the stack of tracks between it and the vertex asks for (`GB_DISC`, see
+    /// [`Router::disc_band`]). A field for the same reason as `stack_band`.
+    pub disc_band: bool,
+    /// With `disc_band`: two discs with no room between them give way in proportion instead of
+    /// costing the track its band, and a band may leave the triangles of its track. Fields for
+    /// measurements.
+    pub disc_local: bool,
+    pub disc_corridor: bool,
+    /// Discs a segment's band keeps besides those of its own triangles: taken over from the
+    /// band of a neighbour where the check found the two too close ([`Router::disc_band`]).
+    pub(crate) extra_discs: HashMap<u32, Vec<crate::realize::Disc>>,
     /// Per pin: number of unrouted connections that start or end there.
     pending: Vec<u32>,
     /// Prices while a negotiation runs and in the passes after it.
@@ -649,6 +661,10 @@ impl<'a> Router<'a> {
             soft_on: false,
             soft_lost: Vec::new(),
             stack_band: crate::knobs::BAND.on(),
+            disc_band: crate::knobs::DISC.on(),
+            disc_local: true,
+            disc_corridor: false,
+            extra_discs: HashMap::new(),
         };
         if !board.soft.chains.is_empty() {
             r.import_soft();

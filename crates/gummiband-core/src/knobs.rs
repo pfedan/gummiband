@@ -338,6 +338,8 @@ knobs! {
         "Tracks are realised as polylines, without arcs around the corners.";
     BAND = "GB_BAND", Experiment, Set, "off",
         "The band of a track takes the radius of the stack where the track lies next to the vertex it bends around, and where a wrap has no tangent, leaves its portal or its triangles, that wrap alone becomes a corner; today such a track loses all its arcs.";
+    DISC = "GB_DISC", Experiment, Set, "off",
+        "The band of a track is built from discs around every vertex of its triangles, each with the radius the tracks between it and the vertex ask for, pulled taut against them; no portal and no share of the slack.";
     NO_TUNE_ROOM = "GB_NO_TUNE_ROOM", Switch, Set, "off",
         "CLI `route`: length tuning does not make room for its meanders first.";
 

@@ -286,6 +286,41 @@ pub struct PathInfo {
     pub own: usize,
 }
 
+/// A disc of [`Router::discs`]: the band keeps `r` from the vertex `id` at `c` and passes it on
+/// `side` (+1: the vertex on the left of travel). `first` and `last` are the crossings of the
+/// track at whose edges the vertex is an end.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Disc {
+    pub(crate) c: Point,
+    pub(crate) r: f64,
+    pub(crate) side: f64,
+    pub(crate) id: u32,
+    pub(crate) first: usize,
+    pub(crate) last: usize,
+}
+
+/// Radius of the disc of a vertex that asks for no distance ([`Router::disc_path`]): small
+/// enough that its arc is drawn as a corner.
+const POINT_DISC: f64 = 1e-5;
+
+/// How far the polyline `path` falls short of disc `d`: its radius less the distance of the
+/// nearest piece from the centre, where the centre lies on the side the disc asks for; where it
+/// lies on the other side, the radius plus that distance (the string has to come round).
+fn disc_deficit(path: &[Point], d: &Disc) -> f64 {
+    let mut best = (f64::INFINITY, 0.0);
+    for w in path.windows(2) {
+        let dist = crate::geom::point_seg_dist(d.c, w[0], w[1]);
+        if dist < best.0 {
+            best = (dist, orient(w[0], w[1], d.c));
+        }
+    }
+    if !best.0.is_finite() {
+        return 0.0;
+    }
+    let right_side = best.1 * d.side >= 0.0 || best.0 < 1e-9;
+    if right_side { d.r - best.0 } else { d.r + best.0 }
+}
+
 /// Circle the band wraps around: `side` +1 = pivot on the left of travel (left turn).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Wrap {
@@ -535,6 +570,12 @@ impl Router<'_> {
             info.fallback = 4;
             return (polyline(), info);
         }
+        if self.disc_band {
+            return match self.disc_path(sid, &mut info) {
+                Some(b) => (b, info),
+                None => (polyline(), info),
+            };
+        }
         if self.stack_band {
             let leaves = |path: &[Point]| self.corridor_exit(sid, path);
             return match stack_band(&portals, &bends, &leaves, &mut info) {
@@ -637,6 +678,246 @@ impl Router<'_> {
         }
         info.wraps = wraps.len();
         (b, info)
+    }
+
+    /// The discs of segment `sid` ([`Router::disc_band`]): for every vertex at an end of an
+    /// edge it crosses, on the side it passes it, the radius the stack asks for there. On an
+    /// edge, a track keeps from the vertex at either end what the copper of the vertex asks
+    /// for (counted squarely, as an arc around the vertex keeps it) plus the gaps of the tracks
+    /// between it and that vertex; a vertex passed over several edges takes the largest. The
+    /// radius follows from the topology alone, so the band of one track does not depend on the
+    /// geometry of another: two tracks around the same vertices have radii that differ by the
+    /// gap between them, and their bands run parallel. Sorted by where along the track the
+    /// vertex is passed.
+    #[allow(dead_code)]
+    pub(crate) fn discs(&self, sid: u32) -> Vec<Disc> {
+        self.discs_and_portals(sid).0
+    }
+
+    /// [`Router::discs`], and per crossing the portal those radii leave on its edge (left,
+    /// right in the direction of travel): from the radius at one end to the radius at the
+    /// other, the point in between in proportion where the two take more than the edge has.
+    fn discs_and_portals(&self, sid: u32) -> (Vec<Disc>, Vec<(Point, Point)>) {
+        let mut portals = Vec::new();
+        let s = self.segs[sid as usize].as_ref().unwrap();
+        let li = s.li as usize;
+        let m = &self.sub.m[li];
+        let margin = self.cfg.margin;
+        let mut discs: Vec<Disc> = Vec::new();
+        for (k, c) in s.crossings.iter().enumerate() {
+            let list = &self.cross[li][c.e as usize];
+            let items = self.items_on(li, c.e);
+            let idx = list.iter().position(|&x| x == sid).unwrap();
+            let [u, v] = m.edges[c.e as usize];
+            let (pu, pv) = (m.verts[u as usize], m.verts[v as usize]);
+            let hot = self.hot_extra(pu, pv);
+            let base = |end: usize, it: &Item| {
+                let need = self.end_need_square(li, c.e, end, it);
+                if need > 0.0 { need + margin + hot } else { 0.0 }
+            };
+            // from u inwards to the track, and from v
+            let mut ru: f64 = 0.0;
+            for i in 0..=idx {
+                let b = base(0, &items[i]);
+                ru = if i == 0 {
+                    b
+                } else {
+                    b.max(ru + Self::gap(self.board, &items[i - 1], &items[i]) + hot)
+                };
+            }
+            let mut rv: f64 = 0.0;
+            for i in (idx..items.len()).rev() {
+                let b = base(1, &items[i]);
+                rv = if i + 1 == items.len() {
+                    b
+                } else {
+                    b.max(rv + Self::gap(self.board, &items[i], &items[i + 1]) + hot)
+                };
+            }
+            // leaving triangle `from` (counter-clockwise) through edge a->b: b is on the left
+            let t = m.tris[c.from as usize];
+            let left_is_v = t[m.local_edge(c.from, c.e)] == u;
+            let len = pu.dist(pv).max(1e-12);
+            let (a, b) = if ru + rv > len {
+                (len * ru / (ru + rv), len * ru / (ru + rv))
+            } else {
+                (ru, len - rv)
+            };
+            let (qa, qb) = (pu.lerp(pv, a / len), pu.lerp(pv, b / len));
+            portals.push(if left_is_v { (qb, qa) } else { (qa, qb) });
+            for (vid, at, r, left) in [(u, pu, ru, !left_is_v), (v, pv, rv, left_is_v)] {
+                let side = if left { 1.0 } else { -1.0 };
+                match discs.iter_mut().find(|d| d.id == vid && d.side == side) {
+                    Some(d) => {
+                        d.r = d.r.max(r);
+                        d.last = k;
+                    }
+                    None => discs.push(Disc {
+                        c: at,
+                        r,
+                        side,
+                        id: vid,
+                        first: k,
+                        last: k,
+                    }),
+                }
+            }
+        }
+        if let Some(extra) = self.extra_discs.get(&sid) {
+            for x in extra {
+                match discs.iter_mut().find(|d| d.id == x.id && d.side == x.side) {
+                    Some(d) => d.r = d.r.max(x.r),
+                    None => discs.push(*x),
+                }
+            }
+        }
+        discs.sort_by(|a, b| (a.first + a.last).cmp(&(b.first + b.last)).then(a.first.cmp(&b.first)));
+        (discs, portals)
+    }
+
+    /// The band of segment `sid` as the taut string against its discs ([`Router::discs`]):
+    /// starting from the straight line, the disc the string violates most is wrapped, and a
+    /// wrap the string has lifted off (it would turn the wrong way round its disc) is dropped,
+    /// until the string keeps every disc. None where that does not settle, where two discs
+    /// leave no tangent, or where the string leaves its triangles.
+    fn disc_path(&self, sid: u32, info: &mut PathInfo) -> Option<Vec<Elem>> {
+        let start = self.seg_end(sid, true);
+        let end = self.seg_end(sid, false);
+        // a vertex that asks for no distance (its own net, a free Steiner point) is still passed
+        // on its side: a point the string may touch but not cross
+        let (discs, tight) = self.discs_and_portals(sid);
+        let mut discs: Vec<Disc> = discs
+            .into_iter()
+            .map(|d| Disc {
+                r: d.r.max(POINT_DISC),
+                ..d
+            })
+            .collect();
+        // discs that are out of the game: inside another on the same side, or on the same centre
+        let mut dead = vec![false; discs.len()];
+        // the wraps of the string, each with its place along the track (in crossings). The
+        // funnel through the portals of the radii says which vertices the string bends around
+        // and in which order, and that it passes every vertex on its side.
+        let s = self.segs[sid as usize].as_ref().unwrap();
+        let m = &self.sub.m[s.li as usize];
+        let mut portals = vec![(start, start)];
+        portals.extend(tight);
+        portals.push((end, end));
+        let mut on: Vec<usize> = Vec::new();
+        let mut place: Vec<f64> = Vec::new();
+        for (i, left) in funnel_bends(&portals) {
+            let c = s.crossings[i - 1];
+            let [u, v] = m.edges[c.e as usize];
+            let t = m.tris[c.from as usize];
+            let left_is_v = t[m.local_edge(c.from, c.e)] == u;
+            let (vid, side) = (if left == left_is_v { v } else { u }, if left { 1.0 } else { -1.0 });
+            if let Some(j) = discs.iter().position(|d| d.id == vid && d.side == side)
+                && !on.contains(&j)
+            {
+                on.push(j);
+                place.push(i as f64 - 1.0);
+            }
+        }
+        let limit = 6 * discs.len() + 8;
+        let mut best: Option<Vec<Elem>> = None;
+        for _ in 0..limit {
+            let wraps: Vec<Wrap> = on
+                .iter()
+                .map(|&i| Wrap {
+                    c: discs[i].c,
+                    r: discs[i].r,
+                    side: discs[i].side,
+                    id: discs[i].id,
+                })
+                .collect();
+            let elems = match band_why(start, end, &wraps) {
+                Ok(e) => e,
+                Err((i, 5)) if i >= 1 && i <= on.len() => {
+                    // lifted off: the string turns the wrong way round this disc
+                    on.remove(i - 1);
+                    place.remove(i - 1);
+                    continue;
+                }
+                Err((i, kind)) => {
+                    // circles i and i + 1 of the chain have no tangent; 0 is the start and
+                    // `on.len() + 1` the end. Where two discs take more room than there is
+                    // between their vertices, the passage is over-full: both give way in
+                    // proportion, the string passes square to the line of centres, and the
+                    // check reports what is missing.
+                    if !self.disc_local {
+                        info.why = kind;
+                        info.fallback = 1;
+                        return None;
+                    }
+                    let a = (i >= 1).then(|| on[i - 1]);
+                    let b = (i < on.len()).then(|| on[i]);
+                    info.gave_way[(kind as usize).clamp(1, 4) - 1] += 1;
+                    match (kind, a, b) {
+                        (1, None, Some(j)) => discs[j].r = (start.dist(discs[j].c) * 0.999).max(POINT_DISC / 2.0),
+                        (1, Some(j), None) => discs[j].r = (end.dist(discs[j].c) * 0.999).max(POINT_DISC / 2.0),
+                        (2 | 4, Some(x), Some(y)) => {
+                            let small = if discs[x].r <= discs[y].r { i - 1 } else { i };
+                            dead[on[small]] = true;
+                            on.remove(small);
+                            place.remove(small);
+                        }
+                        (_, Some(x), Some(y)) => {
+                            let d = discs[x].c.dist(discs[y].c);
+                            let f = d * 0.999 / (discs[x].r + discs[y].r);
+                            if f >= 1.0 {
+                                info.why = kind;
+                                info.fallback = 1;
+                                return None;
+                            }
+                            discs[x].r *= f;
+                            discs[y].r *= f;
+                        }
+                        _ => {
+                            info.why = kind;
+                            info.fallback = 1;
+                            return None;
+                        }
+                    }
+                    continue;
+                }
+            };
+            let path = flatten(&elems);
+            // the disc the string violates most, with the side it must pass on
+            let mut worst: Option<(f64, usize)> = None;
+            for i in 0..discs.len() {
+                if dead[i] || on.contains(&i) {
+                    continue;
+                }
+                let deficit = disc_deficit(&path, &discs[i]);
+                if deficit > 1e-6 && worst.is_none_or(|w| deficit > w.0) {
+                    worst = Some((deficit, i));
+                }
+            }
+            match worst {
+                None => {
+                    best = Some(elems);
+                    break;
+                }
+                Some((_, i)) => {
+                    let at = (discs[i].first + discs[i].last) as f64 / 2.0;
+                    let pos = place.iter().position(|&p| p > at).unwrap_or(on.len());
+                    on.insert(pos, i);
+                    place.insert(pos, at);
+                }
+            }
+        }
+        let Some(b) = best else {
+            info.fallback = 1;
+            info.refused += 1;
+            return None;
+        };
+        if self.disc_corridor && !self.in_corridor(sid, &flatten(&b)) {
+            info.fallback = 2;
+            return None;
+        }
+        info.wraps = on.len();
+        info.stack_wraps = on.len();
+        Some(b)
     }
 
     /// True if the polyline stays in the corridor of seg `sid` (its crossed triangles and the
@@ -1875,6 +2156,51 @@ mod tests {
             stack += arcs(&band);
         }
         assert!(stack > 0 && stack >= edge, "{stack} {edge}");
+    }
+
+    /// The same board with the band of the discs: every track gets its band, the band keeps
+    /// the radius of each of its discs and passes it on its side, and no two bands of
+    /// different nets cross.
+    #[test]
+    fn the_band_of_the_discs_keeps_every_disc_and_crosses_no_other() {
+        let mut pins = Vec::new();
+        for (k, net) in ["A", "B", "C", "D"].into_iter().enumerate() {
+            pins.push(("U1", net, 3.0, 8.5 + k as f64));
+            pins.push(("U2", net, 17.0, 11.5 - k as f64));
+        }
+        for (k, net) in ["P", "Q", "R", "S", "T"].into_iter().enumerate() {
+            pins.push(("X", net, 7.0 + 1.5 * k as f64, 6.0 + 2.0 * (k % 3) as f64));
+        }
+        let b = crate::route::tests::pad_board(&pins);
+        let sub = crate::topo::Substrate::build(&b, &crate::topo::SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, crate::route::RouterConfig::default());
+        r.plan();
+        r.run();
+        r.disc_band = true;
+        let ids: Vec<u32> = (0..r.segs.len() as u32)
+            .filter(|&i| r.segs[i as usize].is_some())
+            .collect();
+        let mut wraps = 0;
+        for &sid in &ids {
+            let (band, info) = r.seg_path_info(sid);
+            assert_eq!(info.fallback, 0, "segment {sid}: {info:?}");
+            assert_eq!(info.gave_way.iter().sum::<usize>(), 0, "segment {sid}: {info:?}");
+            let flat = flatten(&band);
+            for d in r.discs(sid) {
+                let short = disc_deficit(
+                    &flat,
+                    &Disc {
+                        r: d.r.max(POINT_DISC),
+                        ..d
+                    },
+                );
+                // an arc is flattened to chords, which lie a little inside it
+                assert!(short < 2e-3, "segment {sid}: {short} short of {d:?}");
+            }
+            wraps += info.wraps;
+        }
+        assert!(wraps > 0);
+        assert!(r.debug_intersections(10).is_empty(), "{:?}", r.debug_intersections(10));
     }
 }
 

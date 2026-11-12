@@ -279,8 +279,17 @@ fn main() -> anyhow::Result<()> {
             .all(|(x, y)| x.seg == y.seg && x.net == y.net && x.layer == y.layer);
 
     let mut construction = serde_json::Map::new();
-    for (mode, on) in [("edge", false), ("stack", true)] {
+    for (mode, on, disc, local, corridor) in [
+        ("edge", false, false, false, false),
+        ("stack", true, false, false, false),
+        ("disc strict", false, true, false, true),
+        ("disc local", false, true, true, true),
+        ("disc", false, true, true, false),
+    ] {
         r.stack_band = on;
+        r.disc_band = disc;
+        r.disc_local = local;
+        r.disc_corridor = corridor;
         let (tc, cc) = (Instant::now(), cpu_seconds());
         let g = r.geometry();
         let (secs, cpu_s) = (tc.elapsed().as_secs_f64(), cpu_seconds() - cc);
@@ -387,7 +396,7 @@ fn main() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(scratch.with_extension("kicad_pro"));
     let c = &report["construction"];
     println!(
-        "{name} seed {} band {}: {}/{} routed, {} violations at {} spots, {} vias, {:.0} mm, {:.1} s cpu; construction pieces edge {} stack {}, matched {matched} rebuilt {rebuilt}",
+        "{name} seed {} band {}: {}/{} routed, {} violations at {} spots, {} vias, {:.0} mm, {:.1} s cpu; construction pieces edge {} stack {} disc {}, matched {matched} rebuilt {rebuilt}",
         routed.seed,
         if gummiband_core::knobs::BAND.on() { "on" } else { "off" },
         st.routed,
@@ -399,6 +408,7 @@ fn main() -> anyhow::Result<()> {
         cpu,
         c["edge"]["check"]["pieces"],
         c["stack"]["check"]["pieces"],
+        c["disc"]["check"]["pieces"],
     );
     Ok(())
 }
