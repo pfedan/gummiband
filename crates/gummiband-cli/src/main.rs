@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use gummiband_app::old::Respelled;
-use gummiband_app::{AreaOptions, Hooks, Pairs, Preset, RouteOptions, Scope, defaults};
+use gummiband_app::{AreaOptions, Areas, Hooks, Pairs, Preset, RouteOptions, Scope, defaults};
 use gummiband_core::board::ObstacleKind;
 use gummiband_kicad::{KeepCopper, ReadOptions, read_board, write};
 use gummiband_place::auto::PlaceOptions;
@@ -16,15 +16,6 @@ enum Angles {
     /// Conventional 45 degree routing.
     #[value(name = "45")]
     Deg45,
-}
-
-/// How the nets with an area on a routed layer are connected.
-#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum Areas {
-    /// Like any net, as tracks.
-    Tracks,
-    /// By the fill of their area.
-    Fill,
 }
 
 #[derive(Parser)]
@@ -275,12 +266,8 @@ struct RouteArgs {
     /// comma separated.
     #[arg(long, value_delimiter = ',')]
     fixed: Vec<String>,
-    /// How nets with an area (a zone of the file, or a pour of --pour) on a routed layer are
-    /// connected: `tracks` lays them like any net and does not look at the area, `fill` does
-    /// not lay them as tracks: the fill connects them, and the report says which pads it does
-    /// not reach.
-    #[arg(long, value_enum, default_value_t = Areas::Tracks)]
-    areas: Areas,
+    #[arg(long, value_name = "HOW", value_parser = words("areas"), help = table_help("areas"))]
+    areas: Option<String>,
     /// With --areas fill: a net that gets a pour after the route, as NET or NET:LAYER,LAYER
     /// (the outer layers where none is given). The route takes the pour as an area of the
     /// net; it does not write the zone. Give the flag once per net.
@@ -425,9 +412,9 @@ impl RouteArgs {
             move_parts: on_off(self.move_parts, self.no_move_parts),
             fixed: self.fixed.clone(),
             plane_layers: plane_layers.to_vec(),
-            areas: match self.areas {
-                Areas::Tracks => gummiband_app::Areas::Tracks,
-                Areas::Fill => gummiband_app::Areas::Fill,
+            areas: match &self.areas {
+                Some(word) => Areas::parse(word).expect("a word of the table"),
+                None => Areas::default(),
             },
             pour: self.pour.clone(),
             area_stitch: on_off(self.area_stitch, self.no_area_stitch),

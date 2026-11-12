@@ -68,10 +68,19 @@
       "name": "plane_layers"
     },
     {
-      "choices": [],
+      "choices": [
+        {
+          "help": "Such a net is laid as tracks like any net, and the area is not looked at.",
+          "value": "tracks"
+        },
+        {
+          "help": "Such a net is not laid as tracks: the fill connects it, only what the fill does not reach gets copper of its own, and the report says which pads stay open.",
+          "value": "fill"
+        }
+      ],
       "default": "tracks",
-      "help": "How nets with an area (a zone of the file or a pour of pour) on a routed layer are connected: tracks (like any net, the area is not looked at) or fill (they are not laid as tracks, the fill connects them, and the report says which pads it does not reach).",
-      "kind": "text",
+      "help": "How nets with an area (a zone of the file or a pour of pour) on a routed layer are connected.",
+      "kind": "choice",
       "name": "areas"
     },
     {

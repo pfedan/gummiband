@@ -184,11 +184,20 @@ pub const OPTIONS: &[OptionDoc] = &[
         "none",
         "Copper layers treated as planes besides those of KiCad type \"power\": not routed, their zones stay.",
     ),
-    opt(
+    choice(
         "areas",
-        Kind::Text,
         "tracks",
-        "How nets with an area (a zone of the file or a pour of pour) on a routed layer are connected: tracks (like any net, the area is not looked at) or fill (they are not laid as tracks, the fill connects them, and the report says which pads it does not reach).",
+        "How nets with an area (a zone of the file or a pour of pour) on a routed layer are connected.",
+        &[
+            word(
+                "tracks",
+                "Such a net is laid as tracks like any net, and the area is not looked at.",
+            ),
+            word(
+                "fill",
+                "Such a net is not laid as tracks: the fill connects it, only what the fill does not reach gets copper of its own, and the report says which pads stay open.",
+            ),
+        ],
     ),
     opt(
         "pour",

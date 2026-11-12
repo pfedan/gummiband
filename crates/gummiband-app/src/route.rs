@@ -92,7 +92,9 @@ pub enum Areas {
 }
 
 impl Areas {
-    /// The word of the option.
+    pub const ALL: [Areas; 2] = [Areas::Tracks, Areas::Fill];
+
+    /// The word of the option `areas` ([`crate::OPTIONS`]).
     pub fn word(self) -> &'static str {
         match self {
             Areas::Tracks => "tracks",
@@ -100,12 +102,13 @@ impl Areas {
         }
     }
 
+    /// The value of a word; the error names the words there are.
     pub fn parse(word: &str) -> Result<Areas, String> {
-        match word {
-            "tracks" => Ok(Areas::Tracks),
-            "fill" => Ok(Areas::Fill),
-            other => Err(format!("areas must be \"tracks\" or \"fill\", not {other:?}")),
-        }
+        let word = crate::option_doc("areas").expect("areas").choice(word)?;
+        Ok(*Areas::ALL
+            .iter()
+            .find(|a| a.word() == word)
+            .expect("a word of the table"))
     }
 }
 
