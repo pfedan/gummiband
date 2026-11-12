@@ -31,6 +31,9 @@ pub struct RouterConfig {
     /// Weight of the preferred directions: routing layers alternate between horizontal and
     /// vertical, a step costs this much extra per mm across its layer's direction (0 = off).
     pub layer_dirs: f64,
+    /// Extra cost per mm of track on the back layer of a board with more than one routing layer
+    /// (0 = off): the tracks keep to the other layers and leave the back to a pour.
+    pub back_cost: f64,
     /// Route plane fan-outs before signal nets.
     pub fanout_first: bool,
     /// Expansion limit per connection search.
@@ -92,6 +95,7 @@ impl Default for RouterConfig {
         RouterConfig {
             via_cost: 3.0,
             layer_dirs: 0.0,
+            back_cost: knobs::BACK_COST.num(),
             pair_pull: 0.0,
             via_pass: 4.0,
             fanout_first: true,
@@ -245,6 +249,13 @@ struct Prices {
     /// An edge with no room for the track even without any other track stays closed: nothing
     /// that could move is in the way there.
     solid: bool,
+    /// While the prices are soft a new via costs at least this many crossings at the price of
+    /// the round (0: the plain via price). A via that is cheaper than a conflict lets a
+    /// connection change layer before the rounds have sorted out its own layer.
+    via: f64,
+    /// The most that `via` raises the price of a via, as a multiple of the plain via price:
+    /// beyond it a via is again the cheaper way out of a conflict that the rounds do not solve.
+    via_cap: f64,
 }
 
 /// Mutable routing state. Owns its copy of the meshes, because vias split triangles.
@@ -935,11 +946,16 @@ impl<'a> Router<'a> {
     /// Extra cost of the step a-b on routing layer li for leaving the layer's preferred
     /// direction (even layers horizontal, odd ones vertical).
     fn across(&self, li: usize, a: Point, b: Point) -> f64 {
+        let back = if self.cfg.back_cost > 0.0 && li + 1 == self.nl() && li > 0 {
+            self.cfg.back_cost * a.dist(b)
+        } else {
+            0.0
+        };
         if self.cfg.layer_dirs <= 0.0 {
-            return 0.0;
+            return back;
         }
         let d = b - a;
-        self.cfg.layer_dirs * if li % 2 == 0 { d.y.abs() } else { d.x.abs() }
+        back + self.cfg.layer_dirs * if li % 2 == 0 { d.y.abs() } else { d.x.abs() }
     }
 
     /// Escape penalty for crossing edge e: an end vertex on a pad of another net that still
@@ -2174,7 +2190,10 @@ impl<'a> Router<'a> {
         let via_in_pad = self.cfg.via_in_pad;
         let cls = self.board.class_of(net);
         // a layer change on a current path takes as many vias as carry the current
-        let via_cost = self.cfg.via_cost * self.via_factor(ci);
+        let mut via_cost = self.cfg.via_cost * self.via_factor(ci);
+        if let Some(p) = self.prices.as_ref().filter(|p| p.soft && p.via > 0.0) {
+            via_cost = via_cost.max((p.via * p.crossing * self.via_factor(ci)).min(p.via_cap * via_cost));
+        }
         let item = Item {
             net,
             w: cls.track_width,
@@ -3658,6 +3677,8 @@ impl<'a> Router<'a> {
             tight: knobs::NEG_TIGHT.num(),
             reserve: knobs::NEG_RESERVE.num(),
             solid: false,
+            via: knobs::NEG_VIA.num(),
+            via_cap: knobs::NEG_VIA_CAP.num(),
         });
         for ci in 0..self.conns.len() {
             self.route_one(ci);
@@ -3945,6 +3966,8 @@ impl<'a> Router<'a> {
             tight: 0.0,
             reserve: 0.0,
             solid: true,
+            via: 0.0,
+            via_cap: 1.0,
         });
         r.route_one(ci)
             .then(|| (r.in_the_way(ci), r.conn_points(ci), r.conn_vias[ci].len()))
@@ -4293,7 +4316,84 @@ impl<'a> Router<'a> {
                 }
             }
         }
+        self.validate_chains(&mut out);
         out
+    }
+
+    /// Second look at the planarity, from the crossing chains and the order on the edges alone:
+    /// the chords of the triangles are derived state, and the check above trusts them. Here each
+    /// pair of crossings in a row gives the chord through the triangle between them, with whole
+    /// places on the edges, and these must be the chords that are stored and must not cross.
+    fn validate_chains(&self, out: &mut Vec<String>) {
+        // boundary place of a crossing: local edge, then the place on it counter-clockwise
+        type Place = (u8, u32);
+        for li in 0..self.nl() {
+            let m = self.m(li);
+            for (e, list) in self.cross[li].iter().enumerate() {
+                let mut sorted = list.clone();
+                sorted.sort_unstable();
+                if sorted.windows(2).any(|w| w[0] == w[1]) {
+                    out.push(format!("layer {li} edge {e}: a seg is listed twice"));
+                }
+            }
+            let place = |t: u32, e: u32, seg: u32| -> Option<Place> {
+                let k = m.tri_edges[t as usize].iter().position(|&x| x == e)?;
+                let list = &self.cross[li][e as usize];
+                let i = list.iter().position(|&x| x == seg)?;
+                let forward = m.tris[t as usize][k] == m.edges[e as usize][0];
+                Some((k as u8, if forward { i } else { list.len() - 1 - i } as u32))
+            };
+            let mut through: FastMap<u32, Vec<(Place, Place, u32)>> = FastMap::default();
+            for (sid, s) in self.segs.iter().enumerate() {
+                let Some(s) = s.as_ref().filter(|s| s.li as usize == li) else {
+                    continue;
+                };
+                for w in s.crossings.windows(2) {
+                    let t = w[1].from;
+                    if t == NONE || m.other_tri(w[0].e, w[0].from) != t || m.status[t as usize] != NONE {
+                        continue;
+                    }
+                    let (Some(a), Some(b)) = (place(t, w[0].e, sid as u32), place(t, w[1].e, sid as u32)) else {
+                        continue; // reported above
+                    };
+                    let stored = self.chords[li][t as usize].iter().any(|c| {
+                        c.seg == sid as u32
+                            && matches!((c.a, c.b), (CPos::Edge(x), CPos::Edge(y)) if (x, y) == (a.0, b.0) || (x, y) == (b.0, a.0))
+                    });
+                    if !stored {
+                        out.push(format!(
+                            "layer {li} triangle {t}: seg {sid} passes through without a chord"
+                        ));
+                    }
+                    through.entry(t).or_default().push((a.min(b), a.max(b), sid as u32));
+                }
+            }
+            for (t, list) in self.chords[li].iter().enumerate() {
+                let have = through.get(&(t as u32)).map_or(0, |l| l.len());
+                let want = list
+                    .iter()
+                    .filter(|c| matches!((c.a, c.b), (CPos::Edge(_), CPos::Edge(_))))
+                    .count();
+                if want != have {
+                    out.push(format!(
+                        "layer {li} triangle {t}: {want} chords from edge to edge, {have} passes in the chains"
+                    ));
+                }
+            }
+            let net = |s: u32| self.segs[s as usize].as_ref().map(|s| s.net);
+            for (t, list) in &through {
+                for (i, &(lo, hi, sa)) in list.iter().enumerate() {
+                    for &(c, d, sb) in &list[i + 1..] {
+                        let inside = |p: Place| lo < p && p < hi;
+                        if net(sa) != net(sb) && inside(c) != inside(d) {
+                            out.push(format!(
+                                "layer {li} triangle {t}: seg {sa} and seg {sb} cross by their places"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -4545,6 +4645,64 @@ mod tests {
         assert!(shut > 0, "no goal was found shut in");
         assert_eq!(routed, routed_checked);
         assert!(geo == geo_checked, "the geometry differs");
+    }
+
+    /// The check of the chains is silent on a routed board and finds both faults it is for: two
+    /// tracks that swap their places on an edge, and a pass through a triangle without a chord.
+    #[test]
+    fn the_chains_tell_a_swap_on_an_edge_and_a_lost_chord() {
+        let mut pins = Vec::new();
+        let mut x: u64 = 99;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % 1000) as f64 / 1000.0
+        };
+        let names: Vec<String> = (0..25).map(|i| format!("N{i}")).collect();
+        for n in &names {
+            for fp in ["U1", "U2"] {
+                let (u, v) = (next(), next());
+                pins.push((fp, n.as_str(), 4.0 + 14.0 * u, 4.0 + 14.0 * v));
+            }
+        }
+        let b = pad_board(&pins);
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        assert!(r.run() > 10);
+        let chains = |r: &Router| {
+            let mut out = Vec::new();
+            r.validate_chains(&mut out);
+            out
+        };
+        assert!(chains(&r).is_empty(), "{:?}", chains(&r));
+        let net = |r: &Router, s: u32| r.segs[s as usize].as_ref().unwrap().net;
+        let mut told = 0;
+        for li in 0..r.nl() {
+            for e in 0..r.cross[li].len() {
+                let Some(i) =
+                    (1..r.cross[li][e].len()).find(|&i| net(&r, r.cross[li][e][i - 1]) != net(&r, r.cross[li][e][i]))
+                else {
+                    continue;
+                };
+                r.cross[li][e].swap(i - 1, i);
+                told += chains(&r).iter().any(|l| l.contains("cross by their places")) as usize;
+                r.cross[li][e].swap(i - 1, i);
+            }
+        }
+        assert!(told > 0, "no swap was found");
+        assert!(chains(&r).is_empty());
+        let (li, t) = (0..r.nl())
+            .flat_map(|li| (0..r.chords[li].len()).map(move |t| (li, t)))
+            .find(|&(li, t)| {
+                r.chords[li][t]
+                    .iter()
+                    .any(|c| matches!((c.a, c.b), (CPos::Edge(_), CPos::Edge(_))))
+            })
+            .unwrap();
+        r.chords[li][t].retain(|c| !matches!((c.a, c.b), (CPos::Edge(_), CPos::Edge(_))));
+        assert!(chains(&r).iter().any(|l| l.contains("without a chord")));
     }
 
     /// The open list hands out the nodes by f, ties by index, also with pushes between pops,
@@ -4858,6 +5016,8 @@ mod tests {
             tight: 0.0,
             reserve: 0.05,
             solid: false,
+            via: 0.0,
+            via_cap: 1.0,
         });
         assert!(r.route_one(0) && r.route_one(1));
         assert_eq!(r.conflicts(0.0).2, 1);
