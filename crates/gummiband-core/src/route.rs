@@ -910,7 +910,7 @@ impl<'a> Router<'a> {
         need
     }
 
-    fn item_of(&self, seg: u32) -> Item {
+    pub(crate) fn item_of(&self, seg: u32) -> Item {
         let s = self.segs[seg as usize].as_ref().unwrap();
         Item {
             net: s.net,

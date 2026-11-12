@@ -285,11 +285,16 @@ fn main() -> anyhow::Result<()> {
         ("disc strict", false, true, false, true),
         ("disc local", false, true, true, true),
         ("disc", false, true, true, false),
+        ("disc repaired", false, true, true, false),
     ] {
         r.stack_band = on;
         r.disc_band = disc;
         r.disc_local = local;
         r.disc_corridor = corridor;
+        r.forget_repairs();
+        if mode == "disc repaired" {
+            r.repair_discs(4);
+        }
         let (tc, cc) = (Instant::now(), cpu_seconds());
         let g = r.geometry();
         let (secs, cpu_s) = (tc.elapsed().as_secs_f64(), cpu_seconds() - cc);

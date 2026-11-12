@@ -689,7 +689,6 @@ impl Router<'_> {
     /// geometry of another: two tracks around the same vertices have radii that differ by the
     /// gap between them, and their bands run parallel. Sorted by where along the track the
     /// vertex is passed.
-    #[allow(dead_code)]
     pub(crate) fn discs(&self, sid: u32) -> Vec<Disc> {
         self.discs_and_portals(sid).0
     }
@@ -918,6 +917,142 @@ impl Router<'_> {
         info.wraps = on.len();
         info.stack_wraps = on.len();
         Some(b)
+    }
+
+    /// Gives the bands of [`Router::disc_band`] the discs they did not know of. The discs of
+    /// a track come from the vertices of its own triangles, but a disc can reach into its way
+    /// from a vertex none of them touches: a bundle that goes around a vertex two triangles
+    /// away. Where the check finds two tracks too close, the outer one takes on the disc the
+    /// inner one is pulled against there, a gap wider. Up to `rounds` times; returns the weight
+    /// of what the check finds before and after (spots, shorts and crossings fivefold), and
+    /// keeps the discs only if they left less. Not part of a route: the relaxation follows the
+    /// construction there; `examples/band_stage.rs` measures it.
+    pub fn repair_discs(&mut self, rounds: usize) -> (usize, usize) {
+        let count = |r: &Router| {
+            let geo = r.geometry();
+            let v: Vec<_> = crate::check::check(r.board, &geo)
+                .into_iter()
+                .filter(|v| !v.is_width())
+                .collect();
+            // a short weighs as five spots, and so does a crossing of two bands: a disc taken
+            // on in the wrong place can push a band across its neighbour
+            let spots = crate::check::spots(&v);
+            spots.len() + 5 * spots.iter().filter(|s| s.short).count() + 5 * r.debug_intersections(usize::MAX).len()
+        };
+        let before = count(self);
+        let mut best = (before, self.extra_discs.clone());
+        for _ in 0..rounds {
+            let (geo, segs, _) = self.tagged_geometry();
+            let found: Vec<_> = crate::check::check(self.board, &geo)
+                .into_iter()
+                .filter(|v| !v.is_width() && v.what.starts_with("track"))
+                .collect();
+            let near = |net: NetId, at: Point| -> Option<(usize, f64)> {
+                geo.tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| t.net == net && t.pts.len() >= 2)
+                    .map(|(i, t)| {
+                        let d = t
+                            .pts
+                            .windows(2)
+                            .map(|w| crate::geom::point_seg_dist(at, w[0], w[1]))
+                            .fold(f64::INFINITY, f64::min);
+                        (i, d)
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+            };
+            let dist_to = |i: usize, c: Point| {
+                geo.tracks[i]
+                    .pts
+                    .windows(2)
+                    .map(|w| (crate::geom::point_seg_dist(c, w[0], w[1]), orient(w[0], w[1], c)))
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .unwrap()
+            };
+            let mut added = 0;
+            for x in &found {
+                let Some(other) = x.nets.1 else { continue };
+                let (Some((ia, da)), Some((ib, db))) = (near(x.nets.0, x.at), near(other, x.at)) else {
+                    continue;
+                };
+                if da > 1.0 || db > 1.0 || geo.tracks[ia].layer != geo.tracks[ib].layer {
+                    continue;
+                }
+                let (sa, sb) = (segs[ia], segs[ib]);
+                let gap = Self::gap(self.board, &self.item_of(sa), &self.item_of(sb)) + self.cfg.margin;
+                // the disc of either track nearest to the spot, with the other track outside it
+                let mut pick: Option<(f64, u32, Disc, f64, f64)> = None;
+                for (inner, i_in, outer, i_out) in [(sa, ia, sb, ib), (sb, ib, sa, ia)] {
+                    for d in self.discs(inner) {
+                        if d.r <= POINT_DISC {
+                            continue;
+                        }
+                        let (din, _) = dist_to(i_in, d.c);
+                        let (dout, side) = dist_to(i_out, d.c);
+                        let reach = d.c.dist(x.at);
+                        if dout <= din || din > d.r + 0.05 || reach > d.r + gap + 0.2 {
+                            continue;
+                        }
+                        if pick.as_ref().is_none_or(|p| reach < p.0) {
+                            pick = Some((
+                                reach,
+                                outer,
+                                d,
+                                din.max(d.r) + gap,
+                                if side >= 0.0 { 1.0 } else { -1.0 },
+                            ));
+                        }
+                    }
+                }
+                let Some((_, outer, d, r, side)) = pick else { continue };
+                let s = self.segs[outer as usize].as_ref().unwrap();
+                let m = &self.sub.m[s.li as usize];
+                let k = s
+                    .crossings
+                    .iter()
+                    .enumerate()
+                    .map(|(k, c)| {
+                        let [u, v] = m.edges[c.e as usize];
+                        (
+                            k,
+                            crate::geom::point_seg_dist(d.c, m.verts[u as usize], m.verts[v as usize]),
+                        )
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map_or(0, |x| x.0);
+                let known = self
+                    .discs(outer)
+                    .iter()
+                    .any(|o| o.id == d.id && o.side == side && o.r >= r - 1e-9);
+                if known {
+                    continue;
+                }
+                self.extra_discs.entry(outer).or_default().push(Disc {
+                    c: d.c,
+                    r,
+                    side,
+                    id: d.id,
+                    first: k,
+                    last: k,
+                });
+                added += 1;
+            }
+            if added == 0 {
+                break;
+            }
+            let now = count(self);
+            if now < best.0 {
+                best = (now, self.extra_discs.clone());
+            }
+        }
+        self.extra_discs = best.1;
+        (before, best.0)
+    }
+
+    /// Forgets what [`Router::repair_discs`] added.
+    pub fn forget_repairs(&mut self) {
+        self.extra_discs.clear();
     }
 
     /// True if the polyline stays in the corridor of seg `sid` (its crossed triangles and the
