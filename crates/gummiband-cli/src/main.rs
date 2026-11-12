@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use gummiband_app::{AreaOptions, Hooks, RouteOptions, defaults};
+use gummiband_app::old::Respelled;
+use gummiband_app::{AreaOptions, Hooks, Pairs, Preset, RouteOptions, Scope, defaults};
 use gummiband_core::board::ObstacleKind;
 use gummiband_kicad::{KeepCopper, ReadOptions, read_board, write};
 use gummiband_place::auto::PlaceOptions;
@@ -40,6 +41,90 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// The parser of an option with a fixed list of words: the words and what each means come from
+/// the table of gummiband-app, so `--help` lists them as the MCP schema does, and a word that is
+/// none of them is refused in the words of the table. A word with an underscore is taken with a
+/// dash too.
+#[derive(Clone)]
+struct Words(&'static gummiband_app::OptionDoc);
+
+fn words(name: &str) -> Words {
+    Words(gummiband_app::option_doc(name).expect("an option of the table"))
+}
+
+impl clap::builder::TypedValueParser for Words {
+    type Value = String;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<String, clap::Error> {
+        self.0
+            .choice(&value.to_string_lossy())
+            .map(str::to_string)
+            .map_err(|e| {
+                // the table names the option, here it is a flag
+                let said = e.strip_prefix(self.0.name).unwrap_or(&e);
+                clap::Error::raw(
+                    clap::error::ErrorKind::InvalidValue,
+                    format!("--{}{said}\n", self.0.flag()),
+                )
+                .with_cmd(cmd)
+            })
+    }
+
+    fn possible_values(&self) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        Some(Box::new(
+            self.0
+                .choices
+                .iter()
+                .map(|c| clap::builder::PossibleValue::new(c.value).help(c.help)),
+        ))
+    }
+}
+
+/// The help of an option from the table of gummiband-app: its sentence and its default.
+fn table_help(name: &str) -> String {
+    let doc = gummiband_app::option_doc(name).expect("an option of the table");
+    format!("{} [default: {}]", doc.help, doc.default)
+}
+
+/// `--pairs` was a switch for the wide track. Where no word follows it in the arguments of
+/// `route` (the end, another flag, or what can only be the board file: a name with a dot or a
+/// slash), it becomes the hidden `--pairs-switch`, which is mapped onto `--pairs band`.
+fn old_pairs_switch(args: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let word = |next: &std::ffi::OsString| {
+        let next = next.to_string_lossy();
+        !next.starts_with('-') && !next.contains(['.', '/', '\\'])
+    };
+    let mut out: Vec<std::ffi::OsString> = Vec::new();
+    // the subcommand is the first argument that is neither a global flag nor its value
+    let (mut command, mut value_next) = (None::<bool>, false);
+    let mut args = args.into_iter().peekable();
+    if let Some(binary) = args.next() {
+        out.push(binary);
+    }
+    while let Some(arg) = args.next() {
+        let text = arg.to_string_lossy().into_owned();
+        if command.is_none() {
+            if value_next {
+                value_next = false;
+            } else if text == "--threads" || text == "--plane-layers" {
+                value_next = true;
+            } else if !text.starts_with('-') {
+                command = Some(text == "route");
+            }
+        } else if command == Some(true) && text == "--pairs" && !args.peek().is_some_and(word) {
+            out.push("--pairs-switch".into());
+            continue;
+        }
+        out.push(arg);
+    }
+    out
+}
+
 /// The arguments of `route`: the options of the pipeline ([`gummiband_app::OPTIONS`], each as
 /// `--kebab-case`) and what the CLI itself does with the result.
 #[derive(clap::Args)]
@@ -47,39 +132,43 @@ struct RouteArgs {
     board: PathBuf,
     #[arg(short, long)]
     output: PathBuf,
-    /// Keep only locked tracks and vias as fixed copper (default: remove all).
-    #[arg(long)]
+    #[arg(long, value_name = "SCOPE", value_parser = words("scope"), help = table_help("scope"))]
+    scope: Option<String>,
+    /// The spelling of earlier versions, now `--scope keep_locked`.
+    #[arg(long, hide = true, conflicts_with = "scope")]
     keep_locked: bool,
-    /// Keep all existing tracks and vias as fixed copper and add to them (for completing
-    /// a partly routed board or finishing a started track).
-    #[arg(long)]
+    /// The spelling of earlier versions, now `--scope finish`.
+    #[arg(long, hide = true, conflicts_with = "scope")]
     keep_all: bool,
-    /// With --keep-all --nets: if a connection finds no way, let the unlocked tracks of other
-    /// nets within this many mm of its pin give way (they are routed again), growing in
-    /// steps up to this radius; the try with the fewest open connections is kept. 0: nothing
-    /// gives way [default: 8 with --keep-all --nets, else 0]
-    #[arg(long)]
-    give: Option<f64>,
-    /// With --keep-all --nets: the unlocked tracks of other nets are threaded into the
-    /// topology, so a connection passes between them and they shift aside. What it does not
-    /// touch stays as it is in the file. On by default with --keep-all --nets (not with
-    /// --move-parts); this flag insists on it.
-    #[arg(long, conflicts_with = "no_shove")]
-    shove: bool,
-    /// With --keep-all --nets: the tracks of other nets stay where they are (no shove).
-    #[arg(long)]
-    no_shove: bool,
-    /// Route only these nets, comma separated (the others stay as they are).
+    /// The spelling of earlier versions: with `--keep-all --nets`, now `--scope reroute`.
+    #[arg(long, hide = true, conflicts_with = "scope")]
+    reroute: bool,
+    /// Lay only these nets, comma separated. With --scope finish and reroute the others stay as
+    /// they are; with fresh and keep_locked they stay unrouted. --scope reroute needs them.
     #[arg(long, value_delimiter = ',')]
     nets: Vec<String>,
-    /// With --keep-all --nets: remove the unlocked tracks and vias of those nets first and route
-    /// them anew. Without it a net that is already connected stays as it is.
+    /// Single nets on kept copper (--scope reroute, or --scope finish with --nets): if a
+    /// connection finds no way, let the unlocked tracks of other nets within this many mm of
+    /// its pin give way (they are routed again), growing in steps up to this radius; the try
+    /// with the fewest open connections is kept. 0: nothing gives way [default: 8 with
+    /// --scope reroute and with --scope finish --nets, else 0]
     #[arg(long)]
-    reroute: bool,
+    give: Option<f64>,
+    /// Single nets on kept copper (--scope reroute, or --scope finish with --nets): the
+    /// unlocked tracks of other nets are threaded into the topology, so a connection passes
+    /// between them and they shift aside. What it does not touch stays as it is in the file.
+    /// On by default there (not with --move-parts); this flag insists on it.
+    #[arg(long, conflicts_with = "no_shove")]
+    shove: bool,
+    /// Single nets on kept copper: the tracks of other nets stay where they are (no shove).
+    #[arg(long)]
+    no_shove: bool,
+    #[arg(long, value_name = "PRESET", value_parser = words("preset"), help = table_help("preset"))]
+    preset: Option<String>,
     /// Portfolio size (router runs with different orders). A constant, so that results do
-    /// not depend on the machine.
-    #[arg(long, default_value_t = defaults::RUNS)]
-    runs: usize,
+    /// not depend on the machine. [default: what --preset says, 14 with standard]
+    #[arg(long)]
+    runs: Option<usize>,
     /// Via site grid pitch in mm.
     #[arg(long, default_value_t = defaults::VIA_PITCH)]
     via_pitch: f64,
@@ -105,30 +194,33 @@ struct RouteArgs {
     /// keeps what has fewer vias (0 = off).
     #[arg(long, default_value_t = defaults::VIA_PASS)]
     via_pass: f64,
-    /// Weight of the pull between the nets of differential pairs (0 = off).
-    #[arg(long, default_value_t = defaults::PAIR_PULL)]
-    pair_pull: f64,
-    /// Experimental: route differential pairs as one wide track and split it into two parallel
-    /// tracks. Check the result with the KiCad DRC; on dense boards it costs connections.
+    #[arg(long, value_name = "MODE", value_parser = words("pairs"), help = table_help("pairs"))]
+    pairs: Option<String>,
+    /// The spelling of earlier versions: `--pairs` without a word, now `--pairs band`.
+    #[arg(long, hide = true, conflicts_with = "pairs")]
+    pairs_switch: bool,
+    /// With --pairs pull: weight of the pull between the two nets of a pair; 1 is a good
+    /// start, it can cost clearance on tight boards. With --pairs band: the same pull for the
+    /// pairs that get no wide track [default: 1 with --pairs pull, 0 with --pairs band]
     #[arg(long)]
-    pairs: bool,
-    /// With --pairs: length difference left within a pair in mm; the shorter track gets
+    pair_pull: Option<f64>,
+    /// With --pairs band: length difference left within a pair in mm; the shorter track gets
     /// bumps down to this (a `skew` rule in the .kicad_dru may ask for less).
     #[arg(long, default_value_t = defaults::PAIR_SKEW)]
     pair_skew: f64,
-    /// With --pairs: target differential impedance in ohm. Sets the track width per layer
-    /// from the board's stackup; the gap stays.
+    /// With --pairs band: target differential impedance in ohm. Sets the track width per
+    /// layer from the board's stackup; the gap stays.
     #[arg(long)]
     pair_zdiff: Option<f64>,
-    /// With --pairs: couple every pair recognised by name. Without it only pairs that a
-    /// `diff_pair_gap` rule or a net class of their own marks as differential pairs.
+    /// With --pairs band: a wide track for every pair recognised by name. Without it only for
+    /// pairs that a `diff_pair_gap` rule or a net class of their own marks as differential pairs.
     #[arg(long)]
     pair_all: bool,
-    /// Experimental, with --pairs: let the wide track end at a point just outside the pads,
-    /// with two single tracks to the pads (breakout zones).
+    /// Experimental, with --pairs band: let the wide track end at a point just outside the
+    /// pads, with two single tracks to the pads (breakout zones).
     #[arg(long)]
     breakouts: bool,
-    /// Experimental, with --pairs: two vias side by side are one via pair, a capsule that
+    /// Experimental, with --pairs band: two vias side by side are one via pair, a capsule that
     /// turns with the wide track, in place of the circle around both.
     #[arg(long)]
     via_pairs: bool,
@@ -138,13 +230,15 @@ struct RouteArgs {
     /// open (GB_AUTO_NEGOTIATE=0 switches that off).
     #[arg(long, default_value_t = defaults::NEGOTIATE)]
     negotiate: usize,
-    /// Generations of the evolutionary order search after the portfolio.
-    #[arg(long, default_value_t = defaults::GENERATIONS)]
-    generations: usize,
+    /// Generations of the evolutionary order search after the portfolio. [default: what
+    /// --preset says, 3 with standard]
+    #[arg(long)]
+    generations: Option<usize>,
     /// Generations that select by clearance violations after the geometry step. Each costs
-    /// about one routing pass; 0 is fastest and leaves many more violations.
-    #[arg(long, default_value_t = defaults::GEOMETRY_GENERATIONS)]
-    geometry_generations: usize,
+    /// about one routing pass; 0 is fastest and leaves many more violations. [default: what
+    /// --preset says, 3 with standard]
+    #[arg(long)]
+    geometry_generations: Option<usize>,
     /// Seed of the search (default: GB_EVO_SEED, then a constant). The same seed gives the
     /// same result, another one a different try. The line "best: seed N" and the report
     /// name the seed that was used.
@@ -169,8 +263,9 @@ struct RouteArgs {
     report: Option<PathBuf>,
     /// Let the geometry generations shift parts next to clearance problems and open
     /// connections; the routed copper follows like rubber bands (locked footprints,
-    /// connectors, modules and mounting holes stay). On by default when the whole board is
-    /// routed (not with --keep-all); this flag insists on it.
+    /// connectors, modules and mounting holes stay). On by default where the board is laid
+    /// anew (--scope fresh and keep_locked), off with finish and reroute; this flag insists
+    /// on it.
     #[arg(long, conflicts_with = "no_move_parts")]
     move_parts: bool,
     /// Parts stay where they are.
@@ -238,22 +333,24 @@ struct RouteArgs {
     /// lay them again, the rest of the result stays; when that stops helping, bolder side
     /// branches take over. Results that differ in vias and length are written next to the
     /// output as alt1, alt2, ... No placement rounds, and no plain search next to --negotiate.
-    /// Finishing nets, the tries of --give run first and the one kept goes on open ended.
+    /// With single nets on kept copper, the tries of --give run first and the one kept goes on
+    /// open ended.
     #[arg(long)]
     until_stop: bool,
     /// Open end with a time budget: after the normal search keep improving for this many
     /// seconds, then finish the best result (0: off). The budget starts when the open end
     /// starts, so it never cuts the normal search short. With --until-stop as well, the
-    /// run ends on the line on stdin or after the budget, whichever comes first.
-    #[arg(long, default_value_t = defaults::OPEN_END_SECONDS)]
-    open_end_seconds: f64,
+    /// run ends on the line on stdin or after the budget, whichever comes first. [default:
+    /// what --preset says, 0 with standard]
+    #[arg(long)]
+    open_end_seconds: Option<f64>,
     /// In the open end (--until-stop, --open-end-seconds): what a via is worth in mm of track when the open end judges its
     /// results. Lower gives more vias and shorter tracks, higher fewer vias and longer ones.
     #[arg(long, default_value_t = defaults::OPEN_VIA_COST)]
     open_via_cost: f64,
     /// Give the finished copper this reserve in mm on top of the clearances where there is
     /// room, instead of leaving it at the limit [default: 0.03 in an open ended run
-    /// (--until-stop, --open-end-seconds), but not when finishing nets with --keep-all
+    /// (--until-stop, --open-end-seconds), but 0 with --scope reroute and with --scope finish
     /// --nets, else 0]
     #[arg(long)]
     air: Option<f64>,
@@ -287,20 +384,42 @@ struct RouteArgs {
 }
 
 impl RouteArgs {
-    /// The options of the pipeline these arguments ask for. What was not given is the default
-    /// of `RouteOptions`, through the clap defaults that name the same constants.
-    fn options(&self, plane_layers: &[String]) -> RouteOptions {
+    /// The options of the pipeline these arguments ask for, and a note for every spelling of an
+    /// earlier version among them. What was not given is the default of `RouteOptions`, through
+    /// the clap defaults that name the same constants. An old spelling that never had a meaning
+    /// is an error that says what to write.
+    fn options(&self, plane_layers: &[String]) -> Result<(RouteOptions, Vec<Respelled>), String> {
         // `--name` insists, `--no-name` switches off, neither leaves the default to the pipeline
         let on_off = |on: bool, off: bool| match (on, off) {
             (true, _) => Some(true),
             (false, true) => Some(false),
             (false, false) => None,
         };
-        RouteOptions {
-            keep_locked: self.keep_locked,
-            keep_all: self.keep_all,
+        let mut notes = Vec::new();
+        let scope = match &self.scope {
+            Some(word) => Scope::parse(word).expect("a word of the table"),
+            None => {
+                let (scope, note) = gummiband_app::old::scope(
+                    self.keep_locked.then_some(true),
+                    self.keep_all.then_some(true),
+                    self.reroute.then_some(true),
+                    Scope::default(),
+                )?;
+                notes.extend(note);
+                scope
+            }
+        };
+        let pairs = match &self.pairs {
+            Some(word) => Pairs::parse(word).expect("a word of the table"),
+            None => {
+                let (pairs, note) = gummiband_app::old::pairs(self.pairs_switch.then_some(true), self.pair_pull);
+                notes.extend(note);
+                pairs
+            }
+        };
+        let opts = RouteOptions {
+            scope,
             nets: self.nets.clone(),
-            reroute: self.reroute,
             shove: on_off(self.shove, self.no_shove),
             give: self.give,
             move_parts: on_off(self.move_parts, self.no_move_parts),
@@ -312,14 +431,18 @@ impl RouteArgs {
             },
             pour: self.pour.clone(),
             area_stitch: on_off(self.area_stitch, self.no_area_stitch),
+            preset: match &self.preset {
+                Some(word) => Preset::parse(word).expect("a word of the table"),
+                None => Preset::default(),
+            },
             runs: self.runs,
             via_pitch: self.via_pitch,
             via_cost: self.via_cost,
             layer_dirs: self.layer_dirs,
             patterns: self.patterns.clone(),
             via_pass: self.via_pass,
+            pairs,
             pair_pull: self.pair_pull,
-            pairs: self.pairs,
             pair_skew: self.pair_skew,
             pair_zdiff: self.pair_zdiff,
             pair_all: self.pair_all,
@@ -348,7 +471,8 @@ impl RouteArgs {
             net_priorities: self.net_priorities.clone(),
             net_options: Default::default(),
             teardrops: self.teardrops,
-        }
+        };
+        Ok((opts, notes))
     }
 }
 
@@ -636,7 +760,7 @@ fn print_matching(rules: &[gummiband_core::matching::RuleMatch]) {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(old_pairs_switch(std::env::args_os()));
     if let Some(n) = cli.threads {
         rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global()?;
     }
@@ -682,6 +806,9 @@ fn main() -> Result<()> {
                 routable,
                 conns
             );
+            if let Some(w) = b.ground_warning() {
+                println!("warning: {w}");
+            }
             println!("patterns:");
             for line in gummiband_core::patterns::find(b).summary(b) {
                 println!("  {line}");
@@ -731,7 +858,11 @@ fn main() -> Result<()> {
         }
         Cmd::Route(args) => {
             use gummiband_app::Event;
-            let opts = args.options(&cli.plane_layers);
+            let (opts, respelled) = args.options(&cli.plane_layers).map_err(anyhow::Error::msg)?;
+            // a spelling of an earlier version still works, and says what to write now
+            for r in &respelled {
+                println!("note: {}", r.cli());
+            }
             let RouteArgs {
                 board,
                 output,
@@ -742,7 +873,7 @@ fn main() -> Result<()> {
                 until_stop,
                 ..
             } = *args;
-            // the options against each other, before a word is printed
+            // the options against each other, before any work
             opts.validate(until_stop).map_err(anyhow::Error::msg)?;
             if gummiband_core::knobs::GPU.on() && !cfg!(feature = "gpu") {
                 println!("warning: GB_GPU has no effect, this binary is built without the gpu feature");
@@ -786,6 +917,9 @@ fn main() -> Result<()> {
             let outcome = gummiband_app::route_file(&board, &output, &opts, &hooks)?;
             let r = &outcome.routed;
             let (b, sub, res) = (&r.board, &r.sub, &r.res);
+            if let Some(w) = b.ground_warning() {
+                println!("warning: {w}");
+            }
             if !outcome.skipped_nets.is_empty() {
                 println!("nets left out: {}", outcome.skipped_nets.len());
             }
@@ -950,6 +1084,12 @@ fn main() -> Result<()> {
             }
             let matching = &r.matching;
             print_matching(matching);
+            if let Some(m) = gummiband_core::refplane::measure(b, &res.geometry.tracks) {
+                println!(
+                    "return paths: {:.0} mm of signal track next to a plane, {:.1} mm over no plane copper, {} splits crossed",
+                    m.checked_mm, m.gap_mm, m.splits
+                );
+            }
             let viol = &r.violations;
             let spots = gummiband_core::check::spots(&viol).len();
             println!("clearance check: {} violations at {spots} spots", viol.len());
@@ -1539,7 +1679,12 @@ mod tests {
     /// the stop line of the open end. Everything else has to be an option of the pipeline.
     const OWN: &[&str] = &["board", "output", "svg", "svg-tris", "report", "progress", "until-stop"];
 
-    /// The long names of `route`, with the global ones.
+    /// Flags of earlier versions that `route` still takes and maps onto the options of today
+    /// (`gummiband_app::old`). They are hidden: no help lists them.
+    const OLD: &[&str] = &["keep-locked", "keep-all", "reroute", "pairs-switch"];
+
+    /// The long names of `route`, with the global ones; without the hidden flags of earlier
+    /// versions, which have to be exactly those of `OLD`.
     fn route_flags() -> Vec<(String, Vec<String>)> {
         flags_of("route")
     }
@@ -1548,9 +1693,17 @@ mod tests {
     fn flags_of(sub: &str) -> Vec<(String, Vec<String>)> {
         let cli = Cli::command();
         let route = cli.find_subcommand(sub).expect(sub);
+        if sub == "route" {
+            let hidden: Vec<&str> = route
+                .get_arguments()
+                .filter(|a| a.is_hide_set())
+                .filter_map(|a| a.get_long())
+                .collect();
+            assert_eq!(hidden, OLD, "the hidden flags of route are the old spellings");
+        }
         cli.get_arguments()
             .chain(route.get_arguments())
-            .filter(|a| a.get_id() != "threads")
+            .filter(|a| a.get_id() != "threads" && !a.is_hide_set())
             .map(|a| {
                 let name = a.get_long().map(str::to_string).unwrap_or(a.get_id().to_string());
                 let defaults = a
@@ -1577,6 +1730,20 @@ mod tests {
             };
             if o.kind == Kind::OnOff {
                 assert!(has(&format!("no-{flag}")), "route lacks --no-{flag}");
+            }
+            // the words of a choice are those of the table, each with its sentence
+            if o.kind == Kind::Choice {
+                let arg = Cli::command()
+                    .find_subcommand("route")
+                    .and_then(|r| r.get_arguments().find(|a| a.get_long() == Some(flag.as_str())).cloned())
+                    .expect("the flag");
+                let words: Vec<String> = arg
+                    .get_possible_values()
+                    .iter()
+                    .map(|v| v.get_name().to_string())
+                    .collect();
+                let table: Vec<&str> = o.choices.iter().map(|c| c.value).collect();
+                assert_eq!(words, table, "words of --{flag}");
             }
             // a default clap prints is the default of the table
             if let [d] = defaults.as_slice()
@@ -1661,14 +1828,25 @@ mod tests {
         assert_eq!(o.plane_layers, ["In1.Cu"]);
     }
 
-    fn route_args(extra: &[&str]) -> (RouteOptions, bool) {
-        let mut argv = vec!["gummiband", "route", "in.kicad_pcb", "-o", "out.kicad_pcb"];
+    /// The options of `gummiband route in.kicad_pcb -o out.kicad_pcb` with `extra`, the notes
+    /// about old spellings, and whether the run is open ended.
+    fn route_line(extra: &[&str]) -> Result<(RouteOptions, Vec<String>, bool), String> {
+        let mut argv = vec!["gummiband", "route"];
         argv.extend(extra);
-        let cli = Cli::try_parse_from(argv).unwrap();
+        argv.extend(["in.kicad_pcb", "-o", "out.kicad_pcb"]);
+        let cli = Cli::try_parse_from(old_pairs_switch(argv.iter().map(std::ffi::OsString::from)))
+            .map_err(|e| e.to_string())?;
         let Cmd::Route(args) = cli.cmd else {
             panic!("route");
         };
-        (args.options(&cli.plane_layers), args.until_stop)
+        let (opts, notes) = args.options(&cli.plane_layers)?;
+        Ok((opts, notes.iter().map(Respelled::cli).collect(), args.until_stop))
+    }
+
+    fn route_args(extra: &[&str]) -> (RouteOptions, bool) {
+        let (opts, notes, until_stop) = route_line(extra).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        (opts, until_stop)
     }
 
     /// With nothing given the CLI routes with the defaults of the pipeline, and what is given
@@ -1679,10 +1857,10 @@ mod tests {
         assert_eq!(format!("{opts:?}"), format!("{:?}", RouteOptions::default()));
         assert!(!until_stop);
         let (opts, _) = route_args(&[
-            "--keep-all",
+            "--scope",
+            "reroute",
             "--nets",
             "A,B",
-            "--reroute",
             "--no-shove",
             "--give",
             "2",
@@ -1694,10 +1872,10 @@ mod tests {
             "--frames",
             "pictures",
         ]);
-        assert!(opts.keep_all && opts.reroute && !opts.tune);
+        assert!(opts.scope == Scope::Reroute && !opts.tune);
         assert_eq!(opts.nets, ["A", "B"]);
         assert_eq!((opts.shove, opts.give, opts.move_parts), (Some(false), Some(2.0), None));
-        assert_eq!(opts.open_end_seconds, 30.0);
+        assert_eq!(opts.open_end_seconds, Some(30.0));
         assert_eq!(opts.plane_layers, ["In1.Cu"]);
         assert_eq!(opts.frames, Some(PathBuf::from("pictures")));
         assert_eq!(opts.validate(false), Ok(()));
@@ -1709,9 +1887,260 @@ mod tests {
         let (opts, until_stop) = route_args(&["--areas", "fill", "--until-stop"]);
         assert!(opts.validate(until_stop).unwrap_err().contains("open ended"));
         // contradictions are the pipeline's to refuse, in its words
-        let (opts, until_stop) = route_args(&["--until-stop", "--pairs"]);
-        assert!(opts.validate(until_stop).unwrap_err().contains("pairs"));
+        let (opts, until_stop) = route_args(&["--until-stop", "--pairs", "band"]);
+        assert!(opts.validate(until_stop).unwrap_err().contains("pairs band"));
         let (opts, _) = route_args(&["--runs", "0"]);
         assert_eq!(opts.validate(false), Err("runs must be at least 1".to_string()));
+    }
+
+    /// A preset sets four options, and each of them wins over it when given.
+    #[test]
+    fn a_preset_sets_what_was_not_given() {
+        let effort = |o: &RouteOptions| {
+            (
+                o.runs(),
+                o.generations(),
+                o.geometry_generations(),
+                o.open_end_seconds(),
+            )
+        };
+        let (opts, _) = route_args(&[]);
+        assert_eq!(effort(&opts), (14, 3, 3, 0.0));
+        let (opts, _) = route_args(&["--preset", "standard"]);
+        assert_eq!(effort(&opts), (14, 3, 3, 0.0));
+        let (opts, _) = route_args(&["--preset", "draft"]);
+        assert_eq!(effort(&opts), (4, 1, 0, 0.0));
+        let (opts, _) = route_args(&["--preset", "quick"]);
+        assert_eq!(effort(&opts), (14, 3, 0, 0.0));
+        let (opts, until_stop) = route_args(&["--preset", "final"]);
+        assert_eq!(effort(&opts), (14, 3, 3, 600.0));
+        assert!(!until_stop && opts.open_end(until_stop));
+        let (opts, _) = route_args(&["--preset", "draft", "--runs", "8", "--geometry-generations", "1"]);
+        assert_eq!(effort(&opts), (8, 1, 1, 0.0));
+        let (opts, _) = route_args(&["--preset", "final", "--open-end-seconds", "0"]);
+        assert_eq!(effort(&opts), (14, 3, 3, 0.0));
+        // the settings of the hash lists are the draft
+        let (hashes, _) = route_args(&["--runs", "4", "--generations", "1", "--geometry-generations", "0"]);
+        let (draft, _) = route_args(&["--preset", "draft"]);
+        assert_eq!(effort(&hashes), effort(&draft));
+        let e = route_line(&["--preset", "fast"]).unwrap_err();
+        assert!(
+            e.contains("--preset must be draft, quick, standard or final, not \"fast\""),
+            "{e}"
+        );
+        // the help names the words with what each sets
+        let help = Cli::command()
+            .find_subcommand("route")
+            .unwrap()
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("runs 4, generations 1, geometry_generations 0"), "{help}");
+    }
+
+    /// The pair options: one mode with its words, and the sub-options under their names.
+    #[test]
+    fn pairs_is_one_option_with_three_words() {
+        let (opts, _) = route_args(&["--pairs", "pull"]);
+        assert_eq!((opts.pairs, opts.pair_pull, opts.pair_pull()), (Pairs::Pull, None, 1.0));
+        let (opts, _) = route_args(&["--pairs", "pull", "--pair-pull", "2.5"]);
+        assert_eq!((opts.pairs, opts.pair_pull()), (Pairs::Pull, 2.5));
+        let (opts, _) = route_args(&["--pairs=band", "--breakouts", "--via-pairs", "--pair-all"]);
+        assert!(opts.pairs == Pairs::Band && opts.breakouts && opts.via_pairs && opts.pair_all);
+        assert_eq!(opts.validate(false), Ok(()));
+        let (opts, _) = route_args(&["--pairs", "off"]);
+        assert_eq!(opts.pairs, Pairs::Off);
+        // a word that is none: refused with the words there are
+        let e = route_line(&["--pairs", "wide"]).unwrap_err();
+        assert!(e.contains("--pairs must be off, pull or band, not \"wide\""), "{e}");
+        // contradictions say what to write
+        let (opts, _) = route_args(&["--pairs", "pull", "--breakouts"]);
+        assert_eq!(
+            opts.validate(false).unwrap_err(),
+            "breakouts acts on the wide track of pairs band only: write pairs band, or leave breakouts out"
+        );
+        let (opts, _) = route_args(&["--pairs", "off", "--pair-pull", "1"]);
+        assert!(
+            opts.validate(false)
+                .unwrap_err()
+                .starts_with("pair_pull needs pairs pull")
+        );
+        // the help has the words with their sentences, from the table
+        let mut cli = Cli::command();
+        let help = cli.find_subcommand_mut("route").unwrap().render_long_help().to_string();
+        let doc = gummiband_app::option_doc("pairs").unwrap();
+        assert!(help.contains("--pairs <MODE>"), "{help}");
+        for c in doc.choices {
+            assert!(help.contains(&format!("- {}:", c.value)), "{}", c.value);
+        }
+        assert!(help.contains(&doc.help[..40]) && help.contains("[default: off]"));
+    }
+
+    /// The spellings of earlier versions give the options of the new spelling, with one line that
+    /// says what to write now, and no help names them.
+    #[test]
+    fn old_spellings_are_mapped_onto_the_new_ones() {
+        let cases: &[(&[&str], &[&str], &[&str])] = &[
+            (&["--pairs"], &["--pairs", "band"], &["--pairs is now --pairs band"]),
+            (
+                &["--pairs", "--breakouts", "--via-pairs"],
+                &["--pairs", "band", "--breakouts", "--via-pairs"],
+                &["--pairs is now --pairs band"],
+            ),
+            (
+                &["--pair-pull", "1"],
+                &["--pairs", "pull"],
+                &["--pair-pull 1 is now --pairs pull --pair-pull 1"],
+            ),
+            (
+                &["--pair-pull", "2.5"],
+                &["--pairs", "pull", "--pair-pull", "2.5"],
+                &["--pair-pull 2.5 is now --pairs pull --pair-pull 2.5"],
+            ),
+            (
+                &["--pair-pull", "0"],
+                &["--pairs", "off"],
+                &["--pair-pull 0 is now --pairs off"],
+            ),
+            (
+                &["--pairs", "--pair-pull", "1"],
+                &["--pairs", "band", "--pair-pull", "1"],
+                &["--pairs is now --pairs band"],
+            ),
+            // the switches that scope replaces, in every combination that had a meaning
+            (&[], &["--scope", "fresh"], &[]),
+            (&["--nets", "A"], &["--scope", "fresh", "--nets", "A"], &[]),
+            (
+                &["--keep-locked"],
+                &["--scope", "keep_locked"],
+                &["--keep-locked is now --scope keep_locked"],
+            ),
+            (
+                &["--keep-locked", "--nets", "A"],
+                &["--scope", "keep-locked", "--nets", "A"],
+                &["--keep-locked is now --scope keep_locked"],
+            ),
+            (
+                &["--keep-all"],
+                &["--scope", "finish"],
+                &["--keep-all is now --scope finish"],
+            ),
+            (
+                &["--keep-all", "--keep-locked"],
+                &["--scope", "finish"],
+                &["--keep-locked --keep-all is now --scope finish"],
+            ),
+            (
+                &["--keep-all", "--nets", "A,B"],
+                &["--scope", "finish", "--nets", "A,B"],
+                &["--keep-all is now --scope finish"],
+            ),
+            (
+                &["--keep-all", "--nets", "A,B", "--reroute", "--no-shove", "--give", "2"],
+                &["--scope", "reroute", "--nets", "A,B", "--no-shove", "--give", "2"],
+                &["--keep-all --reroute is now --scope reroute"],
+            ),
+            (
+                &["--keep-locked", "--keep-all", "--reroute", "--nets", "A"],
+                &["--scope", "reroute", "--nets", "A"],
+                &["--keep-locked --keep-all --reroute is now --scope reroute"],
+            ),
+            (
+                &["--keep-locked", "--pairs"],
+                &["--scope", "keep_locked", "--pairs", "band"],
+                &[
+                    "--keep-locked is now --scope keep_locked",
+                    "--pairs is now --pairs band",
+                ],
+            ),
+        ];
+        // what the router is told, which is what decides the result
+        let told = |o: &RouteOptions| {
+            let mut o = o.clone();
+            o.pair_pull = Some(o.pair_pull());
+            format!("{o:?}")
+        };
+        for (old, new, notes) in cases {
+            let (old_opts, old_notes, _) = route_line(old).unwrap();
+            let (new_opts, new_notes, _) = route_line(new).unwrap();
+            assert_eq!(told(&old_opts), told(&new_opts), "{old:?}");
+            assert_eq!(old_notes, *notes, "{old:?}");
+            assert!(new_notes.is_empty(), "{new:?}: {new_notes:?}");
+            assert_eq!(old_opts.validate(false), Ok(()), "{old:?}");
+        }
+        // the old switch in front of the board file is not taken for a word
+        let (opts, notes, _) = route_line(&["--runs", "4", "--pairs"]).unwrap();
+        assert_eq!((opts.pairs, notes.len()), (Pairs::Band, 1));
+        // old and new together contradict each other
+        assert!(route_line(&["--pairs", "--pairs", "pull"]).is_err());
+        for old in ["--keep-locked", "--keep-all", "--reroute"] {
+            let e = route_line(&["--scope", "finish", old]).unwrap_err();
+            assert!(e.contains("cannot be used with"), "{e}");
+        }
+        // what had no meaning has none now, and the message says what to write
+        for old in [
+            &["--reroute"][..],
+            &["--reroute", "--nets", "A"],
+            &["--keep-locked", "--reroute"],
+        ] {
+            let e = route_line(old).unwrap_err();
+            assert!(
+                e.starts_with("reroute without keep_all has no meaning: write scope reroute with nets"),
+                "{e}"
+            );
+        }
+        let (opts, _, _) = route_line(&["--keep-all", "--reroute"]).unwrap();
+        assert!(
+            opts.validate(false)
+                .unwrap_err()
+                .starts_with("scope reroute needs nets")
+        );
+        // only `route` has the switch
+        let args: Vec<std::ffi::OsString> = ["gummiband", "--threads", "2", "lengths", "--pairs"]
+            .iter()
+            .map(Into::into)
+            .collect();
+        assert_eq!(old_pairs_switch(args.clone()), args);
+        let mut cli = Cli::command();
+        let help = cli.find_subcommand_mut("route").unwrap().render_long_help().to_string();
+        for flag in OLD {
+            assert!(!help.contains(&format!("--{flag}")), "the help names --{flag}");
+        }
+    }
+
+    /// What stays and what is laid is one option with four words; the defaults that hang on it
+    /// follow.
+    #[test]
+    fn scope_is_one_option_with_four_words() {
+        let (opts, _) = route_args(&[]);
+        assert_eq!(opts.scope, Scope::Fresh);
+        let (opts, _) = route_args(&["--scope", "finish"]);
+        assert!(opts.scope == Scope::Finish && !opts.move_parts() && !opts.shove() && opts.give() == 0.0);
+        let (opts, _) = route_args(&["--scope", "finish", "--nets", "A"]);
+        assert!(opts.shove() && opts.give() == defaults::GIVE && opts.air(true) == 0.0);
+        let (opts, _) = route_args(&["--scope", "reroute", "--nets", "A,B"]);
+        assert_eq!(
+            (opts.scope, opts.reroute_nets().len(), opts.shove()),
+            (Scope::Reroute, 2, true)
+        );
+        assert_eq!(opts.validate(false), Ok(()));
+        let (opts, _) = route_args(&["--scope", "reroute"]);
+        assert_eq!(
+            opts.validate(false).unwrap_err(),
+            "scope reroute needs nets: name the nets to lay again, or write scope finish to lay what is open"
+        );
+        let e = route_line(&["--scope", "all"]).unwrap_err();
+        assert!(
+            e.contains("--scope must be fresh, keep_locked, finish or reroute, not \"all\""),
+            "{e}"
+        );
+        // the help has every word with its sentence, and says which scope a default hangs on
+        let mut cli = Cli::command();
+        let help = cli.find_subcommand_mut("route").unwrap().render_long_help().to_string();
+        assert!(help.contains("--scope <SCOPE>"), "{help}");
+        for c in gummiband_app::option_doc("scope").unwrap().choices {
+            assert!(help.contains(&format!("- {}:", c.value)), "{}", c.value);
+        }
+        assert!(help.contains("lay net X again") && help.contains("finish the rest"));
     }
 }

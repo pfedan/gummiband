@@ -3,16 +3,18 @@
 //! option, its default and what it does exist once.
 
 pub mod areas;
+pub mod export;
 pub mod nets;
+pub mod old;
 pub mod options;
 pub mod route;
 pub mod svg;
 
 pub use areas::{AREA_OPTIONS, AreaOptions, AreaReport, area_option_doc, area_report};
 pub use nets::{AppliedNetOptions, NetOptions, apply_net_options, parse_net_options, read_net_options};
-pub use options::{Kind, OPTIONS, OptionDoc, option_doc};
+pub use options::{Choice, Kind, OPTIONS, OptionDoc, option_doc};
 pub use route::{
-    Alternative, Angles, Angles45, Areas, Cleared, Event, Frames, Hooks, Placement, Room, RouteOptions, RouteOutcome,
-    Routed, Trial, Tuned, Written, clear_corridors, copy_project_files, defaults, load_board, parse_pour, route_board,
-    route_file,
+    Alternative, Angles, Angles45, Areas, Cleared, Event, Frames, Hooks, Pairs, Placement, Preset, PresetValues, Room,
+    RouteOptions, RouteOutcome, Routed, Scope, Trial, Tuned, Written, clear_corridors, copy_project_files, defaults,
+    load_board, parse_pour, route_board, route_file,
 };

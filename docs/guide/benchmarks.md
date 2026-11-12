@@ -91,10 +91,10 @@ lengths can be judged by the KiCad DRC (see [Length matching](concepts.md#length
 ```bash
 bench/run_suite.sh matching
 bench/prepare-ddr5.sh              # fetches and strips into bench/work/ddr5/
-bench/run-ddr5.sh --pairs --no-move-parts   # lengths of the reference, routing, lengths, KiCad DRC
+bench/run-ddr5.sh --pairs band --no-move-parts   # lengths of the reference, routing, lengths, KiCad DRC
 ```
 
-Results of 2026-11-01 (`--pairs --runs 4 --generations 1 --no-move-parts`, so the placement
+Results of 2026-11-01 (`--pairs band --runs 4 --generations 1 --no-move-parts`, so the placement
 stays as the reference has it). "Meanders only" is the routing with meanders in the room it left,
 "room, then meanders" pushes the neighbours aside first:
 
@@ -103,7 +103,7 @@ stays as the reference has it). "Meanders only" is the routing with meanders in 
 | `matching` | 13 of 16 nets or pairs out of range | 11 of 16, 5 of 11 tuned nets reached their length | 6 of 16: clock length 2 of 2, byte lane 6 of 10; 6 of 11 tuned nets reached their length | 0 unconnected, 0 clearance, 5 skew (10 with meanders only), 1 uncoupled (2) |
 | DDR5 testbed | 24 of 29: byte lane 3 of 12, command/address 1 of 14, 22 skew errors in the KiCad DRC | 16 of 29: byte lane 7 of 12, command/address 5 of 14, uncoupled 1 of 3; 7 of 22 tuned nets reached their length | 10 of 29: byte lane 8 of 12, command/address 9 of 14, uncoupled 2 of 3; 14 of 23 tuned nets reached their length | 261 of 263 routed, 0 clearance, 9 skew (14), 6 pair gap (22), 1 uncoupled (3), 0 sliver (1) |
 
-In `bench/compare.py` against main (default arguments, so without `--pairs` and with moving
+In `bench/compare.py` against main (default arguments, so without `--pairs band` and with moving
 parts) every board has the same KiCad DRC result; the LED controller file is byte-identical
 (the step only runs with length rules). On `matching` it makes room for 6 nets but the meanders
 reach the same lengths as before there.

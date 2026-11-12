@@ -1,0 +1,400 @@
+{
+  "note": "Written from gummiband_app::OPTIONS and gummiband_app::Preset. Do not edit, write it again: cargo run -p gummiband-app --example plugin_table > plugin/gb_plugin/route_options.json",
+  "options": [
+    {
+      "choices": [
+        {
+          "help": "No copper stays: every track and via goes, locked ones too, and the board is laid anew.",
+          "value": "fresh"
+        },
+        {
+          "help": "Locked tracks and vias stay as fixed copper that the router connects to, all unlocked copper goes and is laid anew: for a board on which the copper that must stay is locked.",
+          "value": "keep_locked"
+        },
+        {
+          "help": "All copper stays, locked or not, and only what is still open is laid, with nets only the open connections of those nets: for \"I laid these nets by hand, finish the rest\" and for a track that was started.",
+          "value": "finish"
+        },
+        {
+          "help": "Needs nets: the unlocked copper of those nets is taken out and they are laid anew, everything else stays: for \"lay net X again\".",
+          "value": "reroute"
+        }
+      ],
+      "default": "fresh",
+      "help": "What of the copper on the board stays, and what is laid.",
+      "kind": "choice",
+      "name": "scope"
+    },
+    {
+      "choices": [],
+      "default": "all nets",
+      "help": "Lay only these nets: with scope finish and reroute the others stay as they are, with fresh and keep_locked they stay unrouted.",
+      "kind": "list",
+      "name": "nets"
+    },
+    {
+      "choices": [],
+      "default": "on with scope reroute and with scope finish and nets, else off",
+      "help": "Single nets on kept copper: the unlocked tracks of the other nets shift aside to let a connection pass.",
+      "kind": "on_off",
+      "name": "shove"
+    },
+    {
+      "choices": [],
+      "default": "8 with scope reroute and with scope finish and nets, else 0",
+      "help": "Single nets on kept copper: radius in mm within which the unlocked tracks of other nets give way and are routed again when a connection finds no way.",
+      "kind": "number",
+      "name": "give"
+    },
+    {
+      "choices": [],
+      "default": "on with scope fresh and keep_locked, off with finish and reroute",
+      "help": "Let parts next to clearance problems and open connections shift a little while the copper follows.",
+      "kind": "on_off",
+      "name": "move_parts"
+    },
+    {
+      "choices": [],
+      "default": "none",
+      "help": "References that never move under move_parts, placements and clear_corridors.",
+      "kind": "list",
+      "name": "fixed"
+    },
+    {
+      "choices": [],
+      "default": "none",
+      "help": "Copper layers treated as planes besides those of KiCad type \"power\": not routed, their zones stay.",
+      "kind": "list",
+      "name": "plane_layers"
+    },
+    {
+      "choices": [],
+      "default": "tracks",
+      "help": "How nets with an area (a zone of the file or a pour of pour) on a routed layer are connected: tracks (like any net, the area is not looked at) or fill (they are not laid as tracks, the fill connects them, and the report says which pads it does not reach).",
+      "kind": "text",
+      "name": "areas"
+    },
+    {
+      "choices": [],
+      "default": "none",
+      "help": "With areas fill: nets that get a pour after the route, each NET or NET:LAYER,LAYER (the outer layers where none is given), which the route takes as an area of the net.",
+      "kind": "list",
+      "name": "pour"
+    },
+    {
+      "choices": [],
+      "default": "on with areas fill",
+      "help": "With areas fill: an island of fill that holds pads gets one via where it joins the area, set on the finished copper where the fill model finds the spot.",
+      "kind": "on_off",
+      "name": "area_stitch"
+    },
+    {
+      "choices": [
+        {
+          "help": "runs 4, generations 1, geometry_generations 0, open_end_seconds 0: the quickest look at whether the board routes and where it is tight, as the benchmark suite routes; leaves many clearance violations.",
+          "value": "draft"
+        },
+        {
+          "help": "runs 14, generations 3, geometry_generations 0, open_end_seconds 0: the whole order search without the rounds that select by the clearance check, in about a third of the time of standard and with many more clearance violations: for a first result on a real board.",
+          "value": "quick"
+        },
+        {
+          "help": "runs 14, generations 3, geometry_generations 3, open_end_seconds 0: the defaults, a usable board in a few minutes.",
+          "value": "standard"
+        },
+        {
+          "help": "runs 14, generations 3, geometry_generations 3, open_end_seconds 600: standard, then the open end improves the result for 10 minutes (fewer vias, fewer violations, sometimes the last connections), for the last run of a board and not with pairs band.",
+          "value": "final"
+        }
+      ],
+      "default": "standard",
+      "help": "How much search the route gets: a preset sets runs, generations, geometry_generations and open_end_seconds, and each of the four wins over it when given.",
+      "kind": "choice",
+      "name": "preset"
+    },
+    {
+      "choices": [],
+      "default": "what the preset says: 14 with standard",
+      "help": "Portfolio size: router runs with different orders in every generation.",
+      "kind": "number",
+      "name": "runs"
+    },
+    {
+      "choices": [],
+      "default": "0.5",
+      "help": "Via site grid pitch in mm.",
+      "kind": "number",
+      "name": "via_pitch"
+    },
+    {
+      "choices": [],
+      "default": "3",
+      "help": "Via cost in mm of track.",
+      "kind": "number",
+      "name": "via_cost"
+    },
+    {
+      "choices": [],
+      "default": "0.5",
+      "help": "Weight of the preferred layer directions in every third run (0: off).",
+      "kind": "number",
+      "name": "layer_dirs"
+    },
+    {
+      "choices": [],
+      "default": "none",
+      "help": "Hints from local patterns of the board, comma separated: shares, decaps, rows, pairs, groups, groups-short, all or none.",
+      "kind": "text",
+      "name": "patterns"
+    },
+    {
+      "choices": [],
+      "default": "4",
+      "help": "Factor on the via cost in the pass that routes connections with vias again and keeps what has fewer vias (0: off).",
+      "kind": "number",
+      "name": "via_pass"
+    },
+    {
+      "choices": [
+        {
+          "help": "Each net on its own, like any other net.",
+          "value": "off"
+        },
+        {
+          "help": "Two nets, the second pulled to the way of the first with the weight pair_pull, and the finished tracks close up to the pair gap where nothing lies between: for every pair recognised by name, the gentle way on a board that is not dense.",
+          "value": "pull"
+        },
+        {
+          "help": "Experimental: one wide track per pair that is split into two parallel tracks, for the pairs that a diff_pair_gap rule or a net class of their own marks (pair_all: every pair), which keeps them coupled, costs connections on a dense board and does not work with an open end.",
+          "value": "band"
+        }
+      ],
+      "default": "off",
+      "help": "How the two nets of a differential pair are laid.",
+      "kind": "choice",
+      "name": "pairs"
+    },
+    {
+      "choices": [],
+      "default": "1 with pairs pull, 0 with pairs band",
+      "help": "With pairs pull: weight of the pull between the two nets (1 is a good start, up to about 4); with pairs band: the same pull for the pairs that get no wide track.",
+      "kind": "number",
+      "name": "pair_pull"
+    },
+    {
+      "choices": [],
+      "default": "0.1",
+      "help": "With pairs band: length difference left within a pair in mm.",
+      "kind": "number",
+      "name": "pair_skew"
+    },
+    {
+      "choices": [],
+      "default": "none: the widths of the net classes and rules",
+      "help": "With pairs band: target differential impedance in ohm, which sets the track width per layer from the stackup.",
+      "kind": "number",
+      "name": "pair_zdiff"
+    },
+    {
+      "choices": [],
+      "default": "off",
+      "help": "With pairs band: a wide track for every pair recognised by name, not only those a rule or a net class of their own marks.",
+      "kind": "switch",
+      "name": "pair_all"
+    },
+    {
+      "choices": [],
+      "default": "off",
+      "help": "Experimental, with pairs band: the wide track ends just outside the pads and two single tracks connect them.",
+      "kind": "switch",
+      "name": "breakouts"
+    },
+    {
+      "choices": [],
+      "default": "off",
+      "help": "Experimental, with pairs band: two vias side by side are one via pair that turns with the wide track.",
+      "kind": "switch",
+      "name": "via_pairs"
+    },
+    {
+      "choices": [],
+      "default": "0",
+      "help": "Rounds of negotiated routing from the start, in a second search next to the plain one (0: only when the plain search leaves a few connections open).",
+      "kind": "number",
+      "name": "negotiate"
+    },
+    {
+      "choices": [],
+      "default": "what the preset says: 3 with standard",
+      "help": "Generations of the evolutionary order search after the portfolio.",
+      "kind": "number",
+      "name": "generations"
+    },
+    {
+      "choices": [],
+      "default": "what the preset says: 3 with standard",
+      "help": "Generations that select by clearance violations after the geometry step (0: fastest, many more violations).",
+      "kind": "number",
+      "name": "geometry_generations"
+    },
+    {
+      "choices": [],
+      "default": "GB_EVO_SEED, else a constant",
+      "help": "Seed of the search: the same seed gives the same result, another one a different try.",
+      "kind": "number",
+      "name": "seed"
+    },
+    {
+      "choices": [],
+      "default": "none",
+      "help": "Folder for one SVG of the best candidate per generation, with an animation if ImageMagick is there.",
+      "kind": "path",
+      "name": "frames"
+    },
+    {
+      "choices": [],
+      "default": "what the preset says: 0 with standard",
+      "help": "Open end with a time budget: after the normal search keep improving for this many seconds, then finish the best result (0: off).",
+      "kind": "number",
+      "name": "open_end_seconds"
+    },
+    {
+      "choices": [],
+      "default": "20",
+      "help": "In the open end: what a via is worth in mm of track when its results are judged.",
+      "kind": "number",
+      "name": "open_via_cost"
+    },
+    {
+      "choices": [],
+      "default": "0.03 in an open ended run, but 0 with scope reroute and with scope finish and nets, else 0",
+      "help": "Reserve in mm on top of the clearances that the finished copper gets where there is room.",
+      "kind": "number",
+      "name": "air"
+    },
+    {
+      "choices": [],
+      "default": "0",
+      "help": "Width in mm that tracks of the default net class grow to at the end where there is room (0: off).",
+      "kind": "number",
+      "name": "prefer_width"
+    },
+    {
+      "choices": [
+        {
+          "help": "Any-angle tracks with arcs, as the rubber bands lie.",
+          "value": "any"
+        },
+        {
+          "help": "Conventional 45 degree routing as a last step, which never adds a clearance violation.",
+          "value": "45"
+        }
+      ],
+      "default": "any",
+      "help": "Track angles of the result.",
+      "kind": "choice",
+      "name": "angles"
+    },
+    {
+      "choices": [],
+      "default": "on",
+      "help": "Meanders for the length and skew rules of the .kicad_dru.",
+      "kind": "on_off",
+      "name": "tune"
+    },
+    {
+      "choices": [],
+      "default": "1",
+      "help": "Highest meander bump in mm.",
+      "kind": "number",
+      "name": "tune_amplitude"
+    },
+    {
+      "choices": [],
+      "default": "2",
+      "help": "Air between neighbouring meander legs in track widths.",
+      "kind": "number",
+      "name": "tune_spacing"
+    },
+    {
+      "choices": [],
+      "default": "0",
+      "help": "Try this many placements from the netlist, route each and go on with the best (0: the placement stays).",
+      "kind": "number",
+      "name": "placements"
+    },
+    {
+      "choices": [],
+      "default": "1",
+      "help": "First seed of placements, and the seed of clear_corridors.",
+      "kind": "number",
+      "name": "placement_seed"
+    },
+    {
+      "choices": [],
+      "default": "off",
+      "help": "Experimental: before routing, parts in the band of a group of tracks between two parts get new positions.",
+      "kind": "switch",
+      "name": "clear_corridors"
+    },
+    {
+      "choices": [],
+      "default": "none",
+      "help": "JSON file with options per net: a track width in mm, or an object with width, min_width, neck_refs, priority and skip.",
+      "kind": "path",
+      "name": "net_widths"
+    },
+    {
+      "choices": [],
+      "default": "none",
+      "help": "JSON file with a routing priority per net, lower routes first.",
+      "kind": "path",
+      "name": "net_priorities"
+    },
+    {
+      "choices": [],
+      "default": "off",
+      "help": "Switch on KiCad's teardrops in the written board and its project.",
+      "kind": "switch",
+      "name": "teardrops"
+    }
+  ],
+  "presets": [
+    {
+      "name": "draft",
+      "sets": {
+        "generations": 1,
+        "geometry_generations": 0,
+        "open_end_seconds": 0.0,
+        "runs": 4
+      }
+    },
+    {
+      "name": "quick",
+      "sets": {
+        "generations": 3,
+        "geometry_generations": 0,
+        "open_end_seconds": 0.0,
+        "runs": 14
+      }
+    },
+    {
+      "name": "standard",
+      "sets": {
+        "generations": 3,
+        "geometry_generations": 3,
+        "open_end_seconds": 0.0,
+        "runs": 14
+      }
+    },
+    {
+      "name": "final",
+      "sets": {
+        "generations": 3,
+        "geometry_generations": 3,
+        "open_end_seconds": 600.0,
+        "runs": 14
+      }
+    }
+  ]
+}

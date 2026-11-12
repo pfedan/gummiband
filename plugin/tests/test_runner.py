@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gb_plugin import fields, runner
+from gb_plugin import fields, runner, table
 
 STDOUT = """substrate: 1 vertices, 2 triangles, 3 via sites
   run seed  0 fanout_first  true: 9/10 routed, 4 vias, 120 mm
@@ -69,22 +69,55 @@ class FindBinaryTest(unittest.TestCase):
 
 class CommandTest(unittest.TestCase):
     def test_build_command(self):
-        opts = runner.RouteOptions(keep_locked=True, runs=8, via_cost=2, geometry_generations=0,
-                                   until_stop=False)
+        opts = runner.RouteOptions(scope="keep_locked", runs=8, via_cost=2,
+                                   geometry_generations=0, until_stop=False)
         self.assertEqual(
             runner.build_command("gb", Path("/a/b.kicad_pcb"), Path("/t/o.kicad_pcb"), opts),
-            ["gb", "route", "/a/b.kicad_pcb", "-o", "/t/o.kicad_pcb", "--progress", "--keep-locked",
+            ["gb", "route", "/a/b.kicad_pcb", "-o", "/t/o.kicad_pcb", "--progress",
+             "--scope", "keep_locked",
              "--runs", "8", "--via-cost", "2.0", "--geometry-generations", "0"])
-        opts.keep_locked = False
-        self.assertNotIn("--keep-locked", runner.build_command("gb", Path("b"), Path("o"), opts))
+        opts.scope = "fresh"
+        cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
+        self.assertEqual(cmd[cmd.index("--scope") + 1], "fresh")
+        # the spellings of earlier versions are gone from the command
+        for old in ("--keep-locked", "--keep-all", "--reroute"):
+            self.assertNotIn(old, cmd)
 
     def test_finish_nets(self):
-        opts = runner.RouteOptions(geometry_generations=0, finish_nets=["A", "B"])
+        # what the Finish action runs: all copper stays, the nets are finished, quickly
+        opts = runner.with_preset(runner.RouteOptions(scope="finish", nets=["A", "B"]), "quick")
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
-        self.assertIn("--keep-all", cmd)
-        self.assertIn("--shove", cmd)
+        self.assertEqual(cmd[cmd.index("--scope") + 1], "finish")
         self.assertEqual(cmd[cmd.index("--nets") + 1], "A,B")
-        self.assertNotIn("--keep-locked", cmd)
+        self.assertEqual(cmd[cmd.index("--geometry-generations") + 1], "0")
+        # shove and give are the router's defaults there, and there is no window to accept in
+        for flag in ("--shove", "--give", "--keep-all", "--until-stop"):
+            self.assertNotIn(flag, cmd)
+
+    def test_scopes(self):
+        cmd = runner.build_command("gb", Path("b"), Path("o"),
+                                   runner.RouteOptions(scope="reroute", nets=["/SDA"]))
+        self.assertEqual(cmd[cmd.index("--scope") + 1], "reroute")
+        self.assertEqual(cmd[cmd.index("--nets") + 1], "/SDA")
+        # finish without nets lays everything that is open
+        cmd = runner.build_command("gb", Path("b"), Path("o"), runner.RouteOptions(scope="finish"))
+        self.assertNotIn("--nets", cmd)
+        # nets narrow only where the copper stays: elsewhere the others would lose theirs
+        cmd = runner.build_command("gb", Path("b"), Path("o"),
+                                   runner.RouteOptions(scope="keep_locked", nets=["A"]))
+        self.assertNotIn("--nets", cmd)
+        self.assertIsNone(runner.problem(runner.RouteOptions(scope="finish")))
+        self.assertIsNone(runner.problem(runner.RouteOptions(scope="reroute", nets=["A"])))
+        self.assertIn("needs the nets", runner.problem(runner.RouteOptions(scope="reroute")))
+        self.assertEqual(runner.parse_nets(" /SDA, Net-(U1-Pad 3) ,,"), ["/SDA", "Net-(U1-Pad 3)"])
+
+    def test_settled(self):
+        asked = runner.RouteOptions(scope="finish", nets=["A"], placements=3, clear_corridors=True)
+        run = runner.settled(asked)
+        self.assertEqual((run.move_parts, run.placements, run.clear_corridors, run.nets),
+                         (False, 0, False, ["A"]))
+        run = runner.settled(runner.RouteOptions(scope="keep_locked", nets=["A"], placements=3))
+        self.assertEqual((run.move_parts, run.placements, run.nets), (True, 3, None))
 
     def test_quality_and_animation(self):
         opts = runner.RouteOptions(geometry_generations=3, frames_dir="/p/anim", until_stop=False)
@@ -111,7 +144,8 @@ class CommandTest(unittest.TestCase):
 
     def test_defaults(self):
         o = runner.RouteOptions()
-        self.assertTrue(o.keep_locked)
+        self.assertEqual(o.scope, "keep_locked")
+        self.assertEqual(o.pairs, "off")
         self.assertEqual(o.runs, 14)
         self.assertEqual(o.via_cost, 3.0)
         self.assertEqual(o.geometry_generations, 3)
@@ -233,10 +267,14 @@ open({str(self.out)!r}, "w").write("done")
         self.assertIn("--until-stop", runner.build_command("gb", Path("b"), Path("o"), opts))
         off = runner.RouteOptions(until_stop=False)
         self.assertNotIn("--until-stop", runner.build_command("gb", Path("b"), Path("o"), off))
-        finish = runner.RouteOptions(finish_nets=["A"])
-        self.assertNotIn("--until-stop", runner.build_command("gb", Path("b"), Path("o"), finish))
-        pairs = runner.RouteOptions(until_stop=True, pairs=True)
+        # nets can be finished open ended from the dialog
+        finish = runner.RouteOptions(scope="finish", nets=["A"])
+        self.assertIn("--until-stop", runner.build_command("gb", Path("b"), Path("o"), finish))
+        # the wide track of pairs has no open end, the pull has
+        pairs = runner.RouteOptions(until_stop=True, pairs="band")
         self.assertNotIn("--until-stop", runner.build_command("gb", Path("b"), Path("o"), pairs))
+        pull = runner.RouteOptions(until_stop=True, pairs="pull")
+        self.assertIn("--until-stop", runner.build_command("gb", Path("b"), Path("o"), pull))
 
     def test_open_via_cost_goes_with_the_open_end(self):
         cmd = runner.build_command("gb", Path("b"), Path("o"), runner.RouteOptions())
@@ -310,9 +348,9 @@ class TailTest(unittest.TestCase):
 class AdvancedCommandTest(unittest.TestCase):
     def test_defaults_add_nothing(self):
         cmd = runner.build_command("gb", Path("b"), Path("o"),
-                                   runner.RouteOptions(geometry_generations=0, keep_locked=False,
+                                   runner.RouteOptions(geometry_generations=0, scope="fresh",
                                                        until_stop=False))
-        self.assertEqual(cmd, ["gb", "route", "b", "-o", "o", "--progress",
+        self.assertEqual(cmd, ["gb", "route", "b", "-o", "o", "--progress", "--scope", "fresh",
                                "--runs", "14", "--via-cost", "3.0", "--geometry-generations", "0"])
 
     def test_changed_values_reach_the_router(self):
@@ -336,23 +374,33 @@ class AdvancedCommandTest(unittest.TestCase):
         self.assertIn("--no-move-parts", cmd)
         self.assertNotIn("--fixed", cmd)
         # finishing nets keeps the parts in place, the router's default there
-        opts = runner.RouteOptions(finish_nets=["A"], fixed=["U1"])
+        opts = runner.RouteOptions(scope="finish", nets=["A"], fixed=["U1"])
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
         self.assertNotIn("--no-move-parts", cmd)
         self.assertNotIn("--move-parts", cmd)
         self.assertNotIn("--fixed", cmd)
 
-    def test_pair_options_need_pairs(self):
-        opts = runner.RouteOptions(pair_skew=0.2, pair_zdiff=90.0, pair_pull=1.0)
+    def test_pair_options_need_their_mode(self):
+        # off: nothing of the pairs reaches the router, whatever the fields hold
+        opts = runner.RouteOptions(pair_skew=0.2, pair_zdiff=90.0, pair_pull=1.5)
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
-        self.assertNotIn("--pairs", cmd)
-        self.assertNotIn("--pair-skew", cmd)
+        for flag in ("--pairs", "--pair-skew", "--pair-zdiff", "--pair-pull"):
+            self.assertNotIn(flag, cmd)
+        # pull: the mode and its weight, none of the options of the wide track
+        opts.pairs = "pull"
+        cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
+        self.assertEqual(cmd[cmd.index("--pairs") + 1], "pull")
+        self.assertEqual(cmd[cmd.index("--pair-pull") + 1], "1.5")
         self.assertNotIn("--pair-zdiff", cmd)
-        self.assertIn("--pair-pull", cmd)
-        opts.pairs = True
+        # the weight 0 leaves the pull to the router
+        cmd = runner.build_command("gb", Path("b"), Path("o"), runner.RouteOptions(pairs="pull"))
+        self.assertNotIn("--pair-pull", cmd)
+        # band: the wide track with its options, and a weight for the pairs that get none
+        opts.pairs = "band"
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
-        self.assertIn("--pairs", cmd)
+        self.assertEqual(cmd[cmd.index("--pairs") + 1], "band")
         self.assertEqual(cmd[cmd.index("--pair-zdiff") + 1], "90.0")
+        self.assertEqual(cmd[cmd.index("--pair-pull") + 1], "1.5")
 
     def test_place(self):
         opts = runner.PlaceOptions(seed=7, iters=1_000_000, margin=1.0, free=["TP1", "SW1"],
@@ -391,7 +439,8 @@ class OptInCommandTest(unittest.TestCase):
 
     def test_clear_corridors(self):
         self.assertIn("--clear-corridors", self.cmd(clear_corridors=True))
-        self.assertNotIn("--clear-corridors", self.cmd(clear_corridors=True, finish_nets=["A"]))
+        self.assertNotIn("--clear-corridors",
+                         self.cmd(clear_corridors=True, scope="finish", nets=["A"]))
 
     def test_seeds(self):
         c = self.cmd(seed=42)
@@ -399,6 +448,10 @@ class OptInCommandTest(unittest.TestCase):
         self.assertNotIn("--placement-seed", self.cmd(placement_seed=7))
         c = self.cmd(placements=3, placement_seed=7)
         self.assertEqual(c[c.index("--placement-seed") + 1], "7")
+        # placements route the whole board: not where its copper stays
+        c = self.cmd(placements=3, scope="reroute", nets=["A"])
+        self.assertNotIn("--placements", c)
+        self.assertNotIn("--placement-seed", c)
 
     def test_next_placement_seed(self):
         opts = runner.RouteOptions(placements=3, placement_seed=7)
@@ -419,13 +472,15 @@ class OptInCommandTest(unittest.TestCase):
         self.assertEqual(c[c.index("--areas") + 1], "fill")
         self.assertEqual([c[i + 1] for i, a in enumerate(c) if a == "--pour"], ["GND", "VCC"])
         self.assertNotIn("--until-stop", c)
-        c = self.cmd(areas_fill=True, finish_nets=["A"])
+        c = self.cmd(areas_fill=True, scope="finish", nets=["A"])
         self.assertNotIn("--areas", c)
 
     def test_pair_switches_need_pairs(self):
         c = self.cmd(pair_all=True, via_pairs=True, breakouts=True, until_stop=False)
         self.assertNotIn("--pair-all", c)
-        c = self.cmd(pairs=True, pair_all=True, via_pairs=True, breakouts=True)
+        c = self.cmd(pairs="pull", pair_all=True, via_pairs=True, breakouts=True)
+        self.assertNotIn("--pair-all", c)
+        c = self.cmd(pairs="band", pair_all=True, via_pairs=True, breakouts=True)
         for flag in ("--pairs", "--pair-all", "--via-pairs", "--breakouts"):
             self.assertIn(flag, c)
 
@@ -480,13 +535,15 @@ class SavedOptionsTest(unittest.TestCase):
 
     def test_round_trip_keeps_the_binary_path(self):
         self.path.write_text('{"gummiband_bin": "/x/gb"}')
-        opts = runner.RouteOptions(runs=8, via_cost=2.5, pairs=True, plane_layers=["In1.Cu"])
+        opts = runner.RouteOptions(runs=8, via_cost=2.5, pairs="band", plane_layers=["In1.Cu"],
+                                   scope="fresh")
         self.assertTrue(runner.save_options("route", opts, runner.ROUTE_SAVED, self.path))
         stored = runner.load_settings(self.path)
         self.assertEqual(stored["gummiband_bin"], "/x/gb")
         self.assertNotIn("plane_layers", stored["route"])
         loaded = runner.RouteOptions(**self.load())
-        self.assertEqual((loaded.runs, loaded.via_cost, loaded.pairs), (8, 2.5, True))
+        self.assertEqual((loaded.runs, loaded.via_cost, loaded.pairs, loaded.scope),
+                         (8, 2.5, "band", "fresh"))
         self.assertIsNone(loaded.plane_layers)
 
     def test_no_file(self):
@@ -494,8 +551,33 @@ class SavedOptionsTest(unittest.TestCase):
 
     def test_bad_values_are_ignored(self):
         self.path.write_text(json.dumps({"route": {
-            "runs": "many", "pairs": 1, "via_cost": 2, "keep_locked": False, "gone": 1}}))
-        self.assertEqual(self.load(), {"via_cost": 2.0, "keep_locked": False})
+            "runs": "many", "pairs": 1, "via_cost": 2, "scope": "everything", "gone": 1}}))
+        self.assertEqual(self.load(), {"via_cost": 2.0})
+
+    def test_settings_of_earlier_versions(self):
+        # keep_locked was a switch, pairs the switch for the wide track, and the pull was on
+        # whenever its weight was above 0: the same mapping as the router's old spellings
+        cases = (
+            ({"keep_locked": False}, {"scope": "fresh"}),
+            ({"keep_locked": True}, {"scope": "keep_locked"}),
+            ({"pairs": True}, {"pairs": "band"}),
+            ({"pairs": True, "pair_pull": 1.5}, {"pairs": "band", "pair_pull": 1.5}),
+            ({"pairs": False, "pair_pull": 2.0}, {"pairs": "pull", "pair_pull": 2.0}),
+            ({"pairs": False, "pair_pull": 0.0}, {"pairs": "off", "pair_pull": 0.0}),
+            ({"pairs": False}, {"pairs": "off"}),
+            # the names of today win over a key that an earlier version left in the file
+            ({"scope": "fresh", "keep_locked": True}, {"scope": "fresh"}),
+        )
+        for stored, want in cases:
+            self.path.write_text(json.dumps({"route": stored}))
+            self.assertEqual(self.load(), want, stored)
+
+    def test_a_scope_for_single_nets_is_not_remembered(self):
+        for scope in ("finish", "reroute"):
+            opts = runner.RouteOptions(scope=scope, nets=["A"])
+            self.assertTrue(runner.save_options("route", opts, runner.ROUTE_SAVED, self.path))
+            self.assertNotIn("scope", self.load())
+            self.assertNotIn("nets", runner.load_settings(self.path)["route"])
 
     def test_broken_file_stays(self):
         self.path.write_text("{not json")
@@ -509,21 +591,105 @@ class FieldTableTest(unittest.TestCase):
     def test_fields_match_the_options(self):
         for cls, tabs, saved in ((runner.RouteOptions, fields.ROUTE_TABS, runner.ROUTE_SAVED),
                                  (runner.PlaceOptions, fields.PLACE_TABS, runner.PLACE_SAVED)):
-            table = fields.all_fields(tabs)
-            names = [f.name for f in table]
+            dialog = fields.all_fields(tabs)
+            names = [f.name for f in dialog]
             self.assertEqual(len(names), len(set(names)))
             self.assertLessEqual(set(saved), set(names))
             opts = cls()
-            for f in table:
+            for f in dialog:
                 self.assertTrue(f.tip, f.name)
                 if f.kind in ("int", "float"):
                     self.assertTrue(f.low <= getattr(opts, f.name) <= f.high, f.name)
                 if f.requires is not None:
-                    self.assertIn(f.requires, names)
-                if f.kind in ("refs", "file"):
+                    name, _, words = f.requires.partition("=")
+                    self.assertIn(name, names)
+                    if words:
+                        other = next(o for o in dialog if o.name == name)
+                        self.assertLessEqual(set(words.split("|")),
+                                             {v for v, _label in other.choices}, f.name)
+                if f.kind in ("refs", "nets", "file") or f.derived:
                     self.assertNotIn(f.name, saved)
-                if f.kind == "choice":
+                if f.derived:
+                    self.assertFalse(hasattr(opts, f.name), f.name)
+                elif f.kind == "choice":
                     self.assertIn(getattr(opts, f.name), [v for v, _label in f.choices])
+
+
+class RouterTableTest(unittest.TestCase):
+    """The choices and presets of the dialog are those of the router's own table
+    (gummiband_app::OPTIONS, in gb_plugin/route_options.json)."""
+
+    def field(self, name):
+        return next(f for f in fields.all_fields(fields.ROUTE_TABS) if f.name == name)
+
+    def test_choices_have_the_words_of_the_router(self):
+        for name in ("scope", "pairs"):
+            self.assertEqual([v for v, _label in self.field(name).choices],
+                             list(table.words(name)), name)
+            for word in table.words(name):
+                self.assertIn(table.meaning(name, word), self.field(name).tip)
+        self.assertEqual([v for v, _label in self.field("preset").choices],
+                         list(table.words("preset")) + [runner.CUSTOM])
+        # the flags the command gets are words of the router
+        self.assertIn(runner.RouteOptions().scope, table.words("scope"))
+        self.assertIn(runner.RouteOptions().pairs, table.words("pairs"))
+        self.assertEqual(set(runner.KEEP_ALL) | {"fresh", "keep_locked"}, set(table.words("scope")))
+
+    def test_presets_are_the_router_s(self):
+        self.assertEqual(list(table.PRESETS), list(table.words("preset")))
+        self.assertEqual(runner.preset_values("draft"),
+                         {"runs": 4, "generations": 1, "geometry_generations": 0,
+                          "until_stop": False})
+        self.assertEqual(runner.preset_values("final"),
+                         {"runs": 14, "generations": 3, "geometry_generations": 3,
+                          "until_stop": True})
+        # the sentence of a preset starts with what it sets
+        for name, sets in table.PRESETS.items():
+            self.assertTrue(table.meaning("preset", name).startswith(
+                f"runs {sets['runs']}, generations {sets['generations']}, "
+                f"geometry_generations {sets['geometry_generations']}, "), name)
+        # the plugin's own defaults are the router's standard, and the open end on top: final
+        d = runner.RouteOptions()
+        self.assertEqual(runner.preset_of(d), "final")
+        self.assertEqual(runner.preset_of(dataclasses.replace(d, until_stop=False)), "standard")
+        self.assertEqual(runner.preset_of(dataclasses.replace(d, runs=8)), runner.CUSTOM)
+        for name in table.PRESETS:
+            self.assertEqual(runner.preset_of(runner.with_preset(d, name)), name)
+        # the Finish action runs the router's quick
+        quick = runner.with_preset(d, "quick")
+        self.assertEqual((quick.runs, quick.generations, quick.geometry_generations,
+                          quick.until_stop), (14, 3, 0, False))
+
+    def test_a_preset_sets_its_fields_and_follows_them(self):
+        self.assertEqual(fields.follows("preset", "draft"), runner.preset_values("draft"))
+        self.assertEqual(fields.follows("preset", runner.CUSTOM), {})
+        self.assertEqual(fields.follows("scope", "finish"), {})
+        values = dataclasses.asdict(runner.RouteOptions())
+        self.assertEqual(fields.derived(values), {"preset": "final"})
+        values.update(fields.follows("preset", "quick"))
+        self.assertEqual(fields.derived(values), {"preset": "quick"})
+        values["geometry_generations"] = 2
+        self.assertEqual(fields.derived(values), {"preset": runner.CUSTOM})
+
+    def test_fields_are_on_where_they_mean_something(self):
+        def on(name, **values):
+            return fields.enabled(self.field(name), values)
+        for name in ("pair_skew", "pair_zdiff", "pair_all", "via_pairs", "breakouts"):
+            self.assertFalse(on(name, pairs="off"), name)
+            self.assertFalse(on(name, pairs="pull"), name)
+            self.assertTrue(on(name, pairs="band"), name)
+        self.assertFalse(on("pair_pull", pairs="off"))
+        self.assertTrue(on("pair_pull", pairs="pull"))
+        self.assertTrue(on("pair_pull", pairs="band"))
+        for scope, single in (("fresh", False), ("keep_locked", False), ("finish", True),
+                              ("reroute", True)):
+            self.assertEqual(on("nets", scope=scope), single, scope)
+            for name in ("move_parts", "placements", "clear_corridors"):
+                self.assertEqual(on(name, scope=scope), not single, f"{name} {scope}")
+        # as before: a check box or a number that is not 0
+        self.assertTrue(on("open_via_cost", until_stop=True))
+        self.assertFalse(on("placement_seed", placements=0))
+        self.assertTrue(on("scope"))
 
 
 class PlacementsCommandTest(unittest.TestCase):

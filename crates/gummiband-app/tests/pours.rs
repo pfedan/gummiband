@@ -84,10 +84,10 @@ fn finish(board: &str, name: &str, shove: bool) -> gummiband_app::RouteOutcome {
     std::fs::write(&pcb, board).unwrap();
     std::fs::write(pcb.with_extension("kicad_pro"), "{}").unwrap();
     let opts = RouteOptions {
-        runs: 4,
-        generations: 1,
-        geometry_generations: 1,
-        keep_all: true,
+        runs: Some(4),
+        generations: Some(1),
+        geometry_generations: Some(1),
+        scope: gummiband_app::Scope::Finish,
         nets: vec!["GND".into()],
         shove: Some(shove),
         ..Default::default()

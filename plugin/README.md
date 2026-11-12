@@ -48,9 +48,16 @@ PCB editor: click the Gummiband button in the plugin toolbar (the action is list
 *Basic* and an *Advanced* tab; every field explains itself in a tooltip and maps to one option of
 `gummiband route`, see [the plugin guide](../docs/guide/kicad-plugin.md#the-dialog).
 
-- **Keep locked tracks and vias** (default on): locked copper stays as fixed copper the router
-  connects to; all unlocked tracks and vias are replaced. Off: every track and via is replaced
-  (same as `gummiband route` without `--keep-locked`).
+- **Copper that stays** (default: locked tracks and vias): the router's `--scope`. Locked copper
+  stays as fixed copper the router connects to and all unlocked tracks and vias are replaced
+  (`keep_locked`); or nothing stays (`fresh`); or everything stays and what is open is laid
+  (`finish`); or everything stays but the nets named in **Nets**, which are laid again
+  (`reroute`).
+- **Preset** (default Final): the router's `--preset`, which sets the runs, the generations, the
+  geometry generations and *Keep improving*. The words and what each sets come from the
+  router's own table (`gb_plugin/route_options.json`, kept equal to it by a test of
+  gummiband-app; `cargo run -p gummiband-app --example plugin_table >
+  plugin/gb_plugin/route_options.json` writes it anew after a change of the table).
 - **Save an animation of the generations** (off by default): one image per generation and an
   animated `evolution.gif` in `gummiband-evolution/` next to the project, `--frames`. Needs
   `rsvg-convert` and ImageMagick (`brew install librsvg imagemagick`).

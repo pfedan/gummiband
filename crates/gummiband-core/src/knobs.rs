@@ -318,6 +318,10 @@ knobs! {
         "Open end, combination A: this share of the moves aims at an expensive routed connection; `0` turns it off.";
     PRUNE = "GB_PRUNE", Switch, NotZero, "on",
         "Open end, combination A: a mutant that cannot beat its parent is dropped before its relaxation.";
+    REF_COST = "GB_REF_COST", Switch, Num, "0.5",
+        "Price per mm of a signal track over no copper of the plane next to its layer, and per 2 mm for a split of that plane (`0` turns it off).";
+    OWN_VIA = "GB_OWN_VIA", Switch, Num, "inf",
+        "A plane fan-out ends on a via of its own, not on the via or the fan-out track of another pin of its net (`inf`); a number lets it share a via at that factor of the via cost, `0` as before.";
     PLANE_HOLD = "GB_PLANE_HOLD", Switch, NotZero, "on",
         "Open end: a new via that reaches the plane of its net stays in it when it is moved.";
     NO_RELAX = "GB_NO_RELAX", Switch, Set, "off",
@@ -386,6 +390,12 @@ knobs! {
         "Negotiated routing: price of a crossing that leaves an edge no room at all.";
     NEG_RESERVE = "GB_NEG_RESERVE", Experiment, Num, "0.05",
         "Negotiated routing: room in mm per gap on an edge from which on a crossing is free.";
+    NEG_VIA = "GB_NEG_VIA", Experiment, Num, "0",
+        "Negotiated routing: a new via costs at least this many crossings at the price of the round (0: the plain via price).";
+    NEG_VIA_CAP = "GB_NEG_VIA_CAP", Experiment, Num, "3",
+        "Negotiated routing: the most that GB_NEG_VIA raises the price of a via, as a multiple of the plain via price.";
+    BACK_COST = "GB_BACK_COST", Experiment, Num, "0",
+        "Extra cost per mm of track on the back layer of a board with more than one routing layer (0: off).";
     MAXEXP = "GB_MAXEXP", Experiment, Num, "400000",
         "Most expansions of one search for a connection.";
     RIPUP = "GB_RIPUP", Experiment, Num, "3",

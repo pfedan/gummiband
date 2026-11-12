@@ -84,16 +84,30 @@ front end.
 - `RouteOptions` has every option. `Default` gives the documented defaults from the constants in
   `gummiband_app::defaults`; the clap defaults of the CLI name these constants and the MCP server
   falls back to `RouteOptions::default()`. Options that follow from others are `Option`s with one
-  method each that resolves them: `move_parts` (on unless `keep_all`), `shove` (on when finishing
-  nets with fixed parts), `give` (8 mm when finishing nets), `air` (0.03 mm in an open ended run
-  of the whole board).
+  method each that resolves them: `move_parts` (on with `scope` fresh and keep_locked), `shove` (on for single
+  nets on kept copper with fixed parts: `scope` reroute, or finish with `nets`), `give` (8 mm
+  there), `air` (0.03 mm in every other open ended run), `pair_pull` (1 with `pairs` pull, 0 with band).
 - `OPTIONS` is the table of them: name, kind of value, default in words and one sentence per
   option. The CLI offers each as `--kebab-case`, the MCP tool `route` as an argument of the same
   name. Three tests keep this true: the table against the fields of `RouteOptions`
   (`options.rs`), the flags of `gummiband route` against the table (`gummiband-cli`), the
   arguments of the tool against the table (`gummiband-mcp`). What a front end adds of its own
-  is listed in its test (`OWN`): where the result goes and how it is shown. Help texts are to
-  be generated from the table.
+  is listed in its test (`OWN`): where the result goes and how it is shown. An option with a
+  fixed list of words (`Kind::Choice`: `scope`, `preset`, `pairs`, `angles`) has its words in the table, each with
+  one sentence. The CLI's `--help` and the schema of the MCP tool take the words and the text
+  from there (`OptionDoc::describe`), and the type of the option parses with the table
+  (`Pairs::parse`). The other help texts are to follow.
+- `gummiband_app::export` writes the table and the presets as JSON for the front end that is
+  not Rust: the KiCad plugin keeps a copy (`plugin/gb_plugin/route_options.json`) and takes the
+  words of `scope`, `preset` and `pairs`, their sentences and the values of the presets from it.
+  A test (`tests/plugin_table.rs`) fails when the copy differs and names the command that
+  writes it anew (`cargo run -p gummiband-app --example plugin_table`).
+- `gummiband_app::old` holds the spellings of earlier versions that the front ends still take
+  (`pairs` as a switch, `pair_pull` without `pairs`, the switches `keep_locked`, `keep_all` and
+  `reroute` that `scope` replaced): one function per option that gives the
+  value of today and a `Respelled`, the line that says what to write now. The CLI prints it as
+  `note: ...`, the MCP tool returns it in `notes`. The old spellings are hidden flags of the
+  CLI and no part of the MCP schema; the tests there pin each mapping.
 - `RouteOptions::validate` checks the options against each other. Options that contradict each
   other are errors that say what to change, and nothing is adjusted silently; `route_board` and
   `route_file` call it first, so both front ends return the same message.
@@ -190,7 +204,20 @@ each layer stays planar by construction.
 
 - Search: A* over (triangle, entry edge, slot, layer), loop free, with via transitions to sites
   inside the triangle or to existing via vertices, through-hole pads as free layer changes,
-  plane fan-out goals (a via inside the plane outline or a nearby through-hole pad).
+  plane fan-out goals (a via inside the plane outline or a nearby through-hole pad). Every pin of
+  a plane net reaches the plane through a via of its own: a via another pin fanned out through
+  and the fan-out track of another pin are no goal (`RouterConfig::own_plane_vias`,
+  `GB_OWN_VIA`), because pins on one via share its impedance and the noise of one goes into
+  the other. Vias of the kept copper and through hole pads stay goals for every pin.
+- Return paths: a step of a signal net on a layer next to a plane layer pays per mm where none
+  of its reference planes (the plane layers right above and below) has copper, and 2 mm for
+  every split, where it passes from the plane of one net into that of another
+  (`refplane::RefMap`, rastered at 0.25 mm once per board; `RouterConfig::ref_cost`,
+  `GB_REF_COST`, 0.5 by default). Nets with a plane of their own and nets of clearly wide
+  classes do not pay. Only the zone outlines count, not the antipads; `route` prints what is
+  left (`return paths: ...`), the MCP tool `reference_check` measures the filled zones.
+- Grounds: a board with more than one ground net by name (GND, AGND, PGND, VSS, ...) gets a
+  warning in `info`, `route` and `load_board` (`Board::ground_warning`).
 - Capacity: packing of all crossings on an edge with end demands, apex bounds, net class
   clearances and custom rule clearances between net pairs.
 - Track width: net class width; near pins it may neck down to 0.25 mm if no minimum width rule
@@ -273,7 +300,7 @@ the portals, where a wrap around a far pivot could swing past a neighbour.
 
 ## Importing existing copper
 
-For finishing nets on a routed board (`--keep-all --nets`, shove on by default) the unlocked
+For finishing nets on a routed board (`--scope finish --nets` and `--scope reroute`, shove on by default) the unlocked
 tracks and vias of the other nets are no obstacles but part of the topology
 (`gummiband-core::import`). `finish_nets` drives it in the route pipeline: when a
 connection still finds no way, the nets near its pins give way in growing circles, and the try
@@ -484,7 +511,7 @@ for the shifts of `--move-parts`, with all routed copper awake, before it consid
 
 ## Differential pairs
 
-With `--pairs` (`gummiband_core::pairs`, experimental, off by default) a pair is routed as one wide
+With `--pairs band` (`gummiband_core::pairs`, experimental, off by default) a pair is routed as one wide
 track and split afterwards.
 
 1. Merge: the two nets become one net whose track is as wide as both tracks and their gap, with a
@@ -571,13 +598,13 @@ pad-to-die lengths; skew against the longest net of a group; coupling of exactly
 and the gap fits the rule. Tracks of tuning patterns stay out of the coupling, as in KiCad.
 
 Before that, still inside the geometry step, `tune::make_room` makes room: `room_wanted` gives
-every net (with `--pairs` every pair band, keyed by its P net) that is too short an extra width
+every net (with `--pairs band` every pair band, keyed by its P net) that is too short an extra width
 of twice the bump height its missing length needs, from the gain of one bump per `4r` of line
 (`2h + (2 pi - 8) r`), clamped to `[2r, amplitude]`. `push_aside` widens these tracks in steps of
 0.15 mm with `relax` (no tension, vias fixed, only the widened tracks and what they touch awake),
 keeps the old width as necks at the ends, near pads and zones and at spots that already had a
 violation, then pulls the moved tracks taut and restores the widths. `make_room_judged` keeps the
-result only if the judge (the router's clearance check, with `--pairs` on the split geometry)
+result only if the judge (the router's clearance check, with `--pairs band` on the split geometry)
 finds no spot that was not there before; otherwise it bisects the set and pushes the halves on
 top of what was accepted, at most 12 pushes. In `pairs.rs` this runs on the merged board, before
 the split.
@@ -753,7 +780,7 @@ hints on, all off by default (and then byte for byte the same as without them):
   of one pin row out and lays them again in the order of their pins, from one end, the other,
   the middle out or the ends in.
 - `pairs`: the connections of differential pairs (as two nets, or as the one wide net of
-  `--pairs`) go before the other signal connections of their priority, the longest first: a pair
+  `--pairs band`) go before the other signal connections of their priority, the longest first: a pair
   has the fewest ways, and a wide track that comes late finds its corridor taken
   (`Router::order_keys`).
 - `groups`: the connections between the same two parts (ICs or connectors, at least 4 pins on

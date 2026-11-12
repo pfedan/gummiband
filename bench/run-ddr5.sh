@@ -1,7 +1,7 @@
 #!/bin/sh
 # Route the prepared DDR5 benchmark (prepare-ddr5.sh), measure it against its length rules as
 # KiCad does and judge it with the KiCad DRC, next to the measurements of Antmicro's routing.
-# Usage: bench/run-ddr5.sh [extra gummiband route args]     (e.g. --pairs)
+# Usage: bench/run-ddr5.sh [extra gummiband route args]     (e.g. --pairs band)
 set -eu
 export PATH=/opt/homebrew/opt/rustup/bin:$PATH
 B=$(cd "$(dirname "$0")" && pwd)

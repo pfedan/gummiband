@@ -33,7 +33,9 @@ because they fit only one board. *Defaults* brings back the values below.
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| Keep locked tracks and vias | on | Locked copper stays and is routed around. All unlocked tracks and vias are replaced. Off: everything is replaced, locked or not. |
+| Copper that stays | Locked tracks and vias | What of the copper on the board stays, the router's `--scope`. *Locked tracks and vias; the rest is laid anew* (`keep_locked`): locked copper stays and is routed around, all unlocked tracks and vias are replaced. *Nothing* (`fresh`): everything is replaced, locked or not. *Everything; lay what is still open* (`finish`): no track or via is replaced, the open connections are laid, for nets you laid by hand with the rest left to the router. *Everything but the nets below, which are laid again* (`reroute`): the unlocked copper of the named nets is replaced, everything else stays. The first two are remembered; the other two fit one moment of one board. |
+| Nets | from the selection | With the last two scopes: the nets to lay, separated by commas. The dialog fills in the nets of the tracks, vias and pads that are selected when it opens. Laying nets again needs them; with *lay what is still open* an empty field means every open connection. The unlocked tracks of other nets shift aside and give way within 8 mm, as in [Finish selected nets](#finish-selected-nets-follow-me-experimental). |
+| Preset | Final | How much search the run gets, the router's `--preset`: *Draft* (4 runs, 1 generation, no geometry generations: does the board route at all?), *Quick* (no geometry generations, about a third of the time), *Standard* (14 runs, 3 generations, 3 geometry generations) or *Final* (*Standard* and *Keep improving*). Choosing one sets the four fields below it; change one of them and the preset reads *Custom*. *Final* keeps improving until you accept, where the command line stops after 10 minutes. |
 | Parallel runs | 14 | How many routing attempts with different orders are tried in every phase. The default is a constant, not the core count, so the same board gives the same result on every machine; the core count only changes how long it takes. More runs explore more orders. |
 | Via cost (mm of track) | 3.0 | How much track a via is worth to the router. Lower values give more vias and shorter tracks, higher values fewer vias. The search also tries values around it. |
 | Generations | 3 | Rounds of the order search after the first runs, judged by routed connections, vias and length. |
@@ -42,7 +44,7 @@ because they fit only one board. *Defaults* brings back the values below.
 | Keep improving until I accept the result | on | After the normal search the router keeps working on the result until you press *Accept current result*. Not together with pairs routed as one wide track. |
 | Via price while improving (mm of track) | 20 | With *Keep improving*: how much track a via is worth when the improvement judges its results (`--open-via-cost`). Lower gives more vias and shorter tracks, higher fewer vias and longer tracks. |
 | Preferred track width (mm) | 0 (off) | Tracks of the default net class push aside what can give way and grow up to this width where there is room, with a taper at every change of width. Other classes get a target of their own with a custom rule `track_width (opt ...)`, see [Wider tracks where there is room](concepts.md#wider-tracks-where-there-is-room). |
-| Let parts shift to open channels | on | The geometry generations may shift parts next to clearance problems and open connections (`--move-parts`), so at least one of them is needed; the routed tracks follow like rubber bands. A setting remembered from an earlier version stays as it was: tick it once. Finishing nets leaves the parts where they are. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay. The moved footprints arrive in the same undo step as the tracks, and the message box lists them. |
+| Let parts shift to open channels | on | The geometry generations may shift parts next to clearance problems and open connections (`--move-parts`), so at least one of them is needed. Greyed out where all copper stays (the scopes `finish` and `reroute`): there the parts stay too; the routed tracks follow like rubber bands. A setting remembered from an earlier version stays as it was: tick it once. Finishing nets leaves the parts where they are. Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay. The moved footprints arrive in the same undo step as the tracks, and the message box lists them. |
 | First placement seed | 1 | With *Placements to try*: the placements use this seed and the ones after it (`--placement-seed`). After every run it moves on by the number of placements, so the next run tries placements it has not seen; the message box names the seed that won. *New* draws another one. |
 | Search seed | 0 (fixed) | Seed of the routing search (`--seed`). The same seed gives the same result, another seed another attempt, often with quite different vias and violations. *New* draws one; try two or three before judging a setting. |
 | Parts that never move | | With the option above: references that stay in addition (`--fixed`). |
@@ -82,13 +84,13 @@ over the same two or three search seeds: one run says little.
 | Planned pours (nets) | | `--pour` | With the option above: nets that get a pour on both outer layers after the route. The route takes the pour as the zone of the net; lay it afterwards. |
 | Net widths file | | `--net-widths` | JSON file with a track width per net, or an object of options per net (see the CLI reference). |
 | Net priorities file | | `--net-priorities` | JSON file with a routing priority per net; lower routes first. |
-| Route pairs as one wide track | off | `--pairs` | Experimental: routes each differential pair as one wide track and splits it into two. Costs connections on dense boards. |
-| Length difference | 0.1 mm | `--pair-skew` | With pairs: length difference left within a pair. |
-| Differential impedance | 0 (off) | `--pair-zdiff` | With pairs: sets the track width per layer from the stackup. |
-| Also pairs without a pair rule or class | off | `--pair-all` | With pairs: every pair recognised by name. |
-| Vias of a pair as one capsule | off | `--via-pairs` | Experimental, with pairs: two vias side by side turn with the pair as one capsule. Helps pairs that change layers often. |
-| Single tracks into the pads | off | `--breakouts` | Experimental, with pairs: the wide track ends just outside the pads. Helps at connector rows, not yet on DDR. |
-| Pair pull | 0 | `--pair-pull` | How strongly the two nets of a pair attract each other while routing; 1 is a good start. The gentle way to couple pairs on a board that is not dense. |
+| Pairs | Each net on its own | `--pairs` | How the two nets of a differential pair are laid. *Each net on its own* (`off`). *Pull the two nets together* (`pull`, experimental): the gentle way to couple pairs on a board that is not dense, for every pair recognised by name. *One wide track per pair* (`band`, experimental): each pair is one wide track that is split into two; costs connections on dense boards, and has no *Keep improving*. |
+| Pair pull | 0 (the router's) | `--pair-pull` | With *Pull* and *One wide track*: how strongly the two nets of a pair attract each other while routing. 0 leaves it to the router: 1 with the pull, a good start. With the wide track a weight pulls the pairs that get none. |
+| Length difference | 0.1 mm | `--pair-skew` | With the wide track: length difference left within a pair. |
+| Differential impedance | 0 (off) | `--pair-zdiff` | With the wide track: sets the track width per layer from the stackup. |
+| Also pairs without a pair rule or class | off | `--pair-all` | With the wide track: every pair recognised by name. |
+| Vias of a pair as one capsule | off | `--via-pairs` | Experimental, with the wide track: two vias side by side turn with the pair as one capsule. Helps pairs that change layers often. |
+| Single tracks into the pads | off | `--breakouts` | Experimental, with the wide track: it ends just outside the pads. Helps at connector rows, not yet on DDR. |
 | Extra air over the clearance | 0.03 mm | `--air` | With *Keep improving*: reserve on top of the clearances where there is room. |
 
 **Teardrops.** KiCad's plugin API has no setting for teardrops on vias and pads, so `--teardrops`
@@ -143,10 +145,14 @@ at instead of rerouting the board:
    room; what the new track does not touch stays exactly as it was. If there is still no way,
    unlocked tracks of other nets within 8 mm of the pin are rerouted. Locked copper and plane
    nets such as GND never move.
-4. The additions arrive as one undo step. There is no dialog: the action runs with the defaults
-   (14 runs, via cost 3.0) and without geometry generations, so it is quick.
+4. The additions arrive as one undo step. There is no dialog: the action runs with the preset
+   *Quick* (14 runs, 3 generations, no geometry generations) and via cost 3.0.
 
-This is the plugin's form of `gummiband route --keep-all --nets A,B` (it passes `--shove --give 8`, the defaults there). The
+This is the plugin's form of `gummiband route --scope finish --nets A,B --preset quick`; the
+tracks of other nets shift aside and give way within 8 mm by the router's defaults there. The
+same with a dialog, with other settings or open ended, is the routing dialog with *Copper that
+stays* set to *Everything; lay what is still open*, and *Everything but the nets below* lays a
+net again that is already connected. The
 button is new and not yet tested live in KiCad. Refill the zones (B) before you run the DRC:
 after vias moved, stale plane fills report errors that are not there. Moved vias lose their
 teardrop settings.

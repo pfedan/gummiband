@@ -2,7 +2,7 @@
 //! The boards are those of `bench/boards/areas`.
 
 use gummiband_app::areas::route_plan;
-use gummiband_app::{Areas, Hooks, RouteOptions, parse_pour, route_file};
+use gummiband_app::{Areas, Hooks, RouteOptions, Scope, parse_pour, route_file};
 use gummiband_kicad::{ReadOptions, read_board};
 
 fn bench(board: &str) -> std::path::PathBuf {
@@ -13,9 +13,9 @@ fn bench(board: &str) -> std::path::PathBuf {
 
 fn quick(areas: Areas, pour: &[&str]) -> RouteOptions {
     RouteOptions {
-        runs: 4,
-        generations: 1,
-        geometry_generations: 1,
+        runs: Some(4),
+        generations: Some(1),
+        geometry_generations: Some(1),
         move_parts: Some(false),
         areas,
         pour: pour.iter().map(|s| s.to_string()).collect(),
@@ -128,7 +128,7 @@ fn a_pad_the_pour_does_not_reach_is_joined_to_it() {
 #[test]
 fn an_island_of_fill_gets_one_via_and_no_track() {
     let locked = |stitch: Option<bool>| RouteOptions {
-        keep_locked: true,
+        scope: Scope::KeepLocked,
         area_stitch: stitch,
         ..quick(Areas::Fill, &[])
     };
@@ -162,7 +162,7 @@ fn an_island_of_fill_gets_one_via_and_no_track() {
 #[test]
 fn the_last_check_keeps_what_ends_in_the_fill_where_pieces_of_fill_are_left_out() {
     let opts = RouteOptions {
-        keep_locked: true,
+        scope: Scope::KeepLocked,
         ..quick(Areas::Fill, &[])
     };
     let out = route("area_island", "island", &opts);

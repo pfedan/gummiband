@@ -65,6 +65,8 @@ Each turns off a behaviour that is on by default (or, for the `GB_NO_*` names, a
 | `GB_BANDIT` | `0` turns it off | on | Open end, combination A: the via price of a move is drawn by what has won on this board (Thompson sampling). |
 | `GB_AIM_COST` | number | 0.25 | Open end, combination A: this share of the moves aims at an expensive routed connection; `0` turns it off. |
 | `GB_PRUNE` | `0` turns it off | on | Open end, combination A: a mutant that cannot beat its parent is dropped before its relaxation. |
+| `GB_REF_COST` | number | 0.5 | Price per mm of a signal track over no copper of the plane next to its layer, and per 2 mm for a split of that plane (`0` turns it off). |
+| `GB_OWN_VIA` | number | inf | A plane fan-out ends on a via of its own, not on the via or the fan-out track of another pin of its net (`inf`); a number lets it share a via at that factor of the via cost, `0` as before. |
 | `GB_PLANE_HOLD` | `0` turns it off | on | Open end: a new via that reaches the plane of its net stays in it when it is moved. |
 | `GB_NO_RELAX` | set to anything | off | The search returns its best topology without the geometry stage (for `examples/relax_bench.rs`). |
 | `GB_NO_POLISH` | set to anything | off | Skips the polish relaxation of a winner that has clearance spots left. |
@@ -105,6 +107,9 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_NEG_CROSSING` | number | 1.5 | Negotiated routing: starting price per crossed track of another net. |
 | `GB_NEG_TIGHT` | number | 3.0 | Negotiated routing: price of a crossing that leaves an edge no room at all. |
 | `GB_NEG_RESERVE` | number | 0.05 | Negotiated routing: room in mm per gap on an edge from which on a crossing is free. |
+| `GB_NEG_VIA` | number | 0 | Negotiated routing: a new via costs at least this many crossings at the price of the round (0: the plain via price). |
+| `GB_NEG_VIA_CAP` | number | 3 | Negotiated routing: the most that GB_NEG_VIA raises the price of a via, as a multiple of the plain via price. |
+| `GB_BACK_COST` | number | 0 | Extra cost per mm of track on the back layer of a board with more than one routing layer (0: off). |
 | `GB_MAXEXP` | number | 400000 | Most expansions of one search for a connection. |
 | `GB_RIPUP` | number | 3 | Rip-up passes of a router run. |
 | `GB_ESCAPE` | number | 0 | Extra cost in mm for passing right next to a pad of another net that still waits for its route. |

@@ -78,7 +78,7 @@ bench/hashes.sh easy bus            # print the hashes of some boards, compare n
 
 Every board is routed with `--runs 4 --generations 1 --geometry-generations 0 --no-move-parts`.
 A few extra runs on small boards cover option paths the plain run does not touch (the defaults,
-`--angles 45`, `--pairs`, `--pair-pull`, `--patterns groups`, `--negotiate`); their names carry a
+`--angles 45`, `--pairs band`, `--pairs pull`, `--patterns groups`, `--negotiate`); their names carry a
 `+`, as in `medium+45`. `--check` prints a diff and exits with 1 when a hash differs, and a run
 that fails shows up as `FAILED` in place of its hash. `RAYON_NUM_THREADS` sets the threads
 (default 4) and changes the time only.
