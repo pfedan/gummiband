@@ -429,6 +429,16 @@ of the nets that gave way; the soft copper shifts aside in its relaxation as in 
    runs between vias, branches and pads, each run is one track, and `soft_changes` names the
    file items to replace; runs that did not change stay in the file.
 
+### Copper areas after the route
+
+`fill.rs` is a model of how KiCad fills a zone: a raster over the board, the clearances of the
+copper of other nets, thermal spokes, the minimum width, and the pieces that are left. `ground.rs`
+counts those pieces for a pour of one net over the whole board: how many there are on a layer,
+which share of the fill the largest holds, and how many pads of the net sit on another piece. A
+ground area works where it is one piece under the tracks, so this is the number to hold a route
+against; `cargo run --release --example ground BOARD.kicad_pcb [NET]` prints it for a routed
+file. It is a measurement: no step of the route reads it yet.
+
 ## Moving parts with the copper
 
 `follow::follow_steps` moves parts from one set of footprint offsets to another in steps no
