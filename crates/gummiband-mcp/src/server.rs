@@ -1253,6 +1253,10 @@ pub struct LoadBoardOut {
     /// Differential pairs recognised by net name (`..P`/`..N`, `..+`/`..-`). route couples
     /// them only with `pairs` "pull" or "band".
     pub diff_pairs: Vec<DiffPairOut>,
+    /// Nets that are a ground by name (GND, AGND, PGND, VSS, ...).
+    pub ground_nets: Vec<String>,
+    /// Things to look at before routing: more than one ground net.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1847,6 +1851,12 @@ impl Gummiband {
                     class: b.class_of(p).name.clone(),
                 })
                 .collect(),
+            ground_nets: b
+                .ground_nets()
+                .iter()
+                .map(|&n| b.nets[n as usize].name.clone())
+                .collect(),
+            warnings: b.ground_warning().into_iter().collect(),
         };
         let summary = format!(
             "Loaded {} as board {id}: {:.1} x {:.1} mm, {} copper layers ({}), {} pins, {} nets ({} to route, {} connections), {} net classes, {} custom rules.",
@@ -1869,7 +1879,12 @@ impl Gummiband {
             out.connections,
             b.classes.len(),
             custom_rules
-        ) + &pairs_note(&out.diff_pairs);
+        ) + &pairs_note(&out.diff_pairs)
+            + &out
+                .warnings
+                .iter()
+                .map(|w| format!(" Warning: {w}."))
+                .collect::<String>();
         boards.insert(
             id,
             Entry {

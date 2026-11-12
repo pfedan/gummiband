@@ -318,6 +318,10 @@ knobs! {
         "Open end, combination A: this share of the moves aims at an expensive routed connection; `0` turns it off.";
     PRUNE = "GB_PRUNE", Switch, NotZero, "on",
         "Open end, combination A: a mutant that cannot beat its parent is dropped before its relaxation.";
+    REF_COST = "GB_REF_COST", Switch, Num, "0.5",
+        "Price per mm of a signal track over no copper of the plane next to its layer, and per 2 mm for a split of that plane (`0` turns it off).";
+    OWN_VIA = "GB_OWN_VIA", Switch, Num, "inf",
+        "A plane fan-out ends on a via of its own, not on the via or the fan-out track of another pin of its net (`inf`); a number lets it share a via at that factor of the via cost, `0` as before.";
     PLANE_HOLD = "GB_PLANE_HOLD", Switch, NotZero, "on",
         "Open end: a new via that reaches the plane of its net stays in it when it is moved.";
     NO_RELAX = "GB_NO_RELAX", Switch, Set, "off",
