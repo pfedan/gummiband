@@ -3,8 +3,10 @@
 pub mod board;
 pub mod check;
 pub mod exit;
+pub mod fill;
 pub mod follow;
 pub mod geom;
+pub mod ground;
 pub mod import;
 mod improve;
 pub mod index;

@@ -6,7 +6,7 @@
 //! why, the own check of the two constructions, and what one relaxation with a given number of
 //! rounds leaves of each.
 //! Usage: band_stage BOARD OUT.json [--seed N] [--runs N] [--generations N]
-//!        [--geometry-generations N] [--rounds 100,200,400]
+//!        [--geometry-generations N] [--rounds 100,200,400] [--svg FILE [--svg-layer N]]
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -279,8 +279,24 @@ fn main() -> anyhow::Result<()> {
             .all(|(x, y)| x.seg == y.seg && x.net == y.net && x.layer == y.layer);
 
     let mut construction = serde_json::Map::new();
-    for (mode, on) in [("edge", false), ("stack", true)] {
+    for (mode, on, disc, local, corridor) in [
+        ("edge", false, false, false, false),
+        ("stack", true, false, false, false),
+        ("disc strict", false, true, false, true),
+        ("disc local", false, true, true, true),
+        ("disc alone", false, true, true, false),
+        ("disc", false, true, true, false),
+        ("disc repaired", false, true, true, false),
+    ] {
+        r.disc_inherit = mode != "disc alone";
         r.stack_band = on;
+        r.disc_band = disc;
+        r.disc_local = local;
+        r.disc_corridor = corridor;
+        r.forget_repairs();
+        if mode == "disc repaired" {
+            r.repair_discs(4);
+        }
         let (tc, cc) = (Instant::now(), cpu_seconds());
         let g = r.geometry();
         let (secs, cpu_s) = (tc.elapsed().as_secs_f64(), cpu_seconds() - cc);
@@ -315,6 +331,78 @@ fn main() -> anyhow::Result<()> {
             idle += i.idle;
         }
         let v = clearance(b, &g);
+        // --svg FILE [--svg-layer N]: a drawing of the bands of the discs, the discs and the spots of the check
+        if let (true, Some(file)) = (mode == "disc", flag("--svg")) {
+            use gummiband_core::geom::Shape;
+            use std::fmt::Write;
+            let (mut lo, mut hi) = ((f64::INFINITY, f64::INFINITY), (f64::NEG_INFINITY, f64::NEG_INFINITY));
+            for t in &g.tracks {
+                for p in &t.pts {
+                    lo = (lo.0.min(p.x), lo.1.min(p.y));
+                    hi = (hi.0.max(p.x), hi.1.max(p.y));
+                }
+            }
+            let mut s = format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' viewBox='{} {} {} {}' width='1600'><rect x='{}' y='{}' width='100%' height='100%' fill='white'/>",
+                lo.0 - 1.0,
+                lo.1 - 1.0,
+                hi.0 - lo.0 + 2.0,
+                hi.1 - lo.1 + 2.0,
+                lo.0 - 1.0,
+                lo.1 - 1.0
+            );
+            let layer: u8 = flag("--svg-layer").and_then(|x| x.parse().ok()).unwrap_or(0);
+            for o in b.obstacles.iter().filter(|o| o.layers.has(layer)) {
+                match &o.shape {
+                    Shape::Circle { c, r } => write!(s, "<circle cx='{}' cy='{}' r='{}' fill='#bbb'/>", c.x, c.y, r)?,
+                    Shape::Capsule { a, b, r } => write!(
+                        s,
+                        "<line x1='{}' y1='{}' x2='{}' y2='{}' stroke='#bbb' stroke-width='{}' stroke-linecap='round'/>",
+                        a.x,
+                        a.y,
+                        b.x,
+                        b.y,
+                        2.0 * r
+                    )?,
+                    Shape::Polygon(p) => {
+                        let pts: Vec<String> = p.pts.iter().map(|q| format!("{},{}", q.x, q.y)).collect();
+                        write!(s, "<polygon points='{}' fill='#bbb'/>", pts.join(" "))?
+                    }
+                }
+            }
+            let colors = ["#c33", "#36c", "#393", "#c80", "#939", "#099"];
+            for t in g.tracks.iter().filter(|t| t.layer == layer) {
+                let col = colors[t.net as usize % colors.len()];
+                for (c, rad, _) in r.debug_discs(t.seg) {
+                    write!(
+                        s,
+                        "<circle cx='{}' cy='{}' r='{}' fill='none' stroke='{col}' stroke-width='0.004' stroke-dasharray='0.02'/>",
+                        c.x, c.y, rad
+                    )?;
+                }
+                let pts: Vec<String> = t.pts.iter().map(|q| format!("{},{}", q.x, q.y)).collect();
+                write!(
+                    s,
+                    "<polyline points='{}' fill='none' stroke='{col}' stroke-opacity='0.45' stroke-width='{}' stroke-linecap='round' stroke-linejoin='round'/>",
+                    pts.join(" "),
+                    t.width
+                )?;
+                write!(
+                    s,
+                    "<polyline points='{}' fill='none' stroke='{col}' stroke-width='0.006'/>",
+                    pts.join(" ")
+                )?;
+            }
+            for x in &v {
+                write!(
+                    s,
+                    "<circle cx='{}' cy='{}' r='0.05' fill='none' stroke='black' stroke-width='0.01'/>",
+                    x.at.x, x.at.y
+                )?;
+            }
+            s.push_str("</svg>");
+            std::fs::write(file, s)?;
+        }
         let mut relaxed = serde_json::Map::new();
         for &n in &rounds {
             let mut gr = g.clone();
@@ -351,7 +439,7 @@ fn main() -> anyhow::Result<()> {
                 "shape": shape(&g),
                 "crossings": crossings(&g).iter().map(|&(i, j, at)| json!({
                     "nets": [b.nets[g.tracks[i].net as usize].name.clone(), b.nets[g.tracks[j].net as usize].name.clone()],
-                    "classes": [class[i], class[j]], "at": [at.x, at.y], "layer": g.tracks[i].layer,
+                    "classes": [class[i], class[j]], "at": [at.x, at.y], "layer": g.tracks[i].layer, "segs": [g.tracks[i].seg, g.tracks[j].seg], "netids": [g.tracks[i].net, g.tracks[j].net],
                 })).collect::<Vec<_>>(),
                 "check": counts(&v),
                 "pairs": pairs(&g, &v, &class),
@@ -387,7 +475,7 @@ fn main() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(scratch.with_extension("kicad_pro"));
     let c = &report["construction"];
     println!(
-        "{name} seed {} band {}: {}/{} routed, {} violations at {} spots, {} vias, {:.0} mm, {:.1} s cpu; construction pieces edge {} stack {}, matched {matched} rebuilt {rebuilt}",
+        "{name} seed {} band {}: {}/{} routed, {} violations at {} spots, {} vias, {:.0} mm, {:.1} s cpu; construction pieces edge {} stack {} disc {}, matched {matched} rebuilt {rebuilt}",
         routed.seed,
         if gummiband_core::knobs::BAND.on() { "on" } else { "off" },
         st.routed,
@@ -399,6 +487,7 @@ fn main() -> anyhow::Result<()> {
         cpu,
         c["edge"]["check"]["pieces"],
         c["stack"]["check"]["pieces"],
+        c["disc"]["check"]["pieces"],
     );
     Ok(())
 }

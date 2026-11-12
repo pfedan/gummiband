@@ -338,6 +338,8 @@ knobs! {
         "Tracks are realised as polylines, without arcs around the corners.";
     BAND = "GB_BAND", Experiment, Set, "off",
         "The band of a track takes the radius of the stack where the track lies next to the vertex it bends around, and where a wrap has no tangent, leaves its portal or its triangles, that wrap alone becomes a corner; today such a track loses all its arcs.";
+    DISC = "GB_DISC", Experiment, Set, "off",
+        "The band of a track is built from discs around every vertex of its triangles, each with the radius the tracks between it and the vertex ask for, pulled taut against them; no portal and no share of the slack.";
     NO_TUNE_ROOM = "GB_NO_TUNE_ROOM", Switch, Set, "off",
         "CLI `route`: length tuning does not make room for its meanders first.";
 
@@ -398,6 +400,12 @@ knobs! {
         "Negotiated routing: price of a crossing that leaves an edge no room at all.";
     NEG_RESERVE = "GB_NEG_RESERVE", Experiment, Num, "0.05",
         "Negotiated routing: room in mm per gap on an edge from which on a crossing is free.";
+    NEG_VIA = "GB_NEG_VIA", Experiment, Num, "0",
+        "Negotiated routing: a new via costs at least this many crossings at the price of the round (0: the plain via price).";
+    NEG_VIA_CAP = "GB_NEG_VIA_CAP", Experiment, Num, "3",
+        "Negotiated routing: the most that GB_NEG_VIA raises the price of a via, as a multiple of the plain via price.";
+    BACK_COST = "GB_BACK_COST", Experiment, Num, "0",
+        "Extra cost per mm of track on the back layer of a board with more than one routing layer (0: off).";
     MAXEXP = "GB_MAXEXP", Experiment, Num, "400000",
         "Most expansions of one search for a connection.";
     RIPUP = "GB_RIPUP", Experiment, Num, "3",
