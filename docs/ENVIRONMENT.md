@@ -105,6 +105,9 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_NEG_CROSSING` | number | 1.5 | Negotiated routing: starting price per crossed track of another net. |
 | `GB_NEG_TIGHT` | number | 3.0 | Negotiated routing: price of a crossing that leaves an edge no room at all. |
 | `GB_NEG_RESERVE` | number | 0.05 | Negotiated routing: room in mm per gap on an edge from which on a crossing is free. |
+| `GB_NEG_VIA` | number | 0 | Negotiated routing: a new via costs at least this many crossings at the price of the round (0: the plain via price). |
+| `GB_NEG_VIA_CAP` | number | 3 | Negotiated routing: the most that GB_NEG_VIA raises the price of a via, as a multiple of the plain via price. |
+| `GB_BACK_COST` | number | 0 | Extra cost per mm of track on the back layer of a board with more than one routing layer (0: off). |
 | `GB_MAXEXP` | number | 400000 | Most expansions of one search for a connection. |
 | `GB_RIPUP` | number | 3 | Rip-up passes of a router run. |
 | `GB_ESCAPE` | number | 0 | Extra cost in mm for passing right next to a pad of another net that still waits for its route. |
