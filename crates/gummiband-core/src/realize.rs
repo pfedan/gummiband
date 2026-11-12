@@ -297,6 +297,11 @@ pub(crate) struct Disc {
     pub(crate) id: u32,
     pub(crate) first: usize,
     pub(crate) last: usize,
+    /// The vertex is an end of an edge the track crosses, so the track is known to pass it on
+    /// `side`. Else the disc reaches in from beside the way of the track (a via in the next
+    /// triangle, the disc of a neighbour): it counts only where the band comes within its
+    /// radius, and is wrapped on `side` then.
+    pub(crate) sure: bool,
 }
 
 /// Radius of the disc of a vertex that asks for no distance ([`Router::disc_path`]): small
@@ -317,7 +322,7 @@ fn disc_deficit(path: &[Point], d: &Disc) -> f64 {
     if !best.0.is_finite() {
         return 0.0;
     }
-    let right_side = best.1 * d.side >= 0.0 || best.0 < 1e-9;
+    let right_side = !d.sure || best.1 * d.side >= 0.0 || best.0 < 1e-9;
     if right_side { d.r - best.0 } else { d.r + best.0 }
 }
 
@@ -758,6 +763,7 @@ impl Router<'_> {
                         id: vid,
                         first: k,
                         last: k,
+                        sure: true,
                     }),
                 }
             }
@@ -1035,6 +1041,7 @@ impl Router<'_> {
                     id: d.id,
                     first: k,
                     last: k,
+                    sure: false,
                 });
                 added += 1;
             }
