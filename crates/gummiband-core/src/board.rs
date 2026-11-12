@@ -772,6 +772,34 @@ impl Board {
         s
     }
 
+    /// Nets that are a ground by their name (GND, AGND, PGND, GNDA, VSS, 0V and the like, the
+    /// last part of a hierarchical name), with at least two pins.
+    pub fn ground_nets(&self) -> Vec<NetId> {
+        let ground = |name: &str| {
+            let n = name.rsplit('/').next().unwrap_or(name).to_ascii_uppercase();
+            n.contains("GND") || n.starts_with("VSS") || n == "0V"
+        };
+        (0..self.nets.len() as NetId)
+            .filter(|&n| self.nets[n as usize].pins.len() >= 2 && ground(&self.nets[n as usize].name))
+            .collect()
+    }
+
+    /// A warning when the board has more than one ground: split grounds make the return current
+    /// of a signal that crosses from one to the other detour, and a filter capacitor on the wrong
+    /// one does not filter. One ground plane is the better default.
+    pub fn ground_warning(&self) -> Option<String> {
+        let g = self.ground_nets();
+        if g.len() < 2 {
+            return None;
+        }
+        let names: Vec<&str> = g.iter().map(|&n| self.nets[n as usize].name.as_str()).collect();
+        Some(format!(
+            "{} ground nets ({}): separate grounds make return currents detour; one ground plane is the better default, joined at one point (a net tie) only where the design needs it",
+            names.len(),
+            names.join(", ")
+        ))
+    }
+
     pub fn net_id(&self, name: &str) -> Option<NetId> {
         self.nets.iter().position(|n| n.name == name).map(|i| i as NetId)
     }
@@ -1037,6 +1065,18 @@ mod tests {
             crate::geom::pt(x1, y1),
             crate::geom::pt(x0, y1),
         ])
+    }
+
+    #[test]
+    fn two_grounds_give_a_warning_one_does_not() {
+        let mut b = crate::topo::tests::two_pad_board();
+        b.nets[0].name = "GND".into();
+        assert!(b.ground_warning().is_none());
+        let mut a = b.nets[0].clone();
+        a.name = "/Audio/AGND".into();
+        b.nets.push(a);
+        let w = b.ground_warning().unwrap();
+        assert!(w.contains("GND, /Audio/AGND"), "{w}");
     }
 
     #[test]

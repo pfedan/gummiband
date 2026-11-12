@@ -204,7 +204,20 @@ each layer stays planar by construction.
 
 - Search: A* over (triangle, entry edge, slot, layer), loop free, with via transitions to sites
   inside the triangle or to existing via vertices, through-hole pads as free layer changes,
-  plane fan-out goals (a via inside the plane outline or a nearby through-hole pad).
+  plane fan-out goals (a via inside the plane outline or a nearby through-hole pad). Every pin of
+  a plane net reaches the plane through a via of its own: a via another pin fanned out through
+  and the fan-out track of another pin are no goal (`RouterConfig::own_plane_vias`,
+  `GB_OWN_VIA`), because pins on one via share its impedance and the noise of one goes into
+  the other. Vias of the kept copper and through hole pads stay goals for every pin.
+- Return paths: a step of a signal net on a layer next to a plane layer pays per mm where none
+  of its reference planes (the plane layers right above and below) has copper, and 2 mm for
+  every split, where it passes from the plane of one net into that of another
+  (`refplane::RefMap`, rastered at 0.25 mm once per board; `RouterConfig::ref_cost`,
+  `GB_REF_COST`, 0.5 by default). Nets with a plane of their own and nets of clearly wide
+  classes do not pay. Only the zone outlines count, not the antipads; `route` prints what is
+  left (`return paths: ...`), the MCP tool `reference_check` measures the filled zones.
+- Grounds: a board with more than one ground net by name (GND, AGND, PGND, VSS, ...) gets a
+  warning in `info`, `route` and `load_board` (`Board::ground_warning`).
 - Capacity: packing of all crossings on an edge with end demands, apex bounds, net class
   clearances and custom rule clearances between net pairs.
 - Track width: net class width; near pins it may neck down to 0.25 mm if no minimum width rule

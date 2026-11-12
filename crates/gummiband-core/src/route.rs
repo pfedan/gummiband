@@ -65,6 +65,16 @@ pub struct RouterConfig {
     /// Pins of a plane net close to each other reach the plane through one via: the leader fans
     /// out, the others connect to it ([`crate::patterns::PlaneShare`]).
     pub share_fanouts: bool,
+    /// Every plane fan-out ends on a via of its own (or a via of the kept copper, or a through
+    /// hole pad), and never on the fan-out track of another pin: pins that share one via share
+    /// its impedance, and the noise of one goes into the other. Infinite: a via laid for another
+    /// pin of the net is no goal; a finite factor lets a fan-out share one at that many times the
+    /// via cost; 0 shares as before, at almost no cost.
+    pub own_plane_vias: f64,
+    /// Price per mm of a step of a signal net over no copper of the planes next to its layer,
+    /// and per [`crate::refplane::SPLIT_MM`] for a split of them: the return current of the
+    /// track has to detour there (0 = off, see [`crate::refplane`]).
+    pub ref_cost: f64,
     /// The connection between a decoupling capacitor and its IC pin goes before everything else.
     pub decaps_first: bool,
     /// Share of the moves of the open end that re-lay the connections of one pin row in pin
@@ -111,6 +121,8 @@ impl Default for RouterConfig {
             hotspots: Default::default(),
             patterns: None,
             share_fanouts: false,
+            own_plane_vias: knobs::OWN_VIA.num(),
+            ref_cost: knobs::REF_COST.num(),
             decaps_first: false,
             row_moves: 0.0,
             pairs_first: false,
@@ -227,6 +239,9 @@ pub struct ViaInfo {
     pub drill: f64,
     pub clearance: f64,
     pub users: u32,
+    /// Part of the kept copper (soft copper of the input): it stays for good, and any pin of its
+    /// net may fan out to it.
+    pub kept: bool,
 }
 
 /// Prices of the negotiation phase in mm of track, see [`Router::negotiate`].
@@ -807,6 +822,7 @@ impl<'a> Router<'a> {
             drill: 0.0,
             clearance: 0.0,
             users: 0,
+            kept: false,
         }))
     }
 
@@ -941,6 +957,15 @@ impl<'a> Router<'a> {
         let Some((g, pitch)) = guide else { return 0.0 };
         let d = guide_dist(g, li, q, 2.0 + pitch);
         self.cfg.pair_pull * step * ((d - pitch).max(0.0) / 2.0).min(1.0)
+    }
+
+    /// The reference planes of the routing layers, rastered on first use.
+    fn ref_map(&self) -> Option<&crate::refplane::RefMap> {
+        self.sub
+            .shared
+            .ref_map
+            .get_or_init(|| crate::refplane::RefMap::build(self.board, &self.sub.layers).map(std::sync::Arc::new))
+            .as_deref()
     }
 
     /// Extra cost of the step a-b on routing layer li for leaving the layer's preferred
@@ -1711,6 +1736,7 @@ impl<'a> Router<'a> {
             drill,
             clearance,
             users: 0,
+            kept: false,
         }
     }
 
@@ -2131,6 +2157,7 @@ impl<'a> Router<'a> {
                 drill: n.drill,
                 clearance: n.clearance,
                 users: 1,
+                kept: true,
             },
         );
         self.via_cells.entry(Self::via_cell(n.at)).or_default().push(site);
@@ -2186,6 +2213,12 @@ impl<'a> Router<'a> {
             Some((g.as_slice(), w + gap))
         });
         let net = conn.net;
+        // a step that leaves the reference plane of its layer pays (refplane)
+        let refs = (self.cfg.ref_cost > 0.0).then(|| self.ref_map()).flatten();
+        let ref_price = |li: usize, a: Point, b: Point| match refs {
+            Some(m) if m.applies(li, net) => self.cfg.ref_cost * m.penalty(li, a, b),
+            _ => 0.0,
+        };
         // a via in a pad is a last resort
         let via_in_pad = self.cfg.via_in_pad;
         let cls = self.board.class_of(net);
@@ -2473,7 +2506,13 @@ impl<'a> Router<'a> {
                     node.g
                 } else {
                     let step = node.pos.dist(q);
-                    node.g + step + self.across(lu, node.pos, q) + escape + self.pull(guide, lu, q, step) + price
+                    node.g
+                        + step
+                        + self.across(lu, node.pos, q)
+                        + ref_price(lu, node.pos, q)
+                        + escape
+                        + self.pull(guide, lu, q, step)
+                        + price
                 };
                 let kind = NK::Tri {
                     t: t2,
@@ -2751,6 +2790,17 @@ impl<'a> Router<'a> {
                         let q = m.verts[v as usize];
                         let d = node.pos.dist(q);
                         if conn.goal == Goal::Plane && self.in_plane(q, net) {
+                            // a via another pin fanned out through is not this pin's way into
+                            // the plane (own_plane_vias), nor a stop on the way to it
+                            let shared = existing && !self.vias.get(&site).is_some_and(|x| x.kept);
+                            let vc = if shared && self.cfg.own_plane_vias > 0.0 {
+                                if self.cfg.own_plane_vias.is_infinite() {
+                                    continue;
+                                }
+                                via_cost * self.cfg.own_plane_vias
+                            } else {
+                                vc
+                            };
                             push(best, nodes, open, NK::GoalVia { site }, q, node.g + d + vc * 0.5, idx);
                             continue;
                         }
@@ -4122,6 +4172,10 @@ impl<'a> Router<'a> {
     fn tappable(&self, ci: usize) -> HashSet<u32> {
         let c = &self.conns[ci];
         if !self.cfg.taps || self.partner.contains_key(&c.net) {
+            return HashSet::new();
+        }
+        // a plane fan-out that ends on the fan-out of another pin shares its via
+        if c.goal == Goal::Plane && self.cfg.own_plane_vias > 0.0 {
             return HashSet::new();
         }
         let mine = self.net_side(c.net, &[c.from]);

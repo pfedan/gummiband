@@ -698,6 +698,9 @@ fn main() -> Result<()> {
                 routable,
                 conns
             );
+            if let Some(w) = b.ground_warning() {
+                println!("warning: {w}");
+            }
             println!("patterns:");
             for line in gummiband_core::patterns::find(b).summary(b) {
                 println!("  {line}");
@@ -806,6 +809,9 @@ fn main() -> Result<()> {
             let outcome = gummiband_app::route_file(&board, &output, &opts, &hooks)?;
             let r = &outcome.routed;
             let (b, sub, res) = (&r.board, &r.sub, &r.res);
+            if let Some(w) = b.ground_warning() {
+                println!("warning: {w}");
+            }
             if !outcome.skipped_nets.is_empty() {
                 println!("nets left out: {}", outcome.skipped_nets.len());
             }
@@ -961,6 +967,12 @@ fn main() -> Result<()> {
             }
             let matching = &r.matching;
             print_matching(matching);
+            if let Some(m) = gummiband_core::refplane::measure(b, &res.geometry.tracks) {
+                println!(
+                    "return paths: {:.0} mm of signal track next to a plane, {:.1} mm over no plane copper, {} splits crossed",
+                    m.checked_mm, m.gap_mm, m.splits
+                );
+            }
             let viol = &r.violations;
             let spots = gummiband_core::check::spots(&viol).len();
             println!("clearance check: {} violations at {spots} spots", viol.len());
