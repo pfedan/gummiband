@@ -308,6 +308,9 @@ pub(crate) struct Disc {
 /// enough that its arc is drawn as a corner.
 const POINT_DISC: f64 = 1e-5;
 
+/// What two neighbouring tracks keep between their discs beyond their gap, mm.
+const DISC_SAG: f64 = 0.002;
+
 /// How far the polyline `path` falls short of disc `d`: its radius less the distance of the
 /// nearest piece from the centre, where the centre lies on the side the disc asks for; where it
 /// lies on the other side, the radius plus that distance (the string has to come round).
@@ -698,6 +701,11 @@ impl Router<'_> {
         self.discs_and_portals(sid).0
     }
 
+    /// The discs of a segment as (centre, radius, side) for a drawing.
+    pub fn debug_discs(&self, sid: u32) -> Vec<(Point, f64, f64)> {
+        self.discs(sid).iter().map(|d| (d.c, d.r, d.side)).collect()
+    }
+
     /// [`Router::discs`], and per crossing the portal those radii leave on its edge (left,
     /// right in the direction of travel): from the radius at one end to the radius at the
     /// other, the point in between in proportion where the two take more than the edge has.
@@ -817,6 +825,9 @@ impl Router<'_> {
                 let need = self.end_need_square(li, c.e, end, it);
                 if need > 0.0 { need + margin + hot } else { 0.0 }
             };
+            // between two tracks the arcs of both lie a little apart, so that what the pieces
+            // of the arcs cut off does not count against the gap
+            let hot = hot + DISC_SAG;
             // from u inwards to the track, and from v
             let mut ru: f64 = 0.0;
             for i in 0..=idx {
@@ -896,13 +907,36 @@ impl Router<'_> {
                 info.gave_way[0] += 1;
             }
         }
+        // a gate: a short edge between two vertices that ask for nothing, the exit of a pad of
+        // the track's own net. The track goes through its middle, so no disc reaches that far.
+        let s = self.segs[sid as usize].as_ref().unwrap();
+        let m = &self.sub.m[s.li as usize];
+        {
+            let small = |id: u32, discs: &[Disc]| discs.iter().filter(|d| d.id == id).all(|d| d.r <= POINT_DISC);
+            let gates: Vec<Point> = s
+                .crossings
+                .iter()
+                .filter_map(|c| {
+                    let [u, v] = m.edges[c.e as usize];
+                    let (pu, pv) = (m.verts[u as usize], m.verts[v as usize]);
+                    (pu.dist(pv) < 0.05 && small(u, &discs) && small(v, &discs)).then(|| pu.lerp(pv, 0.5))
+                })
+                .collect();
+            for d in &mut discs {
+                for g in &gates {
+                    let near = g.dist(d.c);
+                    if d.r > POINT_DISC && d.r > near - 1e-6 {
+                        d.r = (near - 1e-6).max(POINT_DISC / 2.0);
+                        info.gave_way[0] += 1;
+                    }
+                }
+            }
+        }
         // discs that are out of the game: inside another on the same side, or on the same centre
         let mut dead = vec![false; discs.len()];
         // the wraps of the string, each with its place along the track (in crossings). The
         // funnel through the portals of the radii says which vertices the string bends around
         // and in which order, and that it passes every vertex on its side.
-        let s = self.segs[sid as usize].as_ref().unwrap();
-        let m = &self.sub.m[s.li as usize];
         let mut portals = vec![(start, start)];
         portals.extend(tight);
         portals.push((end, end));
@@ -972,8 +1006,16 @@ impl Router<'_> {
                                 info.fallback = 1;
                                 return None;
                             }
-                            discs[x].r *= f;
-                            discs[y].r *= f;
+                            // both give the same: the tracks of a bundle through the passage
+                            // all lose it at the walls and keep their gaps to each other
+                            let cut = (discs[x].r + discs[y].r - d) / 2.0 + 1e-6;
+                            if discs[x].r.min(discs[y].r) > cut + POINT_DISC {
+                                discs[x].r -= cut;
+                                discs[y].r -= cut;
+                            } else {
+                                discs[x].r *= f;
+                                discs[y].r *= f;
+                            }
                         }
                         _ => {
                             info.why = kind;
