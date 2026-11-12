@@ -400,6 +400,12 @@ knobs! {
         "Negotiated routing: price of a crossing that leaves an edge no room at all.";
     NEG_RESERVE = "GB_NEG_RESERVE", Experiment, Num, "0.05",
         "Negotiated routing: room in mm per gap on an edge from which on a crossing is free.";
+    NEG_VIA = "GB_NEG_VIA", Experiment, Num, "0",
+        "Negotiated routing: a new via costs at least this many crossings at the price of the round (0: the plain via price).";
+    NEG_VIA_CAP = "GB_NEG_VIA_CAP", Experiment, Num, "3",
+        "Negotiated routing: the most that GB_NEG_VIA raises the price of a via, as a multiple of the plain via price.";
+    BACK_COST = "GB_BACK_COST", Experiment, Num, "0",
+        "Extra cost per mm of track on the back layer of a board with more than one routing layer (0: off).";
     MAXEXP = "GB_MAXEXP", Experiment, Num, "400000",
         "Most expansions of one search for a connection.";
     RIPUP = "GB_RIPUP", Experiment, Num, "3",
