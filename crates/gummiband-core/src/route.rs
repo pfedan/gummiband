@@ -1081,7 +1081,7 @@ impl<'a> Router<'a> {
     }
 
     /// Item of segment `seg` crossing edge e, with its sides relative to the two apexes.
-    fn item_on(&self, li: usize, e: u32, seg: u32) -> Item {
+    pub(crate) fn item_on(&self, li: usize, e: u32, seg: u32) -> Item {
         let mut it = self.item_of(seg);
         {
             let s = self.segs[seg as usize].as_ref().unwrap();

@@ -286,10 +286,12 @@ fn main() -> anyhow::Result<()> {
         ("disc strict", false, true, false, true),
         ("disc local", false, true, true, true),
         ("disc alone", false, true, true, false),
+        ("disc raw", false, true, true, false),
         ("disc", false, true, true, false),
         ("disc repaired", false, true, true, false),
     ] {
         r.disc_inherit = mode != "disc alone";
+        r.disc_planar = mode != "disc raw";
         r.stack_band = on;
         r.disc_band = disc;
         r.disc_local = local;
