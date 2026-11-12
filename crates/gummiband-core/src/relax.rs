@@ -1889,6 +1889,10 @@ fn pair_near_poly(poly: &crate::geom::Polygon, c: Point, half: Point, free_insid
     best.unwrap().1
 }
 
+/// How far a point of a waking track may lie from the point of the last query of the grid in
+/// [`wake`] and use what that found.
+const WAKE_SKIN: f64 = 0.4;
+
 /// Wake the sleeping copper that the waking copper violates. A sleeping track that only has
 /// less than the relaxation's margin to spare stays asleep, or the wave would never end.
 #[allow(clippy::too_many_arguments)]
@@ -1910,6 +1914,8 @@ fn wake(
     let within = |v: Point, need: f64| !surely_outside(v.x, v.y, need) && v.len() < need;
     let mut woken: Vec<u32> = Vec::new();
     let mut woken_vias: Vec<u32> = Vec::new();
+    let mut near: Vec<NearPiece> = Vec::new();
+    let mut near_vias: Vec<u32> = Vec::new();
     for (ti, pts) in tracks.iter().enumerate() {
         if !awake[ti] {
             continue;
@@ -1919,38 +1925,55 @@ fn wake(
         let nc = net_clr[t.net as usize];
         let hw = t.width.max(t.neck_w) / 2.0;
         let g = &grids[t.layer as usize];
+        // The sleeping pieces of other nets around an anchor, good for every point within the
+        // skin of it: the points of a track lie a fraction of that apart, and most of what a
+        // query of the grid finds is awake or of the track's own net. Who is awake does not
+        // change while this runs, so the points see what a query of their own would show them.
+        let mut anchor: Option<Point> = None;
+        near.clear();
         for &p in pts {
             let wp = t.width_at(p) / 2.0;
-            for tier in [&g.fine, &g.far] {
-                let radius = hw + max_clr + tier.max_extent;
-                tier.for_each_near(p, radius, |r| {
-                    // no part of a piece comes nearer than its bounds allow
-                    let dm = p - r.mid;
-                    let reach = wp + max_of(nc, r.clr as f64) + r.extent as f64 + fitted_over;
-                    if r.net == t.net || surely_outside(dm.x, dm.y, reach) {
-                        return;
-                    }
-                    let pc = &pieces[r.id as usize];
-                    if awake[pc.track as usize] {
-                        return;
-                    }
-                    let o = &infos[pc.track as usize];
-                    let need = wp + o.piece_width(pc.a, pc.b) / 2.0 + board.track_clearance(t.net, o.net);
-                    if within(point_seg_offset(p, pc.a, pc.b), need) {
-                        woken.push(pc.track);
+            if anchor.is_none_or(|a| (p - a).len2() > WAKE_SKIN * WAKE_SKIN) {
+                anchor = Some(p);
+                near.clear();
+                for tier in [&g.fine, &g.far] {
+                    let radius = hw + max_clr + tier.max_extent + WAKE_SKIN;
+                    tier.for_each_near(p, radius, |r| {
+                        if r.net != t.net && !awake[pieces[r.id as usize].track as usize] {
+                            near.push(*r);
+                        }
+                    });
+                }
+                near_vias.clear();
+                via_grid.for_each_near(p, hw + max_clr + max_vr + WAKE_SKIN, |vi| {
+                    if !via_awake[vi as usize]
+                        && vias[vi as usize].2 != t.net
+                        && via_layer[vi as usize].is_none_or(|l| l == t.layer)
+                    {
+                        near_vias.push(vi);
                     }
                 });
             }
-            via_grid.for_each_near(p, hw + max_clr + max_vr, |vi| {
-                let (vc, vr, vn, vclr) = vias[vi as usize];
-                if !via_awake[vi as usize]
-                    && vn != t.net
-                    && via_layer[vi as usize].is_none_or(|l| l == t.layer)
-                    && within(p - vc, vr + vclr.max(c) + wp)
-                {
+            for r in &near {
+                // no part of a piece comes nearer than its bounds allow
+                let dm = p - r.mid;
+                let reach = wp + max_of(nc, r.clr as f64) + r.extent as f64 + fitted_over;
+                if surely_outside(dm.x, dm.y, reach) {
+                    continue;
+                }
+                let pc = &pieces[r.id as usize];
+                let o = &infos[pc.track as usize];
+                let need = wp + o.piece_width(pc.a, pc.b) / 2.0 + board.track_clearance(t.net, o.net);
+                if within(point_seg_offset(p, pc.a, pc.b), need) {
+                    woken.push(pc.track);
+                }
+            }
+            for &vi in &near_vias {
+                let (vc, vr, _, vclr) = vias[vi as usize];
+                if within(p - vc, vr + vclr.max(c) + wp) {
                     woken_vias.push(vi);
                 }
-            });
+            }
         }
     }
     for (vi, &(vc, vr, vn, vclr)) in vias.iter().enumerate() {
