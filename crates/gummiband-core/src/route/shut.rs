@@ -283,11 +283,25 @@ impl Router<'_> {
         if let Some(r) = w.room.get(&(l as u8, e)) {
             return r.clone();
         }
+        // as the search: at its neck width the track has to cross inside its neck, and a slot
+        // that does not let it get there takes the full width
         let mut it = w.item;
-        it.w = self.width_at_edge(l, e, w.item.w, w.necks, w.neck_w, w.item.net, w.item.c);
+        let mut wide = None;
+        if let Some(span) = self.neck_span(l, e, w.item.w, w.necks, w.neck_w, w.item.net, w.item.c) {
+            it.w = w.neck_w;
+            it.span = span;
+            if span != super::ANYWHERE {
+                wide = Some(self.edge_view(l, e, &w.item));
+            }
+        }
         let view = self.edge_view(l, e, &it);
         let r: Vec<bool> = (0..=self.cross[l][e as usize].len())
-            .map(|j| Self::slot_interval(&view, [2, 2], j, &mut w.scratch).is_some())
+            .map(|j| {
+                Self::slot_interval(&view, [2, 2], j, &mut w.scratch).is_some()
+                    || wide
+                        .as_ref()
+                        .is_some_and(|v| Self::slot_interval(v, [2, 2], j, &mut w.scratch).is_some())
+            })
             .collect();
         w.room.insert((l as u8, e), r.clone());
         r
