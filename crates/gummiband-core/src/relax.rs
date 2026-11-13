@@ -2204,7 +2204,7 @@ fn taut(
                 return clear_piece(a, b, pieces, idx);
             }
             let mut from = a;
-            for to in crate::realize::zone_cuts(a, b, &t.necks, t.width)
+            for to in crate::realize::zone_cuts(a, b, &t.necks, t.width, crate::realize::neck_reach(t.neck_w, clr(t.net)))
                 .into_iter()
                 .chain([b])
             {
@@ -2236,7 +2236,7 @@ fn taut(
         };
         let cut = |p: Vec<Point>| {
             if ruled {
-                crate::realize::cut_at_zones(&p, &t.necks, t.width)
+                crate::realize::cut_at_zones(&p, &t.necks, t.width, crate::realize::neck_reach(t.neck_w, clr(t.net)))
             } else {
                 p
             }
@@ -2752,9 +2752,9 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
         let mut elems = Vec::with_capacity(t.elems.len());
         for e in &t.elems {
             match *e {
-                Elem::Line(a, b) if ruled && !crate::realize::zone_cuts(a, b, &t.necks, t.width).is_empty() => {
+                Elem::Line(a, b) if ruled && !crate::realize::zone_cuts(a, b, &t.necks, t.width, crate::realize::neck_reach(t.neck_w, clr(t.net))).is_empty() => {
                     let mut pts = vec![a];
-                    pts.extend(crate::realize::zone_cuts(a, b, &t.necks, t.width));
+                    pts.extend(crate::realize::zone_cuts(a, b, &t.necks, t.width, crate::realize::neck_reach(t.neck_w, clr(t.net))));
                     pts.push(b);
                     elems.extend(pts.windows(2).map(|w| Elem::Line(w[0], w[1])));
                 }

@@ -1161,18 +1161,18 @@ impl<'a> Router<'a> {
         let m = self.m(li);
         let [u, v] = m.edges[e as usize];
         let (a, b) = (m.verts[u as usize], m.verts[v as usize]);
-        // The realized track is narrow on every piece that touches a zone (that is what
-        // intersectsCourtyard() rules allow), and an exit from a fine pitch pad crosses its
-        // first edges right next to the pad. So the track is narrow on an edge where it can
-        // cross the edge inside a zone: where the part of the edge in the zone reaches into
-        // the stretch the narrow track may lie on, between what the two ends ask of it. An
-        // edge that only touches a zone at one end is crossed outside it, at full width.
         // Without a minimum width rule nothing ends a neck at its zone: every piece that
         // touches the zone is narrow for its whole length, so the edge is narrow where it
         // touches one.
         if self.board.class_of(net).min_width.is_none() {
             return if necks.iter().any(|r| r.touches_seg(a, b)) { neck_w } else { full };
         }
+        // Under a minimum width rule the realized track is narrow from its zone to the end of
+        // its neck, `neck_reach` beyond the zone (`realize::zone_cuts`). So the track is
+        // narrow on an edge where it can cross the edge inside the neck: where the part of the
+        // edge in the neck reaches into the stretch the narrow track may lie on, between what
+        // the two ends ask of it. An edge that only touches the neck at one end is crossed
+        // outside it, at full width.
         let len = a.dist(b);
         let it = Item {
             net,
@@ -1182,16 +1182,16 @@ impl<'a> Router<'a> {
         };
         let lo = self.end_need_square(li, e, 0, &it);
         let hi = len - self.end_need_square(li, e, 1, &it);
-        let hit = necks.iter().any(|r| match r.clip_seg(a, b) {
+        let reach = crate::realize::neck_reach(neck_w, c);
+        let hit = necks.iter().any(|r| match r.grow(reach).clip_seg(a, b) {
             Some((t0, t1)) => lo > hi || (t1 * len >= lo - 1e-9 && t0 * len <= hi + 1e-9),
             None => false,
         });
         // An edge at a pad of the net itself is crossed by the piece that comes from the pad:
-        // that piece touches the zone the pad lies in and is narrow as far as the zone
-        // reaches for a track of full width, half its width beyond the zone.
+        // that piece is narrow up to its cut, half the full width beyond the neck.
         let hit = hit
             || ((0..2).any(|end| m.demands(e, end).iter().any(|d| self.obs_net(d.obs) == Some(net)))
-                && necks.iter().any(|r| r.grow(full / 2.0).touches_seg(a, b)));
+                && necks.iter().any(|r| r.grow(reach + full / 2.0).touches_seg(a, b)));
         if hit { neck_w } else { full }
     }
 
