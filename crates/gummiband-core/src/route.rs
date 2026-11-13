@@ -915,7 +915,13 @@ impl<'a> Router<'a> {
         if via.net == it.net {
             0.0
         } else {
-            via.r + via.clearance.max(it.c).max(board.item_gap(it.net, Some(via.net))) + it.w / 2.0
+            via.r
+                + via
+                    .clearance
+                    .max(it.c)
+                    .max(board.item_gap(it.net, Some(via.net)))
+                    .max(board.via_track_gap(it.net, via.net, via.r))
+                + it.w / 2.0
         }
     }
 
@@ -5676,5 +5682,48 @@ pub(crate) mod tests {
         );
         free.area_pads_wait();
         assert_eq!(paying(&free, 1), 0);
+    }
+
+    /// A custom rule between the tracks of two nets holds against the track that ends in the
+    /// centre of a via too: the passing track keeps the rule from that track, which is nearer
+    /// than the classes ask from the edge of the via.
+    #[test]
+    fn a_track_keeps_the_rule_of_tracks_from_the_track_that_ends_in_a_via() {
+        let mut b = pad_board(&[("J", "A", 1.0, 1.0), ("J", "B", 2.0, 1.0)]);
+        let (w, c) = (b.class_of(0).track_width, b.class_of(0).clearance);
+        let r = w / 2.0 + 0.175;
+        let via = ViaInfo {
+            net: 1,
+            r,
+            drill: 0.3,
+            clearance: c,
+            users: 1,
+            kept: false,
+        };
+        let it = Item {
+            net: 0,
+            w,
+            c,
+            sides: [2, 2],
+        };
+        // the classes alone: the edge of the via and the clearance
+        let plain = Router::via_need(&b, &via, &it);
+        assert!((plain - (r + c + w / 2.0)).abs() < 1e-9, "{plain}");
+        // a rule the via covers anyway changes nothing
+        b.pair_clearance.insert((0, 1), c + 0.1);
+        assert_eq!(Router::via_need(&b, &via, &it), plain);
+        // three widths between the tracks: counted from the track of B in the centre of the via
+        let rule = c + 0.3;
+        b.pair_clearance.insert((0, 1), rule);
+        let need = Router::via_need(&b, &via, &it);
+        assert!(
+            (need - (w / 2.0 + rule + w / 2.0)).abs() < 1e-9,
+            "{need} against {plain}"
+        );
+        // and only between the two nets of the rule
+        let other = Item { net: 0, ..it };
+        b.pair_clearance.clear();
+        b.pair_clearance.insert((0, 5), rule);
+        assert_eq!(Router::via_need(&b, &via, &other), plain);
     }
 }
