@@ -69,6 +69,10 @@ class RouteOptions:
     negotiate: int = 0
     threads: int = 0  # 0 = all cores
     plane_layers: Optional[List[str]] = None
+    # nets with a zone on a routed layer are left to its fill (--areas fill)
+    areas_fill: bool = False
+    # with areas_fill: nets that get a pour on the outer layers after the route (--pour)
+    pour: Optional[List[str]] = None
     net_widths: Optional[str] = None  # JSON file
     net_priorities: Optional[str] = None  # JSON file
     # how the two nets of a differential pair are laid, the router's --pairs: "off", "pull"
@@ -143,7 +147,7 @@ ROUTE_SAVED = ("scope", "runs", "via_cost", "geometry_generations", "animate", "
                "pair_skew", "pair_zdiff", "until_stop", "open_via_cost", "prefer_width", "gpu",
                "angles_45", "seed", "placement_seed", "hint_groups", "group_order", "hint_pairs",
                "hint_decaps", "hint_rows", "hint_shares", "clear_corridors", "pair_all",
-               "via_pairs", "breakouts", "air")
+               "via_pairs", "breakouts", "air", "areas_fill")
 PLACE_SAVED = ("starts", "gap", "halo", "seed", "iters", "margin", "threads", "semantic",
                "corridors", "escape_halo", "leash", "two_sided", "back_cost", "back_max_pads")
 
@@ -316,8 +320,9 @@ def keeps_all(opts: RouteOptions) -> bool:
 
 
 def open_ended(opts: RouteOptions) -> bool:
-    """Whether the run goes on until the user accepts it: not with the wide tracks of pairs."""
-    return opts.until_stop and opts.pairs != "band"
+    """Whether the run goes on until the user accepts it: not with the wide tracks of pairs, and
+    not with nets left to the fill of their area."""
+    return opts.until_stop and opts.pairs != "band" and not opts.areas_fill
 
 
 def preset_values(name: str) -> dict:
@@ -411,6 +416,12 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
         cmd += ["--net-priorities", str(opts.net_priorities)]
     if opts.angles_45:
         cmd += ["--angles", "45"]
+    # where the copper of the board stays, single nets are laid as tracks; the fill of an area
+    # is for a route of the whole board
+    if opts.areas_fill and not keeps_all(opts):
+        cmd += ["--areas", "fill"]
+        for net in opts.pour or []:
+            cmd += ["--pour", net]
     if open_ended(opts):
         cmd += ["--until-stop", "--open-via-cost", repr(float(opts.open_via_cost))]
         if opts.air != _default(RouteOptions, "air"):

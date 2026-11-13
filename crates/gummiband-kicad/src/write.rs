@@ -581,12 +581,8 @@ pub fn add_zone(
         kb,
         text,
         &ZoneSpec {
-            net,
-            layer,
             priority,
-            name: "",
-            connect: PadConnect::Thermal,
-            spoke: DEFAULT_SPOKE,
+            ..ZoneSpec::plain(net, layer)
         },
         outline,
         ids,
@@ -631,9 +627,37 @@ pub struct ZoneSpec<'a> {
     pub connect: PadConnect,
     /// Thermal spoke width in mm.
     pub spoke: f64,
+    /// Clearance of the fill to other nets' copper in mm.
+    pub clearance: f64,
+    /// Minimum width of the fill in mm.
+    pub min_width: f64,
+    /// Gap of the thermal reliefs in mm.
+    pub thermal_gap: f64,
 }
 
-/// [`add_zone`] with a name and the pad connection.
+/// The fill settings every zone of the tools had before they became arguments.
+pub const DEFAULT_ZONE_CLEARANCE: f64 = 0.2;
+pub const DEFAULT_MIN_WIDTH: f64 = 0.2;
+pub const DEFAULT_THERMAL_GAP: f64 = 0.3;
+
+impl ZoneSpec<'static> {
+    /// A zone without name, with priority 0, thermal reliefs and the default fill settings.
+    pub fn plain(net: NetId, layer: LayerId) -> ZoneSpec<'static> {
+        ZoneSpec {
+            net,
+            layer,
+            priority: 0,
+            name: "",
+            connect: PadConnect::Thermal,
+            spoke: DEFAULT_SPOKE,
+            clearance: DEFAULT_ZONE_CLEARANCE,
+            min_width: DEFAULT_MIN_WIDTH,
+            thermal_gap: DEFAULT_THERMAL_GAP,
+        }
+    }
+}
+
+/// [`add_zone`] with a name, the pad connection and the settings of the fill.
 pub fn add_zone_named(kb: &KicadBoard, text: &str, z: &ZoneSpec, outline: &[Point], ids: u64) -> String {
     let name = &kb.board.nets[z.net as usize].name;
     let net_item = match &kb.net_numbers {
@@ -651,17 +675,20 @@ pub fn add_zone_named(kb: &KicadBoard, text: &str, z: &ZoneSpec, outline: &[Poin
         format!("(name {}) ", quote(z.name))
     };
     let connect = match z.connect {
-        PadConnect::Solid => "(connect_pads yes (clearance 0.2))",
-        PadConnect::ThermalTht => "(connect_pads thru_hole_only (clearance 0.2))",
-        PadConnect::Thermal => "(connect_pads (clearance 0.2))",
+        PadConnect::Solid => "yes ",
+        PadConnect::ThermalTht => "thru_hole_only ",
+        PadConnect::Thermal => "",
     };
     let zone = format!(
         "\t(zone {net_item} (layer {}) (uuid \"{}\") {zname}(hatch edge 0.5) (priority {}) \
-         {connect} (min_thickness 0.2) (fill yes (thermal_gap 0.3) \
+         (connect_pads {connect}(clearance {})) (min_thickness {}) (fill yes (thermal_gap {}) \
          (thermal_bridge_width {})) (polygon (pts {pts})))\n",
         quote(&kb.layer_names[z.layer as usize]),
         gen_id.next(),
         z.priority,
+        f(z.clearance.max(0.0)),
+        f(z.min_width.max(0.025)),
+        f(z.thermal_gap.max(0.0)),
         f(z.spoke.max(0.1)),
     );
     let end = text.rfind(')').unwrap_or(text.len());

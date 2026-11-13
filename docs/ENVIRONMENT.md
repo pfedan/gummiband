@@ -113,6 +113,7 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_MAXEXP` | number | 400000 | Most expansions of one search for a connection. |
 | `GB_RIPUP` | number | 3 | Rip-up passes of a router run. |
 | `GB_ESCAPE` | number | 0 | Extra cost in mm for passing right next to a pad of another net that still waits for its route. |
+| `GB_AREA_ESCAPE` | number | 2 | `areas fill`: extra cost in mm for passing right next to a pad of a net left to the fill of its area, while the other nets are laid. |
 | `GB_SHARE_KIND` | value | all kinds | `--patterns shares`: only the shares of this kind (`neighbours` or `decap`). |
 | `GB_SKEW_WEIGHT` | number | 0.5 | Weight of a mm of skew need in the cost of a candidate. |
 | `GB_REFINE` | number | 0.6 | Triangulation: long obstacle sides get a vertex every this many mm. |

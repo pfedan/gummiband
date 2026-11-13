@@ -7,7 +7,9 @@
 //! reported routed with a piece of it hanging in the air. So the pipeline ends here: a track that
 //! still crosses copper of another net is taken out (the connection is open, which the user sees
 //! and can route again, where a short is a broken board), and the connections of every net are
-//! counted on the copper itself. Then the stubs go: a track end of the route that lies on
+//! counted on the copper itself. Copper of the file that gave way and came to lie on another
+//! net goes back to where the file has it first: the route may take out what it laid, never
+//! what it only moved. Then the stubs go: a track end of the route that lies on
 //! nothing of its net is cut back to where the track is last held, and the copper is counted
 //! once more.
 
@@ -34,12 +36,22 @@ pub struct Legal {
     pub open: Vec<String>,
     /// Shorts that could not be removed (no track of the search is part of them).
     pub shorts_left: usize,
+    /// Of the shorts left, the pairs of nets that do not touch in the file as it came, as
+    /// `"A x B"`. The others are the file's own: the route did not make them and leaves them.
+    pub shorts_new: Vec<String>,
+    /// Nets with copper of the file that had given way, came to lie on another net and was put
+    /// back where the file has it.
+    pub put_back: Vec<String>,
     /// Stubs taken back: tracks of the route cut back from an end that lay on nothing of their
     /// net to where they are last held, or taken out as a whole.
     pub trimmed: usize,
     /// Track ends that still lie on nothing of their net, as `"NET at X Y"`: copper of the file,
     /// or a stub that could not go.
     pub dangling: Vec<String>,
+    /// What the fill model finds for the pours of the nets routed: a sentence per net whose
+    /// pour does not reach a pad that lies on it. The router takes the pads on one pour as
+    /// connected and counts them so; this is the second opinion, and it changes no count.
+    pub pours: Vec<String>,
 }
 
 /// Slack for "this point lies on that copper", in mm.
@@ -364,9 +376,11 @@ fn held(board: &Board, geo: &Geometry, net: NetId, skip: usize, p: Point, layer:
 /// The part of [`held`] that the board answers alone: a pad, kept copper or a plane of `net`
 /// at `p` on `layer`.
 fn held_fixed(board: &Board, net: NetId, p: Point, layer: u8) -> bool {
-    board.nets[net as usize].pins.iter().any(|&pin| {
-        let pn = &board.pins[pin];
-        pn.layers.has(layer)
+    // every pad of the net: a net that is not routed in this run has no pins in its list, and
+    // its copper that gave way still ends on its pads
+    board.pins.iter().any(|pn| {
+        pn.net == net
+            && pn.layers.has(layer)
             && pn
                 .obstacles
                 .iter()
@@ -380,6 +394,7 @@ fn held_fixed(board: &Board, net: NetId, p: Point, layer: u8) -> bool {
         .planes
         .iter()
         .any(|pl| pl.net == net && pl.layer == layer && pl.covers(p))
+        || board.area_fill_at(net, p).has(layer)
 }
 
 /// The track ends of the result that lie on nothing of their net, as `"NET at X Y"`. Such an
@@ -457,6 +472,8 @@ fn drop_idle_vias(board: &Board, geo: &mut Geometry, net: NetId) {
         for pl in board.planes.iter().filter(|pl| pl.net == net && pl.covers(v.at)) {
             layers |= 1 << pl.layer;
         }
+        // the fill of the net's area, where the route left the net to it
+        layers |= board.area_fill_at(net, v.at).0;
         // kept copper of the net under the via, and a track the via sits on
         for ob in board.obstacles.iter().filter(|ob| {
             ob.net == Some(net) && matches!(ob.kind, ObstacleKind::Track | ObstacleKind::Via | ObstacleKind::Pour)
@@ -749,6 +766,114 @@ fn drop_shorts(board: &Board, geo: &mut Geometry) -> (Vec<(NetId, NetId, bool)>,
     (dropped, left)
 }
 
+/// Copper of the file that gave way (soft copper that no longer rests) and now touches another
+/// net goes back to where the file has it, with what hangs on it: the tracks that meet it in a
+/// via or branch point that moved as well. Returns the nets it belongs to. What the route laid
+/// across its old place is then a short of the route's own track, which [`drop_shorts`] takes
+/// out.
+fn put_back_soft(board: &Board, geo: &mut Geometry) -> Vec<NetId> {
+    use crate::import::SoftEnd;
+    let soft = &board.soft;
+    let mut nets = Vec::new();
+    if soft.chains.is_empty() && soft.nodes.is_empty() {
+        return nets;
+    }
+    // moved is read off the copper itself: `resting` also says "asleep in the last relaxation",
+    // and copper that gave way earlier may sleep by now
+    let moved_track = |t: &Track| {
+        t.origin.is_some_and(|o| {
+            soft.chains.get(o as usize).is_none_or(|ch| {
+                ch.pts.len() != t.pts.len() || ch.pts.iter().zip(&t.pts).any(|(a, b)| a.dist(*b) >= 1e-6)
+            })
+        })
+    };
+    let moved_via = |v: &Via| {
+        v.origin
+            .is_some_and(|o| soft.nodes.get(o as usize).is_none_or(|n| n.at.dist(v.at) >= 1e-6))
+    };
+    for _ in 0..soft.chains.len() + soft.nodes.len() + 1 {
+        if !geo.tracks.iter().any(moved_track) && !geo.vias.iter().any(moved_via) {
+            break;
+        }
+        let pairs = shorts(board, geo);
+        let (mut chains, mut nodes): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
+        for &(a, b) in &pairs {
+            for (net, other) in [(a, b), (b, a)] {
+                for t in &geo.tracks {
+                    if let Some(o) = t.origin
+                        && moved_track(t)
+                        && t.net == net
+                        && t.pts.len() >= 2
+                        && touches(board, geo, t, other)
+                    {
+                        chains.push(o);
+                    }
+                }
+                for v in &geo.vias {
+                    if let Some(o) = v.origin
+                        && moved_via(v)
+                        && v.net == net
+                        && via_touches(board, geo, v, other)
+                    {
+                        nodes.push(o);
+                    }
+                }
+            }
+        }
+        if chains.is_empty() && nodes.is_empty() {
+            break;
+        }
+        // what hangs together through vias and branch points that moved goes back as one
+        let moved_node = |n: u32| geo.vias.iter().any(|v| v.origin == Some(n) && moved_via(v));
+        let (mut at_c, mut at_n) = (0, 0);
+        while at_c < chains.len() || at_n < nodes.len() {
+            if at_c < chains.len() {
+                let Some(ch) = soft.chains.get(chains[at_c] as usize) else {
+                    at_c += 1;
+                    continue;
+                };
+                at_c += 1;
+                for end in [ch.start, ch.end] {
+                    if let SoftEnd::Node(n) = end
+                        && moved_node(n)
+                        && !nodes.contains(&n)
+                    {
+                        nodes.push(n);
+                    }
+                }
+            } else {
+                let n = nodes[at_n];
+                at_n += 1;
+                for (c, ch) in soft.chains.iter().enumerate() {
+                    if (ch.start == SoftEnd::Node(n) || ch.end == SoftEnd::Node(n)) && !chains.contains(&(c as u32)) {
+                        chains.push(c as u32);
+                    }
+                }
+            }
+        }
+        geo.tracks.retain(|t| !t.origin.is_some_and(|o| chains.contains(&o)));
+        geo.vias.retain(|v| !v.origin.is_some_and(|o| nodes.contains(&o)));
+        let file = crate::follow::soft_geometry(board);
+        for t in file.tracks {
+            if t.origin.is_some_and(|o| chains.contains(&o)) {
+                if !nets.contains(&t.net) {
+                    nets.push(t.net);
+                }
+                geo.tracks.push(t);
+            }
+        }
+        for v in file.vias {
+            if v.origin.is_some_and(|o| nodes.contains(&o)) {
+                if !nets.contains(&v.net) {
+                    nets.push(v.net);
+                }
+                geo.vias.push(v);
+            }
+        }
+    }
+    nets
+}
+
 /// The pairs of nets whose copper touches in `geo` on `board`: the lower net first, each pair
 /// once.
 pub fn shorts(board: &Board, geo: &Geometry) -> Vec<(NetId, NetId)> {
@@ -811,14 +936,32 @@ pub fn new_shorts(board_before: &Board, before: &Geometry, board_after: &Board, 
 /// instead), and every net with copper in `geo` or with a dropped track is counted on the
 /// copper: what is not connected there is open in `stats`, whatever the search believed.
 pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal {
+    // nets left to the fill of their area: a track end or a via in that fill is held by it
+    let filled;
+    let board = match &board.areas {
+        Some(plan) if !plan.nets.is_empty() => {
+            let mut b = board.clone();
+            b.area_fill = Some(std::sync::Arc::new(crate::fill::goals(
+                board, plan, geo, 0.0, 0.0, false,
+            )));
+            filled = b;
+            &filled
+        }
+        _ => board,
+    };
     let mut legal = Legal::default();
     // 0. copper with a coordinate that is no number goes first: it cannot be judged or written
     let not_finite = drop_not_finite(geo);
     legal.not_finite = not_finite.len();
+    let name = |n: NetId| board.nets[n as usize].name.clone();
+    // then copper of the file that gave way into another net goes back to its place
+    legal.put_back = put_back_soft(board, geo).into_iter().map(name).collect();
     // 1. shorts go, with what hangs on them
     let (dropped, left) = drop_shorts(board, geo);
     legal.shorts_left = left;
-    let name = |n: NetId| board.nets[n as usize].name.clone();
+    if left > 0 {
+        legal.shorts_new = new_shorts(board, &crate::follow::soft_geometry(board), board, geo);
+    }
     legal.dropped = dropped.iter().map(|&(a, b, _)| (name(a), name(b))).collect();
     legal.dropped_taps = dropped.iter().filter(|d| d.2).count();
     let mut nets: Vec<NetId> = geo
@@ -839,6 +982,9 @@ pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal
     if legal.trimmed > 0 {
         count_open(board, geo, &nets, &dropped, stats, &mut legal);
     }
+    // and the nets left to the fill of their area by that fill
+    let changed = legal.trimmed > 0 || !dropped.is_empty() || !legal.put_back.is_empty() || legal.not_finite > 0;
+    count_areas(board, geo, changed, stats, &mut legal);
     if !legal.dropped.is_empty() || legal.trimmed > 0 || legal.not_finite > 0 {
         stats.vias = geo.vias.iter().filter(|v| v.drill > 0.0).count();
         stats.length = geo
@@ -857,25 +1003,125 @@ pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal
             legal.not_finite
         );
     }
+    legal.pours = pours(board, geo);
+    for p in &legal.pours {
+        eprintln!("last check on the copper: {p}");
+    }
     if !legal.dropped.is_empty()
         || !legal.open.is_empty()
         || legal.shorts_left > 0
         || legal.trimmed > 0
         || !legal.dangling.is_empty()
+        || !legal.put_back.is_empty()
     {
         let pairs: Vec<String> = legal.dropped.iter().map(|(a, b)| format!("{a} x {b}")).collect();
+        // what is left is the file's own unless a pair is named: the route did not make it
+        let left = match (legal.shorts_left, legal.shorts_new.is_empty()) {
+            (0, _) => "0 left".to_string(),
+            (n, true) => format!("{n} left, all between nets that touch in the file as it came"),
+            (n, false) => format!("{n} left, new between [{}]", legal.shorts_new.join(", ")),
+        };
+        let back = if legal.put_back.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; copper that gave way into another net put back where the file has it: [{}]",
+                legal.put_back.join(", ")
+            )
+        };
         eprintln!(
-            "last check on the copper: {} shorts taken out ({} of them tracks that end on a track of their net) [{}], {} left; open in the copper: [{}]; track ends on nothing: {} taken back, left [{}]",
+            "last check on the copper: {} shorts taken out ({} of them tracks that end on a track of their net) [{}], {left}{back}; open in the copper: [{}]; track ends on nothing: {} taken back, left [{}]",
             legal.dropped.len(),
             legal.dropped_taps,
             pairs.join(", "),
-            legal.shorts_left,
             legal.open.join(", "),
             legal.trimmed,
             legal.dangling.join(", ")
         );
     }
     legal
+}
+
+/// The pours of the nets routed (`gb:` zones, which the router takes as copper of their net)
+/// under the fill model, on the finished copper: for every net with a pour the pads that lie
+/// on a pour of the net and do not hang on the body of its fill (they sit on a piece that
+/// tracks of other nets cut off, or no fill gets to them at all). A pour is an
+/// outline; what KiCad fills of it depends on the tracks that now run through it. The pour is
+/// taken with the settings `power_copper` writes (pads solid, 0.2 mm clearance and minimum
+/// width). Nothing is counted differently because of this.
+pub fn pours(board: &Board, geo: &Geometry) -> Vec<String> {
+    use crate::fill::{Area, Connect, Options, fill_net};
+    use crate::geom::Shape;
+
+    let nl = board.layers.len();
+    let mut areas: Vec<Area> = Vec::new();
+    // per pour: its net, its obstacle and the pads the router takes as held by it
+    let mut held: Vec<(NetId, usize, Vec<usize>)> = Vec::new();
+    for (oi, ob) in board.obstacles.iter().enumerate() {
+        let (ObstacleKind::Pour, Some(net), Shape::Polygon(poly)) = (ob.kind, ob.net, &ob.shape) else {
+            continue;
+        };
+        for l in ob.layers.iter().filter(|&l| (l as usize) < nl) {
+            let mut a = Area::pour(net, l, vec![poly.clone()]);
+            a.connect = Connect::Solid;
+            areas.push(a);
+        }
+        let pads: Vec<usize> = board.nets[net as usize]
+            .pins
+            .iter()
+            .copied()
+            .filter(|&p| {
+                let pin = &board.pins[p];
+                !pin.footprint.is_empty()
+                    && pin.obstacles.iter().any(|&o| {
+                        let pad = &board.obstacles[o];
+                        pad.kind == ObstacleKind::Pad
+                            && pad.layers.intersects(ob.layers)
+                            && pad.shape.dist(&ob.shape) <= TOUCH
+                    })
+            })
+            .collect();
+        if !pads.is_empty() {
+            held.push((net, oi, pads));
+        }
+    }
+    if held.is_empty() {
+        return Vec::new();
+    }
+    // the board with the finished copper on it
+    let work = crate::fill::with_copper(board, geo);
+    let mut nets: Vec<NetId> = held.iter().map(|x| x.0).collect();
+    nets.sort_unstable();
+    nets.dedup();
+    let mut out = Vec::new();
+    for net in nets {
+        let f = fill_net(&work, &areas, net, &Options::default());
+        let mut left: Vec<&str> = Vec::new();
+        for (_, oi, pads) in held.iter().filter(|h| h.0 == net) {
+            let ob = &board.obstacles[*oi];
+            // the body of the pour: its largest piece of fill. A pad the router takes as held
+            // hangs on that piece, itself or through tracks, or the pour does not reach it
+            let body = f
+                .pieces
+                .iter()
+                .filter(|pc| ob.layers.has(pc.layer) && ob.shape.dist_to_point(pc.at) <= 0.0)
+                .max_by(|a, b| a.area.total_cmp(&b.area))
+                .map(|pc| pc.group);
+            for pr in f.pins.iter().filter(|pr| pads.contains(&pr.pin)) {
+                if Some(pr.group) != body && !left.contains(&pr.name.as_str()) {
+                    left.push(&pr.name);
+                }
+            }
+        }
+        if !left.is_empty() {
+            out.push(format!(
+                "the pour of {} does not reach pads {}, judged by the fill model",
+                board.nets[net as usize].name,
+                left.join(", ")
+            ));
+        }
+    }
+    out
 }
 
 /// Count the connections on the copper: every piece of a net beyond its first that `stats` does
@@ -890,6 +1136,9 @@ fn count_open(
 ) {
     let name = |n: NetId| board.nets[n as usize].name.clone();
     for (net, pins) in open_in_copper(board, geo, nets) {
+        if board.areas.as_ref().is_some_and(|a| a.holds(net)) {
+            continue; // its fill connects it: `count_areas` counts it by the fill
+        }
         let net_name = name(net);
         let prefix = format!("{net_name} from ");
         let known = stats.unrouted.iter().filter(|u| u.starts_with(&prefix)).count();
@@ -939,6 +1188,52 @@ fn drop_not_finite(geo: &mut Geometry) -> Vec<NetId> {
         ok
     });
     nets
+}
+
+/// Count the nets left to the fill of their area (`areas fill`) by that fill, as the model has
+/// it on the finished copper: a group of pads that neither the fill nor copper joins to the
+/// area is one open connection, in `stats` and in `legal`. One less where the area itself
+/// holds no pad, as KiCad's ratsnest counts. The fill has the last word in both directions:
+/// what the search left open and the fill joins after all is not open. With `again` the copper
+/// changed since the fill was computed, and the model runs once more.
+fn count_areas(board: &Board, geo: &Geometry, again: bool, stats: &mut RunStats, legal: &mut Legal) {
+    let Some(plan) = board.areas.as_ref().filter(|p| !p.nets.is_empty()) else {
+        return;
+    };
+    let fresh;
+    let fills: &[crate::fill::AreaGoal] = match &board.area_fill {
+        Some(f) if !again => f,
+        _ => {
+            fresh = crate::fill::goals(board, plan, geo, 0.0, 0.0, false);
+            &fresh
+        }
+    };
+    for g in fills {
+        let net_name = &board.nets[g.net as usize].name;
+        let prefix = format!("{net_name} from ");
+        let known = stats.unrouted.iter().filter(|u| u.starts_with(&prefix)).count();
+        stats.unrouted.retain(|u| !u.starts_with(&prefix));
+        legal.open.retain(|u| !u.starts_with(&prefix));
+        stats.routed = (stats.routed + known).min(stats.conns);
+        let first = g.reached.is_empty() as usize;
+        let open: Vec<String> = g
+            .apart
+            .iter()
+            .skip(first)
+            .map(|pins| format!("{net_name} from {}", board.pins[pins[0]].name))
+            .collect();
+        stats
+            .blocked
+            .retain(|(u, _)| !u.starts_with(&prefix) || open.contains(u));
+        for name in open {
+            if !stats.blocked.iter().any(|(u, _)| *u == name) {
+                stats.blocked.push((name.clone(), Vec::new()));
+            }
+            stats.unrouted.push(name.clone());
+            stats.routed = stats.routed.saturating_sub(1);
+            legal.open.push(name);
+        }
+    }
 }
 
 /// Split the lines of the route that a track end of their net meets in their middle, so that
@@ -1084,6 +1379,52 @@ mod tests {
 
     fn cross() -> Board {
         board(&[("A", 2., 10.), ("A", 18., 10.), ("B", 10., 2.), ("B", 10., 18.)])
+    }
+
+    /// A net left to the fill of its area is counted by that fill: a pad the fill does not
+    /// reach is an open connection, whatever the search believed, and a pad it does reach is
+    /// none, although no track leads to it.
+    #[test]
+    fn a_net_left_to_its_fill_is_counted_by_the_fill() {
+        let mut b = board(&[
+            ("GND", 4., 4.),
+            ("GND", 4., 16.),
+            ("GND", 16., 10.),
+            ("S", 10., 0.4),
+            ("S", 10., 19.6),
+        ]);
+        let mut area = crate::fill::Area::pour(0, 0, vec![b.outline[0].clone()]);
+        area.connect = crate::fill::Connect::Solid;
+        b.areas = Some(std::sync::Arc::new(crate::fill::AreaPlan {
+            areas: vec![area],
+            options: Default::default(),
+            nets: vec![0],
+            stitch: false,
+        }));
+        // nothing of GND is routed and nothing is in its way: the fill joins all three pads
+        let mut geo = Geometry::default();
+        let mut st = stats(2);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert!(legal.open.is_empty(), "{:?}", legal.open);
+        assert_eq!((st.routed, st.unrouted.len()), (2, 0));
+        // a connection the search gave up counts as made when the fill joins its pad
+        let mut st = stats(2);
+        st.routed = 1;
+        st.unrouted.push("GND from P.2".into());
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert!(legal.open.is_empty() && st.unrouted.is_empty());
+        assert_eq!(st.routed, 2);
+        // a track of S between its pads at the two edges cuts the third pad off: one open
+        // connection
+        let mut geo = Geometry {
+            tracks: vec![track(1, &[(10., 0.4), (10., 19.6)])],
+            vias: Vec::new(),
+        };
+        let mut st = stats(3);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert_eq!(legal.open, ["GND from P.2"]);
+        assert_eq!(st.unrouted, ["GND from P.2"]);
+        assert_eq!((st.conns, st.routed), (3, 2));
     }
 
     #[test]
@@ -1464,6 +1805,169 @@ mod tests {
         };
         drop_idle_vias(&b, &mut geo, 0);
         assert!(geo.vias.is_empty());
+    }
+
+    /// A board whose file holds one unlocked track of net 1 along `pts`.
+    fn with_soft(mut b: Board, pts: &[(f64, f64)]) -> Board {
+        let t = track(1, pts);
+        b.soft.chains.push(crate::import::SoftChain {
+            net: 1,
+            layer: 0,
+            width: 0.2,
+            clearance: 0.2,
+            pts: t.pts,
+            elems: t.elems,
+            start: crate::import::SoftEnd::Fixed,
+            end: crate::import::SoftEnd::Fixed,
+            items: vec![0],
+        });
+        b
+    }
+
+    /// The moved form of the board's soft track.
+    fn moved(pts: &[(f64, f64)]) -> Track {
+        Track {
+            origin: Some(0),
+            ..track(1, pts)
+        }
+    }
+
+    /// Shove let a track of the file give way, and it came to lie on a pad of a third net. The
+    /// route did not lay that track, so it may not take it out: it goes back to where the file
+    /// has it, and the new track that needed no room there stays.
+    #[test]
+    fn copper_of_the_file_that_gave_way_into_another_net_goes_back() {
+        let b = with_soft(
+            board(&[
+                ("A", 2., 10.),
+                ("A", 8., 10.),
+                ("B", 14., 2.),
+                ("B", 14., 18.),
+                ("C", 11., 10.),
+            ]),
+            &[(14., 2.), (14., 18.)],
+        );
+        let mut geo = Geometry {
+            tracks: vec![
+                track(0, &[(2., 10.), (8., 10.)]),
+                moved(&[(14., 2.), (11., 10.), (14., 18.)]),
+            ],
+            vias: Vec::new(),
+        };
+        assert_eq!(shorts(&b, &geo), vec![(1, 2)]);
+        let mut st = stats(1);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert_eq!(legal.put_back, vec!["B".to_string()]);
+        assert!(legal.dropped.is_empty() && legal.shorts_left == 0 && legal.shorts_new.is_empty());
+        assert_eq!((st.routed, geo.tracks.len()), (1, 2));
+        let back = geo.tracks.iter().find(|t| t.origin == Some(0)).unwrap();
+        assert!(back.resting);
+        assert_eq!(back.pts, vec![pt(14., 2.), pt(14., 18.)]);
+        assert!(shorts(&b, &geo).is_empty());
+    }
+
+    /// Copper of the file that gave way in an earlier step and was asleep in the last relaxation
+    /// carries `resting`, yet it is not where the file has it: it goes back all the same.
+    #[test]
+    fn copper_that_gave_way_and_sleeps_by_now_goes_back_too() {
+        let b = with_soft(
+            board(&[
+                ("A", 2., 10.),
+                ("A", 8., 10.),
+                ("B", 14., 2.),
+                ("B", 14., 18.),
+                ("C", 11., 10.),
+            ]),
+            &[(14., 2.), (14., 18.)],
+        );
+        let mut asleep = moved(&[(14., 2.), (11., 10.), (14., 18.)]);
+        asleep.resting = true;
+        let mut geo = Geometry {
+            tracks: vec![track(0, &[(2., 10.), (8., 10.)]), asleep],
+            vias: Vec::new(),
+        };
+        let mut st = stats(1);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert_eq!(legal.put_back, vec!["B".to_string()]);
+        assert!(legal.shorts_left == 0 && shorts(&b, &geo).is_empty());
+        let back = geo.tracks.iter().find(|t| t.origin == Some(0)).unwrap();
+        assert_eq!(back.pts, vec![pt(14., 2.), pt(14., 18.)]);
+    }
+
+    /// The same, but the new track runs across the old place of the track that gave way: with
+    /// the copper of the file back, the short is the new track's, and that one goes.
+    #[test]
+    fn a_new_track_across_the_old_place_of_copper_put_back_is_taken_out() {
+        let b = with_soft(
+            board(&[
+                ("A", 2., 10.),
+                ("A", 18., 10.),
+                ("B", 14., 2.),
+                ("B", 14., 18.),
+                ("C", 19., 6.),
+            ]),
+            &[(14., 2.), (14., 18.)],
+        );
+        // B went round the end of A's track and onto the pad of C
+        let mut geo = Geometry {
+            tracks: vec![
+                track(0, &[(2., 10.), (18., 10.)]),
+                moved(&[(14., 2.), (19., 6.), (19., 12.), (14., 18.)]),
+            ],
+            vias: Vec::new(),
+        };
+        let mut st = stats(1);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert_eq!(legal.put_back, vec!["B".to_string()]);
+        assert_eq!(legal.dropped, vec![("A".to_string(), "B".to_string())]);
+        assert_eq!((legal.shorts_left, st.routed), (0, 0));
+        assert_eq!(st.unrouted, vec!["A from P.1".to_string()]);
+        assert!(geo.tracks.len() == 1 && geo.tracks[0].resting);
+    }
+
+    /// A short that the file has itself is not the route's: it stays, it is counted, and no
+    /// pair of nets is named as new.
+    #[test]
+    fn a_short_of_the_file_is_left_and_not_called_new() {
+        let b = with_soft(
+            board(&[
+                ("A", 2., 10.),
+                ("A", 8., 10.),
+                ("B", 14., 2.),
+                ("B", 14., 18.),
+                ("C", 14., 10.),
+            ]),
+            &[(14., 2.), (14., 18.)],
+        );
+        let mut geo = crate::follow::soft_geometry(&b);
+        geo.tracks.push(track(0, &[(2., 10.), (8., 10.)]));
+        let mut st = stats(1);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert!(legal.put_back.is_empty() && legal.dropped.is_empty());
+        assert!(legal.shorts_left > 0 && legal.shorts_new.is_empty(), "{legal:?}");
+        assert_eq!((st.routed, geo.tracks.len()), (1, 2));
+    }
+
+    /// A net that is not routed in this run has no pins in its list. Its copper that gave way
+    /// still ends on its pads: that is no loose end.
+    #[test]
+    fn copper_that_gave_way_ends_on_the_pads_of_a_net_that_is_not_routed() {
+        let mut b = with_soft(
+            board(&[("A", 2., 10.), ("A", 8., 10.), ("B", 14., 2.), ("B", 14., 18.)]),
+            &[(14., 2.), (14., 18.)],
+        );
+        b.nets[1].pins.clear();
+        let mut geo = Geometry {
+            tracks: vec![
+                track(0, &[(2., 10.), (8., 10.)]),
+                moved(&[(14., 2.), (15., 10.), (14., 18.)]),
+            ],
+            vias: Vec::new(),
+        };
+        let mut st = stats(1);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert!(legal.dangling.is_empty(), "{:?}", legal.dangling);
+        assert!(legal.put_back.is_empty());
     }
 
     #[test]

@@ -14,6 +14,7 @@ Commands (shortened):
   angles45   Turn the unlocked tracks of a routed board into 45 degree tracks
   move-part  Move a part on a routed board and let the tracks around it follow
   lengths    Measure a routed board as KiCad's DRC does
+  areas      What the copper fill of pours and planes reaches
   strip      Remove tracks, vias and outer copper zones (benchmark preparation)
 ```
 
@@ -165,6 +166,9 @@ A good default for a real board with a few hundred connections is the plain `--s
 | --- | --- | --- |
 | `--move-parts` / `--no-move-parts` | on with `--scope fresh` and `keep_locked`, off with `finish` and `reroute` | During the geometry generations, parts next to clearance problems and next to the pins of open connections may shift a little to open a channel. At an open connection the part with that pin stays and its neighbours step aside. The routed copper goes along like rubber bands, as in [`move-part`](#gummiband-move-part): the parts move in small steps and the tracks give way; a shift stops where the copper cannot give way any more. Only if that keeps the problems does a new search on the shifted board follow (on boards up to 400 connections). Locked footprints, connectors, modules, mounting holes, switches, jumpers and test points stay (by footprint library name and by reference prefix J, P, CN, USB, H, MH, SW, TP). The output file has the moved footprints at their new positions, with the footprint's own zones (a keepout drawn inside the footprint) moved along, and the console lists every move. Footprints in a KiCad group form a block that moves as a whole with its kept tracks and vias (zones in the group do not move yet); a block with one fixed member stays put. Blocks are new and untested on a real board. |
 | `--fixed R1,U3` | none | More references that never move under `--move-parts`, `--placements` and `--clear-corridors`. |
+| `--areas tracks\|fill` | `tracks` | How nets with an area on a routed layer are connected. An area is a zone of the file with a net (a pour) or a pour named by `--pour`. `tracks`: such a net is laid as tracks like any other and the area is not looked at. `fill`: its fill connects it. The other nets are laid first and get the room; then the router's fill model (see [`gummiband areas`](#gummiband-areas)) says which pads the fill reaches on their copper, and only a group of pads it does not reach gets copper of its own: the shortest piece of track that ends in the fill, on a via that lands in the fill on another layer, or on a pad that hangs on the area. While the other nets are laid, a track that passes right next to a pad of such a net pays a small price, so that the pad stays open where there is another way. Where a pad finds no way, the tracks around it give way and are laid again. The lines `areas:` of the result say per net how many pads the fill reaches on the finished copper and which it does not; a group of pads that neither fill nor copper joins to the area counts as an open connection of the route (`unrouted` in the report, "open in the copper" in the log). The model runs once per candidate of the search, which costs time: see `bench/README.md`. Not together with `--pairs`, an open ended run or shove. |
+| `--area-stitch`, `--no-area-stitch` | on with `--areas fill` | An island of fill that holds pads (a piece of the pour that tracks of other nets cut off from the area) gets one via of the net where it joins the area on another layer, and no track. The via is set on the finished copper, where the fill model finds the spot with the most room; where that spot lands on a piece that is itself apart, a second via joins that piece. `areas: N vias set for islands of fill` in the result counts them. With `--no-area-stitch` a pad on an island gets a connection to the area like any pad the fill does not reach. |
+| `--pour NET[:LAYERS]` | none | With `--areas fill`: a net that gets a pour after the route, e.g. `--pour GND` (both outer layers) or `--pour GND:F.Cu`. The route takes the pour as an area of the net, with the fill rules a pour gets by default; it does not write the zone, so lay it afterwards (KiCad, or the MCP tool `ground_pour`). Give the flag once per net; several nets on the same layers share the board by nearest pad. A net that has a zone on that layer already needs no `--pour`, and naming it is an error. |
 | `--placements N` | 0 | Place the board N times from the netlist (see [`gummiband place`](#gummiband-place), default scope), route each result with the settings of this command and keep the best: fewest open connections, then clearance violations, vias and length. Takes N + 1 routes, the last one writes the winner; `--until-stop` applies to that last one only. Not with `--scope finish` or `reroute`, `--nets` or `--pairs band`. The JSON report gets a `placement` block with every try. |
 | `--placement-seed S` | 1 | First seed of `--placements`, and the seed of `--clear-corridors`. |
 | `--clear-corridors` | off | Before the routing, parts that sit in the band of a group of tracks between two parts (ICs, connectors sharing at least two signal nets) and are not on its nets get new positions with `place --corridors`; everything else stays, and so do decoupling capacitors (a capacitor on a ground or supply). ICs and connectors in a band move at most 1.5 mm (`place --leash`, `GB_CC_LEASH` to change it). Pairs with `--patterns groups`. Not with `--scope finish` or `reroute`. Experimental: `GB_CC_GAP`, `GB_CC_HALO` (mm), `GB_CC_ESCAPE=1` and `GB_CC_SEMANTIC=1` give the moved parts more room. When it pays: [options](options.md#room-for-track-groups). |
@@ -282,6 +286,7 @@ wrote 83 items to routed.kicad_pcb
   "length_mm": 2458.1,
   "length_lower_bound_mm": 1980.4,
   "items_written": 3306,
+  "pours": ["the pour of VBUS does not reach pads Q3.5, judged by the fill model"],
   "violations": [
     {"what": "pad /SDA~GND", "x": 143.21, "y": 121.07,
      "actual_mm": 0.148, "required_mm": 0.15, "nets": ["/SDA", "GND"]}
@@ -309,6 +314,13 @@ search. `seed` is the seed the search ran with. The report also lists `alternati
 results of an open ended run: `path`, `routed`, `connections`, `vias`, `length_mm`,
 `clearance_spots`), `copied` (project files copied next to the output), `skipped_nets` (left out
 by `--nets` or a `skip`) and `cleared_corridors` (the parts `--clear-corridors` placed again).
+`areas` (with `--areas fill`) holds the report of the fill model per net left to its fill, with
+the fields of `gummiband areas --json` for a net: `summary`, `pads`, `reached`, `unreached` with
+the reason of each, `islands`.
+`pours` holds the second opinion of the fill model on the `gb:` pours of the nets routed: a
+sentence per net whose pour holds a pad by its outline that its fill will not get to (tracks of
+other nets cut the pad off). The router counts such a pad as connected, so check it;
+`gummiband areas` on the written file has the details.
 
 `violations[].nets` is the routed net and the other net (or null for an obstacle without a net,
 such as the board edge or a hole). Positions are board millimetres as KiCad shows them. Scripts
@@ -495,6 +507,69 @@ uncoupled length of each differential pair. Tracks of KiCad tuning patterns coun
 and stay out of the coupling, as in KiCad. `--nets` also lists the lengths of these nets (glob
 patterns). On the Antmicro DDR5 testbed the lengths equal those of the DRC to 0.0001 mm; the
 uncoupled length can differ, KiCad's coupling test has corner cases this one does not copy.
+
+## `gummiband areas`
+
+```bash
+gummiband areas board.kicad_pcb [--nets GND,+3V3] [--pour F.Cu,B.Cu] [--json] [--brief]
+```
+
+A zone in a board file is an outline. The copper inside it, the fill, is computed by KiCad
+later, and what it connects depends on every track and via of the other nets: a pour over a
+routed layer falls into pieces, and a pad on a piece that nothing joins to the rest is not
+connected, although it lies "in the pour". `areas` computes the fill with the router's own
+model and tells you what it reaches, for every net with a zone (or `--nets`), on the copper
+the file has:
+
+```text
+The area of GND (1203.4 mm2 on F.Cu, B.Cu) reaches 49 of 52 pads; 3 are not reached: 2 on islands, 1 without a spoke.
+  52 pads: 44 by fill, 5 through other copper of the net, 3 not reached in 3 groups apart from the area; 96.1 mm2 of fill apart from the area; step 0.04 mm, 1.9 s
+  F.Cu: 31 pieces of fill (1 of the area, 28 that hold nothing of the net), 601.0 mm2
+  B.Cu: 12 pieces of fill (1 of the area, 11 that hold nothing of the net), 698.5 mm2
+  island 0 on F.Cu: 2.31 mm2, pads C7.2; one via at 31.42 18.06 joins it (F.Cu to B.Cu, 0.21 mm to spare)
+  island 1 on F.Cu: 0.18 mm2, pads R3.1; no via joins it: its widest spot is 0.36 mm and a via has 0.60 mm
+  not reached, has a thermal relief and none of its spokes ends in fill: U2.17
+  from a pad to the nearest spot where a via lands in the area: mean 0.71 mm, at most 2.40 mm (J1.4)
+  doubtful, the answer changes when every clearance moves by half a raster cell: 1 pads
+    reached, but not then: C12.2
+```
+
+- **The area** of a net is the fill and copper that hang together and join the most fill among
+  the groups that join at least two pads. Where no piece joins two pads the first line says so
+  ("The fill of GND joins no two pads") and the largest piece is taken.
+- **Islands** are pieces of fill with pads on them that are cut off from the area. For each the
+  model looks for the spot where one via joins it to the area on another layer, with the most
+  room, or says why there is none.
+- **Not reached** names the other pads with the reason: walled in by other nets, a thermal
+  relief without a spoke that ends in fill, outside the outline, or on a layer where the net has
+  no area.
+- **From a pad to the nearest spot where a via lands in the area** tells how far the pins of a
+  plane net are from their via.
+- **Pieces that hold nothing of the net** are left out of the fill, as KiCad leaves them out
+  (unless the zone is set to keep them). Where no piece of a zone holds anything, KiCad keeps
+  them all and warns of isolated copper for each: a line under the layer says so. A pour on a
+  layer without a pad or via of the net is such a zone.
+- **Doubtful** pads change their answer when every clearance moves by half a raster cell. The
+  model works on a raster of 0.04 to 0.05 mm (`--step`); a strip of fill within one cell of the
+  minimum width can come out either way, and so can a thermal spoke that ends within a cell of
+  the border of the fill. Read them as "not reached until KiCad says otherwise".
+  `--no-doubtful` leaves the two extra runs per net out.
+
+`--pour LAYERS` with `--nets` lays an area of those nets for the report where they have none
+yet: what a pour would reach before one exists. One net gets the board outline; several nets
+share the board by nearest pad, as the MCP tool `ground_pour` lays them. `--zone-clearance`,
+`--zone-min-width`, `--thermal-gap`, `--thermal-spoke-width` and `--pad-connection` are its
+settings (0.2, 0.2, 0.3, 0.3 mm, `thermal`). The file is never changed. `--json` prints
+everything for a program, `--brief` one sentence per net, `--pgm PREFIX` writes the fill per
+net and layer as a grey picture. Where the file holds a fill (KiCad's, from its last refill),
+a line per layer holds the model against it.
+
+The model is the router's own and not KiCad's filler: KiCad's fill and its DRC have the last
+word. On the planes of the LED controller the two differ in 0.08 % of the area and touch the
+same pads. On routed bench boards with a pour it was held against KiCad 10
+(`bench/areas-kicad.sh`) and follows it where the two disagreed: a strip of just the minimum
+width passes, pads in a row whose thermal gaps meet are joined by their spokes, and a pour that
+nothing holds stays as isolated copper.
 
 ## Judging a result with KiCad
 

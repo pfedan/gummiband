@@ -582,6 +582,12 @@ impl Mesh {
         self.verts[a as usize].dist(self.verts[b as usize])
     }
 
+    /// The middle of triangle t.
+    pub fn tri_mid(&self, t: u32) -> Point {
+        let [a, b, c] = self.tris[t as usize].map(|v| self.verts[v as usize]);
+        (a + b + c) * (1.0 / 3.0)
+    }
+
     /// Local index (0..3) of edge e in triangle t.
     #[inline]
     pub fn local_edge(&self, t: u32, e: u32) -> usize {

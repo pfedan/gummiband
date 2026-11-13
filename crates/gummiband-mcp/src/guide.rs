@@ -148,7 +148,7 @@ mod tests {
     fn keys() {
         assert_eq!(key_of("route"), "route");
         assert_eq!(
-            key_of("Good practice: power_plan, power_copper, current_check, reference_check, ground_pour"),
+            key_of("Good practice: power_plan, power_copper, current_check, reference_check, ground_pour, area_report"),
             "good_practice"
         );
         assert_eq!(key_of("The prompt good_practice"), "prompt_good_practice");
@@ -189,6 +189,7 @@ mod tests {
             "current_check",
             "reference_check",
             "ground_pour",
+            "area_report",
             "good_practice",
             "drc",
             "render",
@@ -216,6 +217,7 @@ mod tests {
         assert!(!route.contains("### Choosing opt-in options"));
         let (_, gp, _) = lookup(Some("good_practice"));
         assert!(gp.contains("#### power_plan") && gp.contains("#### ground_pour"));
+        assert!(gp.contains("#### area_report"));
         assert!(!gp.contains("### drc"));
         let (_, tools, _) = lookup(Some("tools"));
         assert!(tools.contains("| `route` |") && !tools.contains("### create_board"));

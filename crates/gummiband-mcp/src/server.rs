@@ -52,7 +52,8 @@ copy. To change one net on a routed board: load the routed file -> route with sc
 nets (the unlocked tracks of other nets shift aside or give way where needed, see shove and give). To straighten a finished any-angle result to 45 degrees without routing again: angles_45 on the routed file. To place parts: move_part for connectors and power stages, place_parts for the rest (semantic: true keeps sheets and IC clusters together and current paths short; two_sided: true when the parts do not fit on one side), set_layer_type (power) and add_zone for planes. load_board lists the differential pairs it recognised; route couples them only with pairs \"pull\" (gentle, every pair) or \"band\" (one wide track, experimental). Good practice around routing (the prompt good_practice walks through a whole board): \
 power_plan before routing (currents -> widths, planes, vias; apply stores the widths), \
 current_check after routing (narrowest cross-section of every current path), ground_pour (GND \
-pours and stitching vias), reference_check (signal tracks over gaps or splits of their reference plane), then drc. Opt-in options (route patterns, clear_corridors, \
+pours and stitching vias), area_report (which pads the fill of a pour or plane reaches, which it \
+leaves on islands, and where one via joins each island), reference_check (signal tracks over gaps or splits of their reference plane), then drc. Opt-in options (route patterns, clear_corridors, \
 pairs pull and band, place_parts semantic, corridors, escape_halo, leash) are off because none wins on every board; \
 results scatter strongly between seeds, so compare a setting with the plain run over the same 2 or 3 \
 seeds (mean and worst, judged by drc). Rough guide: several chips with buses -> patterns groups, on a \
@@ -1046,6 +1047,19 @@ pub struct RouteIn {
     /// zones stay (as `gummiband --plane-layers`). To make it lasting, use set_layer_type.
     #[serde(default)]
     pub plane_layers: Vec<String>,
+    /// How nets with an area (a zone of the file, or a pour of `pour`) on a routed layer are
+    /// connected: "tracks" (default) lays them like any net and does not look at the area,
+    /// "fill" does not lay them as tracks: the fill connects them, and `areas` in the result
+    /// says per net which pads it does not reach.
+    pub areas: Option<String>,
+    /// With areas "fill": nets that get a pour after the route (ground_pour), each "NET" or
+    /// "NET:LAYER,LAYER" (the outer layers where none is given). The route takes the pour as
+    /// an area of the net; it does not write the zone.
+    pub pour: Option<Vec<String>>,
+    /// With areas "fill": an island of fill that holds pads gets one via where it joins the
+    /// area, set on the finished copper where the fill model finds the spot (default true with
+    /// areas "fill"). false: such a pad gets a track to the area instead.
+    pub area_stitch: Option<bool>,
     /// Output .kicad_pcb (default: `<input>.routed.kicad_pcb` next to the input). The
     /// .kicad_pro and .kicad_dru are copied next to it if missing.
     pub output: Option<String>,
@@ -1409,6 +1423,19 @@ pub struct UncoupledOut {
     pub why: String,
 }
 
+/// The area of one net after a route with areas "fill".
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RouteAreaOut {
+    pub net: String,
+    /// The finding in one sentence.
+    pub summary: String,
+    pub pads: usize,
+    pub reached: usize,
+    /// The pads the fill does not reach, each with the reason: island, walled, no_spoke,
+    /// outside or other_layer.
+    pub unreached: Vec<String>,
+}
+
 /// The fields of `gummiband route --report`, plus a few for the session.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BlockedOut {
@@ -1453,6 +1480,12 @@ pub struct RouteOut {
     pub items_written: usize,
     /// Nets left out by set_net_options or the `nets` argument.
     pub skipped_nets: Vec<String>,
+    /// With areas "fill": per net left to its fill what the fill reaches on the finished
+    /// copper, judged by the router's fill model (area_report on the written file has the
+    /// details).
+    pub areas: Vec<RouteAreaOut>,
+    /// Of `vias`, those set for islands of fill (area_stitch).
+    pub area_vias: usize,
     /// Gummiband's own clearance check on the result.
     pub violations_total: usize,
     pub violations_by_kind: BTreeMap<String, usize>,
@@ -3104,12 +3137,10 @@ impl Gummiband {
                 bail!("thermal_spoke_width must be positive");
             }
             let spec = write::ZoneSpec {
-                net,
-                layer,
                 priority: p.priority.unwrap_or(0),
-                name: "",
                 connect,
                 spoke,
+                ..write::ZoneSpec::plain(net, layer)
             };
             Ok(write::add_zone_named(kb, text, &spec, &pts, 1))
         })?;
@@ -3350,6 +3381,12 @@ fn route_options(p: &RouteIn, loaded_keep: bool) -> Result<(RouteOptions, Vec<Re
         move_parts: p.move_parts,
         fixed: p.fixed.clone(),
         plane_layers: p.plane_layers.clone(),
+        areas: match p.areas.as_deref() {
+            None => d.areas,
+            Some(word) => gummiband_app::Areas::parse(word).map_err(anyhow::Error::msg)?,
+        },
+        pour: p.pour.clone().unwrap_or_default(),
+        area_stitch: p.area_stitch,
         preset: match &p.preset {
             Some(word) => Preset::parse(word).map_err(anyhow::Error::msg)?,
             None => d.preset,
@@ -3523,6 +3560,12 @@ fn route_blocking(
             names.join(", ")
         ));
     }
+    // the second opinion of the fill model on the pours of the nets routed
+    for p in &routed.legal.pours {
+        notes.push(format!(
+            "{p}: the pads count as connected through the pour, but its fill will not get to them; route a track to them or give the pour room (area_report on the written file has the details)"
+        ));
+    }
     let length_tuning: Vec<TunedOut> = tuned
         .iter()
         .flat_map(|r| &r.nets)
@@ -3619,6 +3662,22 @@ fn route_blocking(
         length_mm: st.length,
         items_written: items,
         skipped_nets: outcome.skipped_nets.clone(),
+        area_vias: routed.area_vias,
+        areas: routed
+            .areas
+            .iter()
+            .map(|a| RouteAreaOut {
+                net: a.net.clone(),
+                summary: a.summary.clone(),
+                pads: a.pads,
+                reached: a.reached,
+                unreached: a
+                    .unreached
+                    .iter()
+                    .map(|u| format!("{} ({})", u.pad, u.reason))
+                    .collect(),
+            })
+            .collect(),
         alternatives: written
             .alternatives
             .iter()
@@ -4302,7 +4361,7 @@ impl Gummiband {
     }
 
     #[tool(
-        description = "Pour ground after routing: adds zones of the ground net (default GND) over the board outline on the outer layers (default) and locked stitching vias on a grid and along the board edge where they are clear of other nets, holes, rule areas, other nets' pours and courtyards. Writes <input>.gnd.kicad_pcb and loads it; KiCad fills the zones (drc refills them).",
+        description = "Pour ground after routing: adds zones of the ground net (default GND) over the board outline on the outer layers (default), with the fill rules given (pad_connection, thermal_spoke_width, thermal_gap, zone_clearance, zone_min_width), and locked stitching vias: by default one via for every island of fill with pads, at the spot the router's fill model finds, and never a via that joins nothing (stitch: islands, grid, both or none; the grid sets vias on a pitch and along the board edge where they are clear). nets pours several nets at once (GND and GNDR): the board is shared by nearest pad, each net gets zones of its own and they never overlap. via_in_pad also sets a via in an exposed pad that nothing else reaches. The result names per net what the pour reaches and which pads stay unreached and why. Writes <input>.gnd.kicad_pcb and loads it; KiCad fills the zones (drc refills them).",
         output_schema = schema_for_output::<practice::GroundPourOut>(),
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
@@ -4324,8 +4383,9 @@ impl Gummiband {
         .await;
         match res {
             Ok(out) => {
+                let found: Vec<&str> = out.nets.iter().map(|n| n.summary.as_str()).collect();
                 let s = format!(
-                    "{} pours on {} and {} stitching vias ({} along the edge) in {} (board {}). {}",
+                    "{} pours on {} and {} stitching vias ({} along the edge) in {} (board {}). By the fill model: {} {}",
                     out.net,
                     if out.zones_added.is_empty() {
                         "no layer".to_string()
@@ -4336,8 +4396,37 @@ impl Gummiband {
                     out.edge_vias,
                     out.path,
                     out.board,
+                    found.join(" "),
                     out.warnings.join(" ")
                 );
+                ok(s, &out)
+            }
+            Err(e) => fail(format!("{e:#}")),
+        }
+    }
+
+    #[tool(
+        description = "What the copper fill of the nets with a zone (pours, planes) reaches on the copper a .kicad_pcb has, judged by the router's own fill model (no KiCad needed; KiCad's fill has the last word): per net the pieces of fill, the pads the area reaches, the pads it does not reach with the reason in plain words, the islands with their pads and the site of one via that joins each to the area (or why none fits), the distance from the pads to the nearest spot where a via lands in the area, and the pads whose answer changes within one raster cell. With nets and pour it answers what a pour over the board outline would reach before one is written. The file stays as it is.",
+        output_schema = schema_for_output::<practice::AreaReportOut>(),
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn area_report(
+        &self,
+        Parameters(mut p): Parameters<practice::AreaReportIn>,
+    ) -> Result<CallToolResult, ErrorData> {
+        p.path = abs_path(&p.path).display().to_string();
+        match blocking(move || practice::area_report(&p)).await {
+            Ok(out) => {
+                let s = if out.summary.is_empty() {
+                    format!("No net with an area in {}. {}", out.path, out.notes.join(" "))
+                } else {
+                    format!(
+                        "Areas of {}: {} {}",
+                        out.path,
+                        out.summary.join(" "),
+                        out.notes.join(" ")
+                    )
+                };
                 ok(s, &out)
             }
             Err(e) => fail(format!("{e:#}")),
@@ -4503,6 +4592,45 @@ mod tests {
         assert!(serde_json::from_value::<RouteIn>(serde_json::json!({"board": "b1", "pair_breakouts": true})).is_err());
     }
 
+    /// The same for `area_report` and the options of the area report: the tool offers every
+    /// entry of the table under its name and nothing of its own but the file.
+    #[test]
+    fn area_report_offers_the_options_of_the_report() {
+        use practice::AreaReportIn;
+        const OWN: &[&str] = &["path"];
+        let schema = serde_json::to_value(schemars::schema_for!(AreaReportIn)).unwrap();
+        let args: Vec<&String> = schema["properties"].as_object().expect("properties").keys().collect();
+        for o in gummiband_app::AREA_OPTIONS {
+            assert!(args.iter().any(|a| *a == o.name), "area_report lacks {}", o.name);
+        }
+        for a in args {
+            assert!(
+                OWN.contains(&a.as_str()) || gummiband_app::area_option_doc(a).is_some(),
+                "{a} is neither in gummiband_app::AREA_OPTIONS nor the tool's own argument"
+            );
+        }
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        // with nothing given the report runs with the defaults of the table
+        let args = |v: serde_json::Value| serde_json::from_value::<AreaReportIn>(v).unwrap().options();
+        assert_eq!(
+            args(serde_json::json!({"path": "b.kicad_pcb"})),
+            gummiband_app::AreaOptions::default()
+        );
+        let o = args(serde_json::json!({
+            "path": "b.kicad_pcb", "nets": ["GND"], "pour": ["F.Cu", "B.Cu"], "zone_min_width": 0.15,
+            "pad_connection": "solid", "doubtful": false, "plane_layers": ["In1.Cu"],
+        }));
+        assert_eq!(
+            (o.nets, o.pour),
+            (vec!["GND".to_string()], vec!["F.Cu".to_string(), "B.Cu".into()])
+        );
+        assert_eq!(
+            (o.zone_min_width, o.pad_connection.as_str(), o.doubtful),
+            (0.15, "solid", false)
+        );
+        assert!(serde_json::from_value::<AreaReportIn>(serde_json::json!({"path": "b", "net": "GND"})).is_err());
+    }
+
     /// The options of a call of `route` and the notes about old spellings in it.
     fn route_call(v: serde_json::Value) -> (RouteOptions, Vec<String>) {
         let (opts, notes) = route_options(&serde_json::from_value::<RouteIn>(v).unwrap(), false).unwrap();
@@ -4525,6 +4653,17 @@ mod tests {
             "give": 2, "tune": false, "open_end_seconds": 30, "plane_layers": ["In1.Cu"],
             "breakouts": true, "placements": 3, "teardrops": true, "angles": "45",
         }));
+        let fill = args(serde_json::json!({"board": "b1", "areas": "fill", "pour": ["GND:F.Cu,B.Cu", "A"]}));
+        assert!(fill.areas == gummiband_app::Areas::Fill);
+        assert_eq!(fill.pour, ["GND:F.Cu,B.Cu", "A"]);
+        assert_eq!(fill.validate(false), Ok(()));
+        let bad = serde_json::from_value::<RouteIn>(serde_json::json!({"board": "b1", "areas": "pour"})).unwrap();
+        assert!(
+            route_options(&bad, false)
+                .unwrap_err()
+                .to_string()
+                .contains("areas must be")
+        );
         assert!(opts.scope == Scope::Reroute && !opts.tune && opts.breakouts && opts.teardrops);
         assert_eq!(opts.nets, ["A", "B"]);
         assert_eq!((opts.shove, opts.give, opts.move_parts), (Some(false), Some(2.0), None));

@@ -1,0 +1,15 @@
+(version 1)
+(rule "pairs"
+  (condition "A.inDiffPair('*')")
+  (constraint track_width (opt 0.15mm))
+  (constraint diff_pair_gap (min 0.15mm) (opt 0.15mm)))
+(rule "uncoupled"
+  (condition "A.inDiffPair('*')")
+  (constraint diff_pair_uncoupled (max 3mm)))
+(rule "byte lane"
+  (condition "A.NetName == 'DQ?' || A.inDiffPair('DQS')")
+  (constraint skew (max 0.2mm)))
+(rule "clock"
+  (condition "A.inDiffPair('CLK')")
+  (constraint length (min 40mm) (max 41mm))
+  (constraint skew (max 0.05mm) (within_diff_pairs)))

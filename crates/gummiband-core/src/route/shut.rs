@@ -124,16 +124,31 @@ impl Router<'_> {
                 }
             }
         };
+        // a pour is copper of its group like a pad: the search starts in it and ends on it
+        let pours = |groups: &[u32], out: &mut Vec<Place>| {
+            for (&o, &q) in &self.pour_pin {
+                if !groups.contains(&self.pin_group[q]) {
+                    continue;
+                }
+                for (l, m) in self.sub.m.iter().enumerate() {
+                    for &t in m.obs_tris.get(&o).map(|v| v.as_slice()).unwrap_or(&[]) {
+                        out.push(Place::Pad { l: l as u8, t });
+                    }
+                }
+            }
+        };
         let mut start = Vec::new();
         for q in in_groups(&[self.pin_group[conn.from]]) {
             pads(q, &mut start);
         }
+        pours(&[self.pin_group[conn.from]], &mut start);
         let start: HashSet<Place> = start.into_iter().collect();
         let groups: Vec<u32> = goal.iter().map(|&q| self.pin_group[q]).collect();
         let mut seeds = Vec::new();
         for q in in_groups(&groups) {
             pads(q, &mut seeds);
         }
+        pours(&groups, &mut seeds);
         // a goal as large as the budget (all other pins of a large net) cannot be shut in here
         if seeds.len() > budget {
             return false;

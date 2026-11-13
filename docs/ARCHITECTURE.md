@@ -61,9 +61,9 @@ negotiated congestion), not any existing product's code.
 | `gummiband-core` | geometry, board model, triangulation substrate, topological router, realization, checks. No I/O. |
 | `gummiband-kicad` | KiCad 9/10 s-expression reader and writer, net class and rule import from `.kicad_pro`. |
 | `gummiband-place` | placement: `auto` places any board from its netlist (`gummiband place`, MCP `place_parts`), a library without a program of its own. Its `variants` example (a benchmark tool, `bench/place`) makes the LED controller outline variants. |
-| `gummiband-app` | the pipelines behind the front ends: `RouteOptions` (every option of a route with its default, defined once, and the table `OPTIONS` of them), their checks, `NetOptions` per net, `route_board` and `route_file`, the writing of the result (see [Route pipeline](#route-pipeline)), and the debug SVG. Prints nothing. |
-| `gummiband-cli` | `gummiband` binary: `info`, `place`, `route`, `angles45`, `move-part`, `lengths`, `strip`. Maps its arguments to `gummiband-app`, prints the reports. The plugin calls this. |
-| `gummiband-mcp` | `gummiband-mcp` binary: the MCP server (stdio) for AI agents, see `docs/MCP.md`. Keeps the session (loaded boards, working copies, net options) and calls `gummiband-app` for `route` and `try_seeds`. |
+| `gummiband-app` | the pipelines behind the front ends: `RouteOptions` (every option of a route with its default, defined once, and the table `OPTIONS` of them), their checks, `NetOptions` per net, `route_board` and `route_file`, the writing of the result (see [Route pipeline](#route-pipeline)), the area report with its options `AreaOptions` and their table `AREA_OPTIONS` (see [Areas](#areas-pours-and-planes)), and the debug SVG. Prints nothing. |
+| `gummiband-cli` | `gummiband` binary: `info`, `place`, `route`, `angles45`, `move-part`, `lengths`, `areas`, `strip`. Maps its arguments to `gummiband-app`, prints the reports. The plugin calls this. |
+| `gummiband-mcp` | `gummiband-mcp` binary: the MCP server (stdio) for AI agents, see `docs/MCP.md`. Keeps the session (loaded boards, working copies, net options) and calls `gummiband-app` for `route`, `try_seeds` and `area_report`. |
 | `plugin/` | KiCad action plugin (Python, KiCad IPC API): exports the board, runs the CLI, imports the result. |
 
 Units: millimetres as `f64` in the core. The writer rounds to KiCad's nanometre grid.
@@ -327,6 +327,141 @@ of the nets that gave way; the soft copper shifts aside in its relaxation as in 
   (`import::soft_changes`). The passes of the open end put soft copper to sleep for themselves,
   also copper that has moved, so at its end the place decides what is written again, not the
   flag (`import::rest_in_place`): a track that lies on its chain, and its chain on it, rests.
+
+## Areas: pours and planes
+
+An area net is a net with a copper zone: a pour on an outer layer or a plane on an inner one.
+The zone is an outline with settings; the copper in it, the fill, is what KiCad computes when
+it refills, and what the fill joins depends on all other copper on its layer.
+
+**One model, the fill computed.** `gummiband_core::fill::Area` is the outline of one net on one
+layer with the settings of its fill (clearance, minimum width, pad connection, thermal gap and
+spoke width, priority, island removal). `gummiband_kicad::area::areas` reads every copper zone
+of a file into it, with the pads that set their own zone connection and the rule areas that
+forbid fill. The fill is never stored and never read from the file as truth: `fill::fill_net`
+computes it from the board and the copper the board has at that moment, and every caller asks
+again when the copper has changed.
+
+The model works on a raster (cell centres, an exact Euclidean distance transform, 0.04 to
+0.05 mm; the step divides the minimum width into an odd number of cells, which makes "narrower
+than the minimum width" exact for strips along the axes):
+
+1. the outline, inside the board and its edge clearance, without the outlines of other nets'
+   areas that win by priority;
+2. without the copper of other nets and holes grown by the clearance, and without the thermal
+   gap around the net's own pads that get a relief;
+3. without everything narrower than the minimum width (an opening);
+4. with the thermal spokes that end in what is left;
+5. the pieces, joined with the pads, tracks and vias of the net over all layers into groups.
+
+The area is the group with the most fill among those that join at least two pads; where no
+group does, the largest piece, and the result says so (`NetFill::main_pads`). A pin outside the
+area is not reached, with a reason (`Reach`: on an island, walled in, no spoke, outside the
+outline, no area on its layer). A group with pads outside the area is an island, and for each
+the best cell for one via that joins it to the area is looked for: clear of other nets on every
+layer, off every hole, in the island on one layer and in the area (or in a piece that one more
+via joins to the area) on another, with the most room; or the reason why none exists.
+`Options::slack` moves every clearance by a part of a cell; the report runs the model with half
+a cell less and half a cell more and lists the pads whose answer changes as doubtful.
+
+`gummiband_app::areas::area_report` turns this into the report of `gummiband areas` and of the
+MCP tool `area_report`; both front ends only map their arguments to `AreaOptions`, whose table
+`AREA_OPTIONS` the same guard tests hold them to as `OPTIONS` for a route.
+
+**Laying pours.** `gummiband_app::areas::lay_pours` makes the areas of a pour: one net gets the
+board outline; several nets share the board by nearest pad (`gummiband_core::region`: a raster
+labelled with the net of the nearest pad, a corridor of two cells between two nets, the pieces
+traced into outlines with their staircase corners cut, a region enclosed by another cut in as a
+hole through a slit, and no region for a pad alone among the pads of another net).
+`stitch_islands` sets one via per island at the model's site and runs the model again on the
+board with those vias until no island has a site left; `stitch_pads` sets a via in a pad that
+holds one, only where asked for. The MCP tool `ground_pour` writes the result (the zones with
+the fill rules given, the vias locked) and reports what stays unreached on the board as
+written; the report option `pour` lays the same areas without writing anything.
+
+**What the router does with a pour today.** A `gb:` zone (the pours of `power_copper`) is
+copper of its net like a large pad: other nets keep out, the pads under one pour count as
+connected, and a connection that reaches the pour ends where it enters it (`End::Area` in
+`route.rs`), not at a pad under the pour across its holes. Other zones on routing layers are
+not obstacles: KiCad's fill gives way to the tracks. Planes on plane layers are reached by a
+via into the outline. The router does not yet use the fill model while it searches; that, and
+counting a pad the model leaves unreached as open, are the next stages. Until then the last
+check on the copper (`legal::pours`) gives the model's second opinion on the finished result:
+for every net with a `gb:` pour it fills the pours on the copper as routed and names the pads
+that lie on a pour by its outline but do not hang on the body of its fill ("the pour of GND
+does not reach pads ..., judged by the fill model"). The sentence goes to the console, into
+`pours` of the JSON report and into the notes of the MCP tool `route`; the count of routed
+connections stays as the router has it.
+
+**Area nets in a route (option `areas`).** With `areas tracks`, the default, a net with a
+zone on a routed layer is laid as tracks like any net. With `areas fill` the app builds a
+`fill::AreaPlan` when it loads the board (`gummiband_app::areas::route_plan`): the areas of the
+file, the pours named by the option `pour` as `lay_pours` would lay them, the settings of the
+model, and the nets the fill connects (those with an area that is not a `gb:` pour on a routed
+layer). The plan rides on the board (`Board::areas`), and everything that treats such a net
+differently asks it. With no plan on the board nothing in the router changes, which is what
+keeps the route hashes of `areas tracks`.
+
+`Router::plan` gives the area nets no connections, so the first pass (`Router::run`) lays the
+other nets alone. Then `Router::area_pass` runs, once per candidate of the search: the model
+fills the areas on the copper of the candidate (`fill::goals`: after a short relaxation, on a
+raster of a third of the minimum width, with half a cell of reserve on every clearance, so
+that a strip of fill the search counts on is still there on the finished copper), and every
+group of pads the fill does not reach becomes one connection with the goal `Goal::Area`. The
+goal is copper of the net that hangs together with its area, on whatever layer
+(`fill::AreaGoal`): the search ends where it enters a free triangle at a spot of the fill at
+least half the minimum width inside (`inside`), on a pad that hangs on the area (by the
+model, or through a connection laid: `Router::area_joined`), or on a via whose landing lies in
+the fill on another layer (`lands`; an inner plane is such a layer). A via is only a change
+of layer: where its landing is not in the fill, the search goes on from it. What finds no way
+gets a via in its pad as a second chance and then the rip-up of the first pass: the
+connections around the pad give way, the pad goes first, they are laid again, the model runs
+again, and a connection whose end the new fill no longer holds is laid again as well. A net
+whose area has no fill at all is joined by tracks. What the fill joins stays in the count of
+connections (`Router::area_base`), so that rules on a share of them (the second, negotiating
+search at 15 % open) mean the same as with tracks.
+
+While the first pass runs, the pads of the area nets count as waiting
+(`Router::area_pads_wait`): a track of another net that passes right next to one pays
+`RouterConfig::area_escape` (2 mm of track; `GB_AREA_ESCAPE`), the escape price that
+`escape_penalty` knows for pads with an unrouted connection. It reserves nothing and takes no
+capacity; it only makes the way around the pad the cheaper one where there is one, so that
+the fill, or the pad's own piece of copper, finds the pad open.
+
+An island of fill that holds pads and has a spot for one via (`fill::Island::via`, with
+`fill::SITE_ROOM` to spare) gets no connection in that pass when the plan says `stitch` (the
+option `area_stitch`): `gummiband_app::areas::stitch_route` sets that via on the finished
+copper, where the model finds the spot, as `ground_pour` does for a pour that is laid. The
+search judges each net without its own copper of this pass (`fill::goals` with `bare`): a pad
+that hangs on the area only through a connection must not count as held by the area once that
+connection is taken out again.
+
+The last check (`legal::enforce`) runs the model once on the finished copper and takes a
+track end or a via in the fill of its net's area as held. It counts these nets by the fill
+(`legal::count_areas`): a group of pads that neither the fill nor copper joins to the area is
+one open connection, in the count of the route and in its list of unrouted connections, one
+less where the area itself holds no pad (as KiCad's ratsnest counts); a connection the search
+gave up whose pad the fill joins after all is not open. After the route `Routed::areas` holds
+the report of the model per net on the finished copper (`fill::with_copper` puts a geometry
+on the board as obstacles).
+
+**Validation.** The model was held against KiCad's fill of the planes of the LED controller
+(0.08 % of the area differs, the same pads are touched by both) and against KiCad 10 on routed
+bench boards with a pour; `bench/areas-kicad.sh` holds the commands and `bench/README.md` says
+how to read its table and what KiCad said. Where the two disagreed the model follows KiCad: a
+cell centre at just the clearance is fill (a strip of the minimum width passes), a thermal
+spoke is laid and tested as KiCad lays it (also against the spokes of other pads), and the
+pieces of a zone in which no piece holds anything stay. Five small boards in
+`bench/boards/areas` hold one situation each (strips of fill of six widths, two islands with
+strips that hold nothing, two pour nets on two halves, an area far from its pins, a split
+plane), and `bench/boards/areas/kicad` holds four routed boards as KiCad got them;
+`crates/gummiband-app/tests/area_boards.rs` pins what the model says about them, which on the
+latter is KiCad's answer.
+
+The cells of the area (`NetFill::of_area`) are told by the pieces as `fill_net` labels them,
+before the pieces that hold nothing are taken out of the fill: `AreaGoal` and through it the
+last check (`Board::area_fill_at`) read that mask. Labelling the fill a second time after
+pieces went gives other numbers, and a track end or a via in the fill was then not held.
 
 ## Geometry
 

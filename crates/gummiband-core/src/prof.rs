@@ -14,6 +14,7 @@ pub enum Slot {
     RelaxTracks,
     RelaxDirty,
     Taut,
+    AreaModel,
     Check,
     Rounds,
     Calls,
@@ -22,9 +23,10 @@ pub enum Slot {
     GpuWait,
     GoalChecks,
     GoalShut,
+    AreaModels,
 }
 
-const NAMES: [&str; 15] = [
+const NAMES: [&str; 17] = [
     "evaluate",
     "relax setup",
     "relax pieces",
@@ -32,6 +34,7 @@ const NAMES: [&str; 15] = [
     "relax tracks",
     "relax dirty",
     "taut",
+    "area model",
     "check",
     "rounds",
     "relax calls",
@@ -40,9 +43,10 @@ const NAMES: [&str; 15] = [
     "gpu wait ns",
     "goal checks",
     "goal shut in",
+    "area models",
 ];
 
-static SLOTS: [AtomicU64; 15] = [const { AtomicU64::new(0) }; 15];
+static SLOTS: [AtomicU64; 17] = [const { AtomicU64::new(0) }; 17];
 
 #[inline]
 pub fn add(s: Slot, n: u64) {
@@ -55,6 +59,11 @@ pub fn time<R>(s: Slot, f: impl FnOnce() -> R) -> R {
     let r = f();
     add(s, t.elapsed().as_nanos() as u64);
     r
+}
+
+/// What one slot holds so far.
+pub fn value(s: Slot) -> u64 {
+    SLOTS[s as usize].load(Ordering::Relaxed)
 }
 
 /// The values collected so far, for a benchmark that compares phases.

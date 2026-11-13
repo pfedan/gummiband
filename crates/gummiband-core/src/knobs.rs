@@ -402,6 +402,8 @@ knobs! {
         "Rip-up passes of a router run.";
     ESCAPE = "GB_ESCAPE", Experiment, Num, "0",
         "Extra cost in mm for passing right next to a pad of another net that still waits for its route.";
+    AREA_ESCAPE = "GB_AREA_ESCAPE", Experiment, Num, "2",
+        "`areas fill`: extra cost in mm for passing right next to a pad of a net left to the fill of its area, while the other nets are laid.";
     SHARE_KIND = "GB_SHARE_KIND", Experiment, Value, "all kinds",
         "`--patterns shares`: only the shares of this kind (`neighbours` or `decap`).";
     SKEW_WEIGHT = "GB_SKEW_WEIGHT", Experiment, Num, "0.5",

@@ -25,10 +25,11 @@ pub enum Kind {
     Path,
 }
 
-/// One option of [`RouteOptions`](crate::RouteOptions).
+/// One option of a pipeline: of [`RouteOptions`](crate::RouteOptions) in [`OPTIONS`], of
+/// [`AreaOptions`](crate::AreaOptions) in [`AREA_OPTIONS`](crate::AREA_OPTIONS).
 #[derive(Debug, Clone, Copy)]
 pub struct OptionDoc {
-    /// The field of `RouteOptions` and the MCP argument; the CLI flag is this in kebab-case.
+    /// The field of the options and the MCP argument; the CLI flag is this in kebab-case.
     pub name: &'static str,
     pub kind: Kind,
     /// The default in words, the same in every front end. For a plain number it is the number
@@ -93,7 +94,7 @@ impl OptionDoc {
     }
 }
 
-const fn opt(name: &'static str, kind: Kind, default: &'static str, help: &'static str) -> OptionDoc {
+pub(crate) const fn opt(name: &'static str, kind: Kind, default: &'static str, help: &'static str) -> OptionDoc {
     OptionDoc {
         name,
         kind,
@@ -182,6 +183,33 @@ pub const OPTIONS: &[OptionDoc] = &[
         Kind::List,
         "none",
         "Copper layers treated as planes besides those of KiCad type \"power\": not routed, their zones stay.",
+    ),
+    choice(
+        "areas",
+        "tracks",
+        "How nets with an area (a zone of the file or a pour of pour) on a routed layer are connected.",
+        &[
+            word(
+                "tracks",
+                "Such a net is laid as tracks like any net, and the area is not looked at.",
+            ),
+            word(
+                "fill",
+                "Such a net is not laid as tracks: the fill connects it, only what the fill does not reach gets copper of its own, and the report says which pads stay open.",
+            ),
+        ],
+    ),
+    opt(
+        "pour",
+        Kind::List,
+        "none",
+        "With areas fill: nets that get a pour after the route, each NET or NET:LAYER,LAYER (the outer layers where none is given), which the route takes as an area of the net.",
+    ),
+    opt(
+        "area_stitch",
+        Kind::OnOff,
+        "on with areas fill",
+        "With areas fill: an island of fill that holds pads gets one via where it joins the area, set on the finished copper where the fill model finds the spot.",
     ),
     choice(
         "preset",
@@ -429,6 +457,9 @@ mod tests {
             move_parts,
             fixed,
             plane_layers,
+            areas,
+            pour,
+            area_stitch,
             preset,
             runs,
             via_pitch,
@@ -575,6 +606,9 @@ mod tests {
         assert!(!d.shove() && text("shove").ends_with("else off"));
         assert_eq!(text("angles"), "any");
         assert_eq!(d.angles, crate::Angles::Any);
+        assert_eq!(text("areas"), d.areas.word());
+        assert!(d.pour.is_empty() && text("pour") == "none");
+        assert!(!d.area_stitch() && text("area_stitch") == "on with areas fill");
         // the four that a preset sets say so, with the number of the default preset
         let standard = crate::Preset::Standard.values();
         let said = |n: String| format!("what the preset says: {n} with standard");
