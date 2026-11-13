@@ -3598,6 +3598,20 @@ mod tests {
             pin: None,
             locked: false,
         };
+        // an arc out of the zone is one item with one width: with room it is wide, though its
+        // chord touches the zone
+        {
+            let sub = Substrate::build(&b, &crate::topo::SubstrateConfig::default());
+            let (a, m, c) = (pt(5.9, 5.), pt(7., 5.4), pt(8., 6.5));
+            let mut geo = Geometry {
+                tracks: vec![track(vec![Elem::Line(pt(5., 5.), a), Elem::Arc(a, m, c)])],
+                vias: Vec::new(),
+            };
+            widen_necks(&b, &sub, &mut geo);
+            let t = &geo.tracks[0];
+            assert_eq!(t.piece_width(a, c), 0.25);
+            assert_eq!(t.arc_width(a, m, c), 0.75);
+        }
         // a pad next to the line outside the zone: the line stays wide there and the check
         // reports the clearance; the narrow piece ends where the round end of the wide one
         // stays out of the neck, which reaches a little beyond the zone

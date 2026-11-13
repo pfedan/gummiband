@@ -53,6 +53,17 @@ impl Track {
         }
     }
 
+    /// Width of the arc a-m-b, which is one item in the file: the narrowest of its pieces. Not
+    /// the width of its chord: the chord misses the widths fitted to the pieces of the arc and
+    /// can touch a neck zone where the arc is wide.
+    pub fn arc_width(&self, a: Point, m: Point, b: Point) -> f64 {
+        flatten(&[Elem::Arc(a, m, b)])
+            .windows(2)
+            .map(|p| self.piece_width(p[0], p[1]))
+            .fold(f64::INFINITY, f64::min)
+            .min(self.width)
+    }
+
     /// Width of the piece a-b: narrow if it touches a neck zone. The topology counts an edge
     /// as narrow only if the whole edge lies in a zone, so every piece that crosses such an edge
     /// touches the zone and is narrow as well.
