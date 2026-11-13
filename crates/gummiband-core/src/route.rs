@@ -1157,18 +1157,51 @@ impl<'a> Router<'a> {
         x
     }
 
-    /// Width of a track of `full` width with neck zones at edge e.
-    fn width_at_edge(&self, li: usize, e: u32, full: f64, necks: &[Rect], neck_w: f64) -> f64 {
+    /// Width of a track of `full` width with neck zones at edge e, for a track of `net` that
+    /// keeps `c`.
+    #[allow(clippy::too_many_arguments)]
+    fn width_at_edge(&self, li: usize, e: u32, full: f64, necks: &[Rect], neck_w: f64, net: NetId, c: f64) -> f64 {
         if necks.is_empty() {
             return full;
         }
         let m = self.m(li);
         let [u, v] = m.edges[e as usize];
         let (a, b) = (m.verts[u as usize], m.verts[v as usize]);
-        // narrow where the edge touches a zone: the realized track narrows on every piece that
-        // touches a zone (that is what intersectsCourtyard() rules allow), and an exit from a
-        // fine pitch pad crosses its first edges right next to the pad
-        let hit = necks.iter().any(|r| r.touches_seg(a, b));
+        // Without a minimum width rule nothing ends a neck at its zone: every piece that
+        // touches the zone is narrow for its whole length, so the edge is narrow where it
+        // touches one.
+        if self.board.class_of(net).min_width.is_none() {
+            return if necks.iter().any(|r| r.touches_seg(a, b)) {
+                neck_w
+            } else {
+                full
+            };
+        }
+        // Under a minimum width rule the realized track is narrow from its zone to the end of
+        // its neck, `neck_reach` beyond the zone (`realize::zone_cuts`). So the track is
+        // narrow on an edge where it can cross the edge inside the neck: where the part of the
+        // edge in the neck reaches into the stretch the narrow track may lie on, between what
+        // the two ends ask of it. An edge that only touches the neck at one end is crossed
+        // outside it, at full width.
+        let len = a.dist(b);
+        let it = Item {
+            net,
+            w: neck_w,
+            c,
+            sides: [2, 2],
+        };
+        let lo = self.end_need_square(li, e, 0, &it);
+        let hi = len - self.end_need_square(li, e, 1, &it);
+        let reach = crate::realize::neck_reach(neck_w, c);
+        let hit = necks.iter().any(|r| match r.grow(reach).clip_seg(a, b) {
+            Some((t0, t1)) => lo > hi || (t1 * len >= lo - 1e-9 && t0 * len <= hi + 1e-9),
+            None => false,
+        });
+        // An edge at a pad of the net itself is crossed by the piece that comes from the pad:
+        // that piece is narrow up to its cut, half the full width beyond the neck.
+        let hit = hit
+            || ((0..2).any(|end| m.demands(e, end).iter().any(|d| self.obs_net(d.obs) == Some(net)))
+                && necks.iter().any(|r| r.grow(reach + full / 2.0).touches_seg(a, b)));
         if hit { neck_w } else { full }
     }
 
@@ -2658,7 +2691,7 @@ impl<'a> Router<'a> {
                 block = top.block_up;
             }
             let mut item = item;
-            item.w = self.width_at_edge(lu, e, item.w, &necks, neck_w);
+            item.w = self.width_at_edge(lu, e, item.w, &necks, neck_w, item.net, item.c);
             let mut price = prices.map_or(0.0, |p| p.history[lu].get(e as usize).copied().unwrap_or(0.0));
             if free && let Some((cp, cs)) = chord_from {
                 // the chord in t fixes the side of t's apex on the exit edge ...
@@ -2669,7 +2702,7 @@ impl<'a> Router<'a> {
                     let e_in = m.tri_edges[t as usize][ke as usize];
                     let mut it_in = item;
                     it_in.sides = [2, 2];
-                    it_in.w = self.width_at_edge(lu, e_in, cls.track_width, &necks, neck_w);
+                    it_in.w = self.width_at_edge(lu, e_in, cls.track_width, &necks, neck_w, item.net, item.c);
                     let si = m.edge_tris[e_in as usize].iter().position(|&x| x == t).unwrap();
                     it_in.sides[si] = self.side_of_pos(lu, t, e_in, CPos::Edge(k));
                     // Only the apex of t is taken here. The side of the apex before the edge is
@@ -3567,7 +3600,7 @@ impl<'a> Router<'a> {
             crossings.push((e, from, slot));
         }
         for (e, from, slot) in crossings {
-            let w = self.width_at_edge(li, e, s.width, &s.necks, s.neck_w);
+            let w = self.width_at_edge(li, e, s.width, &s.necks, s.neck_w, s.net, s.clearance);
             s.widths.push(w);
             let list = &mut self.cross[li][e as usize];
             let j = (slot as usize).min(list.len());

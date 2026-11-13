@@ -53,6 +53,17 @@ impl Track {
         }
     }
 
+    /// Width of the arc a-m-b, which is one item in the file: the narrowest of its pieces. Not
+    /// the width of its chord: the chord misses the widths fitted to the pieces of the arc and
+    /// can touch a neck zone where the arc is wide.
+    pub fn arc_width(&self, a: Point, m: Point, b: Point) -> f64 {
+        flatten(&[Elem::Arc(a, m, b)])
+            .windows(2)
+            .map(|p| self.piece_width(p[0], p[1]))
+            .fold(f64::INFINITY, f64::min)
+            .min(self.width)
+    }
+
     /// Width of the piece a-b: narrow if it touches a neck zone. The topology counts an edge
     /// as narrow only if the whole edge lies in a zone, so every piece that crosses such an edge
     /// touches the zone and is narrow as well.
@@ -1666,7 +1677,7 @@ impl Router<'_> {
                         .flat_map(|e| match e {
                             Elem::Line(a, b) => {
                                 let mut pts = vec![a];
-                                pts.extend(zone_cuts(a, b, &s.necks, s.width));
+                                pts.extend(zone_cuts(a, b, &s.necks, s.width, neck_reach(s.neck_w, s.clearance)));
                                 pts.push(b);
                                 pts.windows(2).map(|w| Elem::Line(w[0], w[1])).collect()
                             }
@@ -1819,12 +1830,19 @@ fn off_kept(pts: &[Point], on_kept: impl Fn(Point) -> bool) -> Option<Vec<Vec<Po
     Some(out)
 }
 
-/// Where the segment a-b, on its way into or out of one of the zones, comes within reach of it
-/// for a track of `width`: half the width and a micrometre (in order from a). Cut there, a line
-/// keeps its width up to its neck zone, and its round end stays out of the zone. Under a minimum
-/// width rule the neck of a track ends with the courtyard that allows it, the way KiCad's rule
-/// sees it: a piece that touches the courtyard may be narrow, the next one is outside.
-pub fn zone_cuts(a: Point, b: Point, zones: &[crate::geom::Rect], width: f64) -> Vec<Point> {
+/// How far beyond its zone a neck reaches: as far as a narrow track stands off a corner on the
+/// border of the zone, so that the track can round such a corner before it widens.
+pub fn neck_reach(neck_w: f64, clearance: f64) -> f64 {
+    clearance + neck_w / 2.0
+}
+
+/// Where the segment a-b, on its way into or out of one of the zones, leaves the neck of a
+/// track of `width`: `reach` beyond the zone, then half the width and a micrometre (in order
+/// from a). Cut there, a line keeps its width up to its neck, and its round end stays out of
+/// it. Under a minimum width rule a piece may be narrow if it touches the courtyard, the way
+/// KiCad's rule sees it: only a line that touches the zone itself is cut, and the piece from
+/// the zone to the cut is the narrow one.
+pub fn zone_cuts(a: Point, b: Point, zones: &[crate::geom::Rect], width: f64, reach: f64) -> Vec<Point> {
     const OUT: f64 = 1e-3;
     let len = a.dist(b);
     if len < 4.0 * OUT {
@@ -1832,7 +1850,7 @@ pub fn zone_cuts(a: Point, b: Point, zones: &[crate::geom::Rect], width: f64) ->
     }
     let mut ts: Vec<f64> = Vec::new();
     for r in zones.iter().filter(|r| r.touches_seg(a, b)) {
-        if let Some((t0, t1)) = r.grow(width / 2.0 + OUT).clip_seg(a, b) {
+        if let Some((t0, t1)) = r.grow(reach + width / 2.0 + OUT).clip_seg(a, b) {
             ts.push(t0);
             ts.push(t1);
         }
@@ -1844,11 +1862,11 @@ pub fn zone_cuts(a: Point, b: Point, zones: &[crate::geom::Rect], width: f64) ->
 }
 
 /// A polyline with the cuts of [`zone_cuts`] in its pieces.
-pub fn cut_at_zones(pts: &[Point], zones: &[crate::geom::Rect], width: f64) -> Vec<Point> {
+pub fn cut_at_zones(pts: &[Point], zones: &[crate::geom::Rect], width: f64, reach: f64) -> Vec<Point> {
     let mut out: Vec<Point> = Vec::with_capacity(pts.len());
     for (i, &p) in pts.iter().enumerate() {
         if i > 0 {
-            out.extend(zone_cuts(pts[i - 1], p, zones, width));
+            out.extend(zone_cuts(pts[i - 1], p, zones, width, reach));
         }
         out.push(p);
     }
@@ -2478,7 +2496,7 @@ mod tests {
         let mut zone = crate::geom::Rect::empty();
         zone.add(pt(4., 4.));
         zone.add(pt(6., 6.));
-        let cuts = |a: (f64, f64), b: (f64, f64)| zone_cuts(pt(a.0, a.1), pt(b.0, b.1), &[zone], 0.75);
+        let cuts = |a: (f64, f64), b: (f64, f64)| zone_cuts(pt(a.0, a.1), pt(b.0, b.1), &[zone], 0.75, 0.0);
         let out = cuts((5., 5.), (12., 5.));
         assert!(out.len() == 1 && out[0].dist(pt(6.376, 5.)) < 1e-9, "{out:?}");
         let through = cuts((0., 5.), (10., 5.));
@@ -2491,7 +2509,7 @@ mod tests {
         // a line that passes the zone without entering it keeps its width
         assert!(cuts((0., 6.2), (10., 6.2)).is_empty());
         // the piece into the zone touches it; the next one does not, and neither does its end
-        let p = cut_at_zones(&[pt(5., 5.), pt(12., 5.)], &[zone], 0.75);
+        let p = cut_at_zones(&[pt(5., 5.), pt(12., 5.)], &[zone], 0.75, 0.0);
         assert!(
             zone.touches_seg(p[0], p[1]) && zone.dist_seg(p[1], p[2]) > 0.75 / 2.0,
             "{p:?}"

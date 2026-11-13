@@ -1211,7 +1211,7 @@ impl Routed {
                         net: t.net,
                     },
                     Elem::Arc(a, mid, b) => write::Item::Arc {
-                        width: t.piece_width(a, b),
+                        width: t.arc_width(a, mid, b),
                         a,
                         mid,
                         b,
