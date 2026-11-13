@@ -1339,7 +1339,10 @@ pub fn relax_while(
                     let o = &geo.tracks[pc.track as usize];
                     let need = cr
                         + o.piece_width(pc.a, pc.b) / 2.0
-                        + vclr.max(clr(o.net)).max(board.item_gap(vn, Some(o.net)))
+                        + vclr
+                            .max(clr(o.net))
+                            .max(board.item_gap(vn, Some(o.net)))
+                            .max(board.via_track_gap(o.net, vn, cr))
                         + cfg.margin;
                     let ab = pc.b - pc.a;
                     let v = if pair {
@@ -1576,7 +1579,11 @@ pub fn relax_while(
                                 (vr, p - vc)
                             };
                             let need =
-                                vr + max_of(max_of(vclr, c), board.item_gap(net, Some(vn))) + w / 2.0 + cfg.margin;
+                                vr + max_of(
+                                    max_of(max_of(vclr, c), board.item_gap(net, Some(vn))),
+                                    board.via_track_gap(net, vn, vr),
+                                ) + w / 2.0
+                                    + cfg.margin;
                             if surely_outside(v.x, v.y, need) {
                                 continue;
                             }
@@ -2167,7 +2174,12 @@ fn taut(
                 if vn == net {
                     continue;
                 }
-                let need = vr + c.max(clr(vn)).max(board.item_gap(net, Some(vn))) + w / 2.0 + m;
+                let need = vr
+                    + c.max(clr(vn))
+                        .max(board.item_gap(net, Some(vn)))
+                        .max(board.via_track_gap(net, vn, vr))
+                    + w / 2.0
+                    + m;
                 let pair = half != Point::default();
                 let reach = need + 1e-9 + if pair { half.len() } else { 0.0 };
                 if vc.x >= r.min.x - reach
@@ -2889,7 +2901,12 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
             for v in &geo.vias {
                 if v.net != net
                     && point_seg_dist(v.at, a, b)
-                        < v.diameter / 2.0 + w / 2.0 + c.max(clr(v.net)).max(board.item_gap(net, Some(v.net))) + margin
+                        < v.diameter / 2.0
+                            + w / 2.0
+                            + c.max(clr(v.net))
+                                .max(board.item_gap(net, Some(v.net)))
+                                .max(board.via_track_gap(net, v.net, v.diameter / 2.0))
+                            + margin
                 {
                     return false;
                 }
@@ -3270,7 +3287,9 @@ pub fn prefer_width(board: &Board, sub: &Substrate, geo: &mut Geometry, target: 
                         || point_seg_dist(v.at, a, b)
                             >= v.diameter / 2.0
                                 + w / 2.0
-                                + c.max(clr(v.net)).max(board.item_gap(net, Some(v.net)))
+                                + c.max(clr(v.net))
+                                    .max(board.item_gap(net, Some(v.net)))
+                                    .max(board.via_track_gap(net, v.net, v.diameter / 2.0))
                                 + margin
                 })
                 && idx.query(&rr).into_iter().all(|pi| {

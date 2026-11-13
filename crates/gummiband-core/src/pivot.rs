@@ -424,7 +424,10 @@ impl Scene<'_> {
             let pair = half != Point::default();
             for cc in [vc - half, vc + half].into_iter().take(if pair { 2 } else { 1 }) {
                 take(cc, vr, Some(vn), &|n| {
-                    self.clr(n).max(self.clr(vn)).max(board.item_gap(n, Some(vn)))
+                    self.clr(n)
+                        .max(self.clr(vn))
+                        .max(board.item_gap(n, Some(vn)))
+                        .max(board.via_track_gap(n, vn, vr))
                 });
             }
         }

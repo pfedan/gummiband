@@ -978,6 +978,22 @@ impl Board {
         self.pair_clearance.get(&key).map_or(base, |&c| c.max(base))
     }
 
+    /// What a custom rule between the tracks of two nets asks between a track of `net` and the
+    /// edge of a via of `via_net` with radius `r` (0: no such rule, the classes decide). The
+    /// track of the via's net ends in the centre of the via and is copper of its own there: it
+    /// reaches half its width towards the passing track where the via reaches `r`, and the
+    /// rule holds against it. With 0.5 mm between two 0.25 mm tracks and a 0.6 mm via that is
+    /// 0.325 mm from the edge of the via, where the classes ask 0.2.
+    pub fn via_track_gap(&self, net: NetId, via_net: NetId, r: f64) -> f64 {
+        if self.pair_clearance.is_empty() {
+            return 0.0;
+        }
+        let key = (net.min(via_net), net.max(via_net));
+        self.pair_clearance
+            .get(&key)
+            .map_or(0.0, |&c| (c + self.class_of(via_net).track_width / 2.0 - r).max(0.0))
+    }
+
     /// Clearance of custom rules between any copper of two nets (0: none, the class decides).
     pub fn item_gap(&self, a: NetId, b: Option<NetId>) -> f64 {
         let Some(b) = b.filter(|_| !self.item_clearance.is_empty()) else {
