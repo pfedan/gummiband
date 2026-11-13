@@ -2753,7 +2753,9 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
     let clr = |n: u32| board.class_of(n).clearance.max(board.rules.min_clearance);
     let bounds = board.bbox().grow(5.0);
     // a straight piece has one width: long ones are cut, so that one tight spot stays local
-    for t in geo.tracks.iter_mut().filter(|t| !t.necks.is_empty()) {
+    // per track the runs of small pieces beyond a zone: first piece, count, zone at the start
+    let mut runs: Vec<Vec<(usize, usize, bool)>> = vec![Vec::new(); geo.tracks.len()];
+    for (ti, t) in geo.tracks.iter_mut().enumerate().filter(|(_, t)| !t.necks.is_empty()) {
         let ruled = board.class_of(t.net).min_width.is_some();
         let mut elems = Vec::with_capacity(t.elems.len());
         for e in &t.elems {
@@ -2784,9 +2786,11 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
             }
         }
         // Under a minimum width rule every piece is judged on its own: one below the minimum
-        // must touch the courtyard. So only the part of a line inside a zone is cut small; the
-        // part from the border of the zone to the end of the neck stays one piece, which
-        // touches the zone whatever width it takes.
+        // must touch the courtyard. The part of a line inside a zone is cut small as it is.
+        // The part beyond the zone is cut small too, but what has to stay below the minimum
+        // there is joined again to one piece from the border of the zone (below, once the
+        // widths are fitted): that piece touches the zone whatever width it takes.
+        // 0: as it is, 1: in a zone, 2 and 3: beyond a zone that is at its start or its end
         let mut parts = Vec::with_capacity(elems.len());
         for e in elems {
             match e {
@@ -2803,20 +2807,29 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
                     ts.dedup_by(|x, y| (*x - *y).abs() * len < 1e-6);
                     let mut from = a;
                     for to in ts.into_iter().map(|x| a + (b - a) * x).chain([b]) {
-                        let small = t.necks.iter().any(|r| r.contains((from + to) * 0.5));
-                        parts.push((Elem::Line(from, to), small));
+                        let at = |p: Point| t.necks.iter().any(|r| r.grow(1e-6).contains(p));
+                        let kind = match (at((from + to) * 0.5), at(from), at(to)) {
+                            (true, ..) => 1,
+                            (_, true, false) => 2,
+                            (_, false, true) => 3,
+                            _ => 0,
+                        };
+                        parts.push((Elem::Line(from, to), kind));
                         from = to;
                     }
                 }
-                e => parts.push((e, true)),
+                e => parts.push((e, 1)),
             }
         }
         let mut cut = Vec::with_capacity(parts.len());
-        for (e, small) in parts {
+        for (e, kind) in parts {
             match e {
-                Elem::Line(a, b) if small && a.dist(b) > 0.5 && t.necks.iter().any(|r| r.touches_seg(a, b)) => {
+                Elem::Line(a, b) if kind > 0 && a.dist(b) > 0.5 && t.necks.iter().any(|r| r.touches_seg(a, b)) => {
                     let n = (a.dist(b) / 0.3).ceil() as usize;
                     let at = |i: usize| a + (b - a) * (i as f64 / n as f64);
+                    if kind > 1 {
+                        runs[ti].push((cut.len(), n, kind == 2));
+                    }
                     cut.extend((0..n).map(|i| Elem::Line(at(i), at(i + 1))));
                     // all of it was narrow so far, and stays so until it is found to fit
                     for i in 0..n {
@@ -2916,6 +2929,34 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
             })
             .collect();
         geo.tracks[ti].fitted = fitted;
+        // beyond a zone, what stays below the minimum is one piece from the border of the zone:
+        // up to the last small piece that does not take the minimum. The joined piece touches
+        // the marks of all its parts and so takes the narrowest of their widths.
+        let Some(min) = min else { continue };
+        let t = &mut geo.tracks[ti];
+        for &(i0, n, zone_first) in runs[ti].iter().rev() {
+            let below = |i: usize| match t.elems[i] {
+                Elem::Line(a, b) => t.piece_width(a, b) < min - 1e-9,
+                _ => false,
+            };
+            let (from, to) = if zone_first {
+                match (i0..i0 + n).rev().find(|&i| below(i)) {
+                    Some(k) => (i0, k),
+                    None => continue,
+                }
+            } else {
+                match (i0..i0 + n).find(|&i| below(i)) {
+                    Some(k) => (k, i0 + n - 1),
+                    None => continue,
+                }
+            };
+            if let (Elem::Line(a, _), Elem::Line(_, b)) = (t.elems[from], t.elems[to]) {
+                t.elems.splice(from..=to, [Elem::Line(a, b)]);
+            }
+        }
+        if !runs[ti].is_empty() {
+            t.pts = crate::realize::flatten(&t.elems);
+        }
     }
 }
 
