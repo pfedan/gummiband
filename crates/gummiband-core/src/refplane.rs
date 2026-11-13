@@ -12,8 +12,6 @@
 //! count: the antipads of vias are not in this map, `reference_check` of the MCP server sees
 //! them in the filled zones after routing.
 
-use rayon::prelude::*;
-
 use crate::board::{Board, LayerId, NetId};
 use crate::geom::{Point, pt};
 
@@ -101,9 +99,11 @@ impl RefMap {
                 // the highest priority first: KiCad fills it first, `cut` says the same
                 let mut planes: Vec<_> = board.planes.iter().filter(|p| p.layer == l).collect();
                 planes.sort_by_key(|p| std::cmp::Reverse(p.priority));
+                // Not in the rayon pool: the map is built inside a `OnceLock` that the searches
+                // of the pool wait on. A pool worker that waited here for its subtasks would
+                // steal another search, which blocks on the same lock for good.
                 let cells = (0..h)
-                    .into_par_iter()
-                    .flat_map_iter(|j| {
+                    .flat_map(|j| {
                         let planes = &planes;
                         (0..w).map(move |i| {
                             let p = pt(x0 + (i as f64 + 0.5) * STEP, y0 + (j as f64 + 0.5) * STEP);
@@ -268,5 +268,41 @@ mod tests {
         // from net 0 into net 1
         let split = m.penalty(0, pt(8.0, 2.0), pt(12.0, 2.0));
         assert!((split - SPLIT_MM).abs() < 1e-9, "{split}");
+    }
+
+    /// The map is built inside a `OnceLock` that all searches of the rayon pool read. Built
+    /// with the pool itself, a worker waiting for its subtasks took another search, which
+    /// waited on the same lock for good.
+    #[test]
+    fn the_map_builds_under_a_lock_the_whole_pool_waits_on() {
+        use rayon::prelude::*;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // a large board, so that the build is still at work when the other searches arrive
+            let mut b = board();
+            b.outline = vec![rect(0.0, 0.0, 200.0, 100.0)];
+            b.planes[0] = Plane::new(0, 1, rect(0.0, 0.0, 100.0, 100.0));
+            b.planes[1] = Plane::new(1, 1, rect(100.0, 0.0, 200.0, 100.0));
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap();
+            for _ in 0..10 {
+                let lock: std::sync::OnceLock<Option<RefMap>> = std::sync::OnceLock::new();
+                pool.install(|| {
+                    (0..4096u64).into_par_iter().for_each(|i| {
+                        // most of the pool is busy with other work and free to take a part
+                        // of the build; now and then a search reaches the map
+                        if i % 64 == 0 {
+                            assert!(lock.get_or_init(|| RefMap::build(&b, &[0])).is_some());
+                        } else {
+                            std::hint::black_box((0..20_000u64).fold(i, |a, x| a.wrapping_mul(31) ^ x));
+                        }
+                    })
+                });
+            }
+            tx.send(()).ok();
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(60)).is_ok(),
+            "the searches block each other on the lock of the map"
+        );
     }
 }
