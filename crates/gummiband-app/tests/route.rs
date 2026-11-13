@@ -173,6 +173,70 @@ fn contradictions_are_errors() {
         let e = o.validate(open_end).expect_err(word);
         assert!(e.contains(word), "{e}");
     };
+    // a pour is only looked at when the fill connects
+    let pour = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+    refused(
+        RouteOptions {
+            pour: pour(&["GND"]),
+            ..d.clone()
+        },
+        false,
+        "pour needs areas fill",
+    );
+    let fill = RouteOptions {
+        areas: gummiband_app::Areas::Fill,
+        pour: pour(&["GND:F.Cu,B.Cu", "VCC"]),
+        ..d.clone()
+    };
+    assert_eq!(fill.validate(false), Ok(()));
+    refused(
+        RouteOptions {
+            pour: pour(&["GND", "GND:F.Cu"]),
+            ..fill.clone()
+        },
+        false,
+        "names GND twice",
+    );
+    refused(
+        RouteOptions {
+            nets: vec!["VCC".into(), "A".into()],
+            ..fill.clone()
+        },
+        false,
+        "pour names GND, which nets leaves out",
+    );
+    refused(
+        RouteOptions {
+            pairs: Pairs::Band,
+            ..fill.clone()
+        },
+        false,
+        "areas fill does not work with pairs band yet",
+    );
+    refused(
+        fill.clone(),
+        true,
+        "areas fill does not work with an open ended run yet",
+    );
+    refused(
+        RouteOptions {
+            area_stitch: Some(true),
+            ..d.clone()
+        },
+        false,
+        "area_stitch needs areas fill",
+    );
+    assert!(fill.area_stitch() && !d.area_stitch());
+    // finishing nets shoves by default
+    refused(
+        RouteOptions {
+            scope: Scope::Finish,
+            nets: vec!["GND".into(), "VCC".into()],
+            ..fill.clone()
+        },
+        false,
+        "areas fill does not work with shove yet",
+    );
     refused(
         RouteOptions {
             runs: Some(0),

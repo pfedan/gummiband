@@ -21,6 +21,8 @@ pub mod patterns;
 pub mod pivot;
 pub mod prof;
 pub mod realize;
+pub mod refplane;
+pub mod region;
 pub mod relax;
 pub mod route;
 pub mod spread;
@@ -522,7 +524,10 @@ fn evaluate_inner<'a>(
     if let Some(g) = genome {
         r.reorder(|c| g.get(&(c.net, c.from)).copied().unwrap_or(f64::MAX));
     }
-    let routed = r.run();
+    let mut routed = r.run();
+    if board.areas.is_some() {
+        routed = r.area_pass();
+    }
     debug_hooks(board, &mut r);
     let geo = r.geometry();
     (candidate(board, &r, geo, routed, cfg_used, generation), r)
@@ -575,8 +580,9 @@ fn candidate(
         via_pass: cfg.via_pass,
         negotiate: cfg.negotiate,
         generation,
-        conns: r.conns.len(),
-        routed,
+        // what the fill of an area joins stays in the count, see `Router::area_base`
+        conns: r.conns.len() + r.area_base,
+        routed: routed + r.area_base,
         vias: geo.vias.iter().filter(|v| v.drill > 0.0).count(),
         length,
         unrouted,

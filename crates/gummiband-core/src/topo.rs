@@ -86,6 +86,9 @@ pub struct Shared {
     /// What the relaxation needs of the board alone, by widest track, margin, reach and layer
     /// count (see `relax::BoardStatic`); filled on first use.
     pub(crate) relax_cache: RelaxCache,
+    /// The reference planes of the routing layers, rastered on first use (see
+    /// [`crate::refplane`]); None inside when no routing layer has a plane next to it.
+    pub(crate) ref_map: std::sync::OnceLock<Option<Arc<crate::refplane::RefMap>>>,
 }
 
 pub(crate) type RelaxCache = std::sync::Mutex<Vec<((u64, u64, u64, usize), Arc<crate::relax::BoardStatic>)>>;
@@ -171,6 +174,7 @@ impl Substrate {
             soft_base: 0,
             bounds,
             relax_cache: Default::default(),
+            ref_map: Default::default(),
         };
         shared.sites = build_sites(board, &shared, cfg.via_pitch);
         shared.sites.extend(build_pad_sites(board, &shared));
@@ -702,6 +706,12 @@ impl Mesh {
     pub fn edge_len(&self, e: u32) -> f64 {
         let [a, b] = self.edges[e as usize];
         self.verts[a as usize].dist(self.verts[b as usize])
+    }
+
+    /// The middle of triangle t.
+    pub fn tri_mid(&self, t: u32) -> Point {
+        let [a, b, c] = self.tris[t as usize].map(|v| self.verts[v as usize]);
+        (a + b + c) * (1.0 / 3.0)
     }
 
     /// Local index (0..3) of edge e in triangle t.

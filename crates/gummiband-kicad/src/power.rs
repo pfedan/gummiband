@@ -9,6 +9,7 @@ use gummiband_core::math;
 use std::collections::{HashMap, VecDeque};
 
 use gummiband_core::board::{Board, LayerId, NetId, ObstacleKind};
+use gummiband_core::fill::edt;
 use gummiband_core::geom::{Point, Polygon, Rect, Shape, pt};
 
 use crate::read::KicadBoard;
@@ -253,84 +254,6 @@ impl Grid {
             }
         }
     }
-}
-
-/// Euclidean distance (in cells) from every cell to the nearest cell where `m` is false
-/// (Felzenszwalb and Huttenlocher); outside the raster counts as false.
-#[allow(clippy::needless_range_loop)]
-fn edt(m: &[bool], nx: usize, ny: usize) -> Vec<f32> {
-    const INF: f64 = 1e18;
-    fn dt1(f: &[f64], d: &mut [f64], v: &mut [usize], z: &mut [f64]) {
-        let n = f.len();
-        let mut k = 0usize;
-        v[0] = 0;
-        z[0] = -INF;
-        z[1] = INF;
-        for q in 1..n {
-            loop {
-                let p = v[k];
-                let s = ((f[q] + (q * q) as f64) - (f[p] + (p * p) as f64)) / (2.0 * (q as f64 - p as f64));
-                if s <= z[k] && k > 0 {
-                    k -= 1;
-                    continue;
-                }
-                if s <= z[k] {
-                    // k == 0: replace the first parabola
-                    v[0] = q;
-                    z[0] = -INF;
-                    z[1] = INF;
-                    break;
-                }
-                k += 1;
-                v[k] = q;
-                z[k] = s;
-                z[k + 1] = INF;
-                break;
-            }
-        }
-        k = 0;
-        for q in 0..n {
-            while z[k + 1] < q as f64 {
-                k += 1;
-            }
-            let p = v[k];
-            let dq = q as f64 - p as f64;
-            d[q] = dq * dq + f[p];
-        }
-    }
-    // pad by one false cell on every side
-    let (w, h) = (nx + 2, ny + 2);
-    let mut g = vec![0f64; w * h];
-    for r in 0..ny {
-        for c in 0..nx {
-            if m[r * nx + c] {
-                g[(r + 1) * w + c + 1] = INF;
-            }
-        }
-    }
-    let len = w.max(h);
-    let (mut f, mut d, mut v, mut z) = (vec![0f64; len], vec![0f64; len], vec![0usize; len], vec![0f64; len + 1]);
-    for c in 0..w {
-        for r in 0..h {
-            f[r] = g[r * w + c];
-        }
-        dt1(&f[..h], &mut d[..h], &mut v, &mut z);
-        for r in 0..h {
-            g[r * w + c] = d[r];
-        }
-    }
-    for r in 0..h {
-        f[..w].copy_from_slice(&g[r * w..(r + 1) * w]);
-        dt1(&f[..w], &mut d[..w], &mut v, &mut z);
-        g[r * w..(r + 1) * w].copy_from_slice(&d[..w]);
-    }
-    let mut out = vec![0f32; nx * ny];
-    for r in 0..ny {
-        for c in 0..nx {
-            out[r * nx + c] = g[(r + 1) * w + c + 1].sqrt() as f32;
-        }
-    }
-    out
 }
 
 // --------------------------------------------------------------------------------- neck

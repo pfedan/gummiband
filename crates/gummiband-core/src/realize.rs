@@ -343,7 +343,7 @@ impl Router<'_> {
         match e {
             End::Pin(p) => self.board.pins[p].pos,
             End::Via(site) => self.site_point(site),
-            End::Point(p) => p,
+            End::Point(p) | End::Area(p, _) => p,
             End::Tap(sid, e) => {
                 let s = self.segs[sid as usize].as_ref().unwrap();
                 match s.crossings.iter().position(|c| c.e == e) {

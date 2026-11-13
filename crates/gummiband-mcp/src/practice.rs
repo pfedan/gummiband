@@ -1,7 +1,7 @@
 //! Good practice around routing: power planning and power copper before (`power_plan`,
-//! `power_copper`), current carrying checks (`current_check`) and ground pours with stitching
-//! vias (`ground_pour`) after, and the `good_practice` prompt that walks an agent through a
-//! whole board.
+//! `power_copper`), current carrying checks (`current_check`), ground pours with stitching
+//! vias (`ground_pour`) and what the fill of an area reaches (`area_report`) after, and the
+//! `good_practice` prompt that walks an agent through a whole board.
 
 use std::path::{Path, PathBuf};
 
@@ -106,12 +106,104 @@ pub struct CurrentCheckIn {
     pub max_segments: Option<usize>,
 }
 
+/// The arguments of `area_report`: the options of the report (`gummiband_app::AREA_OPTIONS`,
+/// each under its name) and the file. An argument that does not exist is an error.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AreaReportIn {
+    /// Path of a .kicad_pcb. It is read with all its tracks and vias as copper and stays as it
+    /// is.
+    pub path: String,
+    /// Report only these nets (default: every net with a zone).
+    pub nets: Option<Vec<String>>,
+    /// Layers on which the nets given get an area for this report where they have none yet, as
+    /// ground_pour would lay it: one net over the board outline, several nets each around its
+    /// own pads (default: none). Answers "what would a pour reach" before one is written.
+    pub pour: Option<Vec<String>>,
+    /// Clearance in mm of the areas of pour to copper of other nets (default 0.2).
+    pub zone_clearance: Option<f64>,
+    /// Minimum width in mm of the fill in the areas of pour (default 0.2).
+    pub zone_min_width: Option<f64>,
+    /// Gap in mm of the thermal reliefs in the areas of pour (default 0.3).
+    pub thermal_gap: Option<f64>,
+    /// Width in mm of the thermal spokes in the areas of pour (default 0.3).
+    pub thermal_spoke_width: Option<f64>,
+    /// How the pads of the net join the areas of pour: "thermal" (default), "solid",
+    /// "thermal_tht" or "none".
+    pub pad_connection: Option<String>,
+    /// Copper layers treated as planes besides those of KiCad type "power".
+    pub plane_layers: Option<Vec<String>>,
+    /// Raster step wanted in mm (default 0.05); the step used divides the minimum width into an
+    /// odd number of cells.
+    pub step: Option<f64>,
+    /// List the pads whose answer changes when every clearance moves by half a raster cell
+    /// (default true; two more runs of the model per net).
+    pub doubtful: Option<bool>,
+}
+
+impl AreaReportIn {
+    /// The options of the report as the arguments give them.
+    pub fn options(&self) -> gummiband_app::AreaOptions {
+        let d = gummiband_app::AreaOptions::default();
+        gummiband_app::AreaOptions {
+            nets: self.nets.clone().unwrap_or(d.nets),
+            pour: self.pour.clone().unwrap_or(d.pour),
+            zone_clearance: self.zone_clearance.unwrap_or(d.zone_clearance),
+            zone_min_width: self.zone_min_width.unwrap_or(d.zone_min_width),
+            thermal_gap: self.thermal_gap.unwrap_or(d.thermal_gap),
+            thermal_spoke_width: self.thermal_spoke_width.unwrap_or(d.thermal_spoke_width),
+            pad_connection: self.pad_connection.clone().unwrap_or(d.pad_connection),
+            plane_layers: self.plane_layers.clone().unwrap_or(d.plane_layers),
+            step: self.step.unwrap_or(d.step),
+            doubtful: self.doubtful.unwrap_or(d.doubtful),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AreaReportOut {
+    pub path: String,
+    /// One sentence per net: what its area reaches.
+    pub summary: Vec<String>,
+    /// Per net the report of `gummiband areas --json`: net, summary, step, layers, area, apart,
+    /// joins, groups_apart, expected_unconnected, pads, reached, by_fill, by_copper, unreached (pad, at, reason, why, island,
+    /// site_distance), islands (pads, layers, filled, widest, via or no_via), site_distance,
+    /// doubtful (pad, at, reached, with_less, with_more, spoke), against_file, seconds.
+    pub nets: Vec<serde_json::Value>,
+    /// What a reader has to know to weigh the report.
+    pub notes: Vec<String>,
+}
+
+/// The area report of a board file, through the one function the CLI calls as well.
+pub fn area_report(p: &AreaReportIn) -> Result<AreaReportOut> {
+    let path = PathBuf::from(&p.path);
+    if !path.is_file() {
+        bail!("{} does not exist", path.display());
+    }
+    let r = gummiband_app::area_report(&path, &p.options())?;
+    Ok(AreaReportOut {
+        path: p.path.clone(),
+        summary: r.nets.iter().map(|n| n.summary.clone()).collect(),
+        nets: r
+            .nets
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<_, _>>()?,
+        notes: r.notes,
+    })
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GroundPourIn {
     /// Path of a routed .kicad_pcb.
     pub path: String,
     /// Net of the pours and vias (default "GND").
     pub net: Option<String>,
+    /// Several nets to pour at once, instead of `net` (e.g. ["GND", "GNDR"]). The board is
+    /// shared by nearest pad: every spot goes to the net whose pad is nearest, each net gets
+    /// zones of its own and two zones never overlap. A pad alone among the pads of another net
+    /// gets no zone (named in `warnings`).
+    pub nets: Option<Vec<String>>,
     /// Layers for the pours (default: the outer copper layers). A layer that already has a zone
     /// of the net is left as it is; the small "gb:" pours of power_copper do not count.
     pub layers: Option<Vec<String>>,
@@ -122,13 +214,32 @@ pub struct GroundPourIn {
     /// Width of the thermal spokes in mm (default 0.3). Four spokes carry about what a track of
     /// four times the width carries; a connector pin for several amperes wants wider ones.
     pub thermal_spoke_width: Option<f64>,
-    /// Grid pitch of the stitching vias in mm (default 5, 0 = no grid).
+    /// Gap of the thermal reliefs in mm (default 0.3).
+    pub thermal_gap: Option<f64>,
+    /// Clearance of the fill to copper of other nets in mm (default 0.2; the net class
+    /// clearance holds where it is larger).
+    pub zone_clearance: Option<f64>,
+    /// Minimum width of the fill in mm (default 0.2). Narrower strips are left out by KiCad:
+    /// a smaller value lets the fill through tighter gaps, down to what the manufacturer makes.
+    pub zone_min_width: Option<f64>,
+    /// Stitching vias: "islands" (default) sets one via for every piece of fill with pads that
+    /// is cut off from the rest, at the spot the fill model finds, and never a via that joins
+    /// nothing; "grid" sets vias on a grid and along the board edge wherever they are clear
+    /// (pitch, edge_pitch); "both" does both; "none" writes the zones only. With pitch or
+    /// edge_pitch given and stitch left out it is "both".
+    pub stitch: Option<String>,
+    /// Also set a via in a pad of the net that nothing else reaches and that is large enough
+    /// to hold the whole via (the exposed pad of a QFN), where it lands in the area on another
+    /// layer (default false: a via in a pad takes solder and is a decision for the assembly).
+    pub via_in_pad: Option<bool>,
+    /// Grid pitch of the stitching vias in mm (default 5, 0 = no grid), for stitch grid or both.
     pub pitch: Option<f64>,
-    /// Spacing of the via row along the board edge in mm (default 3, 0 = no edge row).
+    /// Spacing of the via row along the board edge in mm (default 3, 0 = no edge row), for
+    /// stitch grid or both.
     pub edge_pitch: Option<f64>,
     /// Distance of the edge row from the outline in mm (default 1).
     pub edge_inset: Option<f64>,
-    /// Keep the vias out of part courtyards (default true).
+    /// Keep the grid and edge vias out of part courtyards (default true).
     pub avoid_courtyards: Option<bool>,
     /// Via size, default the net class.
     pub via_diameter: Option<f64>,
@@ -314,14 +425,53 @@ pub struct CurrentCheckOut {
     pub notes: Vec<String>,
 }
 
+/// A pad a pour leaves unreached, judged by the fill model.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PourUnreachedOut {
+    pub pad: String,
+    pub at: [f64; 2],
+    /// `island`, `walled`, `no_spoke`, `outside` or `other_layer`.
+    pub reason: String,
+    /// The reason in plain words, with what would help.
+    pub why: String,
+}
+
+/// What a pour of one net came to.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PourNetOut {
+    pub net: String,
+    /// The finding of the fill model in one sentence, on the board as written.
+    pub summary: String,
+    /// Layers that got zones of the net, and how many outlines per layer (one, or one per
+    /// region of the net where several nets share the board).
+    pub zones_added: Vec<String>,
+    pub outlines: usize,
+    /// Vias that join an island to the area, vias in pads, and vias of the grid and edge row.
+    pub island_vias: usize,
+    pub pad_vias: usize,
+    pub grid_vias: usize,
+    pub pads: usize,
+    pub reached: usize,
+    /// What stays unreached, and why.
+    pub unreached: Vec<PourUnreachedOut>,
+    /// Pads whose answer changes within one raster cell of the model.
+    pub doubtful: Vec<String>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct GroundPourOut {
     pub board: String,
     pub path: String,
+    /// The net, or the nets joined by a comma.
     pub net: String,
+    /// Layers that got zones.
     pub zones_added: Vec<String>,
+    /// All vias added, and those of the row along the edge among them.
     pub vias_added: usize,
     pub edge_vias: usize,
+    /// Per net what its pour reaches and what stays unreached, judged by the router's fill
+    /// model on the board as written (KiCad's fill has the last word).
+    pub nets: Vec<PourNetOut>,
     pub warnings: Vec<String>,
 }
 
@@ -1614,12 +1764,10 @@ pub fn power_copper(all: &KicadBoard, locked: &KicadBoard, p: &PowerCopperIn) ->
         }
         taken.push((*layer, priority, poly));
         let spec = write::ZoneSpec {
-            net: *net,
-            layer: *layer,
             priority,
             name,
             connect: write::PadConnect::Solid,
-            spoke: write::DEFAULT_SPOKE,
+            ..write::ZoneSpec::plain(*net, *layer)
         };
         text = write::add_zone_named(kb, &text, &spec, outline, 0x7c0 + i as u64);
     }
@@ -1694,20 +1842,47 @@ fn in_the_way(b: &Board, zones: &[(NetId, LayerId, String, Vec<Point>)], vias: &
 
 // ----------------------------------------------------------------------------- ground pour
 
+/// What would help a pad the pour does not reach.
+fn pour_advice(reason: &str, island_has_site: bool, pad_via: bool) -> &'static str {
+    match reason {
+        "island" if island_has_site => "; stitch islands sets the via that joins it",
+        "island" | "walled" | "no_spoke" if pad_via => "; via_in_pad sets a via in the pad, or route a track to it",
+        "island" => "; route a track to it, or make room for a via on its piece",
+        "walled" | "no_spoke" => "; route a track to it, or try pad_connection solid or a smaller zone_min_width",
+        "outside" => "; route a track to it",
+        _ => "; it needs a via next to it or a track",
+    }
+}
+
 pub fn ground_pour(p: &GroundPourIn) -> Result<(PathBuf, GroundPourOut)> {
+    use gummiband_app::areas::{self, PourSettings};
+    use gummiband_core::fill;
+
     let path = PathBuf::from(&p.path);
     if !path.is_file() {
         bail!("{} does not exist", path.display());
     }
     let kb = read_all(&path)?;
     let b = &kb.board;
-    let net = match &p.net {
-        Some(n) => b.net_id(n).with_context(|| format!("no net named {n:?}"))?,
-        None => ground_net(b).context("no ground net found; name it with net")?,
+    let nets: Vec<NetId> = match (&p.nets, &p.net) {
+        (Some(_), Some(_)) => bail!("give net or nets, not both"),
+        (Some(ns), None) if ns.is_empty() => bail!("nets is empty: name the nets to pour"),
+        (Some(ns), None) => {
+            let mut v = Vec::new();
+            for n in ns {
+                let id = b.net_id(n).with_context(|| format!("no net named {n:?}"))?;
+                if v.contains(&id) {
+                    bail!("nets names {n:?} twice");
+                }
+                v.push(id);
+            }
+            v
+        }
+        (None, Some(n)) => vec![b.net_id(n).with_context(|| format!("no net named {n:?}"))?],
+        (None, None) => vec![ground_net(b).context("no ground net found; name it with net")?],
     };
-    let nname = b.nets[net as usize].name.clone();
-    let outline = b
-        .outline
+    let name_of = |net: NetId| b.nets[net as usize].name.clone();
+    b.outline
         .iter()
         .max_by(|x, y| x.signed_area().abs().total_cmp(&y.signed_area().abs()))
         .context("the board has no closed outline (Edge.Cuts)")?;
@@ -1723,104 +1898,214 @@ pub fn ground_pour(p: &GroundPourIn) -> Result<(PathBuf, GroundPourOut)> {
     };
     let prio = p.priority.unwrap_or(0);
     let mut warnings = Vec::new();
-    let mut zone_layers = Vec::new();
     let connect = match p.pad_connection.as_deref() {
         None => write::PadConnect::Thermal,
         Some(s) => write::PadConnect::parse(s)
             .with_context(|| format!("pad_connection {s:?}: use thermal, solid or thermal_tht"))?,
     };
-    let spoke = p.thermal_spoke_width.unwrap_or(write::DEFAULT_SPOKE);
-    if spoke <= 0.0 {
+    let settings = PourSettings {
+        clearance: p.zone_clearance.unwrap_or(write::DEFAULT_ZONE_CLEARANCE),
+        min_width: p.zone_min_width.unwrap_or(write::DEFAULT_MIN_WIDTH),
+        thermal_gap: p.thermal_gap.unwrap_or(write::DEFAULT_THERMAL_GAP),
+        spoke_width: p.thermal_spoke_width.unwrap_or(write::DEFAULT_SPOKE),
+        connect: match connect {
+            write::PadConnect::Thermal => fill::Connect::Thermal,
+            write::PadConnect::Solid => fill::Connect::Solid,
+            write::PadConnect::ThermalTht => fill::Connect::ThermalTht,
+        },
+        priority: prio as i64,
+    };
+    if settings.spoke_width <= 0.0 {
         bail!("thermal_spoke_width must be positive");
     }
-    for &l in &layers {
-        // the small "gb:" pours of power_copper are no ground pour
-        let full = |z: &&power::ZoneFill| {
-            z.net == Some(net) && z.layer == l && !z.name.starts_with(gummiband_kicad::read::GB_ZONE_PREFIX)
-        };
-        if zf.iter().any(|z| full(&z)) {
-            warnings.push(format!(
-                "{} already has a {nname} zone, left as it is",
-                layer_name(b, l)
-            ));
-            continue;
-        }
+    if settings.min_width <= 0.0 {
+        bail!("zone_min_width must be positive");
+    }
+    if settings.clearance < 0.0 || settings.thermal_gap < 0.0 {
+        bail!("zone_clearance and thermal_gap must not be negative");
+    }
+    let grid_asked = p.pitch.is_some_and(|x| x > 0.0) || p.edge_pitch.is_some_and(|x| x > 0.0);
+    let (islands, grid) = match p.stitch.as_deref() {
+        None if grid_asked => (true, true),
+        None | Some("islands") => (true, false),
+        Some("grid") => (false, true),
+        Some("both") => (true, true),
+        Some("none") => (false, false),
+        Some(s) => bail!("stitch {s:?}: use islands, grid, both or none"),
+    };
+    if !grid && grid_asked {
+        bail!(
+            "pitch and edge_pitch belong to the grid: use stitch grid or both, or leave them out with stitch {}",
+            p.stitch.as_deref().unwrap_or("islands")
+        );
+    }
+
+    // ---- the areas: those of the file, and the new ones
+    let from_file = gummiband_kicad::area::areas(&kb);
+    let mut model_areas = from_file.areas;
+    let laid = areas::lay_pours(b, &model_areas, &nets, &layers, &settings)?;
+    for &(net, l) in &laid.kept {
+        warnings.push(format!(
+            "{} already has a {} zone, left as it is",
+            layer_name(b, l),
+            name_of(net)
+        ));
+    }
+    if !laid.alone.is_empty() {
+        let names: Vec<&str> = laid.alone.iter().map(|&q| b.pins[q].name.as_str()).collect();
+        warnings.push(format!(
+            "pads that lie alone among the pads of another net get no zone and stay unreached: {}",
+            names.join(", ")
+        ));
+    }
+    let mut zone_layers: Vec<LayerId> = laid.areas.iter().map(|a| a.layer).collect();
+    zone_layers.sort_unstable();
+    zone_layers.dedup();
+    for &l in &zone_layers {
         let low: Vec<String> = zf
             .iter()
-            .filter(|z| z.layer == l && z.net != Some(net) && z.priority <= prio as i64)
-            .filter_map(|z| z.net.map(|n| b.nets[n as usize].name.clone()))
+            .filter(|z| z.layer == l && z.net.is_some_and(|n| !nets.contains(&n)) && z.priority <= prio as i64)
+            .filter_map(|z| z.net.map(name_of))
             .collect();
         if !low.is_empty() {
             warnings.push(format!(
-                "zones of {} on {} have a priority no higher than the {nname} pour ({prio}): raise theirs so they win",
+                "zones of {} on {} have a priority no higher than the pour ({prio}): raise theirs so they win",
                 low.join(", "),
                 layer_name(b, l)
             ));
         }
-        zone_layers.push(l);
     }
-    let c = b.class_of(net);
-    let opts = power::StitchOptions {
-        net,
-        pitch: p.pitch.unwrap_or(5.0),
-        edge_pitch: p.edge_pitch.unwrap_or(3.0),
-        edge_inset: p.edge_inset.unwrap_or(1.0),
-        diameter: p.via_diameter.unwrap_or(c.via_diameter),
-        drill: p.via_drill.unwrap_or(c.via_drill),
-        margin: 0.3,
-        avoid_courtyards: p.avoid_courtyards.unwrap_or(true),
+    let new_areas = laid.areas.clone();
+    model_areas.extend(laid.areas);
+    let mut options = fill::Options {
+        pad_connect: from_file.pad_connect,
+        no_pour: from_file.no_pour,
+        ..Default::default()
     };
-    let pour_layers = zf
-        .iter()
-        .filter(|z| z.net == Some(net))
-        .map(|z| z.layer)
-        .chain(zone_layers.iter().copied())
-        .chain(b.nets[net as usize].planes.iter())
-        .collect::<std::collections::BTreeSet<_>>();
-    let spots = if pour_layers.len() >= 2 {
-        power::stitch_spots(b, &zf, &opts)
-    } else {
-        warnings.push(format!("{nname} has copper area on one layer only: no stitching vias"));
-        Vec::new()
-    };
-    let edge = if opts.edge_pitch > 0.0 {
-        spots
-            .iter()
-            .filter(|s| {
-                b.outline
-                    .iter()
-                    .map(|q| q.boundary_dist(**s))
-                    .fold(f64::INFINITY, f64::min)
-                    < opts.edge_inset + 0.5
+
+    // ---- the vias, on a copy of the board that gets each one as copper
+    let mut work = b.clone();
+    let mut items: Vec<write::Item> = Vec::new();
+    let mut edge = 0usize;
+    let mut per_net: Vec<(usize, usize, usize)> = Vec::new();
+    for &net in &nets {
+        let c = b.class_of(net).clone();
+        let (diameter, drill) = (
+            p.via_diameter.unwrap_or(c.via_diameter),
+            p.via_drill.unwrap_or(c.via_drill),
+        );
+        options.via = Some((diameter, drill));
+        let nname = name_of(net);
+        let mut count = (0usize, 0usize, 0usize);
+        let mut put = |at: Point| {
+            items.push(write::Item::Via {
+                at,
+                diameter,
+                drill,
+                net,
             })
-            .count()
-    } else {
-        0
-    };
-    let items: Vec<write::Item> = spots
-        .iter()
-        .map(|&at| write::Item::Via {
-            at,
-            diameter: opts.diameter,
-            drill: opts.drill,
-            net,
-        })
-        .collect();
+        };
+        if grid {
+            let opts = power::StitchOptions {
+                net,
+                pitch: p.pitch.unwrap_or(5.0),
+                edge_pitch: p.edge_pitch.unwrap_or(3.0),
+                edge_inset: p.edge_inset.unwrap_or(1.0),
+                diameter,
+                drill,
+                margin: 0.3,
+                avoid_courtyards: p.avoid_courtyards.unwrap_or(true),
+            };
+            let pour_layers = model_areas
+                .iter()
+                .filter(|a| a.net == net)
+                .map(|a| a.layer)
+                .chain(b.nets[net as usize].planes.iter())
+                .collect::<std::collections::BTreeSet<_>>();
+            if pour_layers.len() >= 2 {
+                // where several nets share the board, a via of the grid stays in an outline
+                // of its own net, the clearance away from its border
+                let own: Vec<&fill::Area> = new_areas.iter().filter(|a| a.net == net).collect();
+                let inside = |s: Point| {
+                    nets.len() == 1
+                        || own.iter().any(|a| {
+                            a.rings.iter().all(|r| r.contains(s))
+                                && a.rings
+                                    .iter()
+                                    .all(|r| r.boundary_dist(s) >= diameter / 2.0 + settings.clearance)
+                        })
+                };
+                // and off the pads of the net: a via in a pad only where it was asked for
+                let in_pad = |s: Point| {
+                    !p.via_in_pad.unwrap_or(false)
+                        && b.obstacles.iter().any(|ob| {
+                            ob.net == Some(net)
+                                && ob.kind == ObstacleKind::Pad
+                                && ob.hole.is_none()
+                                && ob.shape.dist_to_point(s) < diameter / 2.0
+                        })
+                };
+                for at in power::stitch_spots(&work, &zf, &opts)
+                    .into_iter()
+                    .filter(|s| inside(*s) && !in_pad(*s))
+                {
+                    let near_edge = b
+                        .outline
+                        .iter()
+                        .map(|q| q.boundary_dist(at))
+                        .fold(f64::INFINITY, f64::min)
+                        < opts.edge_inset + 0.5;
+                    edge += (opts.edge_pitch > 0.0 && near_edge) as usize;
+                    areas::add_via(&mut work, net, at, diameter, drill);
+                    put(at);
+                    count.2 += 1;
+                }
+            } else {
+                warnings.push(format!(
+                    "{nname} has copper area on one layer only: no vias on the grid"
+                ));
+            }
+        }
+        if islands {
+            for at in areas::stitch_islands(&mut work, &model_areas, net, &options) {
+                put(at);
+                count.0 += 1;
+            }
+        }
+        if p.via_in_pad.unwrap_or(false) {
+            let in_pads = areas::stitch_pads(&mut work, &model_areas, net, &options);
+            for &at in &in_pads {
+                put(at);
+                count.1 += 1;
+            }
+            // a pad that hangs on a piece now may have made that piece an island with a site
+            if islands && !in_pads.is_empty() {
+                for at in areas::stitch_islands(&mut work, &model_areas, net, &options) {
+                    put(at);
+                    count.0 += 1;
+                }
+            }
+        }
+        per_net.push(count);
+    }
+
+    // ---- the file
     let mut text = if items.is_empty() {
         kb.text.clone()
     } else {
         write::add_locked(&kb, &items)
     };
-    for (i, &l) in zone_layers.iter().enumerate() {
+    for (i, a) in new_areas.iter().enumerate() {
         let spec = write::ZoneSpec {
-            net,
-            layer: l,
             priority: prio,
-            name: "",
             connect,
-            spoke,
+            spoke: settings.spoke_width,
+            clearance: settings.clearance,
+            min_width: settings.min_width,
+            thermal_gap: settings.thermal_gap,
+            ..write::ZoneSpec::plain(a.net, a.layer)
         };
-        text = write::add_zone_named(&kb, &text, &spec, &outline.pts, 0x9d0 + i as u64);
+        text = write::add_zone_named(&kb, &text, &spec, &a.rings[0].pts, 0x9d0 + i as u64);
     }
     let out_path = match &p.output {
         Some(o) => PathBuf::from(o),
@@ -1831,6 +2116,43 @@ pub fn ground_pour(p: &GroundPourIn) -> Result<(PathBuf, GroundPourOut)> {
     };
     std::fs::write(&out_path, text).with_context(|| format!("writing {}", out_path.display()))?;
     external::copy_project_files(&path, &out_path);
+
+    // ---- what the pours reach on the board as written, judged by the fill model
+    options.via = None;
+    let mut net_outs = Vec::new();
+    for (&net, &(island_vias, pad_vias, grid_vias)) in nets.iter().zip(&per_net) {
+        let own: Vec<&fill::Area> = new_areas.iter().filter(|a| a.net == net).collect();
+        let (r, f) = areas::net_report(&work, &model_areas, net, &options, true);
+        let unreached = r
+            .unreached
+            .iter()
+            .map(|u| {
+                let site = u.island.is_some_and(|k| f.islands[k].via.is_some());
+                PourUnreachedOut {
+                    pad: u.pad.clone(),
+                    at: u.at,
+                    reason: u.reason.to_string(),
+                    why: format!("{}{}", u.why, pour_advice(u.reason, site, u.pad_via.is_some())),
+                }
+            })
+            .collect();
+        let mut zl: Vec<LayerId> = own.iter().map(|a| a.layer).collect();
+        zl.sort_unstable();
+        zl.dedup();
+        net_outs.push(PourNetOut {
+            net: r.net.clone(),
+            summary: r.summary.clone(),
+            outlines: if zl.is_empty() { 0 } else { own.len() / zl.len() },
+            zones_added: zl.into_iter().map(|l| layer_name(b, l)).collect(),
+            island_vias,
+            pad_vias,
+            grid_vias,
+            pads: r.pads,
+            reached: r.reached,
+            unreached,
+            doubtful: r.doubtful.unwrap_or_default().into_iter().map(|d| d.pad).collect(),
+        });
+    }
     // hand back a filled board, so a render or KiCad shows the pours right away
     match external::refilled(&out_path).and_then(|f| std::fs::copy(&f, &out_path).map_err(anyhow::Error::from)) {
         Ok(_) => {}
@@ -1843,10 +2165,11 @@ pub fn ground_pour(p: &GroundPourIn) -> Result<(PathBuf, GroundPourOut)> {
         GroundPourOut {
             board: String::new(),
             path: out_path.display().to_string(),
-            net: nname,
+            net: nets.iter().map(|&n| name_of(n)).collect::<Vec<_>>().join(", "),
             zones_added: zone_layers.iter().map(|&l| layer_name(b, l)).collect(),
-            vias_added: spots.len(),
+            vias_added: items.len(),
             edge_vias: edge,
+            nets: net_outs,
             warnings,
         },
     ))
@@ -1922,8 +2245,9 @@ route scope \"reroute\" with nets), add a pour over the neck (add_zone), or on t
 power_copper with unlocked \"clear\" and route its reroute_nets with scope \"reroute\" and nets, and \
 check again until every path is ok. Too few vias where the current changes layer count as a neck too.
 
-6. Ground: ground_pour on the routed file (GND pours on the outer layers, stitching vias on a grid \
-and along the edge). Use the returned file from now on.
+6. Ground: ground_pour on the routed file (GND pours on the outer layers, one via for every island \
+of fill with pads; stitch both adds a grid and an edge row). Read what it leaves unreached and why, and \
+route a track to those pads or change the fill rules. Use the returned file from now on.
 
 7. Judge: reference_check on the final file: fast signals and differential pairs over a gap or a \
 split of their reference plane get routed over unbroken copper (or on the layer next to ground). \
@@ -1939,6 +2263,212 @@ vias, verdict), what you planned and changed, the DRC counts and the path of the
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GND on the left with three pads, one of them behind a track of S that runs across the
+    /// board, and an exposed pad in a ring of S; GNDR on the right with three pads.
+    const TWO_GROUNDS: &str = r#"(kicad_pcb (version 20240108) (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "") (net 1 "GND") (net 2 "GNDR") (net 3 "S")
+  (gr_rect (start 0 0) (end 40 20) (layer "Edge.Cuts") (stroke (width 0.1) (type default)) (fill no))
+  (footprint "R" (layer "F.Cu") (at 3 4) (property "Reference" "R1")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND")))
+  (footprint "R" (layer "F.Cu") (at 3 16) (property "Reference" "R2")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND")))
+  (footprint "R" (layer "F.Cu") (at 17 4) (property "Reference" "R3")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND")))
+  (footprint "U" (layer "F.Cu") (at 14 13) (property "Reference" "U1")
+    (pad "EP" smd rect (at 0 0) (size 3 3) (layers "F.Cu") (net 1 "GND")))
+  (footprint "R" (layer "F.Cu") (at 30 4) (property "Reference" "R4")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 2 "GNDR")))
+  (footprint "R" (layer "F.Cu") (at 36 16) (property "Reference" "R5")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 2 "GNDR")))
+  (footprint "R" (layer "F.Cu") (at 30 16) (property "Reference" "R6")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 2 "GNDR")))
+  (footprint "R" (layer "F.Cu") (at 8 1) (property "Reference" "R7")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 3 "S")))
+  (footprint "R" (layer "F.Cu") (at 8 19) (property "Reference" "R8")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 3 "S")))
+  (segment (start 8 1) (end 8 19) (width 0.2) (layer "F.Cu") (net 3) (uuid "00000000-0000-4000-8000-000000000001"))
+  (segment (start 11.9 10.9) (end 16.1 10.9) (width 0.2) (layer "F.Cu") (net 3) (uuid "00000000-0000-4000-8000-000000000002"))
+  (segment (start 16.1 10.9) (end 16.1 15.1) (width 0.2) (layer "F.Cu") (net 3) (uuid "00000000-0000-4000-8000-000000000003"))
+  (segment (start 16.1 15.1) (end 11.9 15.1) (width 0.2) (layer "F.Cu") (net 3) (uuid "00000000-0000-4000-8000-000000000004"))
+  (segment (start 11.9 15.1) (end 11.9 10.9) (width 0.2) (layer "F.Cu") (net 3) (uuid "00000000-0000-4000-8000-000000000005"))
+  (segment (start 8 13) (end 11.9 13) (width 0.2) (layer "F.Cu") (net 3) (uuid "00000000-0000-4000-8000-000000000006"))
+)"#;
+
+    fn pour(name: &str, args: serde_json::Value) -> (String, GroundPourOut) {
+        let dir = std::env::temp_dir().join(format!("gummiband-mcp-pour-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pcb = dir.join("two.kicad_pcb");
+        std::fs::write(&pcb, TWO_GROUNDS).unwrap();
+        std::fs::write(pcb.with_extension("kicad_pro"), "{}").unwrap();
+        let mut args = args;
+        args["path"] = serde_json::json!(pcb.display().to_string());
+        let p: GroundPourIn = serde_json::from_value(args).unwrap();
+        let (path, out) = ground_pour(&p).unwrap();
+        (std::fs::read_to_string(path).unwrap(), out)
+    }
+
+    fn pour_err(args: serde_json::Value) -> String {
+        let dir = std::env::temp_dir().join(format!("gummiband-mcp-pour-err-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pcb = dir.join("two.kicad_pcb");
+        std::fs::write(&pcb, TWO_GROUNDS).unwrap();
+        let mut args = args;
+        args["path"] = serde_json::json!(pcb.display().to_string());
+        let p: GroundPourIn = serde_json::from_value(args).unwrap();
+        format!("{:#}", ground_pour(&p).unwrap_err())
+    }
+
+    #[test]
+    fn two_ground_nets_get_zones_of_their_own_that_do_not_overlap() {
+        let (text, out) = pour("two", serde_json::json!({"nets": ["GND", "GNDR"]}));
+        assert_eq!(out.net, "GND, GNDR");
+        assert_eq!(out.zones_added, ["F.Cu", "B.Cu"]);
+        assert_eq!(text.matches("(zone ").count(), 4, "one zone per net and layer");
+        // the outlines as the file has them: those of GND hold no pad of GNDR and the other
+        // way round, and no corner of one lies in the other
+        let kb = gummiband_kicad::read::parse_board(text, None, &ReadOptions::default()).unwrap();
+        let zones = gummiband_kicad::area::areas(&kb).areas;
+        assert_eq!(zones.len(), 4);
+        let b = &kb.board;
+        let (gnd, gndr) = (b.net_id("GND").unwrap(), b.net_id("GNDR").unwrap());
+        for z in &zones {
+            let other = if z.net == gnd { gndr } else { gnd };
+            let ring = &z.rings[0];
+            for pin in b
+                .pins
+                .iter()
+                .filter(|q| !q.footprint.is_empty() && (q.net == gnd || q.net == gndr))
+            {
+                assert_eq!(
+                    ring.contains(pin.pos),
+                    pin.net == z.net,
+                    "{} in a zone of {}",
+                    pin.name,
+                    z.name
+                );
+            }
+            for o in zones.iter().filter(|o| o.net == other && o.layer == z.layer) {
+                assert!(o.rings[0].pts.iter().all(|q| !ring.contains(*q)));
+                assert!(ring.dist_to_poly(&o.rings[0]) > 0.3);
+            }
+        }
+        // GND: the pad behind the track of S is an island on the front. One via joins it to
+        // the pour on the back, a second joins the back to the two pads on the left. The
+        // exposed pad in its ring stays: no fill gets to it, and a via in a pad was not asked
+        // for. GNDR hangs together on the front and gets no via: nothing to join
+        let (g, r) = (&out.nets[0], &out.nets[1]);
+        assert_eq!(
+            (g.net.as_str(), g.island_vias, g.grid_vias, g.pad_vias),
+            ("GND", 2, 0, 0),
+            "{g:?}"
+        );
+        assert_eq!((g.pads, g.reached), (4, 3), "{g:?}");
+        assert_eq!(g.unreached.len(), 1);
+        let u = &g.unreached[0];
+        assert_eq!((u.pad.as_str(), u.reason.as_str()), ("U1.EP", "no_spoke"), "{u:?}");
+        assert!(
+            u.why.contains("none of its spokes ends in fill") && u.why.contains("via_in_pad"),
+            "{}",
+            u.why
+        );
+        assert_eq!(
+            (r.net.as_str(), r.island_vias, r.pads, r.reached),
+            ("GNDR", 0, 3, 3),
+            "{r:?}"
+        );
+        assert_eq!((g.outlines, r.outlines), (1, 1));
+        assert_eq!((out.vias_added, out.edge_vias), (2, 0));
+    }
+
+    #[test]
+    fn a_via_in_an_exposed_pad_is_set_only_when_asked_for() {
+        let (text, out) = pour("pad", serde_json::json!({"via_in_pad": true}));
+        let g = &out.nets[0];
+        assert_eq!((g.island_vias, g.pad_vias), (2, 1), "{g:?}");
+        assert_eq!((g.pads, g.reached), (4, 4), "{:?}", g.unreached);
+        assert!(g.summary.contains("reaches all 4 pads"), "{}", g.summary);
+        // the via stands in the pad
+        let kb = gummiband_kicad::read::parse_board(
+            text,
+            None,
+            &ReadOptions {
+                keep: KeepCopper::All,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let in_pad = kb
+            .board
+            .obstacles
+            .iter()
+            .filter(|o| o.kind == ObstacleKind::Via)
+            .filter(|o| {
+                let c = o.shape.bbox().center();
+                (c.x - 14.0).abs() < 1.2 && (c.y - 13.0).abs() < 1.2
+            })
+            .count();
+        assert_eq!(in_pad, 1);
+    }
+
+    #[test]
+    fn stitching_follows_the_mode_and_the_fill_rules_are_written() {
+        // none: the zones only, and the result says what a via would do
+        let (text, out) = pour(
+            "none",
+            serde_json::json!({"stitch": "none", "zone_clearance": 0.25, "zone_min_width": 0.15,
+                "thermal_gap": 0.4, "thermal_spoke_width": 0.5, "pad_connection": "thermal_tht"}),
+        );
+        assert_eq!(out.vias_added, 0);
+        assert_eq!(text.matches("(zone ").count(), 2);
+        for part in [
+            "(connect_pads thru_hole_only (clearance 0.25))",
+            "(min_thickness 0.15)",
+            "(thermal_gap 0.4)",
+            "(thermal_bridge_width 0.5)",
+        ] {
+            assert_eq!(text.matches(part).count(), 2, "{part}");
+        }
+        let g = &out.nets[0];
+        let by: Vec<(&str, &str)> = g
+            .unreached
+            .iter()
+            .map(|u| (u.pad.as_str(), u.reason.as_str()))
+            .collect();
+        // (SMD pads join solid with thermal_tht, and with these rules a sliver of fill fits
+        // between the exposed pad and its ring: an island of its own)
+        assert_eq!(by, [("R3.1", "island"), ("U1.EP", "island")], "{g:?}");
+        assert!(g.unreached[1].why.contains("via_in_pad"), "{}", g.unreached[1].why);
+        assert!(
+            g.unreached[0].why.contains("stitch islands sets the via"),
+            "{}",
+            g.unreached[0].why
+        );
+        // the defaults are the fill rules the tool always wrote
+        let (text, out) = pour("grid", serde_json::json!({"pitch": 4.0, "edge_pitch": 0}));
+        assert_eq!(text.matches("(connect_pads (clearance 0.2)) (min_thickness 0.2) (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))").count(), 2);
+        // a pitch without stitch: the grid and the islands
+        let g = &out.nets[0];
+        assert!(
+            g.grid_vias > 4 && out.vias_added == g.grid_vias + g.island_vias,
+            "{g:?}"
+        );
+        assert_eq!(g.reached, 3, "{g:?}");
+        // grid alone sets its vias wherever they are clear, as it always did
+        let (_, out) = pour(
+            "gridonly",
+            serde_json::json!({"stitch": "grid", "pitch": 4.0, "edge_pitch": 0}),
+        );
+        assert_eq!(out.nets[0].island_vias, 0);
+        assert!(out.nets[0].grid_vias > 4);
+        // what contradicts is refused in words
+        assert!(pour_err(serde_json::json!({"stitch": "islands", "pitch": 4.0})).contains("stitch grid or both"));
+        assert!(pour_err(serde_json::json!({"stitch": "some"})).contains("islands, grid, both or none"));
+        assert!(pour_err(serde_json::json!({"net": "GND", "nets": ["GND"]})).contains("not both"));
+        assert!(pour_err(serde_json::json!({"zone_min_width": 0})).contains("zone_min_width"));
+    }
 
     #[test]
     fn rounding_up() {

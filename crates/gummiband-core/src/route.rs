@@ -54,6 +54,9 @@ pub struct RouterConfig {
     /// Extra cost (mm) for passing right next to a pad of another net that still waits for its
     /// route: keeps the escape of dense pin rows free.
     pub escape_cost: f64,
+    /// The same price for a pad of a net left to the fill of its area (`areas fill`), through
+    /// the whole first pass: such a pad waits until the fill is known.
+    pub area_escape: f64,
     /// A connection may end on a track of its net, next to where that crosses an edge. Whatever
     /// rips up a segment has to rip up what ends on it, see `improve.rs`.
     pub taps: bool,
@@ -65,6 +68,16 @@ pub struct RouterConfig {
     /// Pins of a plane net close to each other reach the plane through one via: the leader fans
     /// out, the others connect to it ([`crate::patterns::PlaneShare`]).
     pub share_fanouts: bool,
+    /// Every plane fan-out ends on a via of its own (or a via of the kept copper, or a through
+    /// hole pad), and never on the fan-out track of another pin: pins that share one via share
+    /// its impedance, and the noise of one goes into the other. Infinite: a via laid for another
+    /// pin of the net is no goal; a finite factor lets a fan-out share one at that many times the
+    /// via cost; 0 shares as before, at almost no cost.
+    pub own_plane_vias: f64,
+    /// Price per mm of a step of a signal net over no copper of the planes next to its layer,
+    /// and per [`crate::refplane::SPLIT_MM`] for a split of them: the return current of the
+    /// track has to detour there (0 = off, see [`crate::refplane`]).
+    pub ref_cost: f64,
     /// The connection between a decoupling capacitor and its IC pin goes before everything else.
     pub decaps_first: bool,
     /// Share of the moves of the open end that re-lay the connections of one pin row in pin
@@ -107,10 +120,13 @@ impl Default for RouterConfig {
             margin: knobs::SEARCH_MARGIN.num(),
             via_in_pad: false,
             escape_cost: knobs::ESCAPE.num(),
+            area_escape: knobs::AREA_ESCAPE.num(),
             taps: false,
             hotspots: Default::default(),
             patterns: None,
             share_fanouts: false,
+            own_plane_vias: knobs::OWN_VIA.num(),
+            ref_cost: knobs::REF_COST.num(),
             decaps_first: false,
             row_moves: 0.0,
             pairs_first: false,
@@ -138,12 +154,28 @@ impl RouterConfig {
     }
 }
 
+/// Raster step in mm that the fill model is asked for inside the search, where it runs once per
+/// candidate and again after a rip-up: a minimum width of 0.2 mm is then three cells. The last
+/// check and the report take the finer step of the plan.
+const AREA_PASS_STEP: f64 = 0.07;
+
+/// Added to every clearance of the fill when the model runs inside the search, in mm: half a
+/// cell of its raster. The search works on the taut tracks and a coarse raster, the result is
+/// judged on the relaxed tracks and a fine one; with this reserve a strip of fill that the
+/// search counts on is one that is still there at the end.
+const AREA_PASS_SLACK: f64 = 0.035;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Goal {
     /// Any of these pins.
     Pins(Vec<usize>),
     /// A via into a plane of the net (or a through hole pin of the net).
     Plane,
+    /// Copper of the net that hangs together with its area, on whatever layer: the fill of the
+    /// area as the model has it ([`crate::fill::AreaGoal`]), or a pad the model says the area
+    /// joins. A via is only a change of layer: it ends the connection where its landing lies
+    /// in such fill on another layer, and where it does not, the search goes on from it.
+    Area,
 }
 
 /// Place of a planned connection in the routing order below its priority, see
@@ -174,6 +206,9 @@ pub enum End {
     Via(u32),
     /// A point on kept copper of the net.
     Point(Point),
+    /// A point in a pour of the net, just inside its outline, where a track enters or leaves
+    /// it. The pin is one the pour holds: the end stands for that pin's group.
+    Area(Point, usize),
     /// On a segment of the net, where it crosses this edge.
     Tap(u32, u32),
 }
@@ -227,6 +262,9 @@ pub struct ViaInfo {
     pub drill: f64,
     pub clearance: f64,
     pub users: u32,
+    /// Part of the kept copper (soft copper of the input): it stays for good, and any pin of its
+    /// net may fan out to it.
+    pub kept: bool,
 }
 
 /// Prices of the negotiation phase in mm of track, see [`Router::negotiate`].
@@ -280,10 +318,13 @@ pub struct Router<'a> {
     pub pin_group: Vec<u32>,
     /// Pin groups whose kept copper has a via into a plane of the net.
     plane_groups: HashSet<u32>,
+    /// Per pour (by obstacle) a pin its copper holds. A pour is copper of its net like a large
+    /// pad: a way into it ends where it enters, a way out of it starts where it leaves.
+    pour_pin: FastMap<u32, usize>,
     /// Partner net of each differential pair net, and where the nets ran so far.
     partner: HashMap<NetId, NetId>,
     guides: HashMap<NetId, Vec<Guide>>,
-    /// The board has kept tracks or vias.
+    /// The board has kept tracks, vias or pours: a group of pins may be more than one place.
     pub has_kept: bool,
     /// Soft copper of the board is in the topology, see [`crate::import`].
     pub soft_on: bool,
@@ -322,6 +363,15 @@ pub struct Router<'a> {
     /// Per pin the distance to the nearest pin of its part on another net, see
     /// [`Board::pin_room`]: every search asks for it at its pins.
     pin_pitch: std::sync::Arc<Vec<f64>>,
+    /// With `areas fill`: per area net what its connections aim at, from the last run of the
+    /// fill model ([`Router::area_pass`]).
+    area_goals: std::sync::Arc<Vec<crate::fill::AreaGoal>>,
+    /// Per pin, while the first pass of a route with `areas fill` runs: it is a pad of a net
+    /// left to the fill of its area. Empty at any other time.
+    area_wait: Vec<bool>,
+    /// Connections of the area nets that the fill makes: they count as planned and routed, so
+    /// that shares of the connections mean the same with and without the fill.
+    pub area_base: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -356,6 +406,12 @@ enum NK {
     GoalTap {
         seg: u32,
         e: u32,
+    },
+    /// In a pour of the net that holds a pin of the goal, right where the way enters it
+    /// (triangle t on layer li).
+    GoalArea {
+        t: u32,
+        li: u8,
     },
 }
 
@@ -630,6 +686,7 @@ fn key(k: &NK) -> u64 {
         NK::Site { site, li } => (4, site, li as u32),
         NK::GoalSite { site } => (5, site, 0),
         NK::GoalTap { seg, e } => (6, seg, e),
+        NK::GoalArea { t, li } => (7, t, li as u32),
     };
     assert!(a < 1 << 29, "search state out of range");
     kind << 61 | (a as u64) << 32 | b as u64
@@ -646,7 +703,7 @@ impl<'a> Router<'a> {
         } else {
             HashMap::new()
         };
-        let (pin_group, plane_groups) = Self::pin_groups(board, sub);
+        let (pin_group, plane_groups, pour_pin) = Self::pin_groups(board, sub);
         let mut r = Router {
             board,
             sub: sub.clone(),
@@ -662,14 +719,18 @@ impl<'a> Router<'a> {
             search_buf: Default::default(),
             trace: Default::default(),
             pin_pitch: std::sync::Arc::new(Self::pin_pitches(board)),
+            area_goals: Default::default(),
+            area_wait: Vec::new(),
+            area_base: 0,
             pin_group,
             plane_groups,
+            pour_pin,
             partner,
             guides: HashMap::new(),
             has_kept: board
                 .obstacles
                 .iter()
-                .any(|o| matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via)),
+                .any(|o| matches!(o.kind, ObstacleKind::Track | ObstacleKind::Via | ObstacleKind::Pour)),
             pending: vec![0; board.pins.len()],
             prices: None,
             torn: Vec::new(),
@@ -689,7 +750,7 @@ impl<'a> Router<'a> {
         r
     }
 
-    fn pin_groups(board: &Board, sub: &Substrate) -> (Vec<u32>, HashSet<u32>) {
+    fn pin_groups(board: &Board, sub: &Substrate) -> (Vec<u32>, HashSet<u32>, FastMap<u32, usize>) {
         let n = board.pins.len();
         let mut parent: Vec<u32> = (0..n as u32).collect();
         fn find(p: &mut [u32], x: u32) -> u32 {
@@ -737,6 +798,7 @@ impl<'a> Router<'a> {
             board.planes.iter().any(on)
         };
         let mut on_plane: Vec<u32> = Vec::new();
+        let mut pour_pin: FastMap<u32, usize> = FastMap::default();
         let mut seen = vec![false; board.obstacles.len()];
         for start in 0..board.obstacles.len() {
             if seen[start] || !kept(&board.obstacles[start]) {
@@ -747,8 +809,12 @@ impl<'a> Router<'a> {
             let mut stack = vec![start];
             let mut first_pin: Option<u32> = None;
             let mut plane = false;
+            let mut pours: Vec<u32> = Vec::new();
             while let Some(o) = stack.pop() {
                 plane |= into_plane(&board.obstacles[o]);
+                if board.obstacles[o].kind == ObstacleKind::Pour {
+                    pours.push(o as u32);
+                }
                 let poly = &sub.shared.obs_polys[o];
                 for q in sub.shared.obs_index.query(&poly.bbox()) {
                     let q = q as usize;
@@ -779,10 +845,13 @@ impl<'a> Router<'a> {
             if let (true, Some(f)) = (plane, first_pin) {
                 on_plane.push(f);
             }
+            if let Some(f) = first_pin {
+                pour_pin.extend(pours.into_iter().map(|o| (o, f as usize)));
+            }
         }
         let groups: Vec<u32> = (0..n as u32).map(|x| find(&mut parent, x)).collect();
         let on_plane = on_plane.iter().map(|&p| groups[p as usize]).collect();
-        (groups, on_plane)
+        (groups, on_plane, pour_pin)
     }
 
     fn m(&self, li: usize) -> &Mesh {
@@ -834,6 +903,7 @@ impl<'a> Router<'a> {
             drill: 0.0,
             clearance: 0.0,
             users: 0,
+            kept: false,
         }))
     }
 
@@ -1015,6 +1085,15 @@ impl<'a> Router<'a> {
         self.cfg.pair_pull * step * ((d - pitch).max(0.0) / 2.0).min(1.0)
     }
 
+    /// The reference planes of the routing layers, rastered on first use.
+    fn ref_map(&self) -> Option<&crate::refplane::RefMap> {
+        self.sub
+            .shared
+            .ref_map
+            .get_or_init(|| crate::refplane::RefMap::build(self.board, &self.sub.layers).map(std::sync::Arc::new))
+            .as_deref()
+    }
+
     /// Extra cost of the step a-b on routing layer li for leaving the layer's preferred
     /// direction (even layers horizontal, odd ones vertical).
     fn across(&self, li: usize, a: Point, b: Point) -> f64 {
@@ -1033,10 +1112,13 @@ impl<'a> Router<'a> {
     /// Escape penalty for crossing edge e: an end vertex on a pad of another net that still
     /// has unrouted connections.
     fn escape_penalty(&self, li: usize, e: u32, net: NetId) -> f64 {
-        if self.cfg.escape_cost <= 0.0 {
+        // the pads of area nets wait through the first pass, at a price of their own
+        let waiting = !self.area_wait.is_empty();
+        if self.cfg.escape_cost <= 0.0 && !waiting {
             return 0.0;
         }
         let m = self.m(li);
+        let mut price: f64 = 0.0;
         for end in 0..2 {
             for d in m.demands(e, end) {
                 if d.obs == OUTSIDE {
@@ -1045,13 +1127,17 @@ impl<'a> Router<'a> {
                 let o = &self.board.obstacles[d.obs as usize];
                 if let Some(p) = o.pin
                     && o.net != Some(net)
-                    && self.pending[p] > 0
                 {
-                    return self.cfg.escape_cost;
+                    if self.pending[p] > 0 {
+                        price = price.max(self.cfg.escape_cost);
+                    }
+                    if waiting && self.area_wait[p] {
+                        price = price.max(self.cfg.area_escape);
+                    }
                 }
             }
         }
-        0.0
+        price
     }
 
     /// Extra room asked for near hot spots, for an edge a-b.
@@ -1783,6 +1869,7 @@ impl<'a> Router<'a> {
             drill,
             clearance,
             users: 0,
+            kept: false,
         }
     }
 
@@ -2203,6 +2290,7 @@ impl<'a> Router<'a> {
                 drill: n.drill,
                 clearance: n.clearance,
                 users: 1,
+                kept: true,
             },
         );
         self.via_cells.entry(Self::via_cell(n.at)).or_default().push(site);
@@ -2244,6 +2332,35 @@ impl<'a> Router<'a> {
         self.board.obstacles[s as usize].pin
     }
 
+    /// The pour of a net that covers triangle t (the search only gets there on its own net).
+    fn tri_pour(&self, li: usize, t: u32) -> Option<u32> {
+        let s = self.m(li).status[t as usize];
+        (s != NONE && s != OUTSIDE && self.board.obstacles[s as usize].kind == ObstacleKind::Pour).then_some(s)
+    }
+
+    /// Where a track that crosses the outline of a pour at `q` ends in it: a little inside
+    /// triangle t of the pour, so that the end lies in its copper, and what stands for it.
+    fn area_end(&self, li: usize, t: u32, q: Point, width: f64) -> End {
+        let at = self.fill_end(li, t, q, width);
+        match self.tri_pour(li, t).and_then(|o| self.pour_pin.get(&o)) {
+            Some(&p) => End::Area(at, p),
+            None => End::Point(at),
+        }
+    }
+
+    /// The end of a track that enters triangle t at `q` and ends in copper there: one track
+    /// width inside, towards the middle of the triangle.
+    fn fill_end(&self, li: usize, t: u32, q: Point, width: f64) -> Point {
+        let mid = self.m(li).tri_mid(t);
+        let d = mid.dist(q);
+        if d > 1e-9 { q.lerp(mid, (width / d).min(0.6)) } else { q }
+    }
+
+    /// What the connections of area net `net` aim at, once the fill model ran.
+    fn area_goal(&self, net: NetId) -> Option<&crate::fill::AreaGoal> {
+        self.area_goals.iter().find(|g| g.net == net)
+    }
+
     /// A negotiation is on and capacity and planarity are soft.
     fn soft(&self) -> bool {
         self.prices.as_ref().is_some_and(|p| p.soft)
@@ -2258,6 +2375,12 @@ impl<'a> Router<'a> {
             Some((g.as_slice(), w + gap))
         });
         let net = conn.net;
+        // a step that leaves the reference plane of its layer pays (refplane)
+        let refs = (self.cfg.ref_cost > 0.0).then(|| self.ref_map()).flatten();
+        let ref_price = |li: usize, a: Point, b: Point| match refs {
+            Some(m) if m.applies(li, net) => self.cfg.ref_cost * m.penalty(li, a, b),
+            _ => 0.0,
+        };
         // a via in a pad is a last resort
         let via_in_pad = self.cfg.via_in_pad;
         let cls = self.board.class_of(net);
@@ -2276,7 +2399,17 @@ impl<'a> Router<'a> {
         let src = &self.board.pins[conn.from];
         let target_pts: Vec<Point> = match &conn.goal {
             Goal::Pins(p) => p.iter().map(|&p| self.board.pins[p].pos).collect(),
-            Goal::Plane => Vec::new(),
+            Goal::Plane | Goal::Area => Vec::new(),
+        };
+        let area = if conn.goal == Goal::Area {
+            self.area_goal(net)
+        } else {
+            None
+        };
+        let joined = if area.is_some() {
+            self.area_joined(net, ci)
+        } else {
+            HashSet::new()
         };
         let h = |p: Point| -> f64 {
             match target_pts[..] {
@@ -2308,7 +2441,20 @@ impl<'a> Router<'a> {
                             .iter()
                             .any(|pl| pl.net == net && pn.layers.has(pl.layer) && pl.covers(pn.pos))
                 }
+                // a pad that hangs on the area: by the model, or through a connection laid
+                Goal::Area => {
+                    self.pin_group[pin] != self.pin_group[conn.from]
+                        && self.board.pins[pin].net == net
+                        && joined.contains(&self.pin_group[pin])
+                }
             }
+        };
+        // a via at `q`, set from the layer of mesh `lu`, ends the connection: its landing lies
+        // in the plane, or in the fill of the area on another layer
+        let via_ends = |q: Point, lu: usize| match conn.goal {
+            Goal::Pins(_) => false,
+            Goal::Plane => self.in_plane(q, net),
+            Goal::Area => area.is_some_and(|a| a.lands(self.m(lu).layer, q)),
         };
         let nl = self.nl();
         let tappable = self.tappable(ci);
@@ -2459,7 +2605,17 @@ impl<'a> Router<'a> {
                 return;
             }
             let k2 = m.local_edge(t2, e) as u8;
+            let from_pour = !free && self.tri_pour(lu, t).is_some();
             if !free && s2 != NONE {
+                // a pour is no place the way came from: in it, and on what it leads to, the
+                // way stands where the copper is
+                let pos = if self.tri_pour(lu, t2).is_some() {
+                    m.tri_mid(t2)
+                } else if from_pour {
+                    self.tri_pin(lu, t2).map_or(m.tri_mid(t2), |p| self.board.pins[p].pos)
+                } else {
+                    node.pos
+                };
                 push(
                     best,
                     nodes,
@@ -2470,7 +2626,7 @@ impl<'a> Router<'a> {
                         entry: 3,
                         slot: 0,
                     },
-                    node.pos,
+                    pos,
                     node.g,
                     idx,
                 );
@@ -2544,12 +2700,21 @@ impl<'a> Router<'a> {
             let from_coord = chord_from.map(|(cp, cs)| self.coord(t, lu, cp, None, cs));
             let node_at = |j: usize, lo: f64, hi: f64, price: f64| {
                 let q = pu + dir * (node.pos - pu).dot(dir).clamp(lo, hi);
-                // on kept copper of the net the way is already there
+                // on kept copper of the net the way is already there, and out of a pour the track
+                // starts on this edge
                 let g = if self.on_kept(lu, t2) {
                     node.g
+                } else if from_pour {
+                    node.g + escape + price
                 } else {
                     let step = node.pos.dist(q);
-                    node.g + step + self.across(lu, node.pos, q) + escape + self.pull(guide, lu, q, step) + price
+                    node.g
+                        + step
+                        + self.across(lu, node.pos, q)
+                        + ref_price(lu, node.pos, q)
+                        + escape
+                        + self.pull(guide, lu, q, step)
+                        + price
                 };
                 let kind = NK::Tri {
                     t: t2,
@@ -2667,7 +2832,11 @@ impl<'a> Router<'a> {
                 t.push((node.pos, li));
             }
             match node.kind {
-                NK::GoalPin { .. } | NK::GoalVia { .. } | NK::GoalSite { .. } | NK::GoalTap { .. } => {
+                NK::GoalPin { .. }
+                | NK::GoalVia { .. }
+                | NK::GoalSite { .. }
+                | NK::GoalTap { .. }
+                | NK::GoalArea { .. } => {
                     let mut chain = vec![node];
                     let mut p = node.parent;
                     while p != u32::MAX {
@@ -2687,6 +2856,18 @@ impl<'a> Router<'a> {
                     } else {
                         None
                     };
+                    // into a pour that holds a pin of the goal: the way ends where it enters. On
+                    // through the pour to the pad it would be one straight line from here to
+                    // there, across the holes of the pour and what lies in them.
+                    if entry < 3
+                        && !matches!(conn.goal, Goal::Plane)
+                        && let Some(o) = self.tri_pour(lu, t)
+                        && let Some(&pin) = self.pour_pin.get(&o)
+                        && is_target(pin)
+                    {
+                        push(best, nodes, open, NK::GoalArea { t, li }, node.pos, node.g, idx);
+                        continue;
+                    }
                     if let Some(pin) = self.tri_pin(lu, t)
                         && is_target(pin)
                     {
@@ -2700,6 +2881,16 @@ impl<'a> Router<'a> {
                             node.g + node.pos.dist(q),
                             idx,
                         );
+                        continue;
+                    }
+                    // into the fill of the area: the way ends where it enters, a little inside
+                    // the triangle, where the fill is at least half its minimum width deep
+                    if free
+                        && entry < 3
+                        && let Some(a) = area
+                        && a.inside(m.layer, self.fill_end(lu, t, node.pos, item.w))
+                    {
+                        push(best, nodes, open, NK::GoalArea { t, li }, node.pos, node.g, idx);
                         continue;
                     }
                     // right next to a track of the net that is not on this side of the gap
@@ -2731,19 +2922,17 @@ impl<'a> Router<'a> {
                             if !self.sub.site_usable(site) || !ok {
                                 continue;
                             }
-                            if conn.goal == Goal::Plane {
-                                if self.in_plane(q, net) {
-                                    push(
-                                        best,
-                                        nodes,
-                                        open,
-                                        NK::GoalSite { site },
-                                        q,
-                                        node.g + node.pos.dist(q) + via_cost,
-                                        idx,
-                                    );
-                                }
-                            } else {
+                            if via_ends(q, lu) {
+                                push(
+                                    best,
+                                    nodes,
+                                    open,
+                                    NK::GoalSite { site },
+                                    q,
+                                    node.g + node.pos.dist(q) + via_cost,
+                                    idx,
+                                );
+                            } else if conn.goal != Goal::Plane {
                                 // leave the pad through a via to the other layers
                                 for l2 in 0..nl {
                                     if l2 != lu && self.m(l2).site_tri[site as usize] != PAD_SITE {
@@ -2826,7 +3015,19 @@ impl<'a> Router<'a> {
                         }
                         let q = m.verts[v as usize];
                         let d = node.pos.dist(q);
-                        if conn.goal == Goal::Plane && self.in_plane(q, net) {
+                        if via_ends(q, lu) {
+                            // a via another pin fanned out through is not this pin's way into
+                            // the plane (own_plane_vias), nor a stop on the way to it
+                            let shared =
+                                conn.goal == Goal::Plane && existing && !self.vias.get(&site).is_some_and(|x| x.kept);
+                            let vc = if shared && self.cfg.own_plane_vias > 0.0 {
+                                if self.cfg.own_plane_vias.is_infinite() {
+                                    continue;
+                                }
+                                via_cost * self.cfg.own_plane_vias
+                            } else {
+                                vc
+                            };
                             push(best, nodes, open, NK::GoalVia { site }, q, node.g + d + vc * 0.5, idx);
                             continue;
                         }
@@ -2915,9 +3116,7 @@ impl<'a> Router<'a> {
                             vc += s.crossing;
                         }
                         tried += 1;
-                        if self.sub.shared.sites[site as usize].pad.is_some()
-                            || (conn.goal == Goal::Plane && self.in_plane(q, net))
-                        {
+                        if self.sub.shared.sites[site as usize].pad.is_some() || via_ends(q, lu) {
                             push(
                                 best,
                                 nodes,
@@ -3188,6 +3387,7 @@ impl<'a> Router<'a> {
                 }
                 Some(NK::GoalPin { pin }) => End::Pin(pin),
                 Some(NK::GoalTap { seg, e }) => End::Tap(seg, e),
+                Some(NK::GoalArea { t, li: l }) => self.area_end(l as usize, t, chain[j].pos, width),
                 // through hole layer change: the run ends at that pin
                 // or at a kept via of the net
                 _ => match self.tri_pin(li as usize, last_t) {
@@ -3196,23 +3396,26 @@ impl<'a> Router<'a> {
                     None => End::Pin(conn.from),
                 },
             };
-            let seg = Seg {
-                net,
-                conn: ci as u32,
-                li,
-                width,
-                clearance,
-                start,
-                end,
-                crossings: Vec::new(),
-                widths: Vec::new(),
-                chord_tris: Vec::new(),
-                necks: necks.clone(),
-                neck_w,
-                imported: None,
-            };
-            seg_ids.push(self.insert_seg(seg, &run));
-            start = end;
+            let (parts, next) = self.off_pours(li as usize, &chain[i..j], run, start, end, width);
+            for (start, end, run) in parts {
+                let seg = Seg {
+                    net,
+                    conn: ci as u32,
+                    li,
+                    width,
+                    clearance,
+                    start,
+                    end,
+                    crossings: Vec::new(),
+                    widths: Vec::new(),
+                    chord_tris: Vec::new(),
+                    necks: necks.clone(),
+                    neck_w,
+                    imported: None,
+                };
+                seg_ids.push(self.insert_seg(seg, &run));
+            }
+            start = next;
             i = j;
         }
         self.conn_segs[ci] = seg_ids;
@@ -3225,6 +3428,77 @@ impl<'a> Router<'a> {
         true
     }
 
+    /// The pieces of one run of a chain (its nodes, and the triangles, entries and slots in
+    /// `run`) that become segments, each with its ends, and where the next run starts. A run
+    /// that touches no pour of its net is one piece from `start` to `end`. In a pour there is
+    /// no track: the piece before ends where the way enters it, the piece after starts where
+    /// it leaves, both just inside the outline. A straight line from one to the other, or on
+    /// to a pad under the pour, would cross its holes and what lies in them.
+    #[allow(clippy::type_complexity)]
+    fn off_pours(
+        &self,
+        li: usize,
+        nodes: &[Node],
+        run: Vec<(u32, u8, u16)>,
+        start: End,
+        end: End,
+        width: f64,
+    ) -> (Vec<(End, End, Vec<(u32, u8, u16)>)>, End) {
+        let m = self.m(li);
+        let in_pour = |r: usize| self.tri_pour(li, run[r].0).is_some();
+        if !(0..run.len()).any(in_pour) {
+            return (vec![(start, end, run)], end);
+        }
+        let own = |r: usize| m.status[run[r].0 as usize] != NONE;
+        // what stands for the own copper of node r, for a track that crosses its outline at q
+        let stand = |r: usize, q: Point| {
+            if in_pour(r) {
+                self.area_end(li, run[r].0, q, width)
+            } else {
+                self.tri_pin(li, run[r].0).map_or(End::Point(nodes[r].pos), End::Pin)
+            }
+        };
+        let mut parts = Vec::new();
+        let (mut from, mut cur) = (start, Vec::new());
+        let mut r = 0;
+        while r < run.len() {
+            let a = r;
+            if !own(a) {
+                cur.push(run[a]);
+                r += 1;
+                continue;
+            }
+            // one piece of own copper: nodes a to b
+            let mut b = a;
+            while b + 1 < run.len() && own(b + 1) {
+                b += 1;
+            }
+            r = b + 1;
+            if !(a..=b).any(in_pour) {
+                cur.extend_from_slice(&run[a..=b]);
+                continue;
+            }
+            // the way came in from free ground: that piece ends here
+            if run[a].1 < 3 {
+                cur.push(run[a]);
+                parts.push((from, stand(a, nodes[a].pos), std::mem::take(&mut cur)));
+            }
+            cur.clear();
+            if b + 1 < run.len() {
+                // and goes on from where it leaves
+                from = stand(b, nodes[b + 1].pos);
+                cur.push((run[b].0, 3, 0));
+            } else {
+                from = stand(b, nodes[b].pos);
+            }
+        }
+        if cur.is_empty() {
+            return (parts, from);
+        }
+        parts.push((from, end, cur));
+        (parts, end)
+    }
+
     /// Insert a segment: its chords (against the lists as the search saw them), then its
     /// crossings at their slots.
     fn insert_seg(&mut self, mut s: Seg, run: &[(u32, u8, u16)]) -> u32 {
@@ -3233,7 +3507,7 @@ impl<'a> Router<'a> {
         let m = &self.sub.m[li];
         let vert = |e: End| match e {
             End::Via(site) => m.site_vert.get(&site).copied(),
-            End::Pin(_) | End::Point(_) | End::Tap(..) => None,
+            End::Pin(_) | End::Point(_) | End::Area(..) | End::Tap(..) => None,
         };
         let vpos = |t: u32, v: u32| CPos::Vertex(m.tris[t as usize].iter().position(|&x| x == v).unwrap_or(0) as u8);
         let mut chords: Vec<(u32, Chord)> = Vec::new();
@@ -3373,6 +3647,9 @@ impl<'a> Router<'a> {
             }
         }
         for net in b.routable_nets() {
+            if b.areas.as_ref().is_some_and(|a| a.holds(net)) {
+                continue; // the fill connects it
+            }
             let n = &b.nets[net as usize];
             let has_plane = b.planes.iter().any(|p| p.net == net);
             let prio = n.priority as i64;
@@ -3654,6 +3931,10 @@ impl<'a> Router<'a> {
     }
 
     pub fn run(&mut self) -> usize {
+        // A pad of a net left to the fill of its area waits until the fill is known, which is
+        // after this pass: a track right next to it pays the escape price all the way through,
+        // so that the fill, or the pad's own piece of copper, finds the pad open.
+        self.area_pads_wait();
         let mut failed = Vec::new();
         for ci in 0..self.conns.len() {
             for p in self.conn_pins(ci) {
@@ -3730,7 +4011,249 @@ impl<'a> Router<'a> {
             failed = still;
         }
         self.reduce_vias();
+        self.area_wait = Vec::new();
         self.conn_segs.iter().filter(|s| !s.is_empty()).count()
+    }
+
+    /// From now until the end of [`Router::run`] the pads of the nets left to the fill of their
+    /// area count as waiting: a track of another net right next to one pays
+    /// [`RouterConfig::area_escape`].
+    fn area_pads_wait(&mut self) {
+        let Some(plan) = self.board.areas.as_ref().filter(|p| !p.nets.is_empty()) else {
+            return;
+        };
+        if self.cfg.area_escape <= 0.0 {
+            return;
+        }
+        self.area_wait = vec![false; self.board.pins.len()];
+        for &net in &plan.nets {
+            for &p in &self.board.nets[net as usize].pins {
+                self.area_wait[p] = true;
+            }
+        }
+    }
+
+    /// The second pass of a route with `areas fill`, after [`Router::run`] laid the other nets:
+    /// the fill model runs on their copper, and every group of pads of an area net that the
+    /// fill does not reach becomes one connection that ends in the area ([`Goal::Area`]). What
+    /// finds no way gets a via in its pad as a second chance and then the rip-up of the first
+    /// pass: the connections around the pad give way, the pad goes first, they are laid again,
+    /// and the model runs again on what they left. Returns the number of connections routed.
+    pub fn area_pass(&mut self) -> usize {
+        let routed = |r: &Router| r.conn_segs.iter().filter(|s| !s.is_empty()).count();
+        let Some(plan) = self.board.areas.clone().filter(|p| !p.nets.is_empty()) else {
+            return routed(self);
+        };
+        self.area_model(&plan);
+        let mut failed: Vec<usize> = self.area_conns();
+        failed.retain(|&ci| !self.route_area(ci));
+        let vip = self.cfg.via_in_pad;
+        self.cfg.via_in_pad = true;
+        failed.retain(|&ci| !self.route_area(ci));
+        self.cfg.via_in_pad = vip;
+        for _pass in 0..self.cfg.ripup_passes {
+            if failed.is_empty() {
+                break;
+            }
+            let mut still = Vec::new();
+            let mut moved = false;
+            for &ci in &failed {
+                if !self.conn_segs[ci].is_empty() {
+                    continue;
+                }
+                let victims = self.blockers(ci);
+                for &v in &victims {
+                    self.rip_up(v);
+                }
+                moved |= !victims.is_empty();
+                let ok = self.route_area(ci);
+                for &v in &victims {
+                    if !self.route_one(v) {
+                        still.push(v);
+                    }
+                }
+                if !ok {
+                    still.push(ci);
+                }
+            }
+            if moved {
+                // the copper around the pads is another now, and so is the fill
+                self.area_model(&plan);
+                // a connection that ended in fill that is gone is laid again
+                for ci in 0..self.conns.len() {
+                    if !self.conn_segs[ci].is_empty() && !self.area_end_holds(ci) {
+                        self.rip_up(ci);
+                        still.push(ci);
+                    }
+                }
+                still.extend(self.area_conns());
+            }
+            still.sort_unstable();
+            still.dedup();
+            still.retain(|&ci| self.conn_segs[ci].is_empty() && !self.route_area(ci));
+            failed = still;
+        }
+        routed(self)
+    }
+
+    /// The end of a routed connection into an area still lies in what the model has as the area
+    /// (true for every other connection).
+    fn area_end_holds(&self, ci: usize) -> bool {
+        let c = &self.conns[ci];
+        if c.goal != Goal::Area {
+            return true;
+        }
+        let (Some(g), Some(s)) = (
+            self.area_goal(c.net),
+            self.conn_segs[ci]
+                .last()
+                .and_then(|&sid| self.segs[sid as usize].as_ref()),
+        ) else {
+            return true;
+        };
+        let layer = self.m(s.li as usize).layer;
+        match s.end {
+            End::Point(p) => g.inside(layer, p),
+            End::Via(site) => {
+                self.sub.shared.sites[site as usize].pad.is_some() || g.lands(layer, self.site_point(site))
+            }
+            End::Pin(p) | End::Area(_, p) => self.area_joined(c.net, ci).contains(&self.pin_group[p]),
+            End::Tap(..) => true,
+        }
+    }
+
+    /// The groups of pads of area net `net` that hang on its area: those the fill joins, by the
+    /// model, and those with a connection laid that ends in the fill or on such a pad, together
+    /// with the pads on their piece of copper. Connection `but` counts as not laid: what hangs
+    /// on the area only through it is no place for it to end.
+    fn area_joined(&self, net: NetId, but: usize) -> HashSet<u32> {
+        let Some(g) = self.area_goal(net) else {
+            return HashSet::new();
+        };
+        let mut joined: HashSet<u32> = g.reached.iter().map(|&p| self.pin_group[p]).collect();
+        loop {
+            let before = joined.len();
+            for (cj, c) in self.conns.iter().enumerate() {
+                if cj == but || c.net != net || c.goal != Goal::Area || joined.contains(&self.pin_group[c.from]) {
+                    continue;
+                }
+                let last = self.conn_segs[cj]
+                    .last()
+                    .and_then(|&sid| self.segs[sid as usize].as_ref());
+                let holds = match last.map(|s| s.end) {
+                    Some(End::Pin(p) | End::Area(_, p)) => joined.contains(&self.pin_group[p]),
+                    Some(End::Point(_) | End::Via(_)) => true,
+                    Some(End::Tap(..)) | None => false,
+                };
+                if holds {
+                    let mates = g.apart.iter().find(|pins| pins.contains(&c.from));
+                    joined.extend(mates.into_iter().flatten().map(|&p| self.pin_group[p]));
+                    joined.insert(self.pin_group[c.from]);
+                }
+            }
+            if joined.len() == before {
+                return joined;
+            }
+        }
+    }
+
+    /// Runs the fill model for every area net on the copper as it lies.
+    fn area_model(&mut self, plan: &crate::fill::AreaPlan) {
+        // on the tracks as the geometry step will leave them, not on the taut ones: a strip of
+        // fill between two taut bundles is gone once they spread
+        let mut geo = self.geometry();
+        if !knobs::NO_RELAX.on() {
+            // a quarter of the rounds, as for the finalists that are screened: most of the way
+            let full = crate::relax::RelaxConfig::default();
+            let short = crate::relax::RelaxConfig {
+                iterations: (full.iterations / 4).max(40),
+                ..full
+            };
+            crate::relax::relax(self.board, &self.sub, &mut geo, &short);
+        }
+        let goals = crate::prof::time(crate::prof::Slot::AreaModel, || {
+            crate::fill::goals(self.board, plan, &geo, AREA_PASS_STEP, AREA_PASS_SLACK, true)
+        });
+        crate::prof::add(crate::prof::Slot::AreaModels, 1);
+        self.area_goals = std::sync::Arc::new(goals);
+    }
+
+    /// Plans a connection for every group of pads that the area of its net does not reach and
+    /// that has none yet, and returns the new ones. Where a net has no fill at all its groups
+    /// are joined to each other as tracks.
+    fn area_conns(&mut self) -> Vec<usize> {
+        let first = self.conns.len();
+        let goals = self.area_goals.clone();
+        let stitch = self.board.areas.as_ref().is_some_and(|p| p.stitch);
+        self.area_base = 0;
+        for g in goals.iter() {
+            let has = |r: &Router, pins: &[usize]| r.conns.iter().any(|c| c.net == g.net && pins.contains(&c.from));
+            if g.has_fill() {
+                for (pins, &site) in g.apart.iter().zip(&g.site) {
+                    // an island with a spot for a via gets that via on the finished copper
+                    if stitch && site {
+                        continue;
+                    }
+                    if !has(self, pins) {
+                        self.conns.push(Conn {
+                            net: g.net,
+                            from: pins[0],
+                            goal: Goal::Area,
+                        });
+                    }
+                }
+            } else {
+                let mut tree: Vec<usize> = Vec::new();
+                for pins in &g.apart {
+                    if !tree.is_empty() && !has(self, pins) {
+                        self.conns.push(Conn {
+                            net: g.net,
+                            from: pins[0],
+                            goal: Goal::Pins(tree.clone()),
+                        });
+                    }
+                    tree.extend(pins);
+                }
+            }
+            // what the fill joins counts as planned and done
+            let mut groups: Vec<u32> = self.board.nets[g.net as usize]
+                .pins
+                .iter()
+                .map(|&p| self.pin_group[p])
+                .collect();
+            groups.sort_unstable();
+            groups.dedup();
+            let own = self.conns.iter().filter(|c| c.net == g.net).count();
+            self.area_base += groups.len().saturating_sub(1).saturating_sub(own);
+        }
+        self.conn_segs.resize(self.conns.len(), Vec::new());
+        self.conn_vias.resize(self.conns.len(), Vec::new());
+        (first..self.conns.len()).collect()
+    }
+
+    /// Routes a connection into the area from the pad it names, or from another pad of its
+    /// group of copper.
+    fn route_area(&mut self, ci: usize) -> bool {
+        if self.route_one(ci) {
+            return true;
+        }
+        let c = self.conns[ci].clone();
+        if c.goal != Goal::Area {
+            return false;
+        }
+        let others: Vec<usize> = self
+            .area_goal(c.net)
+            .and_then(|g| g.apart.iter().find(|pins| pins.contains(&c.from)))
+            .map(|pins| pins.iter().copied().filter(|&p| p != c.from).take(3).collect())
+            .unwrap_or_default();
+        for p in others {
+            self.conns[ci].from = p;
+            if self.route_one(ci) {
+                return true;
+            }
+        }
+        self.conns[ci].from = c.from;
+        false
     }
 
     /// PathFinder on the topology. In a first pass every connection takes its way and may
@@ -3997,7 +4520,7 @@ impl<'a> Router<'a> {
                 .map(|&q| self.board.pins[q].pos)
                 .min_by(|x, y| x.dist(a).total_cmp(&y.dist(a)))
                 .unwrap_or(a),
-            Goal::Plane => a,
+            Goal::Plane | Goal::Area => a,
         };
         let radius = 1.0 + a.dist(b) * 0.15;
         let mut out = Vec::new();
@@ -4115,7 +4638,7 @@ impl<'a> Router<'a> {
             for &sid in &self.conn_segs[ci] {
                 let s = self.segs[sid as usize].as_ref().unwrap();
                 let node = |e: End| match e {
-                    End::Pin(p) => Some(pin(p)),
+                    End::Pin(p) | End::Area(_, p) => Some(pin(p)),
                     End::Via(v) => Some(site(v)),
                     End::Point(_) | End::Tap(..) => None,
                 };
@@ -4136,9 +4659,15 @@ impl<'a> Router<'a> {
                     }
                 }
                 // two fan-outs that end on each other reach no plane
-                if c.goal == Goal::Plane && !matches!(s.end, End::Tap(..)) {
+                if matches!(c.goal, Goal::Plane | Goal::Area) && !matches!(s.end, End::Tap(..)) {
                     join(nodes[0].unwrap_or(pin(c.from)), PLANE);
                 }
+            }
+        }
+        // the pads the fill of an area joins hang together through it
+        if let Some(g) = self.area_goal(net) {
+            for &p in &g.reached {
+                join(pin(p), PLANE);
             }
         }
         let mut roots: Vec<u64> = self.board.nets[net as usize]
@@ -4200,10 +4729,19 @@ impl<'a> Router<'a> {
         if !self.cfg.taps || self.partner.contains_key(&c.net) {
             return HashSet::new();
         }
+        // a plane fan-out that ends on the fan-out of another pin shares its via
+        if c.goal == Goal::Plane && self.cfg.own_plane_vias > 0.0 {
+            return HashSet::new();
+        }
         let mine = self.net_side(c.net, &[c.from]);
         let goal = match &c.goal {
             Goal::Pins(p) => self.net_side(c.net, p),
             Goal::Plane => self.net_side(c.net, &self.plane_pins(c.net)),
+            // what hangs on the area: its pads, by the model
+            Goal::Area => {
+                let pads = self.area_goal(c.net).map(|g| g.reached.clone()).unwrap_or_default();
+                self.net_side(c.net, &pads)
+            }
         };
         let on = |side: &[End], e: End| side.iter().any(|&x| self.same_end(x, e));
         (0..self.conns.len())
@@ -4247,7 +4785,7 @@ impl<'a> Router<'a> {
     /// Two ends at the same place: pins of one group, or the same via.
     fn same_end(&self, a: End, b: End) -> bool {
         match (a, b) {
-            (End::Pin(a), End::Pin(b)) => self.pin_group[a] == self.pin_group[b],
+            (End::Pin(a) | End::Area(_, a), End::Pin(b) | End::Area(_, b)) => self.pin_group[a] == self.pin_group[b],
             (End::Via(a), End::Via(b)) => a == b,
             _ => false,
         }
@@ -4926,7 +5464,7 @@ pub(crate) mod tests {
         r.plan();
         let goal = |from: usize| match &r.conns.iter().find(|c| c.from == from).unwrap().goal {
             Goal::Pins(p) => p.clone(),
-            Goal::Plane => Vec::new(),
+            Goal::Plane | Goal::Area => Vec::new(),
         };
         assert_eq!(r.conns.len(), 2);
         assert_eq!(goal(1), vec![0]);
@@ -5097,5 +5635,46 @@ pub(crate) mod tests {
         });
         assert!(r.route_one(0) && r.route_one(1));
         assert_eq!(r.conflicts(0.0).2, 1);
+    }
+
+    /// With `areas fill` the pads of a net left to its fill wait through the first pass: a track
+    /// of another net right next to one pays for it, the net itself does not, and after the
+    /// pass nobody does.
+    #[test]
+    fn a_pad_of_an_area_net_keeps_its_escape_price_through_the_first_pass() {
+        let mut b = crate::topo::tests::two_pad_board();
+        b.areas = Some(std::sync::Arc::new(crate::fill::AreaPlan {
+            nets: vec![0],
+            ..Default::default()
+        }));
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let cfg = RouterConfig {
+            area_escape: 2.0,
+            ..Default::default()
+        };
+        let mut r = Router::new(&b, &sub, cfg);
+        r.plan();
+        // the net is left to its fill: nothing is planned for it
+        assert!(r.conns.is_empty());
+        let edges = r.sub.m[0].edges.len() as u32;
+        let paying = |r: &Router, net: NetId| (0..edges).filter(|&e| r.escape_penalty(0, e, net) > 0.0).count();
+        assert_eq!(paying(&r, 1), 0);
+        r.area_pads_wait();
+        assert!(paying(&r, 1) > 0);
+        assert!((0..edges).all(|e| [0.0, 2.0].contains(&r.escape_penalty(0, e, 1))));
+        assert_eq!(paying(&r, 0), 0);
+        r.run();
+        assert_eq!(paying(&r, 1), 0);
+        // without a price nothing waits
+        let mut free = Router::new(
+            &b,
+            &sub,
+            RouterConfig {
+                area_escape: 0.0,
+                ..Default::default()
+            },
+        );
+        free.area_pads_wait();
+        assert_eq!(paying(&free, 1), 0);
     }
 }

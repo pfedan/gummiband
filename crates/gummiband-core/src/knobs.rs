@@ -328,6 +328,10 @@ knobs! {
         "Open end, combination A: this share of the moves aims at an expensive routed connection; `0` turns it off.";
     PRUNE = "GB_PRUNE", Switch, NotZero, "on",
         "Open end, combination A: a mutant that cannot beat its parent is dropped before its relaxation.";
+    REF_COST = "GB_REF_COST", Switch, Num, "0.5",
+        "Price per mm of a signal track over no copper of the plane next to its layer, and per 2 mm for a split of that plane (`0` turns it off).";
+    OWN_VIA = "GB_OWN_VIA", Switch, Num, "inf",
+        "A plane fan-out ends on a via of its own, not on the via or the fan-out track of another pin of its net (`inf`); a number lets it share a via at that factor of the via cost, `0` as before.";
     PLANE_HOLD = "GB_PLANE_HOLD", Switch, NotZero, "on",
         "Open end: a new via that reaches the plane of its net stays in it when it is moved.";
     NO_RELAX = "GB_NO_RELAX", Switch, Set, "off",
@@ -414,6 +418,8 @@ knobs! {
         "Extra cost in mm for passing right next to a pad of another net that still waits for its route.";
     SEARCH_MARGIN = "GB_SEARCH_MARGIN", Experiment, Num, "0.01",
         "Search: room a track or via asks for beyond its clearance, in mm.";
+    AREA_ESCAPE = "GB_AREA_ESCAPE", Experiment, Num, "2",
+        "`areas fill`: extra cost in mm for passing right next to a pad of a net left to the fill of its area, while the other nets are laid.";
     SHARE_KIND = "GB_SHARE_KIND", Experiment, Value, "all kinds",
         "`--patterns shares`: only the shares of this kind (`neighbours` or `decap`).";
     SKEW_WEIGHT = "GB_SKEW_WEIGHT", Experiment, Num, "0.5",

@@ -98,6 +98,43 @@ Standing decisions of the project owner, kept here so that they survive any sess
   default, because the crossings it selects by say almost nothing about the routed result.
 - A block is a group of parts with its locked copper that moves only as a whole.
 - Layer preferred directions are a portfolio dimension, not only an option.
+- An area (the zones of a net: a pour or a plane) is one model, and its fill is computed, never
+  stored. The model holds the outline and the settings of the fill; what the fill is and what
+  it joins is computed from the board and its copper each time it is asked for
+  (`gummiband_core::fill`), because every track of another net changes it. The fill in a file is
+  KiCad's answer for the copper of its last refill and is only ever compared against, never
+  taken as the state. The model is the router's own judgement; KiCad's fill and DRC have the
+  last word, and a statement of the model says how sure it is (raster step, doubtful pads).
+- A pour of the net is copper of the net: a connection that reaches a `gb:` pour ends where it
+  enters it. It does not run on to a pad under the pour. Whether the fill of the pour really
+  holds its pads is the fill model's to say: for now as a second opinion in the report of a
+  route, which changes no count (stage 1); counting such a pad as open comes with the stage in
+  which the search itself knows the fill.
+- How a net with an area on a routed layer is connected is an option, `areas`: `tracks` (the
+  default: like any net, the area is not looked at) or `fill` (the fill of the area connects
+  it: the other nets are laid first, and only what the fill then does not reach gets a piece
+  of track or a via to the area). A pour that is not in the file yet is named with `pour` and
+  taken as it will be laid. `fill` stays opt-in until it is measured against KiCad's fill
+  and DRC; with `tracks` a route is the same as before, to the byte.
+- With `areas fill` a net left to its fill is counted by the fill: a pad that the fill model
+  does not reach on the finished copper and that no copper joins is an open connection of the
+  route, in its count, its list and its exit state, like a connection the search could not
+  lay. The router's own model decides here, KiCad's fill and DRC keep the last word; the
+  report names the pads so that the two can be compared.
+- Where the fill model and KiCad's filler disagree, the model follows KiCad, and a test pins
+  KiCad's answer on the board where the difference showed (`bench/boards/areas/kicad`). What
+  the model takes from KiCad's filler without a measurement of the case is written down as an
+  assumption (`bench/README.md`), and a pad whose answer hangs on it within a raster cell is
+  doubtful, not open.
+- The goal of a connection into an area is copper of the net that hangs together with the
+  area, on whatever layer: fill at least half the minimum width inside, or a pad the area
+  holds. A via is a change of layer and never a goal by itself: it ends a connection only
+  because its landing lies in such copper, and where it does not, the search goes on from it.
+  Other nets crossing an area, and a via that lands where the area is not yet, are then a
+  matter of price, not of another meaning.
+- Copper of the file that gave way in a shove and then touches another net goes back to where
+  the file has it, and new tracks that cross that place are taken out by the last check. A
+  route is not refused because tracks lie inside a pour outline: that is legal in KiCad.
 - Teardrops come from KiCad's built-in feature.
 - Any-angle tracks with arcs stay the default. Conventional 45 degree routing is an optional
   last step (`--angles 45`, plugin and MCP alike) that never adds a clearance violation and

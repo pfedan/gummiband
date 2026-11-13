@@ -280,6 +280,15 @@ ROUTE_TABS: Tuple = (
         )),
         ("Board", (
             PLANE_LAYERS,
+            Field("areas_fill", "Leave nets with a zone to its fill (experimental)",
+                  "A net with a zone on a routed layer (a ground pour) gets no tracks: the fill "
+                  "of the zone connects it, and the result names the pads the fill does not "
+                  "reach. The other nets get the room. The run then ends on its own instead of "
+                  "improving until accepted.", "check"),
+            Field("pour", "Planned pours (nets):",
+                  "Nets that get a pour on both outer layers after the route, separated by "
+                  "commas or spaces, e.g. GND. The route takes the pour as the zone of the net; "
+                  "lay it afterwards. Not remembered.", "refs", requires="areas_fill"),
             Field("net_widths", "Net widths file:",
                   "JSON file {\"net name\": width in mm}. Nets not in the file use the width of "
                   "their class. Not remembered.", "file"),

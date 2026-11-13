@@ -70,6 +70,36 @@
     {
       "choices": [
         {
+          "help": "Such a net is laid as tracks like any net, and the area is not looked at.",
+          "value": "tracks"
+        },
+        {
+          "help": "Such a net is not laid as tracks: the fill connects it, only what the fill does not reach gets copper of its own, and the report says which pads stay open.",
+          "value": "fill"
+        }
+      ],
+      "default": "tracks",
+      "help": "How nets with an area (a zone of the file or a pour of pour) on a routed layer are connected.",
+      "kind": "choice",
+      "name": "areas"
+    },
+    {
+      "choices": [],
+      "default": "none",
+      "help": "With areas fill: nets that get a pour after the route, each NET or NET:LAYER,LAYER (the outer layers where none is given), which the route takes as an area of the net.",
+      "kind": "list",
+      "name": "pour"
+    },
+    {
+      "choices": [],
+      "default": "on with areas fill",
+      "help": "With areas fill: an island of fill that holds pads gets one via where it joins the area, set on the finished copper where the fill model finds the spot.",
+      "kind": "on_off",
+      "name": "area_stitch"
+    },
+    {
+      "choices": [
+        {
           "help": "runs 4, generations 1, geometry_generations 0, open_end_seconds 0: the quickest look at whether the board routes and where it is tight, as the benchmark suite routes; leaves many clearance violations.",
           "value": "draft"
         },
