@@ -823,7 +823,7 @@ impl<'a> Router<'a> {
     /// Via at mesh vertex v of layer li, if any. A via vertex without via (a via that was
     /// ripped up, or a split that was not used) is a phantom: tracks keep their clearance from
     /// the point, so that they never bunch up at a free vertex.
-    fn via_at(&self, li: usize, v: u32) -> Option<ViaInfo> {
+    pub(crate) fn via_at(&self, li: usize, v: u32) -> Option<ViaInfo> {
         let site = self.m(li).vert_site[v as usize];
         if site == NONE {
             return None;
@@ -911,7 +911,7 @@ impl<'a> Router<'a> {
     }
 
     /// Need of a track at vertex v (vertex demands only), for a new edge.
-    fn vertex_need(&self, li: usize, v: u32, it: &Item) -> f64 {
+    pub(crate) fn vertex_need(&self, li: usize, v: u32, it: &Item) -> f64 {
         let m = self.m(li);
         let mut need: f64 = 0.0;
         for &t in &m.vert_tris[v as usize] {

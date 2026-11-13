@@ -761,6 +761,49 @@ impl Router<'_> {
             if own.iter().any(|d| d.id == apex) {
                 continue;
             }
+            // what the vertex itself asks of the track: a via or a pad just beyond the edge,
+            // and around it the tracks that cut the corner with this one, nearer to the edge.
+            // Not where the edge is the side of a piece of copper: its two ends ask for that.
+            if m.status[n as usize] == crate::topo::NONE
+                && let Some(me) = own.iter().find(|x| x.id == q || x.id == r)
+            {
+                let it = self.item_on(li, w[0].e, sid);
+                let need = self.vertex_need(li, apex, &it);
+                if need > 0.0 && !new.iter().any(|d| d.id == apex && d.side == me.side) {
+                    let p = m.verts[apex as usize];
+                    // those tracks lie between this one and both ends of the edge
+                    let between = [q, r]
+                        .into_iter()
+                        .filter_map(|x| {
+                            let d = own.iter().find(|d| d.id == x && d.side == me.side)?;
+                            let e = [w[0].e, w[1].e]
+                                .into_iter()
+                                .find(|&e| m.edges[e as usize].contains(&x))?;
+                            let end = usize::from(m.edges[e as usize][1] == x);
+                            let [u, v] = m.edges[e as usize];
+                            let base = self.end_need_square(li, e, end, &it);
+                            let base = if base > 0.0 {
+                                base + self.cfg.margin + self.hot_extra(m.verts[u as usize], m.verts[v as usize])
+                            } else {
+                                0.0
+                            };
+                            Some((d.r - base).max(0.0))
+                        })
+                        .fold(f64::INFINITY, f64::min);
+                    new.push(Disc {
+                        c: p,
+                        r: need
+                            + self.cfg.margin
+                            + self.hot_extra(p, p)
+                            + if between.is_finite() { between } else { 0.0 },
+                        side: me.side,
+                        id: apex,
+                        first: k,
+                        last: k + 1,
+                        sure: false,
+                    });
+                }
+            }
             for &o in &self.cross[li][c as usize] {
                 if o == sid {
                     continue;
@@ -1080,6 +1123,9 @@ impl Router<'_> {
             }
         }
         let limit = 6 * discs.len() + 8;
+        // what two discs gave each other in a full passage, and the pairs that got it back once
+        let mut cuts: Vec<(usize, usize, f64, f64)> = Vec::new();
+        let mut given_back: Vec<(usize, usize)> = Vec::new();
         let mut best: Option<Vec<Elem>> = None;
         for _ in 0..limit {
             let wraps: Vec<Wrap> = on
@@ -1098,6 +1144,19 @@ impl Router<'_> {
                     if let Some(t) = trace {
                         let _ = writeln!(t, "  off {}: more than 270 degrees", discs[on[i - 1]].id);
                     }
+                    // a disc that gave way to it has its room again
+                    let gone = on[i - 1];
+                    cuts.retain(|&(x, y, rx, ry)| {
+                        if x != gone && y != gone {
+                            return true;
+                        }
+                        if !given_back.contains(&(x, y)) {
+                            given_back.push((x, y));
+                            discs[x].r = discs[x].r.max(rx);
+                            discs[y].r = discs[y].r.max(ry);
+                        }
+                        false
+                    });
                     on.remove(i - 1);
                     place.remove(i - 1);
                     continue;
@@ -1142,6 +1201,7 @@ impl Router<'_> {
                             // both give the same: the tracks of a bundle through the passage
                             // all lose it at the walls and keep their gaps to each other
                             let cut = (discs[x].r + discs[y].r - d) / 2.0 + 1e-6;
+                            cuts.push((x, y, discs[x].r, discs[y].r));
                             if discs[x].r.min(discs[y].r) > cut + POINT_DISC {
                                 discs[x].r -= cut;
                                 discs[y].r -= cut;

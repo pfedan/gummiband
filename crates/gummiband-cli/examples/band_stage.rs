@@ -426,7 +426,14 @@ fn main() -> anyhow::Result<()> {
                 },
             );
             let (rs, rc) = (tx.elapsed().as_secs_f64(), cpu_seconds() - cx);
-            let mut c = counts(&clearance(b, &gr));
+            let left = clearance(b, &gr);
+            let mut c = counts(&left);
+            c["left"] = left
+                .iter()
+                .map(|x| json!({"what": x.what, "nets": [b.nets[x.nets.0 as usize].name.clone(), x.nets.1.map_or(String::new(), |n| b.nets[n as usize].name.clone())],
+                    "at": [x.at.x, x.at.y], "missing": x.required - x.actual}))
+                .collect::<Vec<_>>()
+                .into();
             c["relax_s"] = json!(rs);
             c["relax_cpu"] = json!(rc);
             c["shape"] = shape(&gr);
