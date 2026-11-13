@@ -2204,9 +2204,15 @@ fn taut(
                 return clear_piece(a, b, pieces, idx);
             }
             let mut from = a;
-            for to in crate::realize::zone_cuts(a, b, &t.necks, t.width, crate::realize::neck_reach(t.neck_w, clr(t.net)))
-                .into_iter()
-                .chain([b])
+            for to in crate::realize::zone_cuts(
+                a,
+                b,
+                &t.necks,
+                t.width,
+                crate::realize::neck_reach(t.neck_w, clr(t.net)),
+            )
+            .into_iter()
+            .chain([b])
             {
                 if !clear_piece(from, to, pieces, idx) {
                     return false;
@@ -2752,19 +2758,63 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
         let mut elems = Vec::with_capacity(t.elems.len());
         for e in &t.elems {
             match *e {
-                Elem::Line(a, b) if ruled && !crate::realize::zone_cuts(a, b, &t.necks, t.width, crate::realize::neck_reach(t.neck_w, clr(t.net))).is_empty() => {
+                Elem::Line(a, b)
+                    if ruled
+                        && !crate::realize::zone_cuts(
+                            a,
+                            b,
+                            &t.necks,
+                            t.width,
+                            crate::realize::neck_reach(t.neck_w, clr(t.net)),
+                        )
+                        .is_empty() =>
+                {
                     let mut pts = vec![a];
-                    pts.extend(crate::realize::zone_cuts(a, b, &t.necks, t.width, crate::realize::neck_reach(t.neck_w, clr(t.net))));
+                    pts.extend(crate::realize::zone_cuts(
+                        a,
+                        b,
+                        &t.necks,
+                        t.width,
+                        crate::realize::neck_reach(t.neck_w, clr(t.net)),
+                    ));
                     pts.push(b);
                     elems.extend(pts.windows(2).map(|w| Elem::Line(w[0], w[1])));
                 }
                 e => elems.push(e),
             }
         }
-        let mut cut = Vec::with_capacity(elems.len());
+        // Under a minimum width rule every piece is judged on its own: one below the minimum
+        // must touch the courtyard. So only the part of a line inside a zone is cut small; the
+        // part from the border of the zone to the end of the neck stays one piece, which
+        // touches the zone whatever width it takes.
+        let mut parts = Vec::with_capacity(elems.len());
         for e in elems {
             match e {
-                Elem::Line(a, b) if a.dist(b) > 0.5 && t.necks.iter().any(|r| r.touches_seg(a, b)) => {
+                Elem::Line(a, b) if ruled => {
+                    let len = a.dist(b);
+                    let mut ts: Vec<f64> = t
+                        .necks
+                        .iter()
+                        .filter_map(|r| r.clip_seg(a, b))
+                        .flat_map(|(t0, t1)| [t0, t1])
+                        .filter(|&x| x * len > 1e-3 && (1.0 - x) * len > 1e-3)
+                        .collect();
+                    ts.sort_by(f64::total_cmp);
+                    ts.dedup_by(|x, y| (*x - *y).abs() * len < 1e-6);
+                    let mut from = a;
+                    for to in ts.into_iter().map(|x| a + (b - a) * x).chain([b]) {
+                        let small = t.necks.iter().any(|r| r.contains((from + to) * 0.5));
+                        parts.push((Elem::Line(from, to), small));
+                        from = to;
+                    }
+                }
+                e => parts.push((e, true)),
+            }
+        }
+        let mut cut = Vec::with_capacity(parts.len());
+        for (e, small) in parts {
+            match e {
+                Elem::Line(a, b) if small && a.dist(b) > 0.5 && t.necks.iter().any(|r| r.touches_seg(a, b)) => {
                     let n = (a.dist(b) / 0.3).ceil() as usize;
                     let at = |i: usize| a + (b - a) * (i as f64 / n as f64);
                     cut.extend((0..n).map(|i| Elem::Line(at(i), at(i + 1))));
@@ -3422,9 +3472,10 @@ mod tests {
         assert!(g.vias.iter().all(|v| v.at.x >= 5.0 - 1e-9), "{:?}", g.vias);
     }
 
-    /// Under a minimum width rule a line that leaves its neck zone is cut at the zone: in the zone
-    /// it takes what fits there, outside it keeps the width of the track, also where that is too
-    /// wide (the check reports it: a neck outside the courtyard is no way out).
+    /// Under a minimum width rule a line that leaves its neck zone is cut at the end of its neck,
+    /// a little beyond the zone: up to there it takes what fits, outside it keeps the width of
+    /// the track, also where that is too wide (the check reports it: a neck away from the
+    /// courtyard is no way out).
     #[test]
     fn a_ruled_neck_ends_at_its_zone() {
         use crate::board::{Layer, LayerSet, Net, NetClass, Obstacle};
@@ -3508,14 +3559,18 @@ mod tests {
         };
         // a pad next to the line outside the zone: the line stays wide there and the check
         // reports the clearance; the narrow piece ends where the round end of the wide one
-        // stays out of the zone
+        // stays out of the neck, which reaches a little beyond the zone
         for y in [5.555, 5.5] {
             b.obstacles = vec![pad(8., y)];
             let geo = widen(&b);
             let w = widths(&geo);
             for &(a, c, wd) in &w {
                 assert!(zone.touches_seg(a, c) || wd == 0.75, "{w:?}");
-                assert!(!zone.touches_seg(a, c) || a.x.max(c.x) < 6.0 + 0.375 + 2e-3, "{w:?}");
+                assert!(
+                    !zone.touches_seg(a, c)
+                        || a.x.max(c.x) < 6.0 + crate::realize::neck_reach(0.25, 0.2) + 0.375 + 2e-3,
+                    "{w:?}"
+                );
             }
             assert!(!crate::check::check(&b, &geo).is_empty());
         }
@@ -3527,6 +3582,17 @@ mod tests {
         assert!(w.iter().any(|x| x.2 < 0.75 && x.2 >= 0.25), "{w:?}");
         for &(a, c, wd) in &w {
             assert!(zone.touches_seg(a, c) || wd == 0.75, "{w:?}");
+            // every piece below the minimum touches the courtyard with its copper
+            assert!(wd >= 0.69 || zone.grow(wd / 2.0 - 1e-3).touches_seg(a, c), "{w:?}");
+        }
+        // a pad next to the neck beyond the zone: the piece from the border of the zone to the
+        // end of the neck is one piece, so it may be narrow
+        b.obstacles = vec![pad(6.0, 5.5)];
+        let geo = widen(&b);
+        let w = widths(&geo);
+        assert!(w.iter().any(|x| x.2 < 0.69 && x.0.x.max(x.1.x) > 6.3), "{w:?}");
+        for &(a, c, wd) in &w {
+            assert!(wd >= 0.69 || zone.grow(wd / 2.0 - 1e-3).touches_seg(a, c), "{w:?}");
         }
     }
 

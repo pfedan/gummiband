@@ -1165,7 +1165,11 @@ impl<'a> Router<'a> {
         // touches the zone is narrow for its whole length, so the edge is narrow where it
         // touches one.
         if self.board.class_of(net).min_width.is_none() {
-            return if necks.iter().any(|r| r.touches_seg(a, b)) { neck_w } else { full };
+            return if necks.iter().any(|r| r.touches_seg(a, b)) {
+                neck_w
+            } else {
+                full
+            };
         }
         // Under a minimum width rule the realized track is narrow from its zone to the end of
         // its neck, `neck_reach` beyond the zone (`realize::zone_cuts`). So the track is
