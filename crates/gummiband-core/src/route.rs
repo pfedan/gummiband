@@ -1180,6 +1180,12 @@ impl<'a> Router<'a> {
             Some((t0, t1)) => lo > hi || (t1 * len >= lo - 1e-9 && t0 * len <= hi + 1e-9),
             None => false,
         });
+        // An edge at a pad of the net itself is crossed by the piece that comes from the pad:
+        // that piece touches the zone the pad lies in and is narrow as far as the zone
+        // reaches for a track of full width, half its width beyond the zone.
+        let hit = hit
+            || ((0..2).any(|end| m.demands(e, end).iter().any(|d| self.obs_net(d.obs) == Some(net)))
+                && necks.iter().any(|r| r.grow(full / 2.0).touches_seg(a, b)));
         if hit { neck_w } else { full }
     }
 
