@@ -1080,6 +1080,9 @@ impl Router<'_> {
             }
         }
         let limit = 6 * discs.len() + 8;
+        // what two discs gave each other in a full passage, and the pairs that got it back once
+        let mut cuts: Vec<(usize, usize, f64, f64)> = Vec::new();
+        let mut given_back: Vec<(usize, usize)> = Vec::new();
         let mut best: Option<Vec<Elem>> = None;
         for _ in 0..limit {
             let wraps: Vec<Wrap> = on
@@ -1098,6 +1101,19 @@ impl Router<'_> {
                     if let Some(t) = trace {
                         let _ = writeln!(t, "  off {}: more than 270 degrees", discs[on[i - 1]].id);
                     }
+                    // a disc that gave way to it has its room again
+                    let gone = on[i - 1];
+                    cuts.retain(|&(x, y, rx, ry)| {
+                        if x != gone && y != gone {
+                            return true;
+                        }
+                        if !given_back.contains(&(x, y)) {
+                            given_back.push((x, y));
+                            discs[x].r = discs[x].r.max(rx);
+                            discs[y].r = discs[y].r.max(ry);
+                        }
+                        false
+                    });
                     on.remove(i - 1);
                     place.remove(i - 1);
                     continue;
@@ -1142,6 +1158,7 @@ impl Router<'_> {
                             // both give the same: the tracks of a bundle through the passage
                             // all lose it at the walls and keep their gaps to each other
                             let cut = (discs[x].r + discs[y].r - d) / 2.0 + 1e-6;
+                            cuts.push((x, y, discs[x].r, discs[y].r));
                             if discs[x].r.min(discs[y].r) > cut + POINT_DISC {
                                 discs[x].r -= cut;
                                 discs[y].r -= cut;
@@ -1612,18 +1629,18 @@ impl Router<'_> {
                 }
             }
         }
-        let (tracks, segs): (Vec<Track>, Vec<u32>) = built
-            .into_iter()
-            .zip(&ids)
-            .flat_map(|(t, &sid)| t.into_iter().map(move |t| (t, sid)))
-            .unzip();
         let mut vias: Vec<(Via, u32)> = self
             .vias
             .iter()
             .filter_map(|(&v, info)| Some((self.placed_via(v, info)?, v)))
             .collect();
         vias.sort_by(|a, b| a.0.at.x.total_cmp(&b.0.at.x).then(a.0.at.y.total_cmp(&b.0.at.y)));
-        let (vias, sites) = vias.into_iter().unzip();
+        let (vias, sites): (Vec<Via>, Vec<u32>) = vias.into_iter().unzip();
+        let (tracks, segs): (Vec<Track>, Vec<u32>) = built
+            .into_iter()
+            .zip(&ids)
+            .flat_map(|(t, &sid)| t.into_iter().map(move |t| (t, sid)))
+            .unzip();
         (Geometry { tracks, vias }, segs, sites)
     }
 
