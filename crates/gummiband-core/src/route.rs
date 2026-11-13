@@ -577,7 +577,13 @@ pub struct Item {
     /// Side of the apex of each adjacent triangle (edge_tris order) the track passes:
     /// 0 = towards edges[e][0], 1 = towards edges[e][1], 2 = unknown or not relevant.
     pub sides: [u8; 2],
+    /// Where on the edge the track has to cross it, from edges[e][0]: a track at its neck
+    /// width under a minimum width rule only inside its neck ([`Router::neck_span`]).
+    pub span: (f64, f64),
 }
+
+/// No limit for [`Item::span`].
+pub const ANYWHERE: (f64, f64) = (f64::NEG_INFINITY, f64::INFINITY);
 
 /// A crossing already on an edge with all that packing needs from it.
 #[derive(Debug, Clone, Copy)]
@@ -606,6 +612,8 @@ struct EdgeView {
     /// Per adjacent triangle the bounds its apex sets on the searched track when it passes on
     /// side 0 (upper bound) or side 1 (lower bound).
     apex: [(f64, f64); 2],
+    /// Where the searched track has to cross ([`Item::span`]).
+    span: (f64, f64),
 }
 
 /// An extra obstacle at a triangle apex for capacity checks (a via about to be placed).
@@ -1010,6 +1018,7 @@ impl<'a> Router<'a> {
             w: s.width,
             c: s.clearance,
             sides: [2, 2],
+            span: ANYWHERE,
         }
     }
 
@@ -1157,12 +1166,22 @@ impl<'a> Router<'a> {
         x
     }
 
-    /// Width of a track of `full` width with neck zones at edge e, for a track of `net` that
-    /// keeps `c`.
     #[allow(clippy::too_many_arguments)]
-    fn width_at_edge(&self, li: usize, e: u32, full: f64, necks: &[Rect], neck_w: f64, net: NetId, c: f64) -> f64 {
+    /// Where on edge e a track of the net crosses at its neck width, from edges[e][0]; None
+    /// where it has its full width on the whole edge. [`ANYWHERE`] without a minimum width
+    /// rule, and where not even the neck fits.
+    pub(crate) fn neck_span(
+        &self,
+        li: usize,
+        e: u32,
+        full: f64,
+        necks: &[Rect],
+        neck_w: f64,
+        net: NetId,
+        c: f64,
+    ) -> Option<(f64, f64)> {
         if necks.is_empty() {
-            return full;
+            return None;
         }
         let m = self.m(li);
         let [u, v] = m.edges[e as usize];
@@ -1171,38 +1190,73 @@ impl<'a> Router<'a> {
         // touches the zone is narrow for its whole length, so the edge is narrow where it
         // touches one.
         if self.board.class_of(net).min_width.is_none() {
-            return if necks.iter().any(|r| r.touches_seg(a, b)) {
-                neck_w
-            } else {
-                full
-            };
+            return necks.iter().any(|r| r.touches_seg(a, b)).then_some(ANYWHERE);
         }
         // Under a minimum width rule the realized track is narrow from its zone to the end of
         // its neck, `neck_reach` beyond the zone (`realize::zone_cuts`). So the track is
         // narrow on an edge where it can cross the edge inside the neck: where the part of the
         // edge in the neck reaches into the stretch the narrow track may lie on, between what
         // the two ends ask of it. An edge that only touches the neck at one end is crossed
-        // outside it, at full width.
+        // outside it, at full width. An edge at a pad of the net itself is crossed by the
+        // piece that comes from the pad: that piece is narrow up to its cut, half the full
+        // width beyond the neck.
         let len = a.dist(b);
         let it = Item {
             net,
             w: neck_w,
             c,
             sides: [2, 2],
+            span: ANYWHERE,
         };
         let lo = self.end_need_square(li, e, 0, &it);
         let hi = len - self.end_need_square(li, e, 1, &it);
-        let reach = crate::realize::neck_reach(neck_w, c);
-        let hit = necks.iter().any(|r| match r.grow(reach).clip_seg(a, b) {
-            Some((t0, t1)) => lo > hi || (t1 * len >= lo - 1e-9 && t0 * len <= hi + 1e-9),
-            None => false,
-        });
-        // An edge at a pad of the net itself is crossed by the piece that comes from the pad:
-        // that piece is narrow up to its cut, half the full width beyond the neck.
-        let hit = hit
-            || ((0..2).any(|end| m.demands(e, end).iter().any(|d| self.obs_net(d.obs) == Some(net)))
-                && necks.iter().any(|r| r.grow(reach + full / 2.0).touches_seg(a, b)));
-        if hit { neck_w } else { full }
+        let own = (0..2).any(|end| m.demands(e, end).iter().any(|d| self.obs_net(d.obs) == Some(net)));
+        let reach = crate::realize::neck_reach(neck_w, c) + if own { full / 2.0 } else { 0.0 };
+        let mut span: Option<(f64, f64)> = None;
+        for r in necks {
+            let Some((t0, t1)) = r.grow(reach).clip_seg(a, b) else {
+                continue;
+            };
+            if lo > hi {
+                return Some(ANYWHERE);
+            }
+            if own || (t1 * len >= lo - 1e-9 && t0 * len <= hi + 1e-9) {
+                let s = span.get_or_insert((t0 * len, t1 * len));
+                *s = (s.0.min(t0 * len), s.1.max(t1 * len));
+            }
+        }
+        span
+    }
+
+    /// The width of a track on edge e in slot j of its crossings, and where it has to cross:
+    /// its neck width if it can cross inside its neck there, with the crossings that lie
+    /// between it and the neck, else its full width.
+    fn width_in_slot(
+        &self,
+        li: usize,
+        e: u32,
+        j: usize,
+        full: &Item,
+        necks: &[Rect],
+        neck_w: f64,
+    ) -> (f64, (f64, f64)) {
+        let Some(span) = self.neck_span(li, e, full.w, necks, neck_w, full.net, full.c) else {
+            return (full.w, ANYWHERE);
+        };
+        if span == ANYWHERE {
+            return (neck_w, ANYWHERE);
+        }
+        let narrow = Item {
+            w: neck_w,
+            span,
+            ..*full
+        };
+        let view = self.edge_view(li, e, &narrow);
+        let j = j.min(view.placed.len());
+        match Self::slot_interval(&view, narrow.sides, j, &mut Vec::new()) {
+            Some(_) => (neck_w, span),
+            None => (full.w, ANYWHERE),
+        }
     }
 
     /// Item of segment `seg` crossing edge e, with its sides relative to the two apexes.
@@ -1212,6 +1266,12 @@ impl<'a> Router<'a> {
             let s = self.segs[seg as usize].as_ref().unwrap();
             if let Some(k) = s.crossings.iter().position(|c| c.e == e) {
                 it.w = s.widths.get(k).copied().unwrap_or(s.width);
+                // at its neck width under a minimum width rule the track stays in its neck
+                if it.w < s.width - 1e-9 && !s.necks.is_empty() {
+                    it.span = self
+                        .neck_span(li, e, s.width, &s.necks, s.neck_w, s.net, s.clearance)
+                        .unwrap_or(ANYWHERE);
+                }
             }
         }
         for (k, &t) in self.m(li).edge_tris[e as usize].iter().enumerate() {
@@ -1318,7 +1378,7 @@ impl<'a> Router<'a> {
     /// triangles next to e (an obstacle or via at the apex blocks the middle of the edge).
     fn apex_bounds(&self, li: usize, e: u32, items: &[Item], extra: Option<ExtraApex>) -> Vec<(f64, f64)> {
         let m = self.m(li);
-        let mut b = vec![(f64::NEG_INFINITY, f64::INFINITY); items.len()];
+        let mut b: Vec<(f64, f64)> = items.iter().map(|it| it.span).collect();
         let [u, v] = m.edges[e as usize];
         let pu = m.verts[u as usize];
         let pv = m.verts[v as usize];
@@ -1468,7 +1528,7 @@ impl<'a> Router<'a> {
         let items = self.items_on(li, e);
         let hot = self.hot_extra(pu, pv);
         let margin = self.cfg.margin;
-        let mut bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); items.len()];
+        let mut bounds: Vec<(f64, f64)> = items.iter().map(|it| it.span).collect();
         let mut apex = [(f64::INFINITY, f64::NEG_INFINITY); 2];
         let len = pu.dist(pv);
         if len > 0.0 {
@@ -1515,6 +1575,7 @@ impl<'a> Router<'a> {
             need_u: self.end_need(li, e, 0, new) + margin + hot,
             need_v: self.end_need(li, e, 1, new) + margin + hot,
             apex,
+            span: new.span,
         }
     }
 
@@ -1524,7 +1585,7 @@ impl<'a> Router<'a> {
         let placed = &view.placed[..];
         let n = placed.len();
         let extra = view.hot;
-        let mut bounds = (f64::NEG_INFINITY, f64::INFINITY);
+        let mut bounds = view.span;
         for k in 0..2 {
             match sides[k] {
                 0 => bounds.1 = bounds.1.min(view.apex[k].0),
@@ -1599,7 +1660,7 @@ impl<'a> Router<'a> {
         let placed = &view.placed[..];
         let n = placed.len();
         let extra = view.hot;
-        let mut bounds = (f64::NEG_INFINITY, f64::INFINITY);
+        let mut bounds = view.span;
         for k in 0..2 {
             match sides[k] {
                 0 => bounds.1 = bounds.1.min(view.apex[k].0),
@@ -2444,6 +2505,7 @@ impl<'a> Router<'a> {
             w: cls.track_width,
             c: cls.clearance.max(self.board.rules.min_clearance),
             sides: [2, 2],
+            span: ANYWHERE,
         };
         let (necks, neck_w) = self.necks(ci);
         let src = &self.board.pins[conn.from];
@@ -2623,6 +2685,8 @@ impl<'a> Router<'a> {
         }
 
         let mut views: FastMap<(u8, u32), EdgeView> = FastMap::default();
+        // the same edges for the track at its full width, where its neck is only a part of the edge
+        let mut views_wide: FastMap<(u8, u32), EdgeView> = FastMap::default();
         let mut scratch: Vec<f64> = Vec::new();
         let prices = self.prices.as_ref();
         let soft = prices.filter(|p| p.soft);
@@ -2702,7 +2766,15 @@ impl<'a> Router<'a> {
                 block = top.block_up;
             }
             let mut item = item;
-            item.w = self.width_at_edge(lu, e, item.w, &necks, neck_w, item.net, item.c);
+            // At its neck width the track has to cross inside its neck. Where that is only a
+            // part of the edge, a slot that does not let it get there takes the full width.
+            let full_w = item.w;
+            let mut part = false;
+            if let Some(span) = self.neck_span(lu, e, full_w, &necks, neck_w, item.net, item.c) {
+                item.w = neck_w;
+                item.span = span;
+                part = span != ANYWHERE;
+            }
             let mut price = prices.map_or(0.0, |p| p.history[lu].get(e as usize).copied().unwrap_or(0.0));
             if free && let Some((cp, cs)) = chord_from {
                 // the chord in t fixes the side of t's apex on the exit edge ...
@@ -2713,9 +2785,17 @@ impl<'a> Router<'a> {
                     let e_in = m.tri_edges[t as usize][ke as usize];
                     let mut it_in = item;
                     it_in.sides = [2, 2];
-                    it_in.w = self.width_at_edge(lu, e_in, cls.track_width, &necks, neck_w, item.net, item.c);
+                    it_in.w = cls.track_width;
+                    it_in.span = ANYWHERE;
                     let si = m.edge_tris[e_in as usize].iter().position(|&x| x == t).unwrap();
                     it_in.sides[si] = self.side_of_pos(lu, t, e_in, CPos::Edge(k));
+                    let wide_in = it_in;
+                    let mut part_in = false;
+                    if let Some(span) = self.neck_span(lu, e_in, cls.track_width, &necks, neck_w, item.net, item.c) {
+                        it_in.w = neck_w;
+                        it_in.span = span;
+                        part_in = span != ANYWHERE;
+                    }
                     // Only the apex of t is taken here. The side of the apex before the edge is
                     // known as well, and the two together leave the track less than each alone,
                     // which is what `validate` counts as an edge over capacity. Testing both was
@@ -2725,7 +2805,15 @@ impl<'a> Router<'a> {
                     let view = views
                         .entry((lu as u8, e_in))
                         .or_insert_with(|| self.edge_view(lu, e_in, &it_in));
-                    if Self::slot_interval(view, it_in.sides, js, &mut scratch).is_none() {
+                    let mut view = &*view;
+                    let mut fits = Self::slot_interval(view, it_in.sides, js, &mut scratch).is_some();
+                    if !fits && part_in {
+                        view = views_wide
+                            .entry((lu as u8, e_in))
+                            .or_insert_with(|| self.edge_view(lu, e_in, &wide_in));
+                        fits = Self::slot_interval(view, it_in.sides, js, &mut scratch).is_some();
+                    }
+                    if !fits {
                         let Some(p) = soft else { return };
                         price += p.crossing + p.overflow * Self::slot_overflow(view, it_in.sides, js, &mut scratch).0;
                     }
@@ -2737,9 +2825,22 @@ impl<'a> Router<'a> {
             let dir = (pv - pu) * (1.0 / len);
             let n = self.cross[lu][e as usize].len();
             let escape = self.escape_penalty(lu, e, net);
-            let view = views
+            let view = &*views
                 .entry((lu as u8, e))
                 .or_insert_with(|| self.edge_view(lu, e, &item));
+            let wide = Item {
+                w: full_w,
+                span: ANYWHERE,
+                ..item
+            };
+            let view_wide = match part {
+                true => Some(
+                    &*views_wide
+                        .entry((lu as u8, e))
+                        .or_insert_with(|| self.edge_view(lu, e, &wide)),
+                ),
+                false => None,
+            };
             // the chords in t stay the same from slot to slot
             if free && chord_from.is_some() {
                 self.chord_coords(t, lu, net, &mut coords);
@@ -2807,7 +2908,13 @@ impl<'a> Router<'a> {
                         }
                     }
                 }
-                let (lo, hi) = match (Self::slot_interval(view, item.sides, j, &mut scratch), soft) {
+                let (mut view, mut item) = (view, item);
+                let mut fit = Self::slot_interval(view, item.sides, j, &mut scratch);
+                if let (None, Some(vw)) = (fit, view_wide) {
+                    (view, item) = (vw, wide);
+                    fit = Self::slot_interval(view, item.sides, j, &mut scratch);
+                }
+                let (lo, hi) = match (fit, soft) {
                     (Some(i), _) => i,
                     (None, Some(s)) => {
                         if s.solid && self.pack(lu, e, &[item], None).is_none() {
@@ -3611,7 +3718,14 @@ impl<'a> Router<'a> {
             crossings.push((e, from, slot));
         }
         for (e, from, slot) in crossings {
-            let w = self.width_at_edge(li, e, s.width, &s.necks, s.neck_w, s.net, s.clearance);
+            let full = Item {
+                net: s.net,
+                w: s.width,
+                c: s.clearance,
+                sides: [2, 2],
+                span: ANYWHERE,
+            };
+            let (w, _) = self.width_in_slot(li, e, slot as usize, &full, &s.necks, s.neck_w);
             s.widths.push(w);
             let list = &mut self.cross[li][e as usize];
             let j = (slot as usize).min(list.len());
@@ -5464,6 +5578,7 @@ pub(crate) mod tests {
             need_u: 0.1,
             need_v: 0.1,
             apex: [(f64::INFINITY, f64::NEG_INFINITY); 2],
+            span: ANYWHERE,
         };
         let mut lo = Vec::new();
         // three tracks need 0.1 + 0.4 + 0.4 + 0.1 mm
@@ -5477,6 +5592,47 @@ pub(crate) mod tests {
         let wide = view(1.0);
         assert!(Router::slot_interval(&wide, [2, 2], 1, &mut lo).is_some());
         assert!(Router::slot_overflow(&wide, [2, 2], 1, &mut lo).0.abs() < 1e-9);
+    }
+
+    /// A track at its neck width has to cross an edge inside its neck. A crossing that lies
+    /// between it and the neck keeps it out: that slot has no room for the narrow track, and
+    /// the search falls back on the full width there.
+    #[test]
+    fn a_crossing_between_a_track_and_its_neck_takes_the_neck_away() {
+        let p = Placed {
+            need_u: 0.3,
+            need_v: 0.3,
+            bounds: ANYWHERE,
+            gap_next: 0.5,
+            gap_to_new: 0.5,
+            gap_from_new: 0.5,
+        };
+        // an edge of 2 mm, the neck of the searched track on its last 0.5 mm
+        let view = |span| EdgeView {
+            placed: vec![p],
+            len: 2.0,
+            hot: 0.0,
+            need_u: 0.34,
+            need_v: 0.34,
+            apex: [(f64::INFINITY, f64::NEG_INFINITY); 2],
+            span,
+        };
+        let mut lo = Vec::new();
+        let narrow = view((1.5, 2.0));
+        // behind the other crossing, next to the neck: in the neck
+        let (a, b) = Router::slot_interval(&narrow, [2, 2], 1, &mut lo).unwrap();
+        assert!(a >= 1.5 - 1e-9 && b <= 1.66 + 1e-9, "{a} {b}");
+        // before it: the other crossing would have to lie at 2.0 or beyond
+        assert!(Router::slot_interval(&narrow, [2, 2], 0, &mut lo).is_none());
+        // anywhere on the edge both slots have room
+        let free = view(ANYWHERE);
+        assert!(Router::slot_interval(&free, [2, 2], 0, &mut lo).is_some());
+        assert!(Router::slot_interval(&free, [2, 2], 1, &mut lo).is_some());
+        // and a placed track bound to its neck keeps a new one out of the slot behind it
+        let mut bound = view(ANYWHERE);
+        bound.placed[0].bounds = (1.5, 2.0);
+        assert!(Router::slot_interval(&bound, [2, 2], 0, &mut lo).is_some());
+        assert!(Router::slot_interval(&bound, [2, 2], 1, &mut lo).is_none());
     }
 
     /// Under a minimum width rule a fine pitch pin between two wide ones joins last: the two
@@ -5809,6 +5965,7 @@ pub(crate) mod tests {
             w,
             c,
             sides: [2, 2],
+            span: ANYWHERE,
         };
         // the classes alone: the edge of the via and the clearance
         let plain = Router::via_need(&b, &via, &it);
