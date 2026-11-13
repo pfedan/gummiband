@@ -1167,6 +1167,12 @@ impl<'a> Router<'a> {
         // cross the edge inside a zone: where the part of the edge in the zone reaches into
         // the stretch the narrow track may lie on, between what the two ends ask of it. An
         // edge that only touches a zone at one end is crossed outside it, at full width.
+        // Without a minimum width rule nothing ends a neck at its zone: every piece that
+        // touches the zone is narrow for its whole length, so the edge is narrow where it
+        // touches one.
+        if self.board.class_of(net).min_width.is_none() {
+            return if necks.iter().any(|r| r.touches_seg(a, b)) { neck_w } else { full };
+        }
         let len = a.dist(b);
         let it = Item {
             net,
