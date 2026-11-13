@@ -87,7 +87,7 @@ pub fn move_part_following(kb: &KicadBoard, reference: &str, x: f64, y: f64) -> 
                     net: t.net,
                 },
                 Elem::Arc(a, mid, b) => Item::Arc {
-                    width: t.piece_width(a, b),
+                    width: t.arc_width(a, mid, b),
                     a,
                     mid,
                     b,

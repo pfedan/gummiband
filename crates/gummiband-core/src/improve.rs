@@ -2147,18 +2147,18 @@ pub(crate) fn taper_spots(board: &Board, geo: &Geometry) -> Option<Geometry> {
     })
 }
 
-/// The pieces of element `e` of `t` with their widths, and the width of the element: the
-/// narrowest of its pieces and of its chord, which is the one the file gets.
+/// The pieces of element `e` of `t` with their widths, and the width of the element, which is
+/// the one the file gets: of an arc the narrowest of its pieces.
 fn elem_widths(t: &Track, e: &crate::realize::Elem) -> (Vec<(Point, Point, f64)>, f64) {
     let pts = crate::realize::flatten(std::slice::from_ref(e));
     let chords: Vec<(Point, Point, f64)> = pts
         .windows(2)
         .map(|c| (c[0], c[1], t.piece_width(c[0], c[1])))
         .collect();
-    let (a, b) = match *e {
-        crate::realize::Elem::Line(a, b) | crate::realize::Elem::Arc(a, _, b) => (a, b),
+    let width = match *e {
+        crate::realize::Elem::Line(a, b) => t.piece_width(a, b),
+        crate::realize::Elem::Arc(a, m, b) => t.arc_width(a, m, b),
     };
-    let width = chords.iter().map(|c| c.2).fold(t.piece_width(a, b), f64::min);
     (chords, width)
 }
 
