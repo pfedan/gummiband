@@ -284,7 +284,7 @@ impl Router<'_> {
             return r.clone();
         }
         let mut it = w.item;
-        it.w = self.width_at_edge(l, e, w.item.w, w.necks, w.neck_w);
+        it.w = self.width_at_edge(l, e, w.item.w, w.necks, w.neck_w, w.item.net, w.item.c);
         let view = self.edge_view(l, e, &it);
         let r: Vec<bool> = (0..=self.cross[l][e as usize].len())
             .map(|j| Self::slot_interval(&view, [2, 2], j, &mut w.scratch).is_some())
