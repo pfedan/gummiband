@@ -1886,6 +1886,17 @@ impl<'a> Router<'a> {
         let p = s.p;
         for n in &s.nbrs {
             let o = &self.board.obstacles[n.obs as usize];
+            if let ObstacleKind::Keepout { .. } = o.kind {
+                // A keepout for tracks that lets vias in: the track that ends in the centre of
+                // the via still reaches half its width towards it. Nearer than that the
+                // relaxation would push the via away afterwards, into room the search has
+                // given to others.
+                let need = self.board.class_of(net).track_width / 2.0 + crate::board::KEEPOUT_GAP + self.cfg.margin;
+                if (n.dist as f64) < need {
+                    return false;
+                }
+                continue;
+            }
             let need = if o.net == Some(net) && o.kind != ObstacleKind::Hole {
                 match o.hole {
                     Some(_) => drill / 2.0 + self.board.rules.hole_to_hole,
@@ -5534,6 +5545,66 @@ pub(crate) mod tests {
             locked: true,
         });
         b
+    }
+
+    /// A keepout for tracks that lets vias in: no via right at its edge, where the track that
+    /// ends in the via would reach into the keepout and the relaxation would push the via away
+    /// afterwards. Farther out, and inside the keepout, the sites stay.
+    #[test]
+    fn no_via_at_the_edge_of_a_keepout_for_tracks() {
+        let plain = crate::topo::tests::two_pad_board();
+        let sub0 = Substrate::build(&plain, &SubstrateConfig::default());
+        let r0 = Router::new(&plain, &sub0, RouterConfig::default());
+        let clear0: Vec<Point> = (0..sub0.shared.sites.len() as u32)
+            .filter(|&i| r0.site_clear(i, 0))
+            .map(|i| sub0.shared.sites[i as usize].p)
+            .collect();
+        // a site in the middle of the board, and the keepout 0.05 mm to its right
+        let at = *clear0
+            .iter()
+            .min_by(|a, b| a.dist(pt(5.0, 5.0)).total_cmp(&b.dist(pt(5.0, 5.0))))
+            .unwrap();
+        let edge = at.x + 0.05;
+        let mut b = plain.clone();
+        b.obstacles.push(crate::board::Obstacle {
+            shape: Shape::Polygon(crate::geom::Polygon::new(vec![
+                pt(edge, -1.),
+                pt(edge + 3.0, -1.),
+                pt(edge + 3.0, 11.),
+                pt(edge, 11.),
+            ])),
+            layers: crate::board::LayerSet::single(1),
+            net: None,
+            kind: ObstacleKind::Keepout {
+                vias: false,
+                tracks: true,
+                mask: false,
+            },
+            hole: None,
+            clearance: 0.0,
+            pin: None,
+            locked: true,
+        });
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let r = Router::new(&b, &sub, RouterConfig::default());
+        let clear = |p: Point| {
+            let i = sub.shared.sites.iter().position(|s| s.p.dist(p) < 1e-9);
+            i.is_some_and(|i| r.site_clear(i as u32, 0))
+        };
+        let band = b.class_of(0).track_width / 2.0 + crate::board::KEEPOUT_GAP;
+        assert!(0.05 < band);
+        assert!(!clear(at), "a via {at:?} at 0.05 mm from the keepout");
+        let (mut out, mut inside) = (0, 0);
+        for &p in &clear0 {
+            if p.x < edge - band - 0.02 {
+                assert!(clear(p), "the site {p:?} outside the keepout is lost");
+                out += 1;
+            } else if p.x > edge + 0.01 && p.x < edge + 2.99 {
+                assert!(clear(p), "the site {p:?} inside the keepout is lost");
+                inside += 1;
+            }
+        }
+        assert!(out > 0 && inside > 0, "{out} sites outside, {inside} inside");
     }
 
     fn route_all(b: &Board) -> crate::realize::Geometry {

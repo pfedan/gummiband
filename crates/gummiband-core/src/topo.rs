@@ -920,9 +920,23 @@ fn build_sites(board: &Board, shared: &Shared, pitch: f64) -> Vec<Site> {
                 let o = &board.obstacles[id as usize];
                 let d = shared.obs_polys[id as usize].dist_to_point(p);
                 // (a mask opening is seen by net, like copper)
-                if let ObstacleKind::Keepout { vias, mask: false, .. } = o.kind {
+                if let ObstacleKind::Keepout {
+                    vias,
+                    tracks,
+                    mask: false,
+                } = o.kind
+                {
                     if vias && d == 0.0 {
                         return None;
+                    }
+                    // A keepout for tracks next to the site: a track that ends in a via here
+                    // reaches half its width into it (`Router::site_clear`). Inside the
+                    // keepout no track of its layers gets to the site at all.
+                    if tracks && d > 0.0 && d < 2.5 && o.layers.intersects(routing) {
+                        nbrs.push(SiteNeighbor {
+                            obs: id,
+                            dist: d as f32,
+                        });
                     }
                     continue;
                 }
