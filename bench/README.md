@@ -94,6 +94,246 @@ QUICK=1 bench/hashes.sh --update    # rewrites hashes.quick.txt
 
 Never update the reference to make a refactoring pass: there a changed hash is a bug. A new board
 from `gen_boards.py` needs `--update` too, since the full list covers every board in `boards/`.
+The boards for areas in `boards/areas/` are in neither list, see below.
+
+## Areas: pours and planes
+
+`gen_boards.py` also writes five small boards into `boards/areas/`, each with one situation of a
+pour or a plane. They are fixtures for the fill model behind `gummiband areas` (what the copper
+fill of a net with a zone reaches), not routing problems: each routes in under a second.
+
+| Board | Layers | What it holds | What the fill model says |
+| --- | --- | --- | --- |
+| `area_strips` | 2 | a GND pour on both layers (minimum width 0.2 mm, clearance 0.2 mm); six pens of locked track around one GND pad each, open only through a channel 4 mm long that leaves a strip of fill 0.10, 0.15, 0.20, 0.25, 0.30 or 0.40 mm wide | the pads behind 0.10 and 0.15 mm sit on islands (one via site each), the others are reached, as in KiCad; the pad behind 0.20 mm is doubtful |
+| `area_island` | 2 | a GND pour on both layers; locked tracks from edge to edge cut the front into a region and a band with one GND pad each, strips of fill 0.21 mm wide between them that hold nothing, and the rest with a through hole pin; one GND pad stands in a pen of track that cuts its four spokes | the region and the band are islands with a via site each; the pad in the pen has no spoke; the strips are left out. Routed with `--areas fill --keep-locked`: two vias, one piece of track, all six pads reached (`area_route.rs`) |
+| `area_halves` | 2 | GND parts at the left, GNDR parts at the right, three signals across, no zone; `area_halves.nets.json` leaves the two nets out of a route | a pour of both nets gives each a zone per layer around its own pads; no spot lies in two zones; all 6 pads of each are reached |
+| `area_far` | 2 | VBUS with an area on B.Cu over the right third of the board, two through hole pins in it, six pins outside it | 2 of 8 pads reached; the farthest pad is 28.0 mm from a spot where a via lands in the area |
+| `area_split` | 4 (In1 GND, In2 split) | In2.Cu holds +3V3 at the left and +5V at the right, 0.6 mm between the outlines; each net has one SMD pin over the other half and one through hole pin in it | each half reaches its two through hole pins; the pin in the other half lies outside the outline |
+
+`cargo test -p gummiband-app --test area_boards` holds the model to the last column. The boards
+are **not in the hash lists**: `hashes.sh` lists the boards of `boards/` only. They are quick
+and their routed files are the same from run to run, but the hash of a routed file does not see
+what they are for, the fill, and a board in the lists costs a reference line that every change
+of the router has to carry.
+
+`boards/areas/kicad/` holds four routed boards of the suite with a GND pour on both layers,
+as KiCad 10 got them from the loop below (`<board>.s<seed>`). They are kept because the model
+and KiCad disagreed on them; the tests in `area_boards.rs` pin KiCad's answer on each. They are
+not written by `gen_boards.py` and must not be routed again: a new route is a new board that
+KiCad has not seen.
+
+### The model against KiCad's fill
+
+The model was held against KiCad's fill on the planes of the LED controller, and against
+KiCad 10 on the boards below (see "What KiCad 10 said"). To repeat it on a machine with
+`kicad-cli` (KiCad 9 or 10) on the PATH:
+
+```sh
+python3 bench/gen_boards.py          # only if bench/boards/areas is missing
+bench/areas-kicad.sh                 # the four boards above
+```
+
+and, for thin strips as a router leaves them, ten boards of the suite routed without GND, with
+a pour of GND on both layers and one via per island:
+
+```sh
+for seed in 1 2 3; do
+    POUR=GND:F.Cu,B.Cu \
+    ROUTE_ARGS="--runs 4 --generations 1 --geometry-generations 0 --no-move-parts --seed $seed" \
+    bench/areas-kicad.sh bench/boards/bus.kicad_pcb bench/boards/diff_pairs.kicad_pcb \
+        bench/boards/fine_pitch.kicad_pcb bench/boards/fine_pitch_mixed.kicad_pcb \
+        bench/boards/matching.kicad_pcb bench/boards/medium.kicad_pcb \
+        bench/boards/parts_easy.kicad_pcb bench/boards/parts_hard.kicad_pcb \
+        bench/boards/parts_medium.kicad_pcb bench/boards/power_mix.kicad_pcb
+    cp bench/boards/out/areas/results.txt bench/boards/out/areas/results.seed$seed.txt
+done
+```
+
+`areas-kicad.sh` routes a board (and pours it where asked), lets KiCad refill a copy
+(`kicad-cli pcb drc --refill-zones --save-board`) and runs `gummiband areas --json` on that
+copy, so that the model and KiCad's fill are compared on the same copper. It prints one line per
+net and layer, also into `boards/out/areas/results.txt`:
+
+- `mm2 model only / file only`: fill only one of the two has, beyond what the raster explains;
+- `pads m/f`: pads only the model's fill touches, and pads only KiCad's fill touches;
+- `unconn model/kicad`: the unconnected items the model expects for the net, and those KiCad's
+  DRC counts;
+- `doubtful`: the pads whose answer changes within one raster cell.
+
+The model holds on a board where both pad lists are empty and the two unconnected counts agree.
+A pad in `pads m/f` that is not in the doubtful list is a finding: send the line and the two
+files `<name>.areas.json` and `<name>.filled/<name>.kicad_pcb`. On `area_halves` the question
+is also whether KiCad reads the outlines as written (a region enclosed by another is cut into
+its outline through a slit; this board has none, a board with an island of the other ground
+has).
+
+#### What KiCad 10 said
+
+Measured 2026-11-11 with `kicad-cli` 10 and the commands above (the four area boards of that
+day, the ten boards with seeds 1 to 3). Where the two disagreed the model now follows KiCad, and a test
+pins KiCad's answer on the board where it showed:
+
+| Where | The model said | KiCad 10 | Now |
+| --- | --- | --- | --- |
+| `area_strips` | the strip of 0.20 mm, the minimum width itself, is shut: 4 pieces on the front, 3 unconnected, `TP3.1` doubtful | passes it: 3 pieces, 2 unconnected | a cell centre at just the clearance is fill, the strip passes; `TP3.1` stays doubtful |
+| `fine_pitch_mixed` seed 2, `R50.2` to `R54.2` and `R56.2` (a row at a pitch of 1.6 mm) | none of their spokes ends in fill: 7 unconnected | joins all six: 1 unconnected | a spoke also stays where it and a spoke of another pad hold each other's ends: 1 unconnected (`U1.57`) |
+| `fine_pitch_mixed` seed 3, `U1.57` (exposed pad) | an island, 1 piece of fill on the front | unconnected too, but 2 pieces | the spokes are laid and tested as KiCad lays them: the island is a piece of 1 mm2 that stays, 2 pieces |
+| `matching` seed 3, `J1.16` | no spoke ends in fill, and not doubtful | joins it | still not reached, but doubtful: the end of its one free spoke lies 0.05 mm from the clearance of a track, one cell outside the fill at the raster as it is, inside with half a cell less |
+| `parts_medium` (all seeds), `fine_pitch_mixed` seeds 1 and 3, back layer | nothing of GND holds the pour there: every piece left out, 0 mm2 | keeps all of it (1393 to 1760 mm2 in 1 or 35 to 41 pieces) and warns of isolated copper for each | the pieces stay in the model and the report says so (`isolated`). `ground_pour` and `pour_stitch` still write the zone of such a layer: not writing it is open |
+| `parts_medium`, `U2.4` | reached, doubtful | unconnected | as before: this is what doubtful is for |
+| `area_halves`, `area_far`, `area_split` | | no difference at any pad, no DRC item; the model has 0.4 to 5 mm2 more fill of 344 to 1375 | as before |
+
+What is assumed about KiCad's filler and not measured case by case: the end of a spoke lies the
+thermal gap, half the minimum width and 0.005 mm beyond the box of the pad; a spoke is as wide
+as the spoke width or the short side of the pad and is left out where that is under the minimum
+width; it stays when its end lies in the fill as it is after the minimum width took its part,
+or when it and a spoke of another pad hold each other's ends; other copper then cuts it by its
+clearance. A pad whose answer hangs on this within a raster cell is named as doubtful.
+
+On `J1.16` the two are not reconciled. Read from the copper, its spoke ends in a pocket of fill
+of about 0.2 mm2 between the tracks of DQ4 and DQ0, which lie 0.16 mm apart where the pocket
+would have to open: the pad would hang on that pocket and on nothing else. If KiCad calls the
+pad connected, something in this reading is wrong; the filled board at 105.5, 114.7 shows what.
+
+### `areas tracks` against `areas fill`
+
+`areas-route.py` routes a board both ways with the same binary, `--areas tracks` (a net with a
+pour is laid as tracks) and `--areas fill` (the other nets first, then only what the fill does
+not reach), and prints one line per board, seed and mode: connections, the pads of the area
+nets that the router's fill model leaves open on the routed board with its pour, the pieces
+and spots of the own clearance check, vias, length, CPU seconds, and the seconds the fill model
+took inside the search (summed over the threads) with the number of its runs. It needs no KiCad:
+
+```sh
+cargo build --release -p gummiband-cli
+bench/areas-route.py                 # ten boards of the suite with GND poured, the four area boards
+bench/areas-route.py /path/to/board.kicad_pcb=GND      # another board, GND poured on F.Cu and B.Cu
+bench/areas-route.py /path/to/board.kicad_pcb          # the zones of the file are the areas
+```
+
+The table is also written to `boards/out/areas-route/results.txt` (and `results.json`); the
+routed boards are deleted unless `--keep` is given. `--fill-args=--no-area-stitch` routes the
+fill runs without the vias for islands, and `GB_AREA_ESCAPE=0` in the environment without the
+price at the pads of the area nets.
+`--modes fill` routes one mode only. Write `--args=...` and `--fill-args=...` with the equals
+sign: their values begin with a dash.
+
+Measured without KiCad (2026-11-11, the last check counting by fill, the settings of the
+suite: `--runs 4 --generations 1 --geometry-generations 1 --no-move-parts`). Every number is
+the sum of the seeds 1, 2 and 3; `open pads` is the router's own model, not KiCad. The lines of
+`fill` are those of commit 980246a and have **not been measured again** since the fill model
+follows KiCad and since the last check tells the cells of the area right (the two commits
+after it): the lines of `tracks` cannot change, those of `fill` can. On `area_strips` the
+route now sets two vias for islands, not three.
+
+| board | mode | routed | open pads | pieces/spots | vias | of them island vias | mm | cpu s | model s (runs) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `bus` | tracks | 66/66 | 0 | 0/0 | 86 | 0 | 2174 | 24 |  |
+| `bus` | fill | 66/66 | 0 | 0/0 | 44 | 6 | 1944 | 40 | 6 (27) |
+| `diff_pairs` | tracks | 93/93 | 0 | 0/0 | 158 | 0 | 3183 | 66 |  |
+| `diff_pairs` | fill | 93/93 | 0 | 0/0 | 108 | 6 | 2961 | 74 | 5 (27) |
+| `fine_pitch` | tracks | 336/336 | 0 | 0/0 | 6 | 0 | 2388 | 20 |  |
+| `fine_pitch` | fill | 336/336 | 0 | 0/0 | 6 | 6 | 2010 | 32 | 5 (24) |
+| `fine_pitch_mixed` | tracks | 336/336 | 0 | 27/9 | 420 | 0 | 4551 | 339 |  |
+| `fine_pitch_mixed` | fill | 336/336 | 0 | 6/6 | 408 | 0 | 4278 | 477 | 32 (153) |
+| `matching` | tracks | 78/78 | 0 | 0/0 | 54 | 0 | 1833 | 168 |  |
+| `matching` | fill | 76/78 | 2 | 0/0 | 12 | 6 | 1651 | 195 | 5 (30) |
+| `medium` | tracks | 114/114 | 0 | 0/0 | 36 | 0 | 1347 | 7 |  |
+| `medium` | fill | 114/114 | 0 | 0/0 | 42 | 6 | 1137 | 14 | 4 (27) |
+| `parts_easy` | tracks | 66/66 | 0 | 0/0 | 15 | 0 | 456 | 2 |  |
+| `parts_easy` | fill | 66/66 | 0 | 0/0 | 3 | 0 | 396 | 8 | 3 (27) |
+| `parts_hard` | tracks | 225/225 | 0 | 0/0 | 195 | 0 | 3191 | 20 |  |
+| `parts_hard` | fill | 225/225 | 0 | 0/0 | 150 | 12 | 2751 | 38 | 7 (27) |
+| `parts_medium` | tracks | 129/129 | 0 | 0/0 | 60 | 0 | 1568 | 8 |  |
+| `parts_medium` | fill | 129/129 | 0 | 0/0 | 27 | 0 | 1584 | 20 | 10 (27) |
+| `power_mix` | tracks | 57/57 | 0 | 0/0 | 17 | 0 | 960 | 7 |  |
+| `power_mix` | fill | 57/57 | 0 | 0/0 | 15 | 0 | 657 | 12 | 5 (27) |
+| **the ten** | tracks | 1500/1500 | 0 | 27/9 | 1047 | 0 | 21651 | 661 |  |
+| **the ten** | fill | 1498/1500 | 2 | 6/6 | 815 | 42 | 19369 | 912 | 82 (396) |
+| `area_strips` | tracks | 27/27 | 0 | 0/0 | 0 | 0 | 189 | 1 |  |
+| `area_strips` | fill | 27/27 | 0 | 0/0 | 0 | 0 | 0 | 3 | 2 (24) |
+| `area_far` | tracks | 60/60 | 0 | 0/0 | 0 | 0 | 654 | 3 |  |
+| `area_far` | fill | 60/60 | 0 | 0/0 | 6 | 0 | 549 | 7 | 2 (27) |
+| `area_split` | tracks | 51/51 | 0 | 0/0 | 30 | 0 | 405 | 2 |  |
+| `area_split` | fill | 51/51 | 0 | 0/0 | 30 | 0 | 405 | 2 | 0 (0) |
+| `area_halves` | tracks | 69/69 | 0 | 0/0 | 3 | 0 | 678 | 3 |  |
+| `area_halves` | fill | 69/69 | 0 | 0/0 | 6 | 0 | 468 | 17 | 8 (27) |
+| ledctl, its planes | tracks | 1044/1044 | 0 | 16/6 | 842 | 0 | 7414 | 256 |  |
+| ledctl, its planes | fill | 1044/1044 | 0 | 16/6 | 842 | 0 | 7414 | 260 | 0 (0) |
+| ledctl, GND poured | tracks | 1044/1044 | 0 | 16/6 | 842 | 0 | 7414 | 255 |  |
+| ledctl, GND poured | fill | 1098/1098 | 0 | 5/5 | 782 | 5 | 7754 | 647 | 192 (133) |
+
+What the table does not show:
+
+- The two open pads are `J1.16` and `J2.16` of `matching` on seed 1: pads with a thermal
+  relief whose spokes end in no fill on the finished copper. The search had them joined; the
+  last check counts them open (24 of 26) and names them.
+- A second run of the 42 lines with `fill` gave the same 42 lines.
+- Without the vias for islands (`--fill-args=--no-area-stitch`, the ten boards): 18 open pads
+  in 12 groups on 13 of the 30 runs, 877 vias, 19291 mm. Looked at on `parts_hard`: the
+  search ended the track of `C2.2` in a piece of fill that hung on the area then and is an
+  island on the finished copper; the last check takes such a track back. The via for an
+  island is set on the finished copper and does not depend on what the search saw. This
+  reading is in doubt since: the last check could also take a track back because it did not
+  know the cells of the area (see `area_island`), which gives the same picture. Not measured
+  again after that repair.
+- Without the price at the pads (`GB_AREA_ESCAPE=0`, the ten boards): 13 open pads on 3 of the
+  30 runs (`fine_pitch_mixed` 12, `diff_pairs` 1), 110 violating pieces at 24 spots against 6
+  at 6, 780 vias, 19022 mm.
+- The LED controller as it is has its planes on inner layers and no area on a routed layer:
+  the files of `tracks` and `fill` are the same byte for byte. With GND poured on the outer
+  layers as well (`ledctl.kicad_pcb=GND`) the route with `fill` counts 366 connections against
+  348, because every group of pads of an area net counts and not only the pads that need a
+  way to the plane.
+- `model s` is wall time summed over the threads of the search. The machine was shared with
+  another job, so it is an upper bound on the CPU time of the model.
+
+**With KiCad** (`kicad-cli` of KiCad 9 or 10 on the PATH), `--kicad` lays the pour on every
+result (the example `pour_stitch`: the zones, and one via per island that still has none), lets
+KiCad refill it and adds three columns from KiCad's DRC: unconnected items (of the area nets /
+of all nets), clearance violations, dangling vias and track ends. This is the judgement that
+counts; the model's column `open pads` is what the router believed.
+
+```sh
+cargo build --release -p gummiband-cli --example pour_stitch
+bench/areas-route.py --kicad --keep                    # the fourteen boards, three seeds each
+```
+
+The acceptance run on the Corne (`prepare-ext.sh` fetches and strips it into
+`work/ext/corne/`), with the default settings of a route, three seeds:
+
+```sh
+bench/prepare-ext.sh
+cargo build --release -p gummiband-cli --example pour_stitch
+bench/areas-route.py --kicad --keep --args="" bench/work/ext/corne/corne.kicad_pcb=GND
+```
+
+`areas fill` passes when, on every seed and against the line of `tracks` ("route all, then
+pour"): `unconn` of GND is 0; `clear` is no more than the 119 that the Corne had with GND left
+out of the route; `vias` is no more than the 226 of that run plus the vias set for islands
+(`areas: N vias set for islands of fill` in the log, `area_vias` in the report); `dangling` is
+0. For the LED controller with a GND pour on the outer layers
+(`bench/areas-route.py --kicad --keep --args="" /path/to/ledctl.kicad_pcb=GND`) nothing may be
+worse than its line of `tracks`. With `--keep` the boards KiCad judged are
+`boards/out/areas-route/<board>.s<seed>.<mode>.filled.kicad_pcb`, next to `.drc.json`; send
+those two files for a pad that KiCad's DRC calls unconnected and the column `open pads` does
+not count.
+
+On the Corne with KiCad 10 (2026-11-11, before the two repairs named above) `fill` had more
+clearance violations than `tracks` on every seed (573 against 439 over the seeds 1 to 3), most
+of them at the two QFNs. Whether the price at the pads of the area nets pushes the signals
+aside there is measured with the same seeds and the price off:
+
+```sh
+bench/areas-route.py --kicad --keep --modes fill --args="" bench/work/ext/corne/corne.kicad_pcb=GND
+GB_AREA_ESCAPE=0 bench/areas-route.py --kicad --keep --modes fill --args="" bench/work/ext/corne/corne.kicad_pcb=GND
+```
+
+Compare `clear`, `unconn` and `vias` of the two tables line by line (the second run overwrites
+`boards/out/areas-route/results.txt`: copy it first). Without KiCad the column `pieces/spots`
+of the own clearance check stands in for `clear`. The price is not to be tuned on the small
+boards alone: of the ten only `fine_pitch_mixed` and `diff_pairs` answer to it (see above). One
+route of the Corne with the default settings takes more than an hour of CPU time.
 
 ## Two sided placement
 

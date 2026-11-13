@@ -1911,7 +1911,7 @@ fn aim_at_cost(s: &State, bold: usize, rng: &mut Rng) -> Option<Move> {
                     .iter()
                     .map(|&q| r.board.pins[q].pos.dist(p[0]))
                     .fold(f64::INFINITY, f64::min),
-                Goal::Plane => 0.0,
+                Goal::Plane | Goal::Area => 0.0,
             };
             // through the middle of the edges even a straight track looks a little longer
             let detour = (polyline(p) - 1.25 * direct).max(0.0);

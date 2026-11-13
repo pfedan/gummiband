@@ -294,6 +294,14 @@ pub struct Board {
     /// Unlocked copper that is part of the topology instead of an obstacle, see [`Board::soften`].
     #[serde(skip)]
     pub soft: crate::import::SoftCopper,
+    /// The areas of the board for a route that leaves the nets with an area to the fill
+    /// (`areas fill`); none: every net is laid as tracks and the areas are not looked at.
+    #[serde(skip)]
+    pub areas: Option<std::sync::Arc<crate::fill::AreaPlan>>,
+    /// In the last check of a route with `areas fill`: the fill of every area net on the
+    /// finished copper, as the model has it.
+    #[serde(skip)]
+    pub area_fill: Option<std::sync::Arc<Vec<crate::fill::AreaGoal>>>,
     /// Stackup from top to bottom, if the board has one.
     #[serde(default)]
     pub stackup: Vec<StackItem>,
@@ -824,6 +832,34 @@ impl Board {
         s
     }
 
+    /// Nets that are a ground by their name (GND, AGND, PGND, GNDA, VSS, 0V and the like, the
+    /// last part of a hierarchical name), with at least two pins.
+    pub fn ground_nets(&self) -> Vec<NetId> {
+        let ground = |name: &str| {
+            let n = name.rsplit('/').next().unwrap_or(name).to_ascii_uppercase();
+            n.contains("GND") || n.starts_with("VSS") || n == "0V"
+        };
+        (0..self.nets.len() as NetId)
+            .filter(|&n| self.nets[n as usize].pins.len() >= 2 && ground(&self.nets[n as usize].name))
+            .collect()
+    }
+
+    /// A warning when the board has more than one ground: split grounds make the return current
+    /// of a signal that crosses from one to the other detour, and a filter capacitor on the wrong
+    /// one does not filter. One ground plane is the better default.
+    pub fn ground_warning(&self) -> Option<String> {
+        let g = self.ground_nets();
+        if g.len() < 2 {
+            return None;
+        }
+        let names: Vec<&str> = g.iter().map(|&n| self.nets[n as usize].name.as_str()).collect();
+        Some(format!(
+            "{} ground nets ({}): separate grounds make return currents detour; one ground plane is the better default, joined at one point (a net tie) only where the design needs it",
+            names.len(),
+            names.join(", ")
+        ))
+    }
+
     pub fn net_id(&self, name: &str) -> Option<NetId> {
         self.nets.iter().position(|n| n.name == name).map(|i| i as NetId)
     }
@@ -1069,6 +1105,15 @@ impl Board {
     }
 
     /// Nets that need routing: two or more pins.
+    /// The layers on which `p` lies in the fill of the area of `net`, where the fill is known
+    /// ([`Board::area_fill`]): none otherwise.
+    pub fn area_fill_at(&self, net: NetId, p: Point) -> LayerSet {
+        self.area_fill
+            .as_ref()
+            .and_then(|fills| fills.iter().find(|f| f.net == net))
+            .map_or(LayerSet::default(), |f| f.layers_at(p))
+    }
+
     pub fn routable_nets(&self) -> impl Iterator<Item = NetId> + '_ {
         self.nets
             .iter()
@@ -1089,6 +1134,18 @@ mod tests {
             crate::geom::pt(x1, y1),
             crate::geom::pt(x0, y1),
         ])
+    }
+
+    #[test]
+    fn two_grounds_give_a_warning_one_does_not() {
+        let mut b = crate::topo::tests::two_pad_board();
+        b.nets[0].name = "GND".into();
+        assert!(b.ground_warning().is_none());
+        let mut a = b.nets[0].clone();
+        a.name = "/Audio/AGND".into();
+        b.nets.push(a);
+        let w = b.ground_warning().unwrap();
+        assert!(w.contains("GND, /Audio/AGND"), "{w}");
     }
 
     #[test]
