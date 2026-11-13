@@ -1610,12 +1610,12 @@ impl Router<'_> {
             .filter(|&i| self.segs[i as usize].is_some())
             .collect();
         let mut built: Vec<Vec<Track>> = ids.par_iter().map(|&sid| self.seg_tracks(sid)).collect();
-        let mut plain = vec![false; ids.len()];
         if self.disc_band && self.disc_planar {
             // The band of the discs is not held between the neighbours of its track on every
             // edge, as the band along the edges is. Where two of them cross (a passage with
             // less room than its tracks ask for), both go back to the band along the edges,
             // and so does what crosses that, until nothing crosses.
+            let mut plain = vec![false; ids.len()];
             for _ in 0..6 {
                 let crossed = crossing_segments(&built);
                 let again: Vec<usize> = crossed.into_iter().filter(|&i| !plain[i]).collect();
@@ -1636,71 +1636,6 @@ impl Router<'_> {
             .collect();
         vias.sort_by(|a, b| a.0.at.x.total_cmp(&b.0.at.x).then(a.0.at.y.total_cmp(&b.0.at.y)));
         let (vias, sites): (Vec<Via>, Vec<u32>) = vias.into_iter().unzip();
-        if self.disc_band && self.disc_planar && first == 0 {
-            // A disc asks for the whole stack around its vertex, also where the tracks of the
-            // stack turn away before they are level with it; in a tight passage the band of
-            // the discs then gives way where the band along the edges finds room. The
-            // segments at the spots the check finds are drawn along the edges instead, and
-            // that is kept if the check finds less.
-            let weigh = |built: &[Vec<Track>]| {
-                let geo = Geometry {
-                    tracks: built.iter().flatten().cloned().collect(),
-                    vias: vias.clone(),
-                };
-                let found: Vec<crate::check::Violation> = crate::check::check(self.board, &geo)
-                    .into_iter()
-                    .filter(|v| !v.is_width())
-                    .collect();
-                let weight: f64 = crate::check::spots(&found)
-                    .iter()
-                    .map(|s| if s.short { 5.0 } else { 1.0 })
-                    .sum();
-                (weight, found)
-            };
-            let (before, found) = weigh(&built);
-            if !found.is_empty() {
-                // how many of the finds lie at a track
-                let finds = |t: &[Track], found: &[crate::check::Violation]| {
-                    found
-                        .iter()
-                        .filter(|v| {
-                            t.iter().any(|t| {
-                                (v.nets.0 == t.net || v.nets.1 == Some(t.net))
-                                    && t.pts.windows(2).any(|w| {
-                                        crate::geom::point_seg_dist(v.at, w[0], w[1])
-                                            < t.width / 2.0 + v.required + 0.05
-                                    })
-                            })
-                        })
-                        .count()
-                };
-                let again: Vec<usize> = (0..ids.len())
-                    .filter(|&i| !plain[i] && finds(&built[i], &found) > 0)
-                    .collect();
-                if !again.is_empty() {
-                    // all of them along the edges, to see which of them have less to answer for
-                    // there, then those alone
-                    let fresh: Vec<Vec<Track>> =
-                        again.par_iter().map(|&i| self.seg_tracks_with(ids[i], false)).collect();
-                    let mut all = built.clone();
-                    for (&i, t) in again.iter().zip(&fresh) {
-                        all[i] = t.clone();
-                    }
-                    let (_, there) = weigh(&all);
-                    let mut other = built.clone();
-                    let mut any = false;
-                    for (&i, t) in again.iter().zip(fresh) {
-                        if finds(&t, &there) < finds(&built[i], &found) {
-                            other[i] = t;
-                            any = true;
-                        }
-                    }
-                    if any && crossing_segments(&other).is_empty() && weigh(&other).0 < before {
-                        built = other;
-                    }
-                }
-            }
-        }
         let (tracks, segs): (Vec<Track>, Vec<u32>) = built
             .into_iter()
             .zip(&ids)
