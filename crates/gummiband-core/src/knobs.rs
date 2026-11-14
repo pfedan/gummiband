@@ -358,12 +358,12 @@ knobs! {
         "A layer change on a current path does not keep the room of all its vias from the moment the search sets it: the vias after the first are set after the relaxation where room is left, as before.";
     NO_POLISH = "GB_NO_POLISH", Switch, Set, "off",
         "Skips the polish relaxation of a winner that has clearance spots left.";
+    NO_DISC = "GB_NO_DISC", Switch, Set, "off",
+        "The first line of a track comes from the funnel through its portals, with a share of the slack, instead of the band pulled taut against the discs around the vertices of its triangles.";
     NO_ARCS = "GB_NO_ARCS", Switch, Set, "off",
         "Tracks are realised as polylines, without arcs around the corners.";
     BAND = "GB_BAND", Experiment, Set, "off",
         "The band of a track takes the radius of the stack where the track lies next to the vertex it bends around, and where a wrap has no tangent, leaves its portal or its triangles, that wrap alone becomes a corner; today such a track loses all its arcs.";
-    DISC = "GB_DISC", Experiment, Set, "off",
-        "The band of a track is built from discs around every vertex of its triangles, each with the radius the tracks between it and the vertex ask for, pulled taut against them; no portal and no share of the slack.";
     NO_TUNE_ROOM = "GB_NO_TUNE_ROOM", Switch, Set, "off",
         "CLI `route`: length tuning does not make room for its meanders first.";
 

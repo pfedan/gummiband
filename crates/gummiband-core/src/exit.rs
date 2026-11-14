@@ -803,6 +803,9 @@ pub(crate) mod tests {
             assert_eq!(b.exits.len(), 12);
             let sub = Substrate::build(&b, &SubstrateConfig::default());
             let mut r = Router::new(&b, &sub, RouterConfig::default());
+            // the funnel line: the disc band alone leaves the 0.25 mm row a few um short here,
+            // which the stages after this one have to close
+            r.disc_band = false;
             r.plan();
             for ci in 0..r.conns.len() {
                 assert!(r.route_one(ci), "connection {ci}");

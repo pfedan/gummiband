@@ -2930,6 +2930,7 @@ mod tests {
         let b = crate::route::tests::pad_board(&pins);
         let sub = crate::topo::Substrate::build(&b, &crate::topo::SubstrateConfig::default());
         let mut r = Router::new(&b, &sub, crate::route::RouterConfig::default());
+        r.disc_band = false;
         r.plan();
         r.run();
         let ids: Vec<u32> = (0..r.segs.len() as u32)

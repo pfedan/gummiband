@@ -993,6 +993,8 @@ mod tests {
         let b = crate::route::tests::pad_board(&pins);
         let sub = Substrate::build(&b, &crate::topo::SubstrateConfig::default());
         let mut r = crate::route::Router::new(&b, &sub, crate::route::RouterConfig::default());
+        // the bends of the funnel line; the disc band has its own arcs
+        r.disc_band = false;
         r.plan();
         r.run();
         let mut geo = r.geometry();
