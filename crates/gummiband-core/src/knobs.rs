@@ -422,6 +422,8 @@ knobs! {
         "Search: room a track or via asks for beyond its clearance, in mm.";
     AREA_ESCAPE = "GB_AREA_ESCAPE", Experiment, Num, "2",
         "`areas fill`: extra cost in mm for passing right next to a pad of a net left to the fill of its area, while the other nets are laid.";
+    AREA_SLACK = "GB_AREA_SLACK", Experiment, Num, "0.035",
+        "`areas fill`: added to every clearance of the fill when the model runs inside the search, in mm; more of it and the search counts on wider strips of fill only.";
     SHARE_KIND = "GB_SHARE_KIND", Experiment, Value, "all kinds",
         "`--patterns shares`: only the shares of this kind (`neighbours` or `decap`).";
     SKEW_WEIGHT = "GB_SKEW_WEIGHT", Experiment, Num, "0.5",

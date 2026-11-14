@@ -159,11 +159,13 @@ impl RouterConfig {
 /// check and the report take the finer step of the plan.
 const AREA_PASS_STEP: f64 = 0.07;
 
-/// Added to every clearance of the fill when the model runs inside the search, in mm: half a
-/// cell of its raster. The search works on the taut tracks and a coarse raster, the result is
-/// judged on the relaxed tracks and a fine one; with this reserve a strip of fill that the
-/// search counts on is one that is still there at the end.
-const AREA_PASS_SLACK: f64 = 0.035;
+/// Added to every clearance of the fill when the model runs inside the search, in mm: by
+/// default half a cell of its raster (`GB_AREA_SLACK`). The search works on the taut tracks
+/// and a coarse raster, the result is judged on the relaxed tracks and a fine one; with this
+/// reserve a strip of fill that the search counts on is one that is still there at the end.
+fn area_pass_slack() -> f64 {
+    knobs::AREA_SLACK.num()
+}
 
 /// The price of crossing a connection that lies there when an open connection into an area looks
 /// for what is in its way ([`Router::area_blockers`]), in mm of way: the middle one of the prices
@@ -4371,7 +4373,7 @@ impl<'a> Router<'a> {
             crate::relax::relax(self.board, &self.sub, &mut geo, &short);
         }
         let goals = crate::prof::time(crate::prof::Slot::AreaModel, || {
-            crate::fill::goals(self.board, plan, &geo, AREA_PASS_STEP, AREA_PASS_SLACK, true)
+            crate::fill::goals(self.board, plan, &geo, AREA_PASS_STEP, area_pass_slack(), true)
         });
         crate::prof::add(crate::prof::Slot::AreaModels, 1);
         self.area_goals = std::sync::Arc::new(goals);

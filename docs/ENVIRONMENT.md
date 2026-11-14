@@ -123,6 +123,7 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_ESCAPE` | number | 0 | Extra cost in mm for passing right next to a pad of another net that still waits for its route. |
 | `GB_SEARCH_MARGIN` | number | 0.01 | Search: room a track or via asks for beyond its clearance, in mm. |
 | `GB_AREA_ESCAPE` | number | 2 | `areas fill`: extra cost in mm for passing right next to a pad of a net left to the fill of its area, while the other nets are laid. |
+| `GB_AREA_SLACK` | number | 0.035 | `areas fill`: added to every clearance of the fill when the model runs inside the search, in mm; more of it and the search counts on wider strips of fill only. |
 | `GB_SHARE_KIND` | value | all kinds | `--patterns shares`: only the shares of this kind (`neighbours` or `decap`). |
 | `GB_SKEW_WEIGHT` | number | 0.5 | Weight of a mm of skew need in the cost of a candidate. |
 | `GB_REFINE` | number | 0.6 | Triangulation: long obstacle sides get a vertex every this many mm. |
