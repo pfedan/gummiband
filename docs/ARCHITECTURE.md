@@ -280,12 +280,16 @@ each layer stays planar by construction.
   once the rest of the net is laid, and the check counts it so. The room of those vias is kept
   from the moment the search sets the via: it is one via with the radius of the circle around
   them (`Board::cluster_radius`: the vias on a ring at the hole pitch, with copper of the width
-  of the path to the centre), to other copper and to the pads of its own net, through the
-  search and the relaxation. The check counts such a via as the vias it stands for
-  (`Board::stands_for`). After the placement rounds `relax::set_clusters` sets the vias on
-  their ring with a piece of copper from the centre on every layer with wide copper there, in
-  every geometry that leaves `route_board`; a via that does not join wide copper of two layers,
-  or whose vias do not fit all the same, is one via of its class again. For those, and for
+  of the path to the centre). Search and relaxation keep it to other copper. The search keeps
+  it off the pads of its own net as well and does not set such a via in a pad, where one via
+  may stand (`Router::site_clear`): the vias stand beside each other and out of the pads. The
+  check counts such a via as the vias it stands for (`Board::stands_for`). After the placement
+  rounds `relax::set_clusters` sets the vias on their ring with a piece of copper from the
+  centre on every layer with wide copper there, in every geometry that leaves `route_board`.
+  The first via stands towards the longest straight end of a track; where the ring does not
+  fit so (the relaxation does not hold a via off the pads of its own net), it is turned in
+  six steps. A via that does not join wide copper of two layers, or whose vias fit at no turn,
+  is one via of its class again. For those, and for
   vias of kept copper, `relax::stitch_vias` looks for room afterwards: the missing vias go next
   to the via, in a row on a straight track with a piece of the other layer over them or around
   it with a piece on each layer, tested with the rules of the check (`check::Copper::clear`);
