@@ -1970,16 +1970,20 @@ impl<'a> Router<'a> {
         }
     }
 
-    /// How many vias a layer change of connection ci takes: one, or on a current path (between
-    /// two pins that take the minimum width of their class, [`Board::current_min`]) as many as
-    /// carry what that width carries ([`Board::vias_for`]).
+    /// How many vias a layer change of connection ci takes: one, or on a current path as many
+    /// as carry what the minimum width of its class carries ([`Board::current_min`],
+    /// [`Board::vias_for`]). A connection is on a current path when one of its ends is a pin
+    /// that takes that width: the copper of a net is shared, so the way from such a pin to a
+    /// fine pitch pin can be a piece of the way between two wide pins once the rest of the net
+    /// is laid, and the check counts it so. Only a connection between fine pitch pins of
+    /// exempt parts is free.
     fn via_factor(&self, ci: usize) -> f64 {
         let c = &self.conns[ci];
         let Some(min) = self.board.current_min(c.net) else {
             return 1.0;
         };
         match &c.goal {
-            Goal::Pins(goal) if !self.narrow_pin(c.from) && goal.iter().any(|&p| !self.narrow_pin(p)) => {
+            Goal::Pins(goal) if !self.narrow_pin(c.from) || goal.iter().any(|&p| !self.narrow_pin(p)) => {
                 self.board.vias_for(min, self.via_size(c.net, 1).1) as f64
             }
             _ => 1.0,
@@ -1999,8 +2003,8 @@ impl<'a> Router<'a> {
     }
 
     /// Static and via spacing checks of a via of `net` at site `site`.
-    fn site_clear(&self, site: u32, net: NetId, n: usize) -> bool {
-        let (r, drill, clr) = self.via_size(net, n);
+    fn site_clear(&self, site: u32, net: NetId, cluster: usize) -> bool {
+        let (r, drill, clr) = self.via_size(net, cluster);
         let s = &self.sub.shared.sites[site as usize];
         let p = s.p;
         for n in &s.nbrs {
@@ -2019,6 +2023,9 @@ impl<'a> Router<'a> {
             let need = if o.net == Some(net) && o.kind != ObstacleKind::Hole {
                 match o.hole {
                     Some(_) => drill / 2.0 + self.board.rules.hole_to_hole,
+                    // the vias of a layer change of several stay out of the pads of their net
+                    // (`relax::set_clusters`)
+                    None if cluster > 1 && o.kind == ObstacleKind::Pad => r + clr,
                     None => 0.0,
                 }
             } else {
