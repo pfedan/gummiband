@@ -336,6 +336,8 @@ knobs! {
         "Open end: a new via that reaches the plane of its net stays in it when it is moved.";
     NO_RELAX = "GB_NO_RELAX", Switch, Set, "off",
         "The search returns its best topology without the geometry stage (for `examples/relax_bench.rs`).";
+    NO_AREA_REPAIR = "GB_NO_AREA_REPAIR", Switch, Set, "off",
+        "`areas fill`: what the last check finds open of the nets left to their fill is not laid again on the finished copper.";
     NO_POLISH = "GB_NO_POLISH", Switch, Set, "off",
         "Skips the polish relaxation of a winner that has clearance spots left.";
     NO_ARCS = "GB_NO_ARCS", Switch, Set, "off",

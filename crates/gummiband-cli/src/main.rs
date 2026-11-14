@@ -922,6 +922,9 @@ fn main() -> Result<()> {
                     r.area_vias, r.area_model_runs, r.area_model_seconds
                 );
             }
+            if let Some(a) = &r.area_repair {
+                println!("areas: {}", a.line());
+            }
             for t in r.tries.iter().skip(1) {
                 println!(
                     "give way within {} mm: {} nets, {} open, {} violations",
@@ -1206,6 +1209,7 @@ fn main() -> Result<()> {
                     "pours": r.legal.pours,
                     "areas": r.areas,
                     "area_vias": r.area_vias,
+                    "area_repair": r.area_repair,
                     "area_model_seconds": r.area_model_seconds,
                     "area_model_runs": r.area_model_runs,
                     "violations": viol.iter().map(|v| serde_json::json!({
