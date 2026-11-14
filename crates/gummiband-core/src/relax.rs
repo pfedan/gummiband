@@ -70,6 +70,71 @@ impl Default for RelaxConfig {
 /// shrink with what is left to resolve, so what remains is well below the margin.
 const REST: f64 = 0.0002;
 
+/// What damps the swings of the rounds that only resolve clearances (see `relax_while`).
+struct Calm {
+    /// The share of its move a point in this cell takes, and the round that last halved it.
+    cell: Vec<f64>,
+    halved: Vec<usize>,
+    /// The same per via.
+    via: Vec<f64>,
+    /// The moves of the round before, while the tracks keep their points.
+    last_tracks: Vec<Vec<Point>>,
+    last_vias: Vec<Point>,
+}
+
+impl Calm {
+    /// The least share: a swing of a full step is down to a micrometre.
+    const FLOOR: f64 = 1.0 / 32.0;
+
+    fn round(
+        &mut self,
+        it: usize,
+        cells: &CellLists,
+        (old_tracks, tracks): (&[Vec<Point>], &mut [Vec<Point>]),
+        (old_vias, vias): (&[Point], &mut [Point]),
+    ) {
+        let same = self.last_tracks.len() == tracks.len();
+        if !same {
+            self.last_tracks = tracks.iter().map(|t| vec![Point::default(); t.len()]).collect();
+        }
+        for ((old, new), last) in old_tracks.iter().zip(tracks.iter_mut()).zip(&mut self.last_tracks) {
+            if old.len() != new.len() || last.len() != new.len() {
+                // laid anew: no move to compare with
+                last.clear();
+                last.resize(new.len(), Point::default());
+                continue;
+            }
+            for ((p, q), l) in old.iter().zip(new.iter_mut()).zip(last.iter_mut()) {
+                if p == q {
+                    *l = Point::default();
+                    continue;
+                }
+                let mv = *q - *p;
+                let c = cells.cell_of(*p);
+                if mv.dot(*l) < 0.0 && self.halved[c] != it {
+                    self.halved[c] = it;
+                    self.cell[c] = (self.cell[c] * 0.5).max(Self::FLOOR);
+                }
+                let mv = mv * self.cell[c];
+                *q = *p + mv;
+                *l = mv;
+            }
+        }
+        if self.last_vias.len() != vias.len() {
+            self.last_vias = vec![Point::default(); vias.len()];
+        }
+        for (vi, (p, q)) in old_vias.iter().zip(vias.iter_mut()).enumerate() {
+            let mv = *q - *p;
+            if mv.dot(self.last_vias[vi]) < 0.0 {
+                self.via[vi] = (self.via[vi] * 0.5).max(Self::FLOOR);
+            }
+            let mv = mv * self.via[vi];
+            *q = *p + mv;
+            self.last_vias[vi] = mv;
+        }
+    }
+}
+
 struct Piece {
     a: Point,
     b: Point,
@@ -1010,6 +1075,19 @@ pub fn relax_while(
     // per track where its pieces begin in `pieces` and in the list of its tier
     let mut track_at: Vec<(usize, usize)> = Vec::new();
     let annealing = |it: usize| it * 4 >= cfg.iterations * 3;
+    // Copper that is pushed from two sides with less room than the pushes ask for swings back
+    // and forth by a full step, and the last round would freeze one of the two ends of the
+    // swing: one neighbour clean, the other short by the whole swing. A point or via that turns
+    // back on its last move takes half the step from then on, so the swing dies down in the
+    // middle, where each side gets its share of the room. The gain of a point lives in its
+    // cell, since the points are laid anew every tenth round.
+    let mut calm = Calm {
+        cell: vec![1.0; cells.len()],
+        halved: vec![usize::MAX; cells.len()],
+        via: vec![1.0; vias.len()],
+        last_tracks: Vec::new(),
+        last_vias: Vec::new(),
+    };
     // sleeping copper, vias of one layer and fitted widths stay on the CPU
     #[cfg(feature = "gpu")]
     let mut on_gpu = (cfg.gpu
@@ -1723,6 +1801,10 @@ pub fn relax_while(
         prof::add(Slot::RelaxTracks, t_tracks.elapsed().as_nanos() as u64);
         prof::add(Slot::Rounds, 1);
         let t_dirty = std::time::Instant::now();
+        let mut moved = moved;
+        if before.is_some() {
+            calm.round(it, &cells, (&old_tracks, &mut tracks), (&old_vias, &mut moved));
+        }
         for (v, p) in vias.iter_mut().zip(moved) {
             v.0 = p;
         }
@@ -3859,5 +3941,97 @@ mod tests {
             found.iter().all(|v| !v.what.contains("edge")),
             "the edge rule holds: {found:?}"
         );
+    }
+
+    /// A via between two tracks that each have a wall behind them, with 12 um more room than
+    /// the rules ask for and 20 um less than the pushes with their margins want. Built 0.15 mm
+    /// off the middle. The pushes swing; the swing has to die down so that each of the four
+    /// gaps gets its share and all of them are clean.
+    #[test]
+    fn a_squeezed_via_comes_to_rest_in_the_middle() {
+        use crate::board::{Layer, Net, NetClass, Obstacle};
+        use crate::geom::Polygon;
+        let mut b = Board::default();
+        b.layers = ["F.Cu", "B.Cu"]
+            .iter()
+            .map(|n| Layer {
+                name: n.to_string(),
+                is_plane: false,
+            })
+            .collect();
+        b.outline = vec![Polygon::new(vec![pt(0., 0.), pt(20., 0.), pt(20., 10.), pt(0., 10.)])];
+        b.classes = vec![NetClass {
+            name: "Default".into(),
+            track_width: 0.2,
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            ..Default::default()
+        }];
+        for name in ["A", "B"] {
+            b.nets.push(Net {
+                name: name.into(),
+                class: 0,
+                pins: Vec::new(),
+                planes: LayerSet::default(),
+                priority: 0,
+            });
+        }
+        // wall, 0.2, track, 0.2, via, 0.2, track, 0.2, wall: 1.8 mm by the rules
+        let room = 1.812;
+        for (y0, y1) in [(3.0, 4.0), (4.0 + room, 5.0 + room)] {
+            b.obstacles.push(Obstacle {
+                shape: Shape::Polygon(Polygon::new(vec![pt(6., y0), pt(14., y0), pt(14., y1), pt(6., y1)])),
+                layers: LayerSet::all(2),
+                net: None,
+                kind: ObstacleKind::Pad,
+                hole: None,
+                clearance: 0.2,
+                pin: None,
+                locked: true,
+            });
+        }
+        let track = |a: Point, c: Point, layer: u8, net: u32| {
+            let elems = vec![Elem::Line(a, c)];
+            Track {
+                pts: crate::realize::flatten(&elems),
+                elems,
+                width: 0.2,
+                layer,
+                net,
+                necks: Vec::new(),
+                neck_w: 0.2,
+                origin: None,
+                resting: false,
+                fitted: Vec::new(),
+                pattern: None,
+                seg: u32::MAX,
+                tap: None,
+            }
+        };
+        let mid = 4.0 + room / 2.0;
+        let c = pt(10., mid - 0.15);
+        let mut geo = Geometry {
+            tracks: vec![
+                track(pt(2., mid - 0.6), pt(18., mid - 0.6), 0, 1),
+                track(pt(2., mid + 0.6), pt(18., mid + 0.6), 0, 1),
+                track(pt(2., mid), c, 1, 0),
+                track(c, pt(18., mid), 0, 0),
+            ],
+            vias: vec![Via {
+                at: c,
+                diameter: 0.6,
+                drill: 0.3,
+                net: 0,
+                layer: None,
+                origin: None,
+                resting: false,
+                half: Default::default(),
+            }],
+        };
+        let sub = Substrate::build(&b, &crate::topo::SubstrateConfig::default());
+        relax(&b, &sub, &mut geo, &RelaxConfig::default());
+        let found = crate::check::check(&b, &geo);
+        assert!(found.is_empty(), "via at {:?}: {found:?}", geo.vias[0].at);
     }
 }
