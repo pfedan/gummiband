@@ -218,56 +218,67 @@ price at the pads of the area nets.
 `--modes fill` routes one mode only. Write `--args=...` and `--fill-args=...` with the equals
 sign: their values begin with a dash.
 
-Measured without KiCad (2026-11-11, the last check counting by fill, the settings of the
+Measured without KiCad (2026-11-14, commit 5d63666 of `claude/geometry`, the settings of the
 suite: `--runs 4 --generations 1 --geometry-generations 1 --no-move-parts`). Every number is
-the sum of the seeds 1, 2 and 3; `open pads` is the router's own model, not KiCad. The lines of
-`fill` are those of commit 980246a and have **not been measured again** since the fill model
-follows KiCad and since the last check tells the cells of the area right (the two commits
-after it): the lines of `tracks` cannot change, those of `fill` can. On `area_strips` the
-route now sets two vias for islands, not three.
+the sum of the seeds 1, 2 and 3; `open pads` is the router's own model, not KiCad.
 
 | board | mode | routed | open pads | pieces/spots | vias | of them island vias | mm | cpu s | model s (runs) |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `bus` | tracks | 66/66 | 0 | 0/0 | 86 | 0 | 2174 | 24 |  |
-| `bus` | fill | 66/66 | 0 | 0/0 | 44 | 6 | 1944 | 40 | 6 (27) |
-| `diff_pairs` | tracks | 93/93 | 0 | 0/0 | 158 | 0 | 3183 | 66 |  |
-| `diff_pairs` | fill | 93/93 | 0 | 0/0 | 108 | 6 | 2961 | 74 | 5 (27) |
-| `fine_pitch` | tracks | 336/336 | 0 | 0/0 | 6 | 0 | 2388 | 20 |  |
-| `fine_pitch` | fill | 336/336 | 0 | 0/0 | 6 | 6 | 2010 | 32 | 5 (24) |
-| `fine_pitch_mixed` | tracks | 336/336 | 0 | 27/9 | 420 | 0 | 4551 | 339 |  |
-| `fine_pitch_mixed` | fill | 336/336 | 0 | 6/6 | 408 | 0 | 4278 | 477 | 32 (153) |
-| `matching` | tracks | 78/78 | 0 | 0/0 | 54 | 0 | 1833 | 168 |  |
-| `matching` | fill | 76/78 | 2 | 0/0 | 12 | 6 | 1651 | 195 | 5 (30) |
+| `bus` | tracks | 66/66 | 0 | 0/0 | 60 | 0 | 1911 | 41 |  |
+| `bus` | fill | 66/66 | 0 | 0/0 | 50 | 8 | 1933 | 43 | 7 (27) |
+| `diff_pairs` | tracks | 93/93 | 0 | 0/0 | 90 | 0 | 2916 | 53 |  |
+| `diff_pairs` | fill | 93/93 | 0 | 2/2 | 126 | 0 | 2925 | 96 | 11 (36) |
+| `fine_pitch` | tracks | 336/336 | 0 | 0/0 | 6 | 0 | 2304 | 18 |  |
+| `fine_pitch` | fill | 336/336 | 0 | 0/0 | 6 | 6 | 1928 | 29 | 6 (24) |
+| `fine_pitch_mixed` | tracks | 336/336 | 0 | 28/5 | 368 | 0 | 4509 | 393 |  |
+| `fine_pitch_mixed` | fill | 335/336 | 0 | 1/1 | 426 | 0 | 4211 | 624 | 44 (157) |
+| `matching` | tracks | 78/78 | 0 | 0/0 | 102 | 0 | 1800 | 66 |  |
+| `matching` | fill | 78/78 | 0 | 0/0 | 18 | 6 | 1572 | 191 | 8 (27) |
 | `medium` | tracks | 114/114 | 0 | 0/0 | 36 | 0 | 1347 | 7 |  |
-| `medium` | fill | 114/114 | 0 | 0/0 | 42 | 6 | 1137 | 14 | 4 (27) |
-| `parts_easy` | tracks | 66/66 | 0 | 0/0 | 15 | 0 | 456 | 2 |  |
-| `parts_easy` | fill | 66/66 | 0 | 0/0 | 3 | 0 | 396 | 8 | 3 (27) |
-| `parts_hard` | tracks | 225/225 | 0 | 0/0 | 195 | 0 | 3191 | 20 |  |
-| `parts_hard` | fill | 225/225 | 0 | 0/0 | 150 | 12 | 2751 | 38 | 7 (27) |
-| `parts_medium` | tracks | 129/129 | 0 | 0/0 | 60 | 0 | 1568 | 8 |  |
-| `parts_medium` | fill | 129/129 | 0 | 0/0 | 27 | 0 | 1584 | 20 | 10 (27) |
+| `medium` | fill | 114/114 | 0 | 0/0 | 42 | 6 | 1137 | 15 | 6 (27) |
+| `parts_easy` | tracks | 66/66 | 0 | 0/0 | 15 | 0 | 450 | 2 |  |
+| `parts_easy` | fill | 66/66 | 0 | 0/0 | 3 | 0 | 393 | 8 | 4 (27) |
+| `parts_hard` | tracks | 225/225 | 0 | 0/0 | 172 | 0 | 3260 | 16 |  |
+| `parts_hard` | fill | 225/225 | 0 | 0/0 | 162 | 18 | 2802 | 45 | 13 (27) |
+| `parts_medium` | tracks | 129/129 | 0 | 0/0 | 60 | 0 | 1545 | 9 |  |
+| `parts_medium` | fill | 129/129 | 0 | 0/0 | 27 | 0 | 1560 | 21 | 10 (27) |
 | `power_mix` | tracks | 57/57 | 0 | 0/0 | 17 | 0 | 960 | 7 |  |
-| `power_mix` | fill | 57/57 | 0 | 0/0 | 15 | 0 | 657 | 12 | 5 (27) |
-| **the ten** | tracks | 1500/1500 | 0 | 27/9 | 1047 | 0 | 21651 | 661 |  |
-| **the ten** | fill | 1498/1500 | 2 | 6/6 | 815 | 42 | 19369 | 912 | 82 (396) |
+| `power_mix` | fill | 57/57 | 0 | 0/0 | 15 | 0 | 657 | 12 | 8 (27) |
+| **the ten** | tracks | 1500/1500 | 0 | 28/5 | 926 | 0 | 21002 | 612 |  |
+| **the ten** | fill | 1499/1500 | 0 | 3/3 | 875 | 44 | 19118 | 1083 | 116 (406) |
 | `area_strips` | tracks | 27/27 | 0 | 0/0 | 0 | 0 | 189 | 1 |  |
-| `area_strips` | fill | 27/27 | 0 | 0/0 | 0 | 0 | 0 | 3 | 2 (24) |
-| `area_far` | tracks | 60/60 | 0 | 0/0 | 0 | 0 | 654 | 3 |  |
-| `area_far` | fill | 60/60 | 0 | 0/0 | 6 | 0 | 549 | 7 | 2 (27) |
-| `area_split` | tracks | 51/51 | 0 | 0/0 | 30 | 0 | 405 | 2 |  |
-| `area_split` | fill | 51/51 | 0 | 0/0 | 30 | 0 | 405 | 2 | 0 (0) |
+| `area_strips` | fill | 27/27 | 0 | 0/0 | 0 | 0 | 0 | 3 | 3 (24) |
+| `area_far` | tracks | 60/60 | 0 | 0/0 | 0 | 0 | 654 | 2 |  |
+| `area_far` | fill | 60/60 | 0 | 0/0 | 6 | 0 | 549 | 6 | 4 (27) |
+| `area_split` | tracks | 51/51 | 0 | 0/0 | 36 | 0 | 399 | 2 |  |
+| `area_split` | fill | 51/51 | 0 | 0/0 | 36 | 0 | 399 | 2 | 0 (0) |
 | `area_halves` | tracks | 69/69 | 0 | 0/0 | 3 | 0 | 678 | 3 |  |
-| `area_halves` | fill | 69/69 | 0 | 0/0 | 6 | 0 | 468 | 17 | 8 (27) |
-| ledctl, its planes | tracks | 1044/1044 | 0 | 16/6 | 842 | 0 | 7414 | 256 |  |
-| ledctl, its planes | fill | 1044/1044 | 0 | 16/6 | 842 | 0 | 7414 | 260 | 0 (0) |
-| ledctl, GND poured | tracks | 1044/1044 | 0 | 16/6 | 842 | 0 | 7414 | 255 |  |
-| ledctl, GND poured | fill | 1098/1098 | 0 | 5/5 | 782 | 5 | 7754 | 647 | 192 (133) |
+| `area_halves` | fill | 69/69 | 0 | 0/0 | 6 | 0 | 468 | 17 | 10 (27) |
+| ledctl, its planes | tracks | 1042/1044 | 0 | 26/11 | 934 | 0 | 7366 | 363 |  |
+| ledctl, its planes | fill | 1042/1044 | 0 | 26/11 | 934 | 0 | 7366 | 368 | 0 (0) |
+| ledctl, GND poured | tracks | 1042/1044 | 0 | 26/11 | 934 | 0 | 7366 | 369 |  |
+| ledctl, GND poured | fill | 1098/1098 | 0 | 3/3 | 945 | 8 | 8194 | 335 | 130 (56) |
+
+In short, on the ten: `fill` lays 9 % less track and 6 % fewer vias than `tracks`, joins as
+much (one connection of `fine_pitch_mixed` is lost to a short the last check takes out) and
+takes 77 % more CPU time. The table of 2026-11-11 (commit 980246a) had 1047 vias for `tracks`
+and 815 for `fill`: since then the routes of `tracks` got better by more vias than those of
+`fill`.
 
 What the table does not show:
 
-- The two open pads are `J1.16` and `J2.16` of `matching` on seed 1: pads with a thermal
-  relief whose spokes end in no fill on the finished copper. The search had them joined; the
-  last check counts them open (24 of 26) and names them.
+- The two open connections of the LED controller with `tracks` are `BUCK_PG from R116.2` on
+  the seeds 1 and 3: the small search of the suite settings leaves it open, the default
+  settings of a route join it on every seed.
+- On more seeds `fill` has open pads on `diff_pairs`: 3 on seed 4 and 2 on seed 7 (seeds 4 to
+  7 measured on `fine_pitch_mixed`, `diff_pairs`, `bus` and `parts_hard`). GND has four pads
+  there, the fill lies in 38 pieces, and the pads at the ends of the connectors have every
+  spoke of their thermal relief cut and find no way to the piece that counts as the area. The
+  step that lays open connections again on the finished copper does not help them.
+- The three bullets below are of 2026-11-11 (commit 980246a) and were not measured again.
+  At that commit the two open pads of the table were `J1.16` and `J2.16` of `matching` on
+  seed 1 (pads with a thermal relief whose spokes end in no fill on the finished copper);
+  `matching` joins everything now.
 - A second run of the 42 lines with `fill` gave the same 42 lines.
 - Without the vias for islands (`--fill-args=--no-area-stitch`, the ten boards): 18 open pads
   in 12 groups on 13 of the 30 runs, 877 vias, 19291 mm. Looked at on `parts_hard`: the
