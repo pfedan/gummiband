@@ -2307,7 +2307,16 @@ mod tests {
         args["path"] = serde_json::json!(pcb.display().to_string());
         let p: GroundPourIn = serde_json::from_value(args).unwrap();
         let (path, out) = ground_pour(&p).unwrap();
-        (std::fs::read_to_string(path).unwrap(), out)
+        (one_line(&std::fs::read_to_string(path).unwrap()), out)
+    }
+
+    /// The text of a board on one line, one space between tokens and none before a closing
+    /// parenthesis: where kicad-cli is found, ground_pour fills the zones with it, and KiCad
+    /// writes them in its own layout (one item per line), elsewhere they stay as Gummiband writes
+    /// them. The tests look for the same pieces in both.
+    fn one_line(text: &str) -> String {
+        let s = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        s.replace(" )", ")")
     }
 
     fn pour_err(args: serde_json::Value) -> String {
@@ -2448,7 +2457,14 @@ mod tests {
         );
         // the defaults are the fill rules the tool always wrote
         let (text, out) = pour("grid", serde_json::json!({"pitch": 4.0, "edge_pitch": 0}));
-        assert_eq!(text.matches("(connect_pads (clearance 0.2)) (min_thickness 0.2) (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))").count(), 2);
+        for part in [
+            "(connect_pads (clearance 0.2))",
+            "(min_thickness 0.2)",
+            "(thermal_gap 0.3)",
+            "(thermal_bridge_width 0.3)",
+        ] {
+            assert_eq!(text.matches(part).count(), 2, "{part}");
+        }
         // a pitch without stitch: the grid and the islands
         let g = &out.nets[0];
         assert!(

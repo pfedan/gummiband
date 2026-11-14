@@ -112,10 +112,36 @@ pub fn strip_ranges(kb: &KicadBoard, opts: &StripOptions) -> Vec<Range<usize>> {
     out
 }
 
-/// New file text: original minus `remove`, plus `items` before the closing parenthesis.
+/// Byte ranges of the fills (`filled_polygon`, `fill_segments`) of the board's own zones. A fill
+/// is KiCad's copper as it was when the zones were last filled: once tracks, vias or parts
+/// change it no longer fits the board, and KiCad does not only show it, it also gives a free via
+/// inside a stale fill of another net that net when it loads the file. Gummiband's readers use a
+/// zone's outline where it has no fill, so a written board carries none; KiCad fills the zones
+/// again (the DRC with `--refill-zones`, or `B` in the editor).
+pub fn fill_ranges(kb: &KicadBoard) -> Vec<Range<usize>> {
+    kb.root
+        .args()
+        .iter()
+        .filter(|n| n.head() == Some("zone"))
+        .flat_map(|z| z.args().iter())
+        .filter(|c| matches!(c.head(), Some("filled_polygon") | Some("fill_segments")))
+        .map(|c| c.span())
+        .collect()
+}
+
+/// New file text: original minus `remove`, plus `items` before the closing parenthesis. When
+/// anything changes, the zone fills go too ([`fill_ranges`]).
 pub fn patch(kb: &KicadBoard, remove: &[Range<usize>], items: &[Item]) -> String {
+    patch_fills(kb, remove, items, !remove.is_empty() || !items.is_empty())
+}
+
+/// [`patch`] that drops the zone fills when `drop_fills` says so.
+fn patch_fills(kb: &KicadBoard, remove: &[Range<usize>], items: &[Item], drop_fills: bool) -> String {
     let text = &kb.text;
     let mut ranges: Vec<Range<usize>> = remove.to_vec();
+    if drop_fills {
+        ranges.extend(fill_ranges(kb));
+    }
     ranges.sort_by_key(|r| r.start);
     let mut out = String::with_capacity(text.len() + items.len() * 200);
     let mut pos = 0;
@@ -496,8 +522,9 @@ pub fn add_locked(kb: &KicadBoard, items: &[Item]) -> String {
 /// [`strip_ranges`]).
 pub fn add_locked_removing(kb: &KicadBoard, remove: &[Range<usize>], items: &[Item]) -> String {
     // patch writes the kept text, a line break, the new items and the closing paren
-    let start = patch(kb, remove, &[]).len() - ")\n".len();
-    let text = patch(kb, remove, items);
+    let drop_fills = !remove.is_empty() || !items.is_empty();
+    let start = patch_fills(kb, remove, &[], drop_fills).len() - ")\n".len();
+    let text = patch_fills(kb, remove, items, drop_fills);
     if items.is_empty() {
         return text;
     }
@@ -958,6 +985,37 @@ mod tests {
     #[test]
     fn an_unknown_reference_is_an_error() {
         assert!(place_footprint(BOARD, "R2", 0.0, 0.0, None).is_err());
+    }
+
+    /// A written board carries no zone fills: the fill of the file fitted the old copper. KiCad
+    /// gave a free via inside a stale GND fill the net GND when it loaded the file (Duo board,
+    /// via field of +5V_A at L1). A board that does not change keeps its fill.
+    #[test]
+    fn a_changed_board_drops_the_zone_fills() {
+        let text = r#"(kicad_pcb (version 20240108) (generator "test")
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" power) (31 "B.Cu" signal))
+  (net 0 "") (net 1 "A") (net 2 "GND")
+  (footprint "R" (at 10 20) (property "Reference" "R1" (at 0 0 0))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "A"))
+    (pad "2" smd rect (at 2 0) (size 1 1) (layers "F.Cu") (net 2 "GND")))
+  (zone (net 2) (net_name "GND") (layer "In1.Cu") (uuid "z")
+    (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))
+    (filled_polygon (layer "In1.Cu") (pts (xy 0.3 0.3) (xy 19.7 0.3) (xy 19.7 19.7) (xy 0.3 19.7))))
+)"#;
+        let kb = crate::read::parse_board(text.to_string(), None, &crate::read::ReadOptions::default()).unwrap();
+        assert!(patch(&kb, &[], &[]).contains("filled_polygon"));
+        let net = kb.board.net_id("A").unwrap();
+        let via = Item::Via {
+            at: gummiband_core::geom::pt(5.0, 5.0),
+            diameter: 0.6,
+            drill: 0.3,
+            net,
+        };
+        for out in [patch(&kb, &[], std::slice::from_ref(&via)), add_locked(&kb, std::slice::from_ref(&via))] {
+            assert!(!out.contains("filled_polygon"), "{out}");
+            assert!(out.contains("(polygon (pts (xy 0 0)"));
+            assert!(out.contains("(at 5 5)"), "{out}");
+        }
     }
 
     /// A track of no length (in the open end one can end up on a via, both ends on it) is left
