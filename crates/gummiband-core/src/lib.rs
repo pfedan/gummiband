@@ -945,7 +945,7 @@ fn place_and_route(
     base: &RouterConfig,
     search: &SearchConfig,
 ) -> (Substrate, RouteResult) {
-    let score = |b: &Board, r: &RouteResult| -> (usize, f64, Vec<geom::Point>) {
+    let score = |b: &Board, r: &RouteResult| -> (usize, f64, Vec<geom::Point>, usize) {
         // on the pads as the last steps of the search saw them (`exit::release_unused`)
         let free = exit::release_unused(b, &r.geometry);
         let v = check::check(free.as_ref().unwrap_or(b), &r.geometry);
@@ -955,7 +955,10 @@ fn place_and_route(
         // where the parts around may step aside to let a track out
         let mut hot: Vec<geom::Point> = v.iter().map(|x| x.at).collect();
         hot.extend(open_pins(b, &r.stats.unrouted));
-        (r.stats.routed, cost, hot)
+        // the problems a new search would have to solve: one squeezed place is one problem,
+        // however many pieces of copper the check names there
+        let problems = check::spots(&v).len() + r.stats.unrouted.len();
+        (r.stats.routed, cost, hot, problems)
     };
     let (sub, res) = route_search(board, sub_cfg, base, search);
     if board.movable.is_empty() || search.geometry_generations == 0 {
@@ -1035,7 +1038,7 @@ fn place_and_route(
         // a full new search pays off only for a handful of local problems, and only on boards
         // where a search is not expensive; otherwise the fast path above is all there is.
         // By board size and not by the clock: the result must not depend on the machine.
-        if hot.len() > 20 || best.1.stats.conns > 400 || search.stopped() {
+        if best_score.3 > 20 || best.1.stats.conns > 400 || search.stopped() {
             continue;
         }
         let moved = board.with_offsets(&next);
