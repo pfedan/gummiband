@@ -343,7 +343,9 @@ and that route is the result: on seed 2 with one connection less open, on seed 3
 open and fewer violating pieces (24 against 30). KiCad counts no unconnected item in any of
 the six, because the pour that is laid for the judgement joins the GND pad that the router
 counts open. On seed 1 the fill joins everything with 10 % less track; its 13 hole clearance
-violations are not looked into yet. On 2026-11-13 (fe3f157, before the relaxation came to
+violations are one spot: a GND track that the second pass laid presses a track of `D+` to
+0.16 mm from a mounting hole where 0.25 mm are asked, and KiCad counts every short piece of
+that track. The own check has the spot among its 15. On 2026-11-13 (fe3f157, before the relaxation came to
 rest and before the second route) `tracks` had 68, 7 and 61 clearance violations on these
 seeds and `fill` 33 on each, with two groups of pads open.
 
