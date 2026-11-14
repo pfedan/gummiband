@@ -218,75 +218,81 @@ price at the pads of the area nets.
 `--modes fill` routes one mode only. Write `--args=...` and `--fill-args=...` with the equals
 sign: their values begin with a dash.
 
-Measured without KiCad (2026-11-11, the last check counting by fill, the settings of the
-suite: `--runs 4 --generations 1 --geometry-generations 1 --no-move-parts`). Every number is
-the sum of the seeds 1, 2 and 3; `open pads` is the router's own model, not KiCad. The lines of
-`fill` are those of commit 980246a and have **not been measured again** since the fill model
-follows KiCad and since the last check tells the cells of the area right (the two commits
-after it): the lines of `tracks` cannot change, those of `fill` can. On `area_strips` the
-route now sets two vias for islands, not three.
+Measured without KiCad (2026-11-14, `claude/geometry` at ffe257d with the second route of
+`areas fill`, the settings of the suite: `--runs 4 --generations 1 --geometry-generations 1
+--no-move-parts`). Every number is the sum of the seeds 1 to 7; `open pads` is the router's own
+model, not KiCad. The last column counts the runs of `fill` that left a connection open and
+were routed a second time with every net as tracks, and in brackets how many of them kept that
+second route; the numbers of such a run are those of its result, its CPU time is that of both
+routes.
 
-| board | mode | routed | open pads | pieces/spots | vias | of them island vias | mm | cpu s | model s (runs) |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `bus` | tracks | 66/66 | 0 | 0/0 | 86 | 0 | 2174 | 24 |  |
-| `bus` | fill | 66/66 | 0 | 0/0 | 44 | 6 | 1944 | 40 | 6 (27) |
-| `diff_pairs` | tracks | 93/93 | 0 | 0/0 | 158 | 0 | 3183 | 66 |  |
-| `diff_pairs` | fill | 93/93 | 0 | 0/0 | 108 | 6 | 2961 | 74 | 5 (27) |
-| `fine_pitch` | tracks | 336/336 | 0 | 0/0 | 6 | 0 | 2388 | 20 |  |
-| `fine_pitch` | fill | 336/336 | 0 | 0/0 | 6 | 6 | 2010 | 32 | 5 (24) |
-| `fine_pitch_mixed` | tracks | 336/336 | 0 | 27/9 | 420 | 0 | 4551 | 339 |  |
-| `fine_pitch_mixed` | fill | 336/336 | 0 | 6/6 | 408 | 0 | 4278 | 477 | 32 (153) |
-| `matching` | tracks | 78/78 | 0 | 0/0 | 54 | 0 | 1833 | 168 |  |
-| `matching` | fill | 76/78 | 2 | 0/0 | 12 | 6 | 1651 | 195 | 5 (30) |
-| `medium` | tracks | 114/114 | 0 | 0/0 | 36 | 0 | 1347 | 7 |  |
-| `medium` | fill | 114/114 | 0 | 0/0 | 42 | 6 | 1137 | 14 | 4 (27) |
-| `parts_easy` | tracks | 66/66 | 0 | 0/0 | 15 | 0 | 456 | 2 |  |
-| `parts_easy` | fill | 66/66 | 0 | 0/0 | 3 | 0 | 396 | 8 | 3 (27) |
-| `parts_hard` | tracks | 225/225 | 0 | 0/0 | 195 | 0 | 3191 | 20 |  |
-| `parts_hard` | fill | 225/225 | 0 | 0/0 | 150 | 12 | 2751 | 38 | 7 (27) |
-| `parts_medium` | tracks | 129/129 | 0 | 0/0 | 60 | 0 | 1568 | 8 |  |
-| `parts_medium` | fill | 129/129 | 0 | 0/0 | 27 | 0 | 1584 | 20 | 10 (27) |
-| `power_mix` | tracks | 57/57 | 0 | 0/0 | 17 | 0 | 960 | 7 |  |
-| `power_mix` | fill | 57/57 | 0 | 0/0 | 15 | 0 | 657 | 12 | 5 (27) |
-| **the ten** | tracks | 1500/1500 | 0 | 27/9 | 1047 | 0 | 21651 | 661 |  |
-| **the ten** | fill | 1498/1500 | 2 | 6/6 | 815 | 42 | 19369 | 912 | 82 (396) |
-| `area_strips` | tracks | 27/27 | 0 | 0/0 | 0 | 0 | 189 | 1 |  |
-| `area_strips` | fill | 27/27 | 0 | 0/0 | 0 | 0 | 0 | 3 | 2 (24) |
-| `area_far` | tracks | 60/60 | 0 | 0/0 | 0 | 0 | 654 | 3 |  |
-| `area_far` | fill | 60/60 | 0 | 0/0 | 6 | 0 | 549 | 7 | 2 (27) |
-| `area_split` | tracks | 51/51 | 0 | 0/0 | 30 | 0 | 405 | 2 |  |
-| `area_split` | fill | 51/51 | 0 | 0/0 | 30 | 0 | 405 | 2 | 0 (0) |
-| `area_halves` | tracks | 69/69 | 0 | 0/0 | 3 | 0 | 678 | 3 |  |
-| `area_halves` | fill | 69/69 | 0 | 0/0 | 6 | 0 | 468 | 17 | 8 (27) |
-| ledctl, its planes | tracks | 1044/1044 | 0 | 16/6 | 842 | 0 | 7414 | 256 |  |
-| ledctl, its planes | fill | 1044/1044 | 0 | 16/6 | 842 | 0 | 7414 | 260 | 0 (0) |
-| ledctl, GND poured | tracks | 1044/1044 | 0 | 16/6 | 842 | 0 | 7414 | 255 |  |
-| ledctl, GND poured | fill | 1098/1098 | 0 | 5/5 | 782 | 5 | 7754 | 647 | 192 (133) |
+| board | mode | routed | open pads | pieces/spots | vias | of them island vias | mm | cpu s | model s (runs) | routed again (tracks kept) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `bus` | tracks | 154/154 | 0 | 0/0 | 192 | 0 | 4538 | 90 |  |  |
+| `bus` | fill | 154/154 | 0 | 0/0 | 114 | 18 | 4407 | 89 | 18 (63) | 0 |
+| `diff_pairs` | tracks | 217/217 | 0 | 0/0 | 206 | 0 | 6827 | 109 |  |  |
+| `diff_pairs` | fill | 217/217 | 0 | 0/0 | 237 | 7 | 6832 | 292 | 42 (119) | 3 (3) |
+| `fine_pitch` | tracks | 784/784 | 0 | 0/0 | 14 | 0 | 5376 | 42 |  |  |
+| `fine_pitch` | fill | 784/784 | 0 | 0/0 | 14 | 14 | 4500 | 66 | 21 (56) | 0 |
+| `fine_pitch_mixed` | tracks | 784/784 | 0 | 5/2 | 980 | 0 | 10937 | 914 |  |  |
+| `fine_pitch_mixed` | fill | 784/784 | 0 | 0/0 | 908 | 0 | 9649 | 1326 | 107 (410) | 0 |
+| `matching` | tracks | 182/182 | 0 | 0/0 | 226 | 0 | 4196 | 152 |  |  |
+| `matching` | fill | 182/182 | 0 | 0/0 | 58 | 20 | 3761 | 246 | 12 (63) | 0 |
+| `medium` | tracks | 266/266 | 0 | 0/0 | 84 | 0 | 3143 | 18 |  |  |
+| `medium` | fill | 266/266 | 0 | 0/0 | 98 | 14 | 2652 | 35 | 9 (63) | 0 |
+| `parts_easy` | tracks | 154/154 | 0 | 0/0 | 33 | 0 | 1055 | 6 |  |  |
+| `parts_easy` | fill | 154/154 | 0 | 0/0 | 7 | 0 | 917 | 22 | 9 (63) | 0 |
+| `parts_hard` | tracks | 525/525 | 0 | 0/0 | 388 | 0 | 7536 | 50 |  |  |
+| `parts_hard` | fill | 525/525 | 0 | 0/0 | 371 | 41 | 6542 | 105 | 19 (63) | 0 |
+| `parts_medium` | tracks | 301/301 | 0 | 0/0 | 138 | 0 | 3603 | 23 |  |  |
+| `parts_medium` | fill | 301/301 | 0 | 0/0 | 63 | 0 | 3640 | 52 | 13 (63) | 0 |
+| `power_mix` | tracks | 133/133 | 0 | 0/0 | 41 | 0 | 2228 | 18 |  |  |
+| `power_mix` | fill | 133/133 | 0 | 0/0 | 35 | 0 | 1533 | 32 | 12 (63) | 0 |
+| **the ten** | tracks | 3500/3500 | 0 | 5/2 | 2302 | 0 | 49439 | 1423 |  |  |
+| **the ten** | fill | 3500/3500 | 0 | 0/0 | 1905 | 114 | 44433 | 2264 | 262 (1026) | 3 (3) |
+| `area_strips` | tracks | 63/63 | 0 | 0/0 | 0 | 0 | 441 | 2 |  |  |
+| `area_strips` | fill | 63/63 | 0 | 0/0 | 0 | 0 | 0 | 9 | 4 (56) | 0 |
+| `area_far` | tracks | 140/140 | 0 | 0/0 | 0 | 0 | 1526 | 8 |  |  |
+| `area_far` | fill | 140/140 | 0 | 0/0 | 14 | 0 | 1281 | 19 | 6 (63) | 0 |
+| `area_split` | tracks | 119/119 | 0 | 0/0 | 84 | 0 | 931 | 6 |  |  |
+| `area_split` | fill | 119/119 | 0 | 0/0 | 84 | 0 | 931 | 6 | 0 (0) | 0 |
+| `area_halves` | tracks | 161/161 | 0 | 0/0 | 7 | 0 | 1582 | 8 |  |  |
+| `area_halves` | fill | 161/161 | 0 | 0/0 | 14 | 0 | 1092 | 44 | 21 (63) | 0 |
+| ledctl, its planes | tracks | 2430/2436 | 0 | 25/16 | 2020 | 0 | 17156 | 957 |  |  |
+| ledctl, its planes | fill | 2430/2436 | 0 | 25/16 | 2020 | 0 | 17156 | 957 | 0 (0) | 0 |
+| ledctl, GND poured | tracks | 2430/2436 | 0 | 25/16 | 2020 | 0 | 17156 | 957 |  |  |
+| ledctl, GND poured | fill | 2562/2562 | 0 | 9/9 | 2153 | 18 | 18837 | 823 | 197 (145) | 0 |
+
+In short, on the ten: `fill` never ends with fewer connections than `tracks` (that is the rule
+of the second route, and it holds on each of the 98 runs), lays 10 % less track and 17 % fewer
+vias, has no violating piece against 5, and takes 59 % more CPU time. On the LED controller
+with GND poured `fill` joins everything on every seed, where `tracks` leaves one connection
+open on six of the seven.
 
 What the table does not show:
 
-- The two open pads are `J1.16` and `J2.16` of `matching` on seed 1: pads with a thermal
-  relief whose spokes end in no fill on the finished copper. The search had them joined; the
-  last check counts them open (24 of 26) and names them.
-- A second run of the 42 lines with `fill` gave the same 42 lines.
-- Without the vias for islands (`--fill-args=--no-area-stitch`, the ten boards): 18 open pads
-  in 12 groups on 13 of the 30 runs, 877 vias, 19291 mm. Looked at on `parts_hard`: the
-  search ended the track of `C2.2` in a piece of fill that hung on the area then and is an
-  island on the finished copper; the last check takes such a track back. The via for an
-  island is set on the finished copper and does not depend on what the search saw. This
-  reading is in doubt since: the last check could also take a track back because it did not
-  know the cells of the area (see `area_island`), which gives the same picture. Not measured
-  again after that repair.
-- Without the price at the pads (`GB_AREA_ESCAPE=0`, the ten boards): 13 open pads on 3 of the
-  30 runs (`fine_pitch_mixed` 12, `diff_pairs` 1), 110 violating pieces at 24 spots against 6
-  at 6, 780 vias, 19022 mm.
-- The LED controller as it is has its planes on inner layers and no area on a routed layer:
-  the files of `tracks` and `fill` are the same byte for byte. With GND poured on the outer
-  layers as well (`ledctl.kicad_pcb=GND`) the route with `fill` counts 366 connections against
-  348, because every group of pads of an area net counts and not only the pads that need a
-  way to the plane.
+- The second route ran on 3 of the 98 runs of `fill`: `diff_pairs` on the seeds 1, 4 and 6 (3,
+  2 and 1 connections of GND open with the fill: GND has four pads there, the fill lies in
+  some 38 pieces, and the pads at the ends of the connectors have every spoke of their thermal
+  relief cut). All three kept the route with the tracks, which is the line of `tracks` of that
+  seed. With `GB_NO_AREA_FALLBACK=1` the fill alone is measured.
+- Before the relaxation came to rest (5d63666, the same seeds) `tracks` had 139 violating
+  pieces on the ten and `fill` 29, the second route ran on 4 runs (`diff_pairs` twice,
+  `fine_pitch_mixed` twice for connections of other nets), and all four kept the tracks.
+- The open connections of the LED controller with `tracks` are one per seed on six of the
+  seven: the small search of the suite settings leaves it open, the default settings of a
+  route join it on every seed tried. The LED controller as it is has its planes on inner
+  layers and no area on a routed layer: the files of `tracks` and `fill` are the same byte for
+  byte, and its line of `fill` is that of `tracks`. With GND poured on the outer layers as
+  well (`ledctl.kicad_pcb=GND`) the route with `fill` counts 366 connections against 348,
+  because every group of pads of an area net counts and not only the pads that need a way to
+  the plane.
 - `model s` is wall time summed over the threads of the search. The machine was shared with
   another job, so it is an upper bound on the CPU time of the model.
+- Measured on 2026-11-11 (commit 980246a, the ten boards, seeds 1 to 3) and not again: without
+  the vias for islands (`--fill-args=--no-area-stitch`) 18 open pads in 12 groups on 13 of the
+  30 runs; without the price at the pads (`GB_AREA_ESCAPE=0`) 13 open pads on 3 of the 30 runs
+  and 110 violating pieces against 6.
 
 **With KiCad** (`kicad-cli` of KiCad 9 or 10 on the PATH), `--kicad` lays the pour on every
 result (the example `pour_stitch`: the zones, and one via per island that still has none), lets
@@ -319,10 +325,30 @@ worse than its line of `tracks`. With `--keep` the boards KiCad judged are
 those two files for a pad that KiCad's DRC calls unconnected and the column `open pads` does
 not count.
 
-On the Corne with KiCad 10 (2026-11-11, before the two repairs named above) `fill` had more
-clearance violations than `tracks` on every seed (573 against 439 over the seeds 1 to 3), most
-of them at the two QFNs. Whether the price at the pads of the area nets pushes the signals
-aside there is measured with the same seeds and the price off:
+On the Corne with KiCad 10 (2026-11-14, `claude/geometry` at ffe257d with the second route,
+the default settings of a route, measured on another machine):
+
+| seed | mode | routed | KiCad clearance | hole clearance | unconnected | pieces/spots | vias | mm | cpu s |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | tracks | 480/480 | 7 | 0 | 0 | 31/11 | 320 | 8583 | 2461 |
+| 1 | fill | 480/480 | 5 | 13 | 0 | 48/15 | 346 | 7711 | 3031 |
+| 2 | tracks | 480/480 | 7 | 0 | 0 | 32/13 | 332 | 8539 | 2161 |
+| 2 | fill, routed again | 480/480 | 7 | 0 | 0 | 32/13 | 332 | 8539 | 5206 |
+| 3 | tracks | 479/480 | 8 | 0 | 0 | 24/14 | 353 | 8763 | 1895 |
+| 3 | fill, routed again | 479/480 | 8 | 0 | 0 | 24/14 | 353 | 8763 | 4795 |
+
+On the seeds 2 and 3 the fill left `GND from C4.2` open (a pad under the microcontroller on an
+island of fill with no fill above it), the board was routed again with every net as tracks,
+and that route is the result: on seed 2 with one connection less open, on seed 3 with as many
+open and fewer violating pieces (24 against 30). KiCad counts no unconnected item in any of
+the six, because the pour that is laid for the judgement joins the GND pad that the router
+counts open. On seed 1 the fill joins everything with 10 % less track; its 13 hole clearance
+violations are not looked into yet. On 2026-11-13 (fe3f157, before the relaxation came to
+rest and before the second route) `tracks` had 68, 7 and 61 clearance violations on these
+seeds and `fill` 33 on each, with two groups of pads open.
+
+Whether the price at the pads of the area nets costs clearance on such a board is measured
+with the same seeds and the price off:
 
 ```sh
 bench/areas-route.py --kicad --keep --modes fill --args="" bench/work/ext/corne/corne.kicad_pcb=GND
