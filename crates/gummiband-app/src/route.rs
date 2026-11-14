@@ -802,6 +802,9 @@ pub enum Event<'a> {
     PlacementKept { seed: u64 },
     /// `move_parts`: so many parts may move.
     MovableParts { count: usize },
+    /// `areas` fill: the route left so many connections open, and the board is routed a second
+    /// time with every net as tracks ([`AreaFallback`]).
+    RoutedAgain { open: usize },
 }
 
 /// Room made for the meanders of the length tuning.
@@ -884,6 +887,10 @@ pub struct Routed {
     /// With `areas` fill: what was laid again at the end because the last check found it open.
     /// None: nothing was open, or the step did not run.
     pub area_repair: Option<AreaRepair>,
+    /// With `areas` fill: the second route, with every net as tracks, of a board whose route
+    /// with the fill left a connection open ([`area_fallback`]). None: nothing was open, or
+    /// the step did not run.
+    pub area_fallback: Option<AreaFallback>,
     /// Seconds the fill model took inside the search, summed over the threads of the search,
     /// and how often it ran.
     pub area_model_seconds: f64,
@@ -924,6 +931,45 @@ impl AreaRepair {
     }
 }
 
+/// The second route of `areas` fill ([`area_fallback`]).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AreaFallback {
+    /// The connections that were open with the fill, as `"NET from PIN"`.
+    pub open: Vec<String>,
+    /// Connections open and clearance violations of the route with the fill.
+    pub fill: (usize, usize),
+    /// The same of the route with every net as tracks.
+    pub tracks: (usize, usize),
+    /// Whether the route with the tracks is the result: it is, when fewer connections are open
+    /// with it, or as many with fewer clearance violations.
+    pub kept: bool,
+    /// Seconds of the second route.
+    pub seconds: f64,
+}
+
+impl AreaFallback {
+    /// The step in one sentence, for the report of a route.
+    pub fn line(&self) -> String {
+        let n = self.open.len();
+        let side = |(open, violations): (usize, usize)| format!("{open} open, {violations} clearance violations");
+        let shown: Vec<&str> = self.open.iter().take(8).map(String::as_str).collect();
+        format!(
+            "with the nets left to their fill {n} connection{} stayed open ({}{}), so the board was routed again with every net as tracks: {} against {} with the fill; the result is the route {}",
+            if n == 1 { "" } else { "s" },
+            shown.join(", "),
+            if n > shown.len() { ", ..." } else { "" },
+            side(self.tracks),
+            side(self.fill),
+            if self.kept { "with the tracks" } else { "with the fill" },
+        )
+    }
+}
+
+/// Whether `open`, an entry of the open connections (`"NET from PIN"`), is one of `net`.
+fn open_of(open: &str, net: &str) -> bool {
+    open.strip_prefix(net).is_some_and(|rest| rest.starts_with(" from "))
+}
+
 /// What of the options the writer needs.
 #[derive(Debug, Clone)]
 struct WriteOptions {
@@ -946,7 +992,59 @@ pub fn route_board(board: &Board, opts: &RouteOptions, hooks: &Hooks) -> Result<
 }
 
 fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) -> Result<Routed> {
-    route_with(t0, board, opts, hooks, true)
+    let first = route_with(t0, board, opts, hooks, true)?;
+    area_fallback(t0, board, opts, hooks, first)
+}
+
+/// `areas` fill never ends with fewer connections than `areas` tracks.
+///
+/// With the fill a pad can end that neither the fill nor a track to the fill reaches: the fill
+/// around it is an island, or the pad lies shut in by the tracks of others. And the other nets
+/// are laid on a board that differs from the one they would have had. As tracks every net
+/// joins its pads one to the next and needs no fill near them. So where `first`, the route
+/// with the fill, leaves any connection open, the board is routed a second time as `areas`
+/// tracks does it (the areas stay areas of the board), and the better of the two is the
+/// result: fewer connections open, or as many with fewer clearance violations. A tie keeps
+/// the fill.
+///
+/// The rule is the same for every board and every net and knows no thresholds. Its price is
+/// the time of the second route, paid only where the fill left something open.
+fn area_fallback(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks, mut first: Routed) -> Result<Routed> {
+    use std::sync::atomic::Ordering;
+    let filled = board.areas.as_ref().is_some_and(|p| !p.nets.is_empty());
+    let open = first.res.stats.unrouted.clone();
+    if !filled
+        || open.is_empty()
+        || gummiband_core::knobs::NO_AREA_FALLBACK.on()
+        || hooks.stop.is_some_and(|s| s.load(Ordering::Relaxed))
+    {
+        return Ok(first);
+    }
+    hooks.emit(Event::RoutedAgain { open: open.len() });
+    let t1 = Instant::now();
+    let mut as_tracks = board.clone();
+    as_tracks.areas = None;
+    let mut second = route_with(t1, &as_tracks, opts, hooks, true)?;
+    let worth = |r: &Routed| (r.res.stats.unrouted.len(), r.violations.len());
+    let kept = worth(&second) < worth(&first);
+    let report = AreaFallback {
+        open,
+        fill: worth(&first),
+        tracks: worth(&second),
+        kept,
+        seconds: t1.elapsed().as_secs_f64(),
+    };
+    let seconds = t0.elapsed().as_secs_f64();
+    if kept {
+        // the time of the search is the time of both
+        second.search_seconds += first.search_seconds;
+        second.area_model_seconds += first.area_model_seconds;
+        second.area_model_runs += first.area_model_runs;
+        first = second;
+    }
+    first.seconds = seconds;
+    first.area_fallback = Some(report);
+    Ok(first)
 }
 
 /// [`route_from`]; with `repair` the connections of the nets left to their fill that the last
@@ -1177,6 +1275,7 @@ fn route_with(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks, re
         areas,
         area_vias,
         area_repair,
+        area_fallback: None,
         area_model_seconds: (prof::value(prof::Slot::AreaModel) - model_before.0) as f64 * 1e-9,
         area_model_runs: prof::value(prof::Slot::AreaModels) - model_before.1,
         write: WriteOptions {
@@ -1214,12 +1313,7 @@ fn repair_areas(
     if gummiband_core::knobs::NO_AREA_REPAIR.on() || hooks.stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
         return None;
     }
-    let of_nets = |u: &String, nets: &[String]| {
-        nets.iter().any(|n| {
-            u.strip_prefix(n.as_str())
-                .is_some_and(|rest| rest.starts_with(" from "))
-        })
-    };
+    let of_nets = |u: &String, nets: &[String]| nets.iter().any(|n| open_of(u, n));
     let all: Vec<String> = plan.nets.iter().map(|&n| b.nets[n as usize].name.clone()).collect();
     let open: Vec<String> = res
         .stats
@@ -2008,5 +2102,61 @@ mod tests {
         assert_eq!(report.reached, report.pads, "{}", report.summary);
         // with nothing open the step does not run
         assert!(repair_areas(&b, &mut routed.res, &mut legal, &mut vias, &opts, &Hooks::default()).is_none());
+    }
+
+    /// A route with `areas fill` that ends with a connection of an area net open: here as if
+    /// the fill of VBUS had left one. The board is routed again with every net as tracks, that
+    /// route joins everything, and it is the result.
+    #[test]
+    fn a_net_whose_fill_leaves_a_connection_open_is_laid_as_tracks() {
+        let board =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/boards/areas/area_far.kicad_pcb");
+        let dir = std::env::temp_dir().join(format!("gummiband-app-area-fallback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let opts = RouteOptions {
+            runs: Some(4),
+            generations: Some(1),
+            geometry_generations: Some(1),
+            move_parts: Some(false),
+            areas: Areas::Fill,
+            ..Default::default()
+        };
+        let out = route_file(&board, &dir.join("out.kicad_pcb"), &opts, &Hooks::default()).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let b = &out.kb.board;
+        let vbus = b.net_id("VBUS").unwrap();
+        assert!(b.areas.as_ref().unwrap().holds(vbus));
+        // the fill joined everything, so the board was routed once
+        let mut first = out.routed;
+        assert!(first.res.stats.unrouted.is_empty());
+        assert!(first.area_fallback.is_none());
+        let length = |r: &Routed, net| -> f64 {
+            let of_net = r.res.geometry.tracks.iter().filter(|t| t.net == net);
+            of_net
+                .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
+                .sum()
+        };
+        let with_fill = length(&first, vbus);
+        let pin = &b.pins[b.nets[vbus as usize].pins[0]].name;
+        first.res.stats.unrouted.push(format!("VBUS from {pin}"));
+        let r = area_fallback(Instant::now(), b, &opts, &Hooks::default(), first).unwrap();
+        let rep = r.area_fallback.as_ref().unwrap();
+        assert_eq!(rep.open, [format!("VBUS from {pin}")]);
+        assert_eq!((rep.fill.0, rep.tracks.0), (1, 0), "{}", rep.line());
+        assert!(rep.kept, "{}", rep.line());
+        assert!(
+            rep.line().ends_with("the result is the route with the tracks"),
+            "{}",
+            rep.line()
+        );
+        // the result is the second route: VBUS as tracks from pad to pad
+        assert!(r.res.stats.unrouted.is_empty(), "{:?}", r.res.stats.unrouted);
+        assert!(r.board.areas.is_none());
+        assert!(
+            length(&r, vbus) > with_fill + 1.0,
+            "{} against {with_fill}",
+            length(&r, vbus)
+        );
+        assert!(r.areas.is_empty());
     }
 }

@@ -195,7 +195,7 @@ pub const OPTIONS: &[OptionDoc] = &[
             ),
             word(
                 "fill",
-                "Such a net is not laid as tracks: the fill connects it, only what the fill does not reach gets copper of its own, and the report says which pads stay open.",
+                "Such a net is not laid as tracks: the fill connects it, only what the fill does not reach gets copper of its own, and the report says which pads stay open. Where the route leaves a connection open, the board is routed a second time as with tracks and the better of the two is the result.",
             ),
         ],
     ),

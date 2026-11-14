@@ -1490,6 +1490,11 @@ pub struct RouteOut {
     /// check on the finished copper found it open. Absent when nothing was open.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub area_repair: Option<String>,
+    /// With areas "fill": one sentence on the second route. Where the route leaves a
+    /// connection open, the board is routed again as areas "tracks" does it, and the better
+    /// of the two routes is the result. Absent when nothing was open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub area_fallback: Option<String>,
     /// Gummiband's own clearance check on the result.
     pub violations_total: usize,
     pub violations_by_kind: BTreeMap<String, usize>,
@@ -3669,6 +3674,7 @@ fn route_blocking(
         skipped_nets: outcome.skipped_nets.clone(),
         area_vias: routed.area_vias,
         area_repair: routed.area_repair.as_ref().map(|a| a.line()),
+        area_fallback: routed.area_fallback.as_ref().map(|a| a.line()),
         areas: routed
             .areas
             .iter()
