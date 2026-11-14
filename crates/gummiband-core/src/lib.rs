@@ -540,7 +540,11 @@ fn evaluate_inner<'a>(
 /// less. Otherwise such a run wins against one that really connects everything, and the
 /// connection is found missing only when nothing can be done about it any more.
 fn count_apart(board: &Board, r: &Router, geo: &Geometry, stats: &mut RunStats) {
-    let mut nets: Vec<board::NetId> = r.conns.iter().map(|c| c.net).collect();
+    count_apart_of(board, r.conns.iter().map(|c| c.net).collect(), geo, stats);
+}
+
+/// [`count_apart`] for the nets given.
+fn count_apart_of(board: &Board, mut nets: Vec<board::NetId>, geo: &Geometry, stats: &mut RunStats) {
     nets.sort_unstable();
     nets.dedup();
     nets.retain(|&n| !board.areas.as_ref().is_some_and(|a| a.holds(n)));
@@ -1308,9 +1312,24 @@ fn search_fixed(
     // relax the finalists of the best completion and keep the cleanest geometry; then, if
     // asked, run generations that select by the clearance violations after the geometry step
     let full_relax = relax::RelaxConfig::default();
+    // A candidate is judged on the board its finishing steps will see: an exit piece that none
+    // of its tracks took is no copper there (`exit::release_unused`). On the board of the search
+    // a track pressed against such a piece counts as a violation that is gone in the end, and
+    // two pads that only their unused pieces join count as connected. Both differ from
+    // candidate to candidate, and a choice by them is a choice by what will not be there.
+    let judge = |c: &mut Candidate, geo: &Geometry| -> Vec<check::Violation> {
+        let free = exit::release_unused(board, geo);
+        let seen = free.as_ref().unwrap_or(board);
+        if free.is_some() {
+            count_apart_of(seen, c.order.iter().map(|o| o.0).collect(), geo, &mut c.stats);
+        }
+        prof::time(prof::Slot::Check, || check::check(seen, geo))
+    };
     let geo_eval_with = |mut c: Candidate, cfg: &relax::RelaxConfig| -> Candidate {
         relax::relax(board, &sub, &mut c.geo, cfg);
-        let v = prof::time(prof::Slot::Check, || check::check(board, &c.geo));
+        let geo = std::mem::take(&mut c.geo);
+        let v = judge(&mut c, &geo);
+        c.geo = geo;
         let mut nets: Vec<NetId> = v.iter().flat_map(|x| [Some(x.nets.0), x.nets.1]).flatten().collect();
         nets.sort_unstable();
         nets.dedup();
@@ -1328,7 +1347,7 @@ fn search_fixed(
         if !relax::relax_while(board, &sub, &mut geo, &full_relax, go_on) {
             return c;
         }
-        let v = prof::time(prof::Slot::Check, || check::check(board, &geo));
+        let v = judge(&mut c, &geo);
         let mut nets: Vec<NetId> = v.iter().flat_map(|x| [Some(x.nets.0), x.nets.1]).flatten().collect();
         nets.sort_unstable();
         nets.dedup();
