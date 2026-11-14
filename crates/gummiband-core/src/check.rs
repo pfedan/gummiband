@@ -673,6 +673,27 @@ impl<'a> Copper<'a> {
             } else {
                 chords
             };
+            // the drill of a via against the copper of another net (KiCad's hole_clearance): more
+            // than the copper clearance asks where the ring is narrow or the rule is wide
+            if let (Piece::Seg { r: sr, .. }, Piece::Via { drill, .. })
+            | (Piece::Via { drill, .. }, Piece::Seg { r: sr, .. }) = (p, q)
+                && *drill > 0.0
+            {
+                let hole = d + reach - sr - drill / 2.0;
+                let gap = board.hole_gap(net).max(board.hole_gap(qnet));
+                if hole < gap + extra - tol && d >= need + extra - tol {
+                    out.push(Violation {
+                        what: format!(
+                            "hole {}~{}",
+                            board.nets[net as usize].name, board.nets[qnet as usize].name
+                        ),
+                        nets: (net, Some(qnet)),
+                        at,
+                        actual: hole,
+                        required: gap,
+                    });
+                }
+            }
             if d < need + extra - tol {
                 out.push(Violation {
                     what: format!(
@@ -1343,6 +1364,28 @@ pub(crate) mod tests {
                 .count(),
             1
         );
+
+        // a track of another net past a via: 0.25 mm of copper between them, 0.45 from the drill;
+        // a board that asks 0.5 mm around holes is not content with that
+        let mut other = line((1.0, 3.025), (9.0, 3.025), 1);
+        other.net = b.nets.len() as NetId;
+        b.nets.push(b.nets[0].clone());
+        b.nets.last_mut().unwrap().pins.clear();
+        let mut by = via(5.0);
+        by.at = pt(5.0, 2.0);
+        let past = Geometry {
+            tracks: vec![other],
+            vias: vec![by],
+        };
+        assert!(
+            check(&b, &past).iter().all(|v| !v.what.starts_with("hole ")),
+            "{:?}",
+            check(&b, &past)
+        );
+        let mut wide = b.clone();
+        wide.rules.hole_clearance = 0.5;
+        let v = check(&wide, &past);
+        assert_eq!(v.iter().filter(|v| v.what.starts_with("hole ")).count(), 1, "{v:?}");
 
         // a track tapered to 0.105 mm under a board minimum of 0.127 mm
         let mut t = line((1.0, 2.0), (9.0, 2.0), 0);
