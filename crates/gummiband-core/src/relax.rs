@@ -72,7 +72,9 @@ const REST: f64 = 0.0002;
 
 /// What damps the swings of the rounds that only resolve clearances (see `relax_while`).
 struct Calm {
-    /// The share of its move a point in this cell takes, and the round that last halved it.
+    /// The share of the step a point in this cell may take, and the rounds that last halved it
+    /// and let it grow. It bounds the move and does not scale it: a push smaller than what is
+    /// left of the step still arrives in full, so nothing stops short of the room it needs.
     cell: Vec<f64>,
     halved: Vec<usize>,
     grown: Vec<usize>,
@@ -81,6 +83,12 @@ struct Calm {
     /// The moves of the round before, while the tracks keep their points.
     last_tracks: Vec<Vec<Point>>,
     last_vias: Vec<Point>,
+}
+
+/// `mv`, no longer than `cap`.
+fn capped(mv: Point, cap: f64) -> Point {
+    let l = mv.len();
+    if l > cap { mv * (cap / l) } else { mv }
 }
 
 impl Calm {
@@ -93,6 +101,7 @@ impl Calm {
     fn round(
         &mut self,
         it: usize,
+        step: f64,
         cells: &CellLists,
         (old_tracks, tracks): (&[Vec<Point>], &mut [Vec<Point>]),
         (old_vias, vias): (&[Point], &mut [Point]),
@@ -123,7 +132,7 @@ impl Calm {
                     self.grown[c] = it;
                     self.cell[c] = (self.cell[c] * Self::GROW).min(1.0);
                 }
-                let mv = mv * self.cell[c];
+                let mv = capped(mv, step * self.cell[c]);
                 *q = *p + mv;
                 *l = mv;
             }
@@ -139,7 +148,7 @@ impl Calm {
             } else if turn > 0.0 {
                 self.via[vi] = (self.via[vi] * Self::GROW).min(1.0);
             }
-            let mv = mv * self.via[vi];
+            let mv = capped(mv, step * self.via[vi]);
             *q = *p + mv;
             self.last_vias[vi] = mv;
         }
@@ -1089,9 +1098,9 @@ pub fn relax_while(
     // Copper that is pushed from two sides with less room than the pushes ask for swings back
     // and forth by a full step, and the last round would freeze one of the two ends of the
     // swing: one neighbour clean, the other short by the whole swing. A point or via that turns
-    // back on its last move takes half the step, so the swing dies down in the middle, where
-    // each side gets its share of the room. The gain of a point lives in its
-    // cell, since the points are laid anew every tenth round.
+    // back on its last move gets half the step, so the swing dies down in the middle, where
+    // each side gets its share of the room. The step of a point lives in its cell, since the
+    // points are laid anew every tenth round.
     let mut calm = Calm {
         cell: vec![1.0; cells.len()],
         halved: vec![usize::MAX; cells.len()],
@@ -1815,7 +1824,13 @@ pub fn relax_while(
         let t_dirty = std::time::Instant::now();
         let mut moved = moved;
         if before.is_some() {
-            calm.round(it, &cells, (&old_tracks, &mut tracks), (&old_vias, &mut moved));
+            calm.round(
+                it,
+                cfg.max_step,
+                &cells,
+                (&old_tracks, &mut tracks),
+                (&old_vias, &mut moved),
+            );
         }
         for (v, p) in vias.iter_mut().zip(moved) {
             v.0 = p;
