@@ -272,12 +272,28 @@ each layer stays planar by construction.
   The length of a net counts its pieces (`matching::net_length`). Pads with exits have no rail
   in the relaxation. Not covered: the nets of differential pairs, and boards whose unlocked
   copper is part of the topology.
-- Layer changes on current paths: a connection between two pins that take the minimum width of
-  their class (`Board::current_min`: not for the nets of a differential pair) pays as many vias
-  per layer change as carry that width (`Router::via_factor`, `Board::vias_for`, IPC-2221), and
-  at the very end (`relax::stitch_vias`, after the placement rounds) the missing vias go next to
-  the via, in a row on a straight track with a piece of the other layer over them or around it
-  with a piece on each layer, tested with the rules of the check (`check::Copper::clear`).
+- Layer changes on current paths: a connection with a pin at one of its ends that takes the
+  minimum width of its class (`Board::current_min`: not for the nets of a differential pair)
+  pays as many vias per layer change as carry that width (`Router::via_factor`,
+  `Board::vias_for`, IPC-2221). One wide end is enough, because the copper of a net is shared:
+  the way from a wide pin to a fine pitch pin can be a piece of the way between two wide pins
+  once the rest of the net is laid, and the check counts it so. The room of those vias is kept
+  from the moment the search sets the via: it is one via with the radius of the circle around
+  them (`Board::cluster_radius`: the vias on a ring at the hole pitch, with copper of the width
+  of the path to the centre), to other copper and to the pads of its own net, through the
+  search and the relaxation. The check counts such a via as the vias it stands for
+  (`Board::stands_for`). After the placement rounds `relax::set_clusters` sets the vias on
+  their ring with a piece of copper from the centre on every layer with wide copper there, in
+  every geometry that leaves `route_board`; a via that does not join wide copper of two layers,
+  or whose vias do not fit all the same, is one via of its class again. For those, and for
+  vias of kept copper, `relax::stitch_vias` looks for room afterwards: the missing vias go next
+  to the via, in a row on a straight track with a piece of the other layer over them or around
+  it with a piece on each layer, tested with the rules of the check (`check::Copper::clear`);
+  it counts the vias a layer change already has by their copper. Looking for room only
+  afterwards was the first form of this and left the layer change of VBUS_F on the LED
+  controller short on three of four seeds: the USB pair lay around the via by then.
+  `GB_NO_VIA_ROOM` switches the kept room off, `GB_LOG=current` tells what became of each such
+  via.
 - A chain whose new vias split triangles is checked before it is committed: consecutive
   triangles must still be neighbours, and a via must still be a corner of the triangles the
   chain arrives from and leaves through, since another via of the same chain may have split one

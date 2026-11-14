@@ -902,14 +902,27 @@ pub fn route_board(
     search: &SearchConfig,
 ) -> (Substrate, RouteResult) {
     let (sub, mut res) = place_and_route(board, sub_cfg, base, search);
+    let moved;
+    let b = if res.offsets.is_empty() {
+        board
+    } else {
+        moved = board.with_offsets(&res.offsets);
+        &moved
+    };
+    // a layer change of a current path was one via with the room of all its vias up to here
+    // (`RouterConfig::via_room`): now it gets them, in every geometry that leaves this function
+    let set = relax::set_clusters(b, &mut res.geometry);
+    if set > 0 {
+        eprintln!("current paths: {set} vias set in the room their layer changes kept");
+    }
+    res.stats.vias += set;
+    for (stats, geo) in &mut res.alternatives {
+        stats.vias += relax::set_clusters(b, geo);
+    }
+    for (_, geo, _) in &mut res.frames {
+        relax::set_clusters(b, geo);
+    }
     if knobs::STITCH.on() {
-        let moved;
-        let b = if res.offsets.is_empty() {
-            board
-        } else {
-            moved = board.with_offsets(&res.offsets);
-            &moved
-        };
         // nothing moves any more; what makes a new clearance problem is not kept
         let mut geo = res.geometry.clone();
         let added = relax::stitch_vias(b, &mut geo);

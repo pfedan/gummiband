@@ -3089,6 +3089,233 @@ pub fn widen_necks(board: &Board, sub: &Substrate, geo: &mut Geometry) {
     }
 }
 
+/// The wide copper of the net at via `v`: per track that ends there and carries `min` its
+/// layer, its direction from the via and how far it runs on straight and wide, and the layers
+/// with such copper (a wide pad of the net under the via counts as well).
+fn via_arms(board: &Board, geo: &Geometry, v: &Via, min: f64) -> (Vec<(LayerId, Point, f64)>, LayerSet) {
+    let near = 1e-3;
+    // the wide copper at the via: per track that ends there its layer, direction and how
+    // far it runs on straight and wide
+    let mut arms: Vec<(LayerId, Point, f64)> = Vec::new();
+    let mut wide = LayerSet::default();
+    for t in geo.tracks.iter().filter(|t| t.net == v.net && t.pts.len() > 1) {
+        let pts: Vec<Point> = if t.pts[0].dist(v.at) < near {
+            t.pts.clone()
+        } else if t.pts[t.pts.len() - 1].dist(v.at) < near {
+            t.pts.iter().rev().copied().collect()
+        } else {
+            continue;
+        };
+        let carries = |a: Point, b: Point| board.current_width(t.layer, t.piece_width(a, b)) >= min - 1e-9;
+        if !carries(pts[0], pts[1]) {
+            continue;
+        }
+        wide.insert(t.layer);
+        let u = (pts[1] - pts[0]).norm();
+        let mut len = 0.0;
+        for w in pts.windows(2) {
+            let d = w[1] - w[0];
+            if u.cross(d).abs() > 1e-6 * d.len() || u.dot(d) <= 0.0 || !carries(w[0], w[1]) {
+                break;
+            }
+            len += d.len();
+        }
+        arms.push((t.layer, u, len));
+    }
+    // a wide pad of the net under the via is wide copper as well
+    for &p in board.nets[v.net as usize]
+        .pins
+        .iter()
+        .filter(|&&p| !board.narrow_pin(p))
+    {
+        for &o in &board.pins[p].obstacles {
+            let o = &board.obstacles[o];
+            if o.shape.dist_to_point(v.at) < near {
+                o.layers.iter().for_each(|l| wide.insert(l));
+            }
+        }
+    }
+    (arms, wide)
+}
+
+/// The layer changes of current paths that the search made as one via with the room of all
+/// their vias ([`Board::cluster_radius`]) get those vias: on a ring around the place of the
+/// via ([`Board::cluster_ring`]), the first towards the longest straight end of a track, with
+/// a piece of copper from the centre to each on every layer with wide copper there. The room
+/// was kept by the search and the relaxation, so they keep the clearances; where a pad of the
+/// net, a hole or something the relaxation could not hold is in the way all the same, or the
+/// via does not join wide copper of two layers, the via is one via of its class again
+/// ([`stitch_vias`] then looks for room next to it). Returns how many vias it added.
+pub fn set_clusters(board: &Board, geo: &mut Geometry) -> usize {
+    let mut added = 0;
+    let log = |v: &Via, what: &str| {
+        if crate::knobs::log(crate::knobs::Log::Current) {
+            let net = &board.nets[v.net as usize].name;
+            eprintln!(
+                "current: layer change of {net} at ({:.3}, {:.3}): {what}",
+                v.at.x, v.at.y
+            );
+        }
+    };
+    for vi in 0..geo.vias.len() {
+        let v = geo.vias[vi].clone();
+        if v.drill <= 0.0 || v.resting || v.origin.is_some() || v.is_pair() {
+            continue;
+        }
+        let n = board.stands_for(v.net, v.diameter);
+        if n < 2 {
+            continue;
+        }
+        let cls = board.class_of(v.net);
+        geo.vias[vi].diameter = cls.via_diameter;
+        let Some(min) = board.current_min(v.net) else {
+            continue;
+        };
+        let (mut arms, wide) = via_arms(board, geo, &v, min);
+        if wide.iter().count() < 2 {
+            log(&v, "one via, it does not join wide copper of two layers");
+            continue;
+        }
+        arms.sort_by(|a, b| b.2.total_cmp(&a.2));
+        let ring = board.cluster_ring(v.net, n);
+        let turn = arms.first().map_or(0.0, |a| math::atan2(a.1.y, a.1.x));
+        let spots: Vec<Point> = (0..n)
+            .map(|k| {
+                let a = turn + std::f64::consts::TAU * k as f64 / n as f64;
+                v.at + crate::geom::pt(math::cos(a), math::sin(a)) * ring
+            })
+            .collect();
+        let width = cls.track_width.max(min);
+        let clr = cls.clearance.max(board.rules.min_clearance);
+        let gap = board.rules.hole_to_hole;
+        let holes = spots.iter().all(|&at| {
+            geo.vias
+                .iter()
+                .enumerate()
+                .filter(|&(j, w)| j != vi && w.drill > 0.0)
+                .all(|(_, w)| w.at.dist(at) >= (w.drill + v.drill) / 2.0 + gap - 1e-9)
+                && board
+                    .obstacles
+                    .iter()
+                    .filter(|o| o.hole.is_some())
+                    .all(|o| o.shape.bbox().center().dist(at) >= o.hole.unwrap() + v.drill / 2.0 + gap - 1e-9)
+        });
+        let off_pads = spots.iter().all(|&at| {
+            let pad = Shape::Circle {
+                c: at,
+                r: cls.via_diameter / 2.0,
+            };
+            board.nets[v.net as usize].pins.iter().all(|&p| {
+                board.pins[p]
+                    .obstacles
+                    .iter()
+                    .all(|&o| board.obstacles[o].shape.dist(&pad) >= clr - 1e-9)
+            })
+        });
+        let segs: Vec<(Point, Point, f64, LayerId)> = wide
+            .iter()
+            .flat_map(|l| spots.iter().map(move |&q| (v.at, q, width, l)))
+            .collect();
+        let pads: Vec<(Point, f64)> = spots.iter().map(|&q| (q, cls.via_diameter)).collect();
+        // against everything but the via itself, which gives way to them
+        let mut rest = geo.clone();
+        rest.vias.swap_remove(vi);
+        let clear = crate::check::Copper::new(board, &rest).clear(v.net, &segs, &pads);
+        if !holes || !off_pads || !clear {
+            let why = match (holes, off_pads) {
+                (false, _) => "a hole is too near",
+                (_, false) => "a pad of the net is too near",
+                _ => "copper of another net is too near",
+            };
+            log(&v, &format!("one via, its {n} do not fit: {why}"));
+            continue;
+        }
+        log(&v, &format!("{n} vias on a ring of {ring:.3} mm"));
+        for &(a, b, width, layer) in &segs {
+            let elems = vec![Elem::Line(a, b)];
+            geo.tracks.push(Track {
+                pts: crate::realize::flatten(&elems),
+                elems,
+                width,
+                layer,
+                net: v.net,
+                necks: Vec::new(),
+                neck_w: width,
+                origin: None,
+                resting: false,
+                fitted: Vec::new(),
+                pattern: None,
+                seg: u32::MAX,
+                tap: None,
+            });
+        }
+        geo.vias[vi].at = spots[0];
+        for &at in &spots[1..] {
+            geo.vias.push(Via {
+                at,
+                diameter: cls.via_diameter,
+                ..v.clone()
+            });
+            added += 1;
+        }
+    }
+    added
+}
+
+/// How many other vias of the net change layers in parallel with via `vi`: within `reach` of
+/// it, and on every layer of `wide` their pad lies in the same copper of the net as its pad
+/// (through the tracks and pads within that reach).
+fn vias_beside(geo: &Geometry, vi: usize, wide: LayerSet, reach: f64) -> usize {
+    let v = &geo.vias[vi];
+    let others: Vec<&Via> = geo
+        .vias
+        .iter()
+        .enumerate()
+        .filter(|&(j, w)| j != vi && w.net == v.net && w.drill > 0.0 && w.at.dist(v.at) <= reach)
+        .map(|(_, w)| w)
+        .collect();
+    if others.is_empty() {
+        return 0;
+    }
+    let mut joined = vec![true; others.len()];
+    for l in wide.iter() {
+        // the copper of the net on this layer near the via: its pad first, then the pads of
+        // the others, then the pieces of track
+        let mut copper: Vec<(Point, Point, f64)> = vec![(v.at, v.at, v.diameter / 2.0)];
+        copper.extend(others.iter().map(|w| (w.at, w.at, w.diameter / 2.0)));
+        for t in geo.tracks.iter().filter(|t| t.net == v.net && t.layer == l) {
+            for w in t.pts.windows(2) {
+                let r = t.piece_width(w[0], w[1]) / 2.0;
+                if crate::geom::seg_seg_dist(v.at, v.at, w[0], w[1]) <= reach + r {
+                    copper.push((w[0], w[1], r));
+                }
+            }
+        }
+        let mut root: Vec<usize> = (0..copper.len()).collect();
+        fn find(root: &mut [usize], mut i: usize) -> usize {
+            while root[i] != i {
+                root[i] = root[root[i]];
+                i = root[i];
+            }
+            i
+        }
+        for i in 0..copper.len() {
+            for j in i + 1..copper.len() {
+                let (p, q) = (copper[i], copper[j]);
+                if crate::geom::seg_seg_dist(p.0, p.1, q.0, q.1) < p.2 + q.2 - 1e-6 {
+                    let (a, b) = (find(&mut root, i), find(&mut root, j));
+                    root[a] = b;
+                }
+            }
+        }
+        let own = find(&mut root, 0);
+        for (k, j) in joined.iter_mut().enumerate() {
+            *j &= find(&mut root, k + 1) == own;
+        }
+    }
+    joined.into_iter().filter(|&j| j).count()
+}
+
 /// A row of [`stitch_vias`]: the pieces of copper from the via (layer and end) and the new vias.
 type StitchRow = (Vec<(LayerId, Point)>, Vec<Point>);
 
@@ -3115,47 +3342,7 @@ pub fn stitch_vias(board: &Board, geo: &mut Geometry) -> usize {
         if need <= 1 {
             continue;
         }
-        // the wide copper at the via: per track that ends there its layer, direction and how
-        // far it runs on straight and wide
-        let mut arms: Vec<(LayerId, Point, f64)> = Vec::new();
-        let mut wide = LayerSet::default();
-        for t in geo.tracks.iter().filter(|t| t.net == v.net && t.pts.len() > 1) {
-            let pts: Vec<Point> = if t.pts[0].dist(v.at) < near {
-                t.pts.clone()
-            } else if t.pts[t.pts.len() - 1].dist(v.at) < near {
-                t.pts.iter().rev().copied().collect()
-            } else {
-                continue;
-            };
-            let carries = |a: Point, b: Point| board.current_width(t.layer, t.piece_width(a, b)) >= min - 1e-9;
-            if !carries(pts[0], pts[1]) {
-                continue;
-            }
-            wide.insert(t.layer);
-            let u = (pts[1] - pts[0]).norm();
-            let mut len = 0.0;
-            for w in pts.windows(2) {
-                let d = w[1] - w[0];
-                if u.cross(d).abs() > 1e-6 * d.len() || u.dot(d) <= 0.0 || !carries(w[0], w[1]) {
-                    break;
-                }
-                len += d.len();
-            }
-            arms.push((t.layer, u, len));
-        }
-        // a wide pad of the net under the via is wide copper as well
-        for &p in board.nets[v.net as usize]
-            .pins
-            .iter()
-            .filter(|&&p| !board.narrow_pin(p))
-        {
-            for &o in &board.pins[p].obstacles {
-                let o = &board.obstacles[o];
-                if o.shape.dist_to_point(v.at) < near {
-                    o.layers.iter().for_each(|l| wide.insert(l));
-                }
-            }
-        }
+        let (mut arms, wide) = via_arms(board, geo, &v, min);
         if wide.iter().count() < 2 {
             continue;
         }
@@ -3165,13 +3352,9 @@ pub fn stitch_vias(board: &Board, geo: &mut Geometry) -> usize {
             let along = d.dot(u);
             along > near && along <= len + near && (d - u * along).len() < near
         };
-        // the vias of an earlier row
-        let have = 1 + geo
-            .vias
-            .iter()
-            .enumerate()
-            .filter(|&(j, w)| j != vi && w.net == v.net && w.drill > 0.0 && arms.iter().any(|a| on_arm(w.at, a)))
-            .count();
+        // the vias that change layers with it already: an earlier row, or the ring of
+        // [`set_clusters`]
+        let have = 1 + vias_beside(geo, vi, wide, need as f64 * pitch + v.diameter);
         if have >= need {
             continue;
         }
@@ -3642,6 +3825,63 @@ mod tests {
             crate::check::check(&b, &g)
         );
         assert!(g.vias.iter().all(|v| v.at.x >= 5.0 - 1e-9), "{:?}", g.vias);
+    }
+
+    /// A layer change of a 4.1 A rule that the search made as one via with the room of its three
+    /// vias: before the vias are set the check counts it as the three, then it gets them on a
+    /// ring inside that room, with copper from the centre on both layers. A via of that size
+    /// that joins wide copper on one layer only is one via of its class again.
+    #[test]
+    fn a_layer_change_that_kept_its_room_gets_its_vias_inside_it() {
+        use crate::check::tests::{current_board, line, via};
+        let b = current_board();
+        assert_eq!(b.via_cluster(0), 3);
+        let room = b.cluster_radius(0, 3);
+        assert!((room - (0.67 / 3f64.sqrt() + 0.4)).abs() < 1e-9, "{room}");
+        let geo = |tracks: Vec<Track>| {
+            let mut v = via(5.);
+            v.diameter = 2.0 * room;
+            Geometry { tracks, vias: vec![v] }
+        };
+        let both = || vec![line((2., 5.), (5., 5.), 0), line((5., 5.), (8., 5.), 1)];
+        let mut g = geo(both());
+        let found = crate::check::check(&b, &g);
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(set_clusters(&b, &mut g), 2);
+        assert_eq!(g.vias.len(), 3);
+        let centre = pt(5., 5.);
+        for v in &g.vias {
+            assert!((v.diameter - 0.8).abs() < 1e-9 && (v.drill - 0.4).abs() < 1e-9, "{v:?}");
+            assert!(v.at.dist(centre) + v.diameter / 2.0 <= room + 1e-9, "{v:?}");
+        }
+        for (i, v) in g.vias.iter().enumerate() {
+            for w in &g.vias[i + 1..] {
+                assert!(v.at.dist(w.at) >= 0.4 + b.rules.hole_to_hole, "{v:?} {w:?}");
+            }
+        }
+        // a piece of copper from the centre to every via on both layers
+        let pieces: Vec<&Track> = g.tracks.iter().skip(2).collect();
+        assert_eq!(pieces.len(), 6);
+        for l in 0..2 {
+            for v in &g.vias {
+                assert!(
+                    pieces
+                        .iter()
+                        .any(|t| t.layer == l && t.pts[0] == centre && t.pts[1].dist(v.at) < 1e-9),
+                    "{l} {v:?}"
+                );
+            }
+        }
+        let found = crate::check::check(&b, &g);
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(set_clusters(&b, &mut g), 0, "a second run adds nothing");
+        assert_eq!(stitch_vias(&b, &mut g), 0, "and nothing is left for the rows");
+        // wide copper on one layer only: no layer change of the current
+        let mut g = geo(vec![line((2., 5.), (5., 5.), 0)]);
+        assert_eq!(set_clusters(&b, &mut g), 0);
+        assert_eq!(g.vias.len(), 1);
+        assert!((g.vias[0].diameter - 0.8).abs() < 1e-9 && g.vias[0].at == centre);
+        assert_eq!(g.tracks.len(), 1);
     }
 
     /// Under a minimum width rule a line that leaves its neck zone is cut at the end of its neck,

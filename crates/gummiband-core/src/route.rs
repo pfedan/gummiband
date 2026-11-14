@@ -51,6 +51,9 @@ pub struct RouterConfig {
     pub margin: f64,
     /// Allow vias inside SMD pads for plane fan-outs (otherwise only as a last resort).
     pub via_in_pad: bool,
+    /// A via of a layer change on a current path keeps the room of all the vias that change
+    /// takes ([`Board::cluster_radius`]); off with `GB_NO_VIA_ROOM`.
+    pub via_room: bool,
     /// Extra cost (mm) for passing right next to a pad of another net that still waits for its
     /// route: keeps the escape of dense pin rows free.
     pub escape_cost: f64,
@@ -119,6 +122,7 @@ impl Default for RouterConfig {
             sites_per_tri: 3,
             margin: knobs::SEARCH_MARGIN.num(),
             via_in_pad: false,
+            via_room: !knobs::NO_VIA_ROOM.on(),
             escape_cost: knobs::ESCAPE.num(),
             area_escape: knobs::AREA_ESCAPE.num(),
             taps: false,
@@ -1904,13 +1908,27 @@ impl<'a> Router<'a> {
         (p.x.floor() as i32, p.y.floor() as i32)
     }
 
-    fn via_size(&self, net: NetId) -> (f64, f64, f64) {
+    /// Radius, drill and clearance of a via of `net` that stands for `n` vias: with more than
+    /// one (a layer change of a current path, [`Router::via_cluster`]) the radius is that of
+    /// the circle around them ([`Board::cluster_radius`]), so that the room they take is kept
+    /// from the moment the via is made.
+    fn via_size(&self, net: NetId, n: usize) -> (f64, f64, f64) {
         let c = self.board.class_of(net);
         (
-            c.via_diameter / 2.0,
+            self.board.cluster_radius(net, n),
             c.via_drill,
             c.clearance.max(self.board.rules.min_clearance),
         )
+    }
+
+    /// How many vias a via of connection ci stands for: [`Router::via_factor`], 1 with
+    /// `GB_NO_VIA_ROOM`.
+    fn via_cluster(&self, ci: usize) -> usize {
+        if self.cfg.via_room {
+            self.via_factor(ci) as usize
+        } else {
+            1
+        }
     }
 
     /// The pitch of every pin as [`Board::pin_room`] folds it: the nearest pin of the same part
@@ -1952,24 +1970,28 @@ impl<'a> Router<'a> {
         }
     }
 
-    /// How many vias a layer change of connection ci takes: one, or on a current path (between
-    /// two pins that take the minimum width of their class, [`Board::current_min`]) as many as
-    /// carry what that width carries ([`Board::vias_for`]).
+    /// How many vias a layer change of connection ci takes: one, or on a current path as many
+    /// as carry what the minimum width of its class carries ([`Board::current_min`],
+    /// [`Board::vias_for`]). A connection is on a current path when one of its ends is a pin
+    /// that takes that width: the copper of a net is shared, so the way from such a pin to a
+    /// fine pitch pin can be a piece of the way between two wide pins once the rest of the net
+    /// is laid, and the check counts it so. Only a connection between fine pitch pins of
+    /// exempt parts is free.
     fn via_factor(&self, ci: usize) -> f64 {
         let c = &self.conns[ci];
         let Some(min) = self.board.current_min(c.net) else {
             return 1.0;
         };
         match &c.goal {
-            Goal::Pins(goal) if !self.narrow_pin(c.from) && goal.iter().any(|&p| !self.narrow_pin(p)) => {
-                self.board.vias_for(min, self.via_size(c.net).1) as f64
+            Goal::Pins(goal) if !self.narrow_pin(c.from) || goal.iter().any(|&p| !self.narrow_pin(p)) => {
+                self.board.vias_for(min, self.via_size(c.net, 1).1) as f64
             }
             _ => 1.0,
         }
     }
 
-    fn via_info(&self, net: NetId) -> ViaInfo {
-        let (r, drill, clearance) = self.via_size(net);
+    fn via_info(&self, net: NetId, n: usize) -> ViaInfo {
+        let (r, drill, clearance) = self.via_size(net, n);
         ViaInfo {
             net,
             r,
@@ -1981,8 +2003,8 @@ impl<'a> Router<'a> {
     }
 
     /// Static and via spacing checks of a via of `net` at site `site`.
-    fn site_clear(&self, site: u32, net: NetId) -> bool {
-        let (r, drill, clr) = self.via_size(net);
+    fn site_clear(&self, site: u32, net: NetId, cluster: usize) -> bool {
+        let (r, drill, clr) = self.via_size(net, cluster);
         let s = &self.sub.shared.sites[site as usize];
         let p = s.p;
         for n in &s.nbrs {
@@ -2001,6 +2023,9 @@ impl<'a> Router<'a> {
             let need = if o.net == Some(net) && o.kind != ObstacleKind::Hole {
                 match o.hole {
                     Some(_) => drill / 2.0 + self.board.rules.hole_to_hole,
+                    // the vias of a layer change of several stay out of the pads of their net
+                    // (`relax::set_clusters`)
+                    None if cluster > 1 && o.kind == ObstacleKind::Pad => r + clr,
                     None => 0.0,
                 }
             } else {
@@ -2050,22 +2075,22 @@ impl<'a> Router<'a> {
 
     /// Can a via of `net` be used at the existing via vertex of `site`? Some(true) if a via of
     /// the net is already there.
-    fn via_ok_vertex(&self, site: u32, net: NetId) -> Option<bool> {
+    fn via_ok_vertex(&self, site: u32, net: NetId, n: usize) -> Option<bool> {
         if let Some(via) = self.vias.get(&site) {
             return if via.net == net { Some(true) } else { None };
         }
-        if !self.site_clear(site, net) {
+        if !self.site_clear(site, net, n) {
             return None;
         }
         if self.soft() {
             return Some(false);
         }
-        self.vertex_fits(site, net).then_some(false)
+        self.vertex_fits(site, net, n).then_some(false)
     }
 
     /// Do the tracks around an unused via vertex keep their room with a via of `net`?
-    fn vertex_fits(&self, site: u32, net: NetId) -> bool {
-        let info = self.via_info(net);
+    fn vertex_fits(&self, site: u32, net: NetId, n: usize) -> bool {
+        let info = self.via_info(net, n);
         for li in 0..self.nl() {
             let m = self.m(li);
             // a via in a pad has no vertex on the pad's layer
@@ -2086,17 +2111,17 @@ impl<'a> Router<'a> {
     }
 
     /// Can a via of `net` be placed at the unused `site` (splitting its triangles)?
-    fn via_ok_site(&self, site: u32, net: NetId) -> bool {
-        if !self.sub.site_usable(site) || !self.site_clear(site, net) {
+    fn via_ok_site(&self, site: u32, net: NetId, n: usize) -> bool {
+        if !self.sub.site_usable(site) || !self.site_clear(site, net, n) {
             return false;
         }
-        self.soft() || self.site_fits(site, net)
+        self.soft() || self.site_fits(site, net, n)
     }
 
     /// Do the tracks around the unused `site` keep their room with a via of `net`?
-    fn site_fits(&self, site: u32, net: NetId) -> bool {
+    fn site_fits(&self, site: u32, net: NetId, n: usize) -> bool {
         let p = self.site_point(site);
-        let via = self.via_info(net);
+        let via = self.via_info(net, n);
         for li in 0..self.nl() {
             let m = self.m(li);
             let t = m.site_tri[site as usize];
@@ -2394,7 +2419,7 @@ impl<'a> Router<'a> {
     }
 
     fn in_plane(&self, p: Point, net: NetId) -> bool {
-        let (r, _, _) = self.via_size(net);
+        let (r, _, _) = self.via_size(net, 1);
         self.board.planes.iter().any(|pl| pl.net == net && pl.takes_via(p, r))
     }
 
@@ -2414,12 +2439,12 @@ impl<'a> Router<'a> {
         self.via_cells.entry(Self::via_cell(n.at)).or_default().push(site);
     }
 
-    fn add_via(&mut self, site: u32, net: NetId) {
+    fn add_via(&mut self, site: u32, net: NetId, n: usize) {
         if let Some(via) = self.vias.get_mut(&site) {
             via.users += 1;
             return;
         }
-        let mut info = self.via_info(net);
+        let mut info = self.via_info(net, n);
         info.users = 1;
         self.vias.insert(site, info);
         self.via_cells
@@ -2504,6 +2529,7 @@ impl<'a> Router<'a> {
         let cls = self.board.class_of(net);
         // a layer change on a current path takes as many vias as carry the current
         let mut via_cost = self.cfg.via_cost * self.via_factor(ci);
+        let cluster = self.via_cluster(ci);
         if let Some(p) = self.prices.as_ref().filter(|p| p.soft && p.via > 0.0) {
             via_cost = via_cost.max((p.via * p.crossing * self.via_factor(ci)).min(p.via_cap * via_cost));
         }
@@ -3082,7 +3108,9 @@ impl<'a> Router<'a> {
                     {
                         for &site in list {
                             let q = self.site_point(site);
-                            let ok = *site_ok.entry(site).or_insert_with(|| self.via_ok_site(site, net));
+                            let ok = *site_ok
+                                .entry(site)
+                                .or_insert_with(|| self.via_ok_site(site, net, cluster));
                             if !self.sub.site_usable(site) || !ok {
                                 continue;
                             }
@@ -3160,7 +3188,9 @@ impl<'a> Router<'a> {
                         if site == NONE || site == STEINER {
                             continue;
                         }
-                        let ok = *vertex_ok.entry(site).or_insert_with(|| self.via_ok_vertex(site, net));
+                        let ok = *vertex_ok
+                            .entry(site)
+                            .or_insert_with(|| self.via_ok_vertex(site, net, cluster));
                         let Some(existing) = ok else {
                             continue;
                         };
@@ -3169,7 +3199,11 @@ impl<'a> Router<'a> {
                             if let Some((ep, es)) = entry_pos {
                                 vc += s.crossing * self.chords_crossed(t, lu, net, ep, es, CPos::Vertex(i)) as f64;
                             }
-                            if !existing && !*via_fits.entry(site).or_insert_with(|| self.vertex_fits(site, net)) {
+                            if !existing
+                                && !*via_fits
+                                    .entry(site)
+                                    .or_insert_with(|| self.vertex_fits(site, net, cluster))
+                            {
                                 vc += s.crossing;
                             }
                         } else if let Some((ep, es)) = entry_pos
@@ -3241,7 +3275,7 @@ impl<'a> Router<'a> {
                             p = nodes[p as usize].via_up;
                         }
                     }
-                    let (_, own_drill, _) = self.via_size(net);
+                    let (_, own_drill, _) = self.via_size(net, 1);
                     let hole_gap = own_drill + self.board.rules.hole_to_hole;
                     for at in 0..cand.len() {
                         if tried >= self.cfg.sites_per_tri {
@@ -3271,11 +3305,16 @@ impl<'a> Router<'a> {
                         {
                             continue;
                         }
-                        if !*site_ok.entry(site).or_insert_with(|| self.via_ok_site(site, net)) {
+                        if !*site_ok
+                            .entry(site)
+                            .or_insert_with(|| self.via_ok_site(site, net, cluster))
+                        {
                             continue;
                         }
                         if let Some(s) = soft
-                            && !*via_fits.entry(site).or_insert_with(|| self.site_fits(site, net))
+                            && !*via_fits
+                                .entry(site)
+                                .or_insert_with(|| self.site_fits(site, net, cluster))
                         {
                             vc += s.crossing;
                         }
@@ -3545,7 +3584,7 @@ impl<'a> Router<'a> {
             let last_t = run.last().unwrap().0;
             let end = match chain.get(j).map(|n| n.kind) {
                 Some(NK::Vert { site, .. }) | Some(NK::GoalVia { site }) => {
-                    self.add_via(site, net);
+                    self.add_via(site, net, self.via_cluster(ci));
                     via_ids.push(site);
                     End::Via(site)
                 }
@@ -5576,6 +5615,43 @@ pub(crate) mod tests {
         assert!(crate::check::check(&b, &geo).is_empty());
     }
 
+    /// Two wide pads of a 4.1 A rule on two layers: the via of the layer change takes the room
+    /// of the three vias the current needs from the moment the search sets it, and with
+    /// `via_room` off it is the via of its class.
+    #[test]
+    fn a_layer_change_on_a_current_path_keeps_the_room_of_its_vias() {
+        let b = crate::check::tests::current_board();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let route = |via_room: bool| {
+            let mut r = Router::new(
+                &b,
+                &sub,
+                RouterConfig {
+                    via_room,
+                    ..Default::default()
+                },
+            );
+            r.plan();
+            assert_eq!(r.run(), 1);
+            r.geometry()
+        };
+        let geo = route(true);
+        let vias: Vec<&crate::realize::Via> = geo.vias.iter().filter(|v| v.drill > 0.0).collect();
+        assert_eq!(vias.len(), 1, "{:?}", geo.vias);
+        assert!(
+            (vias[0].diameter - 2.0 * b.cluster_radius(0, 3)).abs() < 1e-9,
+            "{:?}",
+            vias[0]
+        );
+        assert_eq!(b.stands_for(0, vias[0].diameter), 3);
+        let found = crate::check::check(&b, &geo);
+        assert!(found.is_empty(), "{found:?}");
+        let geo = route(false);
+        let vias: Vec<&crate::realize::Via> = geo.vias.iter().filter(|v| v.drill > 0.0).collect();
+        assert_eq!(vias.len(), 1, "{:?}", geo.vias);
+        assert!((vias[0].diameter - 0.8).abs() < 1e-9, "{:?}", vias[0]);
+    }
+
     #[test]
     fn a_kept_via_into_the_plane_needs_no_fan_out() {
         let mut b = crate::topo::tests::two_pad_board();
@@ -5782,7 +5858,7 @@ pub(crate) mod tests {
         let sub0 = Substrate::build(&plain, &SubstrateConfig::default());
         let r0 = Router::new(&plain, &sub0, RouterConfig::default());
         let clear0: Vec<Point> = (0..sub0.shared.sites.len() as u32)
-            .filter(|&i| r0.site_clear(i, 0))
+            .filter(|&i| r0.site_clear(i, 0, 1))
             .map(|i| sub0.shared.sites[i as usize].p)
             .collect();
         // a site in the middle of the board, and the keepout 0.05 mm to its right
@@ -5815,7 +5891,7 @@ pub(crate) mod tests {
         let r = Router::new(&b, &sub, RouterConfig::default());
         let clear = |p: Point| {
             let i = sub.shared.sites.iter().position(|s| s.p.dist(p) < 1e-9);
-            i.is_some_and(|i| r.site_clear(i as u32, 0))
+            i.is_some_and(|i| r.site_clear(i as u32, 0, 1))
         };
         let band = b.class_of(0).track_width / 2.0 + crate::board::KEEPOUT_GAP;
         assert!(0.05 < band);

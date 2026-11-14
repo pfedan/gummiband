@@ -911,7 +911,16 @@ pub fn widest_ways(board: &Board, geo: &Geometry, n: NetId, from: usize) -> (Vec
             None => {
                 let first = items.len();
                 items.extend((0..nl).map(|l| Item::Pad(v.at, v.diameter / 2.0, l)));
-                barrels.push((v.at, v.drill, (first..items.len()).collect()));
+                // a via that still stands for the vias of its layer change carries what they
+                // will carry
+                let stands_for = if v.origin.is_none() {
+                    board.stands_for(n, v.diameter)
+                } else {
+                    1
+                };
+                for _ in 0..stands_for {
+                    barrels.push((v.at, v.drill, (first..items.len()).collect()));
+                }
             }
         }
     }

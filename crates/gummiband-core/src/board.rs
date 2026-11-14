@@ -948,6 +948,58 @@ impl Board {
         ((n - 1e-9).ceil() as usize).max(1)
     }
 
+    /// The vias a layer change of a current path of `net` takes ([`Board::vias_for`] with the
+    /// via of its class), 1 where the net has no minimum width or one via carries it.
+    pub fn via_cluster(&self, net: NetId) -> usize {
+        match self.current_min(net) {
+            Some(min) => self.vias_for(min, self.class_of(net).via_drill),
+            None => 1,
+        }
+    }
+
+    /// The pitch of the vias of one layer change: the holes keep their distance, with a
+    /// little to spare.
+    pub fn via_pitch(&self, drill: f64) -> f64 {
+        drill + self.rules.hole_to_hole + 0.02
+    }
+
+    /// How far from its centre a layer change of `n` vias of `net` lies: the vias stand on a
+    /// ring at [`Board::via_pitch`] from one to the next (two: side by side), and a piece of
+    /// copper of the width of the path joins each to the centre, where the tracks end.
+    pub fn cluster_ring(&self, net: NetId, n: usize) -> f64 {
+        if n < 2 {
+            return 0.0;
+        }
+        let drill = self.class_of(net).via_drill;
+        self.via_pitch(drill) / (2.0 * math::sin(std::f64::consts::PI / n as f64))
+    }
+
+    /// The radius of the circle around a layer change of `n` vias of `net`
+    /// ([`Board::cluster_ring`]): the room the search and the relaxation keep for it while it
+    /// is still one via. With one via: the radius of that via.
+    pub fn cluster_radius(&self, net: NetId, n: usize) -> f64 {
+        let cls = self.class_of(net);
+        let r = cls.via_diameter / 2.0;
+        if n < 2 {
+            return r;
+        }
+        let w = cls.track_width.max(self.current_min(net).unwrap_or(0.0));
+        self.cluster_ring(net, n) + r.max(w / 2.0)
+    }
+
+    /// How many vias a via of `net` with this diameter stands for: [`Board::via_cluster`]
+    /// where it has the size of the circle around them (the search made it for a layer
+    /// change of a current path, and [`crate::relax::stitch_vias`] has not set the vias
+    /// yet), else one.
+    pub fn stands_for(&self, net: NetId, diameter: f64) -> usize {
+        let n = self.via_cluster(net);
+        if n > 1 && diameter / 2.0 >= self.cluster_radius(net, n) - 1e-6 {
+            n
+        } else {
+            1
+        }
+    }
+
     /// What the copper of a current path of the net carries at least, as a width: the minimum
     /// of the width rule of its class. Not for a net of a differential pair, whose width is a
     /// matter of its impedance ([`Board::in_diff_pair`]).
