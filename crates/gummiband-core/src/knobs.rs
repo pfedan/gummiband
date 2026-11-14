@@ -147,6 +147,7 @@ pub enum Log {
     Validate,
     ValidateEach,
     Areas,
+    Current,
 }
 
 /// A topic of `GB_LOG` with its name in the list.
@@ -245,6 +246,12 @@ pub static TOPICS: &[Topic] = &[
         name: "areas",
         was: "",
         doc: "`areas fill`, in the last check: every track of a net left to its fill with its two ends and whether each is held, and the track ends that are taken back.",
+    },
+    Topic {
+        log: Log::Current,
+        name: "current",
+        was: "",
+        doc: "The layer changes of current paths that kept the room of their vias: per via whether it got them, and what was in the way where it did not.",
     },
 ];
 
@@ -347,6 +354,8 @@ knobs! {
         "`areas fill`: what the last check finds open of the nets left to their fill is not laid again on the finished copper.";
     NO_AREA_FALLBACK = "GB_NO_AREA_FALLBACK", Switch, Set, "off",
         "`areas fill`: a board whose route leaves a connection open is not routed a second time with every net as tracks.";
+    NO_VIA_ROOM = "GB_NO_VIA_ROOM", Switch, Set, "off",
+        "A layer change on a current path does not keep the room of all its vias from the moment the search sets it: the vias after the first are set after the relaxation where room is left, as before.";
     NO_POLISH = "GB_NO_POLISH", Switch, Set, "off",
         "Skips the polish relaxation of a winner that has clearance spots left.";
     NO_ARCS = "GB_NO_ARCS", Switch, Set, "off",

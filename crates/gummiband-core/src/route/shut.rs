@@ -43,6 +43,8 @@ struct Pos {
 /// What the walk from the goal keeps: the room of the edges and scratch for the chord tests.
 struct Walk<'n> {
     net: crate::board::NetId,
+    /// How many vias a via of the connection stands for ([`Router::via_cluster`]).
+    cluster: usize,
     item: Item,
     necks: &'n [Rect],
     neck_w: f64,
@@ -78,6 +80,7 @@ impl Router<'_> {
         let nl = self.nl();
         let mut w = Walk {
             net: conn.net,
+            cluster: self.via_cluster(ci),
             item,
             necks,
             neck_w,
@@ -266,16 +269,16 @@ impl Router<'_> {
         if s == NONE || s == STEINER {
             return false;
         }
-        let net = w.net;
+        let (net, n) = (w.net, w.cluster);
         *w.vertex_ok
             .entry(s)
-            .or_insert_with(|| self.via_ok_vertex(s, net).is_some())
+            .or_insert_with(|| self.via_ok_vertex(s, net, n).is_some())
     }
 
     /// An unused via site where the net may place a via.
     fn walk_site(&self, w: &mut Walk, s: u32) -> bool {
-        let net = w.net;
-        *w.site_ok.entry(s).or_insert_with(|| self.via_ok_site(s, net))
+        let (net, n) = (w.net, w.cluster);
+        *w.site_ok.entry(s).or_insert_with(|| self.via_ok_site(s, net, n))
     }
 
     /// The gaps of an edge that have room for the track, with the loosest sides.
