@@ -336,6 +336,8 @@ knobs! {
         "Open end: a new via that reaches the plane of its net stays in it when it is moved.";
     NO_RELAX = "GB_NO_RELAX", Switch, Set, "off",
         "The search returns its best topology without the geometry stage (for `examples/relax_bench.rs`).";
+    NO_AREA_REPAIR = "GB_NO_AREA_REPAIR", Switch, Set, "off",
+        "`areas fill`: what the last check finds open of the nets left to their fill is not laid again on the finished copper.";
     NO_POLISH = "GB_NO_POLISH", Switch, Set, "off",
         "Skips the polish relaxation of a winner that has clearance spots left.";
     NO_ARCS = "GB_NO_ARCS", Switch, Set, "off",
@@ -420,6 +422,8 @@ knobs! {
         "Search: room a track or via asks for beyond its clearance, in mm.";
     AREA_ESCAPE = "GB_AREA_ESCAPE", Experiment, Num, "2",
         "`areas fill`: extra cost in mm for passing right next to a pad of a net left to the fill of its area, while the other nets are laid.";
+    AREA_SLACK = "GB_AREA_SLACK", Experiment, Num, "0.035",
+        "`areas fill`: added to every clearance of the fill when the model runs inside the search, in mm; more of it and the search counts on wider strips of fill only.";
     SHARE_KIND = "GB_SHARE_KIND", Experiment, Value, "all kinds",
         "`--patterns shares`: only the shares of this kind (`neighbours` or `decap`).";
     SKEW_WEIGHT = "GB_SKEW_WEIGHT", Experiment, Num, "0.5",

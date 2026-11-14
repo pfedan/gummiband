@@ -459,9 +459,13 @@ least half the minimum width inside (`inside`), on a pad that hangs on the area 
 model, or through a connection laid: `Router::area_joined`), or on a via whose landing lies in
 the fill on another layer (`lands`; an inner plane is such a layer). A via is only a change
 of layer: where its landing is not in the fill, the search goes on from it. What finds no way
-gets a via in its pad as a second chance and then the rip-up of the first pass: the
-connections around the pad give way, the pad goes first, they are laid again, the model runs
-again, and a connection whose end the new fill no longer holds is laid again as well. A net
+gets a via in its pad as a second chance and then a rip-up: the connections in its way give
+way, the pad goes first, they are laid again, the model runs again, and a connection whose
+end the new fill no longer holds is laid again as well. What is in the way of a pad is found
+by letting its connection look for a way through whatever lies there
+(`Router::area_blockers` with `Router::way_through`): a way into an area has no straight line
+to guess from, as the rip-up of the first pass does, and what shuts a pad off from the area
+often lies millimetres from it. A net
 whose area has no fill at all is joined by tracks. What the fill joins stays in the count of
 connections (`Router::area_base`), so that rules on a share of them (the second, negotiating
 search at 15 % open) mean the same as with tracks.
@@ -486,7 +490,21 @@ track end or a via in the fill of its net's area as held. It counts these nets b
 (`legal::count_areas`): a group of pads that neither the fill nor copper joins to the area is
 one open connection, in the count of the route and in its list of unrouted connections, one
 less where the area itself holds no pad (as KiCad's ratsnest counts); a connection the search
-gave up whose pad the fill joins after all is not open. After the route `Routed::areas` holds
+gave up whose pad the fill joins after all is not open.
+
+The search joins a pad to the fill as its model has it on the copper of the search (a short
+relaxation, a coarse raster). The copper that is written differs: tracks spread and parts
+shift, and a piece of fill that hung on the area can end as an island. The last check then
+takes back the track that ends in it. So after the check what it found open of these nets is
+laid again (`repair_areas` in `gummiband-app/src/route.rs`): the finished copper becomes kept
+copper of a board (`fill::with_copper`), and the open connections are laid on it with a small
+search as `scope` finish lays single nets, nothing else moving. The result is kept when fewer
+connections are open with it, or as many with fewer clearance violations, and
+`Routed::area_repair` says what was open and what is left (`GB_NO_AREA_REPAIR` switches the
+step off). It cannot help a pad that only gets out when its neighbours move; letting whole
+nets around the pad give way was tried on Corne and cost more connections than it joined.
+
+After the route `Routed::areas` holds
 the report of the model per net on the finished copper (`fill::with_copper` puts a geometry
 on the board as obstacles).
 

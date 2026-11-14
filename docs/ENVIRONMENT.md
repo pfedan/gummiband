@@ -72,6 +72,7 @@ Each turns off a behaviour that is on by default (or, for the `GB_NO_*` names, a
 | `GB_OWN_VIA` | number | inf | A plane fan-out ends on a via of its own, not on the via or the fan-out track of another pin of its net (`inf`); a number lets it share a via at that factor of the via cost, `0` as before. |
 | `GB_PLANE_HOLD` | `0` turns it off | on | Open end: a new via that reaches the plane of its net stays in it when it is moved. |
 | `GB_NO_RELAX` | set to anything | off | The search returns its best topology without the geometry stage (for `examples/relax_bench.rs`). |
+| `GB_NO_AREA_REPAIR` | set to anything | off | `areas fill`: what the last check finds open of the nets left to their fill is not laid again on the finished copper. |
 | `GB_NO_POLISH` | set to anything | off | Skips the polish relaxation of a winner that has clearance spots left. |
 | `GB_NO_ARCS` | set to anything | off | Tracks are realised as polylines, without arcs around the corners. |
 | `GB_NO_TUNE_ROOM` | set to anything | off | CLI `route`: length tuning does not make room for its meanders first. |
@@ -122,6 +123,7 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_ESCAPE` | number | 0 | Extra cost in mm for passing right next to a pad of another net that still waits for its route. |
 | `GB_SEARCH_MARGIN` | number | 0.01 | Search: room a track or via asks for beyond its clearance, in mm. |
 | `GB_AREA_ESCAPE` | number | 2 | `areas fill`: extra cost in mm for passing right next to a pad of a net left to the fill of its area, while the other nets are laid. |
+| `GB_AREA_SLACK` | number | 0.035 | `areas fill`: added to every clearance of the fill when the model runs inside the search, in mm; more of it and the search counts on wider strips of fill only. |
 | `GB_SHARE_KIND` | value | all kinds | `--patterns shares`: only the shares of this kind (`neighbours` or `decap`). |
 | `GB_SKEW_WEIGHT` | number | 0.5 | Weight of a mm of skew need in the cost of a candidate. |
 | `GB_REFINE` | number | 0.6 | Triangulation: long obstacle sides get a vertex every this many mm. |
