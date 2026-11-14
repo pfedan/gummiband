@@ -50,6 +50,7 @@ Output for the developer; the routed board stays the same.
 | `timing` | Cumulative phase timers and work counters at the end of a route, and the split of each relaxation. | `GB_TIMING` |
 | `validate` | After a router run: check the inner state of the router and print the problems. | `GB_VALIDATE` |
 | `validate-each` | Check the inner state after every routed connection and print the one that broke it (slow). | `GB_VALIDATE_EACH` |
+| `areas` | `areas fill`, in the last check: every track of a net left to its fill with its two ends and whether each is held, and the track ends that are taken back. |  |
 
 ## Switches
 

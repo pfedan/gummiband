@@ -653,6 +653,14 @@ fn trim_stubs(board: &Board, geo: &mut Geometry) -> usize {
             if !at_end {
                 reverse(&mut geo.tracks[i]);
             }
+            if crate::knobs::log(crate::knobs::Log::Areas) {
+                let t = &geo.tracks[i];
+                let (a, b) = (t.pts[0], *t.pts.last().unwrap());
+                eprintln!(
+                    "areas: taken back: {} on {} from ({:.3}, {:.3}), its end at ({:.3}, {:.3}) lies on nothing of its net",
+                    board.nets[net as usize].name, board.layers[t.layer as usize].name, a.x, a.y, b.x, b.y
+                );
+            }
             match last_junction(board, geo, i) {
                 Some((k, tail)) => {
                     let t = &mut geo.tracks[i];
@@ -988,6 +996,34 @@ pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal
     nets.dedup();
     // 2. what is connected is counted on the copper
     count_open(board, geo, &nets, &dropped, stats, &mut legal);
+    if crate::knobs::log(crate::knobs::Log::Areas)
+        && let Some(plan) = &board.areas
+    {
+        for (i, t) in geo.tracks.iter().enumerate() {
+            if !plan.holds(t.net) || t.origin.is_some() || t.pts.len() < 2 {
+                continue;
+            }
+            let (a, b) = (t.pts[0], *t.pts.last().unwrap());
+            let word = |p: Point| {
+                if held(board, geo, t.net, i, p, t.layer) {
+                    "held"
+                } else {
+                    "on nothing"
+                }
+            };
+            eprintln!(
+                "areas: track of {} on {}: ({:.3}, {:.3}) {}, ({:.3}, {:.3}) {}",
+                board.nets[t.net as usize].name,
+                board.layers[t.layer as usize].name,
+                a.x,
+                a.y,
+                word(a),
+                b.x,
+                b.y,
+                word(b)
+            );
+        }
+    }
     // 3. stubs are taken back: an end on nothing connects nothing
     legal.trimmed = trim_stubs(board, geo);
     // 4. and the copper is counted once more, as the final word
