@@ -1011,7 +1011,10 @@ mod tests {
             drill: 0.3,
             net,
         };
-        for out in [patch(&kb, &[], std::slice::from_ref(&via)), add_locked(&kb, std::slice::from_ref(&via))] {
+        for out in [
+            patch(&kb, &[], std::slice::from_ref(&via)),
+            add_locked(&kb, std::slice::from_ref(&via)),
+        ] {
             assert!(!out.contains("filled_polygon"), "{out}");
             assert!(out.contains("(polygon (pts (xy 0 0)"));
             assert!(out.contains("(at 5 5)"), "{out}");
