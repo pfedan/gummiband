@@ -2007,6 +2007,11 @@ impl<'a> Router<'a> {
         let (r, drill, clr) = self.via_size(net, cluster);
         let s = &self.sub.shared.sites[site as usize];
         let p = s.p;
+        if cluster > 1 && s.pad.is_some() {
+            // a site in a pad does not see that pad among its neighbours: the vias of a layer
+            // change of several stay out of the pads of their net there as everywhere (below)
+            return false;
+        }
         for n in &s.nbrs {
             let o = &self.board.obstacles[n.obs as usize];
             if let ObstacleKind::Keepout { .. } = o.kind {
@@ -5616,8 +5621,8 @@ pub(crate) mod tests {
     }
 
     /// Two wide pads of a 4.1 A rule on two layers: the via of the layer change takes the room
-    /// of the three vias the current needs from the moment the search sets it, and with
-    /// `via_room` off it is the via of its class.
+    /// of the three vias the current needs from the moment the search sets it, and not in a
+    /// pad. With `via_room` off it is the via of its class.
     #[test]
     fn a_layer_change_on_a_current_path_keeps_the_room_of_its_vias() {
         let b = crate::check::tests::current_board();
@@ -5646,6 +5651,14 @@ pub(crate) mod tests {
         assert_eq!(b.stands_for(0, vias[0].diameter), 3);
         let found = crate::check::check(&b, &geo);
         assert!(found.is_empty(), "{found:?}");
+        // one via may stand in a pad of its net, the room of three is not taken there: the
+        // vias stand out of the pads
+        let r = Router::new(&b, &sub, RouterConfig::default());
+        let in_pads: Vec<u32> = (0..sub.shared.sites.len() as u32)
+            .filter(|&i| sub.shared.sites[i as usize].pad.is_some())
+            .collect();
+        assert!(in_pads.iter().any(|&i| r.site_clear(i, 0, 1)));
+        assert!(in_pads.iter().all(|&i| !r.site_clear(i, 0, 3)));
         let geo = route(false);
         let vias: Vec<&crate::realize::Via> = geo.vias.iter().filter(|v| v.drill > 0.0).collect();
         assert_eq!(vias.len(), 1, "{:?}", geo.vias);

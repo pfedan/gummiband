@@ -3143,9 +3143,10 @@ fn via_arms(board: &Board, geo: &Geometry, v: &Via, min: f64) -> (Vec<(LayerId, 
 /// via ([`Board::cluster_ring`]), the first towards the longest straight end of a track, with
 /// a piece of copper from the centre to each on every layer with wide copper there. The room
 /// was kept by the search and the relaxation, so they keep the clearances; where a pad of the
-/// net, a hole or something the relaxation could not hold is in the way all the same, or the
-/// via does not join wide copper of two layers, the via is one via of its class again
-/// ([`stitch_vias`] then looks for room next to it). Returns how many vias it added.
+/// net, a hole or something the relaxation could not hold is in the way all the same, the
+/// ring is turned in steps. Where it fits at no turn, or the via does not join wide copper of
+/// two layers, the via is one via of its class again ([`stitch_vias`] then looks for room
+/// next to it). Returns how many vias it added.
 pub fn set_clusters(board: &Board, geo: &mut Geometry) -> usize {
     let mut added = 0;
     let log = |v: &Via, what: &str| {
@@ -3178,58 +3179,83 @@ pub fn set_clusters(board: &Board, geo: &mut Geometry) -> usize {
         }
         arms.sort_by(|a, b| b.2.total_cmp(&a.2));
         let ring = board.cluster_ring(v.net, n);
-        let turn = arms.first().map_or(0.0, |a| math::atan2(a.1.y, a.1.x));
-        let spots: Vec<Point> = (0..n)
-            .map(|k| {
-                let a = turn + std::f64::consts::TAU * k as f64 / n as f64;
-                v.at + crate::geom::pt(math::cos(a), math::sin(a)) * ring
-            })
-            .collect();
+        let towards = arms.first().map_or(0.0, |a| math::atan2(a.1.y, a.1.x));
         let width = cls.track_width.max(min);
         let clr = cls.clearance.max(board.rules.min_clearance);
         let gap = board.rules.hole_to_hole;
-        let holes = spots.iter().all(|&at| {
-            geo.vias
-                .iter()
-                .enumerate()
-                .filter(|&(j, w)| j != vi && w.drill > 0.0)
-                .all(|(_, w)| w.at.dist(at) >= (w.drill + v.drill) / 2.0 + gap - 1e-9)
-                && board
-                    .obstacles
-                    .iter()
-                    .filter(|o| o.hole.is_some())
-                    .all(|o| o.shape.bbox().center().dist(at) >= o.hole.unwrap() + v.drill / 2.0 + gap - 1e-9)
-        });
-        let off_pads = spots.iter().all(|&at| {
-            let pad = Shape::Circle {
-                c: at,
-                r: cls.via_diameter / 2.0,
-            };
-            board.nets[v.net as usize].pins.iter().all(|&p| {
-                board.pins[p]
-                    .obstacles
-                    .iter()
-                    .all(|&o| board.obstacles[o].shape.dist(&pad) >= clr - 1e-9)
-            })
-        });
-        let segs: Vec<(Point, Point, f64, LayerId)> = wide
-            .iter()
-            .flat_map(|l| spots.iter().map(move |&q| (v.at, q, width, l)))
-            .collect();
-        let pads: Vec<(Point, f64)> = spots.iter().map(|&q| (q, cls.via_diameter)).collect();
         // against everything but the via itself, which gives way to them
         let mut rest = geo.clone();
         rest.vias.swap_remove(vi);
-        let clear = crate::check::Copper::new(board, &rest).clear(v.net, &segs, &pads);
-        if !holes || !off_pads || !clear {
-            let why = match (holes, off_pads) {
-                (false, _) => "a hole is too near",
-                (_, false) => "a pad of the net is too near",
-                _ => "copper of another net is too near",
-            };
-            log(&v, &format!("one via, its {n} do not fit: {why}"));
-            continue;
+        let copper = crate::check::Copper::new(board, &rest);
+        // the vias on the ring, turned by `turn`, and their copper from the centre; or what is
+        // in their way
+        type Ring = (Vec<Point>, Vec<(Point, Point, f64, LayerId)>);
+        let fit = |turn: f64| -> Result<Ring, &'static str> {
+            let spots: Vec<Point> = (0..n)
+                .map(|k| {
+                    let a = turn + std::f64::consts::TAU * k as f64 / n as f64;
+                    v.at + crate::geom::pt(math::cos(a), math::sin(a)) * ring
+                })
+                .collect();
+            let holes = spots.iter().all(|&at| {
+                rest.vias
+                    .iter()
+                    .filter(|w| w.drill > 0.0)
+                    .all(|w| w.at.dist(at) >= (w.drill + v.drill) / 2.0 + gap - 1e-9)
+                    && board
+                        .obstacles
+                        .iter()
+                        .filter(|o| o.hole.is_some())
+                        .all(|o| o.shape.bbox().center().dist(at) >= o.hole.unwrap() + v.drill / 2.0 + gap - 1e-9)
+            });
+            if !holes {
+                return Err("a hole is too near");
+            }
+            let off_pads = spots.iter().all(|&at| {
+                let pad = Shape::Circle {
+                    c: at,
+                    r: cls.via_diameter / 2.0,
+                };
+                board.nets[v.net as usize].pins.iter().all(|&p| {
+                    board.pins[p]
+                        .obstacles
+                        .iter()
+                        .all(|&o| board.obstacles[o].shape.dist(&pad) >= clr - 1e-9)
+                })
+            });
+            if !off_pads {
+                return Err("a pad of the net is too near");
+            }
+            let segs: Vec<(Point, Point, f64, LayerId)> = wide
+                .iter()
+                .flat_map(|l| spots.iter().map(move |&q| (v.at, q, width, l)))
+                .collect();
+            let pads: Vec<(Point, f64)> = spots.iter().map(|&q| (q, cls.via_diameter)).collect();
+            if !copper.clear(v.net, &segs, &pads) {
+                return Err("copper of another net is too near");
+            }
+            Ok((spots, segs))
+        };
+        // the first via towards the longest straight end of a track; where the ring does not
+        // fit so, turned in steps: the room the search kept is a circle, but the relaxation
+        // holds it only against other nets, and the via may stand nearer to a pad of its own
+        const TURNS: usize = 6;
+        let step = std::f64::consts::TAU / (n * TURNS) as f64;
+        let mut found = fit(towards);
+        for k in 1..TURNS {
+            if found.is_ok() {
+                break;
+            }
+            // (the reason told is that of the ring as it should have stood)
+            found = fit(towards + step * k as f64).or(found);
         }
+        let (spots, segs) = match found {
+            Ok(f) => f,
+            Err(why) => {
+                log(&v, &format!("one via, its {n} do not fit: {why}"));
+                continue;
+            }
+        };
         log(&v, &format!("{n} vias on a ring of {ring:.3} mm"));
         for &(a, b, width, layer) in &segs {
             let elems = vec![Elem::Line(a, b)];
@@ -3882,6 +3908,53 @@ mod tests {
         assert_eq!(g.vias.len(), 1);
         assert!((g.vias[0].diameter - 0.8).abs() < 1e-9 && g.vias[0].at == centre);
         assert_eq!(g.tracks.len(), 1);
+    }
+
+    /// The ring of a layer change turns where it does not fit towards its track: with a pad of
+    /// its net beside it the vias stand so that the pad lies between two of them. With that
+    /// pad nearer than any turn leaves room for, the layer change is one via.
+    #[test]
+    fn the_ring_of_a_layer_change_turns_out_of_the_way_of_a_pad_of_its_net() {
+        use crate::check::tests::{current_board, line, via};
+        let board = |d: f64| {
+            let mut b = current_board();
+            let mut o = b.obstacles[0].clone();
+            o.shape = Shape::Circle {
+                c: pt(5., 5. + d),
+                r: 0.1,
+            };
+            b.pins[0].obstacles.push(b.obstacles.len());
+            b.obstacles.push(o);
+            b
+        };
+        let geo = |b: &Board| {
+            let mut v = via(5.);
+            v.diameter = 2.0 * b.cluster_radius(0, 3);
+            Geometry {
+                tracks: vec![line((2., 5.), (5., 5.), 0), line((5., 5.), (8., 5.), 1)],
+                vias: vec![v],
+            }
+        };
+        // 0.95 mm above the centre: a via 30 degrees off that direction comes within 0.15 mm of
+        // the pad, one 50 degrees off keeps 0.26 mm
+        let b = board(0.95);
+        let mut g = geo(&b);
+        assert_eq!(set_clusters(&b, &mut g), 2);
+        for v in &g.vias {
+            let gap = v.at.dist(pt(5., 5.95)) - 0.1 - v.diameter / 2.0;
+            assert!((v.diameter - 0.8).abs() < 1e-9 && gap >= 0.2 - 1e-9, "{v:?} {gap}");
+        }
+        assert!(g.vias.iter().all(|v| (v.at.x - 5.0).abs() > 0.05), "{:?}", g.vias);
+        let found = crate::check::check(&b, &g);
+        assert!(found.is_empty(), "{found:?}");
+        let b = board(0.5);
+        let mut g = geo(&b);
+        assert_eq!(set_clusters(&b, &mut g), 0);
+        assert!(
+            g.vias.len() == 1 && (g.vias[0].diameter - 0.8).abs() < 1e-9,
+            "{:?}",
+            g.vias
+        );
     }
 
     /// Under a minimum width rule a line that leaves its neck zone is cut at the end of its neck,
