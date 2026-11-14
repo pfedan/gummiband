@@ -83,6 +83,34 @@ impl Track {
             self.width
         }
     }
+
+    /// The piece a-b in parts by where it lies, each with the widest it can come to be drawn:
+    /// narrow inside a neck zone, the width of the track outside. [`Track::piece_width`] is the
+    /// width of a piece as it is cut now, and a piece that reaches from outside into a zone is
+    /// narrow as a whole. But the pieces are cut anew until the copper is finished, and the
+    /// part outside can end up as a piece of its own, at full width. A clearance that is judged
+    /// while tracks are still being formed has to hold for that.
+    pub fn parts_by_place(&self, a: Point, b: Point) -> Vec<(Point, Point, f64)> {
+        if self.fitted.iter().any(|(r, _)| r.touches_seg(a, b)) {
+            return vec![(a, b, self.piece_width(a, b))];
+        }
+        let len = a.dist(b);
+        let mut ts: Vec<f64> = self
+            .necks
+            .iter()
+            .filter_map(|r| r.clip_seg(a, b))
+            .flat_map(|(t0, t1)| [t0, t1])
+            .filter(|&x| x * len > 1e-6 && (1.0 - x) * len > 1e-6)
+            .collect();
+        ts.sort_by(f64::total_cmp);
+        let mut out = Vec::with_capacity(ts.len() + 1);
+        let mut from = a;
+        for to in ts.into_iter().map(|x| a + (b - a) * x).chain([b]) {
+            out.push((from, to, self.width_at((from + to) * 0.5)));
+            from = to;
+        }
+        out
+    }
 }
 
 /// How far a joint between two lines may lie off the line through their far ends, in mm, and
@@ -2648,6 +2676,44 @@ mod tests {
         let mut info = PathInfo::default();
         let band = stack_band(portals, &bends, &|_| None, &mut info);
         (band, info, bends)
+    }
+
+    /// A piece that reaches from outside into a neck zone is narrow as it is cut, and wide
+    /// outside the zone by where it lies; a fitted width holds for the piece as it is.
+    #[test]
+    fn a_piece_into_a_neck_is_wide_outside_by_place() {
+        let mut zone = crate::geom::Rect::empty();
+        zone.add(pt(10.0, 3.0));
+        zone.add(pt(12.0, 7.0));
+        let (a, b) = (pt(6.0, 5.0), pt(11.0, 5.0));
+        let mut t = Track {
+            pts: vec![a, b],
+            elems: vec![Elem::Line(a, b)],
+            width: 0.25,
+            layer: 0,
+            net: 0,
+            necks: vec![zone],
+            neck_w: 0.2,
+            origin: None,
+            resting: false,
+            fitted: Vec::new(),
+            pattern: None,
+            seg: u32::MAX,
+            tap: None,
+        };
+        assert_eq!(t.piece_width(a, b), 0.2);
+        let parts = t.parts_by_place(a, b);
+        assert_eq!(parts.len(), 2, "{parts:?}");
+        assert_eq!((parts[0].0, parts[0].2), (a, 0.25));
+        assert!(parts[0].1.dist(pt(10.0, 5.0)) < 1e-9);
+        assert_eq!((parts[1].1, parts[1].2), (b, 0.2));
+        // all of it outside or inside: one part
+        assert_eq!(t.parts_by_place(a, pt(9.0, 5.0)), vec![(a, pt(9.0, 5.0), 0.25)]);
+        assert_eq!(t.parts_by_place(pt(10.5, 5.0), b), vec![(pt(10.5, 5.0), b, 0.2)]);
+        let mut mark = crate::geom::Rect::empty();
+        mark.add(pt(8.5, 5.0));
+        t.fitted.push((mark.grow(1e-6), 0.2));
+        assert_eq!(t.parts_by_place(a, b), vec![(a, b, 0.2)]);
     }
 
     /// Two vertices on opposite sides of a track, 1 mm apart. The track needs 0.31 mm around

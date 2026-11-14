@@ -2236,8 +2236,7 @@ fn taut(
         // under a minimum width rule a line that leaves its neck zone is cut where its full
         // width would reach into the zone, and keeps that width outside (`realize::zone_cuts`)
         let ruled = board.class_of(net).min_width.is_some() && !t.necks.is_empty();
-        let clear_piece = |a: Point, b: Point, pieces: &[(Point, Point, u32)], idx: &GridIndex| -> bool {
-            let w = t.piece_width(a, b);
+        let clear_as = |a: Point, b: Point, w: f64, pieces: &[(Point, Point, u32)], idx: &GridIndex| -> bool {
             if let Some(j) = exact {
                 return j.keeps(ti, net, layer, w / 2.0, a, b, None, m);
             }
@@ -2316,16 +2315,26 @@ fn taut(
                 if o.net == net || o.layer != layer {
                     continue;
                 }
-                let need = w / 2.0 + o.piece_width(p, q) / 2.0 + board.track_clearance(net, o.net) + m;
-                if crate::geom::seg_seg_dist(a, b, p, q) < need {
-                    return false;
+                // the other track as it can come to be drawn, see `Track::parts_by_place`
+                for (p, q, ow) in o.parts_by_place(p, q) {
+                    let need = w / 2.0 + ow / 2.0 + board.track_clearance(net, o.net) + m;
+                    if crate::geom::seg_seg_dist(a, b, p, q) < need {
+                        return false;
+                    }
                 }
             }
             true
         };
+        let clear_piece = |a: Point, b: Point, pieces: &[(Point, Point, u32)], idx: &GridIndex| -> bool {
+            clear_as(a, b, t.piece_width(a, b), pieces, idx)
+        };
         let clear = |a: Point, b: Point, pieces: &[(Point, Point, u32)], idx: &GridIndex| -> bool {
             if !ruled {
-                return clear_piece(a, b, pieces, idx);
+                // and this one too: the part outside its neck zones at its full width
+                return t
+                    .parts_by_place(a, b)
+                    .into_iter()
+                    .all(|(p, q, w)| clear_as(p, q, w, pieces, idx));
             }
             let mut from = a;
             for to in crate::realize::zone_cuts(
