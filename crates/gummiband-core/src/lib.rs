@@ -1391,10 +1391,15 @@ fn search_fixed(
     for c in &judged {
         portfolio.push(c.stats.clone());
     }
-    let mut best = judged
-        .into_iter()
-        .min_by(|a, b| full_cost(a).total_cmp(&full_cost(b)))
-        .unwrap();
+    let mut judged = judged;
+    judged.sort_by(|a, b| full_cost(a).total_cmp(&full_cost(b)));
+    // The runners-up. The numbers of the choice are taken before the finishing steps, and
+    // those take away nine tenths of the findings of one candidate and a fifth of another's.
+    // So the best few are finished as well, and the finished results decide (below).
+    let n_rivals: usize = knobs::RIVALS.num();
+    let mut rivals: Vec<Candidate> = judged.split_off(1);
+    rivals.truncate(n_rivals);
+    let mut best = judged.pop().unwrap();
     search.report("geometry", &best.stats);
     if search.frames {
         frames.push((label(&best, "geometry"), best.geo.clone(), true));
@@ -1518,10 +1523,15 @@ fn search_fixed(
             let better = c.stats.routed > best.stats.routed
                 || (c.stats.routed == best.stats.routed && full_cost(&c) < full_cost(&best));
             if better {
-                best = c;
+                rivals.push(std::mem::replace(&mut best, c));
                 best_router = router;
+            } else if c.stats.violations.is_some() {
+                rivals.push(c);
             }
         }
+        rivals.retain(|c| c.stats.routed == best.stats.routed && c.stats.violations.is_some());
+        rivals.sort_by(|a, b| full_cost(a).total_cmp(&full_cost(b)));
+        rivals.truncate(n_rivals);
         search.report_at(
             &format!("geometry generation {generation}"),
             &best.stats,
@@ -1806,6 +1816,47 @@ fn search_fixed(
         best
     };
     let best = finish(board, free_sub, best, true);
+    // The finished runners-up against the finished winner, each on its own board without its
+    // unused exit pieces: open connections on the copper first, then the findings of the check.
+    // The open end has made its own choice among its mutants and keeps it.
+    let finished = |b: &Board, mut c: Candidate| -> (Candidate, (usize, f64)) {
+        count_apart_of(b, c.order.iter().map(|o| o.0).collect(), &c.geo, &mut c.stats);
+        let v = check::check(b, &c.geo);
+        let shorts = v.iter().filter(|x| x.actual <= 0.0).count();
+        c.stats.violations = Some(v.len());
+        c.stats.shorts = Some(shorts);
+        let open = c.stats.conns.saturating_sub(c.stats.routed);
+        (c, (open, (v.len() + 5 * shorts) as f64))
+    };
+    let (mut best, mut best_key) = finished(board, best);
+    if !open {
+        for rival in std::mem::take(&mut rivals) {
+            if best_key == (0, 0.0) {
+                break;
+            }
+            let polished = if rival.stats.violations.unwrap_or(0) > 0 && !knobs::NO_POLISH.on() {
+                let polish = relax::RelaxConfig {
+                    tension: 0.0,
+                    ..full_relax.clone()
+                };
+                let p = geo_eval_with(rival.clone(), &polish);
+                if full_cost(&p) < full_cost(&rival) { p } else { rival }
+            } else {
+                rival
+            };
+            let own = exit::release_unused(whole, &polished.geo).map(|free| {
+                let sub = Substrate::build(&free, sub_cfg);
+                (free, sub)
+            });
+            let (b, s) = own.as_ref().map_or((whole, &sub), |r| (&r.0, &r.1));
+            let (c, key) = finished(b, finish(b, s, polished, true));
+            if key < best_key {
+                best = c;
+                best_key = key;
+                search.report("runner-up", &best.stats);
+            }
+        }
+    }
     if let Some((order, cfg, before_finish)) = kept {
         WINNERS.lock().unwrap().push(Winner {
             order,

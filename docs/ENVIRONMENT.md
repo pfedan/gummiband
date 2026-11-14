@@ -109,6 +109,7 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_GEO_SCREEN` | value | off | `k`: a geometry generation relaxes all candidates briefly and only the best k fully. |
 | `GB_FINALISTS` | number | 24 | How many candidates of the search go on to the geometry stage. |
 | `GB_FULL` | number | 6 | How many finalists get the full relaxation after the short one. |
+| `GB_RIVALS` | number | 2 | How many runners-up of the geometry stage are finished next to the winner; the best finished result is the route (0: the winner alone). |
 | `GB_DIRS_ALL` | set to anything | off | Every run of the portfolio uses the preferred layer directions, not every third. |
 | `GB_PLACE_ROUNDS` | number | 2 | Rounds in which parts give way at hot spots (`--move-parts`). |
 | `GB_PLACE_AFTER_STOP` | set to anything | off | An open end that was stopped still gets the placement rounds. |

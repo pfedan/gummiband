@@ -404,6 +404,8 @@ knobs! {
         "How many candidates of the search go on to the geometry stage.";
     FULL = "GB_FULL", Experiment, Num, "6",
         "How many finalists get the full relaxation after the short one.";
+    RIVALS = "GB_RIVALS", Experiment, Num, "2",
+        "How many runners-up of the geometry stage are finished next to the winner; the best finished result is the route (0: the winner alone).";
     DIRS_ALL = "GB_DIRS_ALL", Experiment, Set, "off",
         "Every run of the portfolio uses the preferred layer directions, not every third.";
     PLACE_ROUNDS = "GB_PLACE_ROUNDS", Experiment, Num, "2",
