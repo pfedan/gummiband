@@ -533,6 +533,44 @@ fn evaluate_inner<'a>(
     (candidate(board, &r, geo, routed, cfg_used, generation), r)
 }
 
+/// Count the connections of a run on its copper. The router counts a connection as routed once
+/// it has segments, wherever they end: on kept copper of the net that leads nowhere, or on the
+/// connection's own side of the net. The copper has the last word, as it has in the last check:
+/// every piece of a net beyond its first that the run does not know as open is one connection
+/// less. Otherwise such a run wins against one that really connects everything, and the
+/// connection is found missing only when nothing can be done about it any more.
+fn count_apart(board: &Board, r: &Router, geo: &Geometry, stats: &mut RunStats) {
+    let mut nets: Vec<board::NetId> = r.conns.iter().map(|c| c.net).collect();
+    nets.sort_unstable();
+    nets.dedup();
+    nets.retain(|&n| !board.areas.as_ref().is_some_and(|a| a.holds(n)));
+    // the end of a tap lies on its track only once it is snapped there
+    let mut snapped;
+    let geo = if geo.tracks.iter().any(|t| t.tap.is_some()) {
+        snapped = geo.clone();
+        relax::snap_taps(&mut snapped.tracks);
+        &snapped
+    } else {
+        geo
+    };
+    for (net, pins) in legal::open_in_copper(board, geo, &nets) {
+        let net_name = &board.nets[net as usize].name;
+        let prefix = format!("{net_name} from ");
+        let known = stats.unrouted.iter().filter(|u| u.starts_with(&prefix)).count();
+        for &pin in pins.iter().skip(known) {
+            let pin = if pin == usize::MAX {
+                board.nets[net as usize].pins.first().copied().unwrap_or(0)
+            } else {
+                pin
+            };
+            let open = format!("{net_name} from {}", board.pins[pin].name);
+            stats.blocked.push((open.clone(), Vec::new()));
+            stats.unrouted.push(open);
+            stats.routed = stats.routed.saturating_sub(1);
+        }
+    }
+}
+
 /// What a finished router run is worth, with `geo` as its geometry.
 fn candidate(
     board: &Board,
@@ -590,6 +628,8 @@ fn candidate(
         shorts: None,
         skew_need: skew_need(board, &geo),
     };
+    let mut stats = stats;
+    count_apart(board, r, &geo, &mut stats);
     Candidate {
         stats,
         geo,
@@ -2003,6 +2043,39 @@ fn mutate_geo(best: &Candidate, rng: &mut Rng) -> Genome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run that says it routed everything while its copper leaves the net in two pieces has
+    /// one connection less; one that knows the connection open is not counted twice, and
+    /// copper that joins the pins leaves the count alone.
+    #[test]
+    fn a_run_is_counted_on_its_copper() {
+        let b = topo::tests::two_pad_board();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        let all = || RunStats {
+            conns: 1,
+            routed: 1,
+            ..Default::default()
+        };
+        let apart = Geometry {
+            tracks: Vec::new(),
+            vias: Vec::new(),
+        };
+        let mut st = all();
+        count_apart(&b, &r, &apart, &mut st);
+        assert_eq!((st.routed, st.unrouted.len()), (0, 1), "{:?}", st.unrouted);
+        count_apart(&b, &r, &apart, &mut st);
+        assert_eq!((st.routed, st.unrouted.len()), (0, 1), "counted once");
+        let mut joined = apart.clone();
+        let mut t = check::tests::line((2.0, 5.0), (8.0, 5.0), 0);
+        t.width = 0.2;
+        t.neck_w = 0.2;
+        joined.tracks.push(t);
+        let mut st = all();
+        count_apart(&b, &r, &joined, &mut st);
+        assert_eq!((st.routed, st.unrouted.len()), (1, 0), "{:?}", st.unrouted);
+    }
     use crate::board::Block;
     use crate::geom::{Polygon, Rect, pt};
 
