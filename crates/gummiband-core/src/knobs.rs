@@ -146,6 +146,7 @@ pub enum Log {
     Timing,
     Validate,
     ValidateEach,
+    Areas,
 }
 
 /// A topic of `GB_LOG` with its name in the list.
@@ -238,6 +239,12 @@ pub static TOPICS: &[Topic] = &[
         name: "validate-each",
         was: "VALIDATE_EACH",
         doc: "Check the inner state after every routed connection and print the one that broke it (slow).",
+    },
+    Topic {
+        log: Log::Areas,
+        name: "areas",
+        was: "",
+        doc: "`areas fill`, in the last check: every track of a net left to its fill with its two ends and whether each is held, and the track ends that are taken back.",
     },
 ];
 
@@ -477,7 +484,12 @@ pub fn markdown() -> String {
          | Topic | Output | Replaces |\n| --- | --- | --- |\n",
     );
     for t in TOPICS {
-        let _ = writeln!(s, "| `{}` | {} | `GB_{}` |", t.name, t.doc, t.was);
+        let was = if t.was.is_empty() {
+            String::new()
+        } else {
+            format!("`GB_{}`", t.was)
+        };
+        let _ = writeln!(s, "| `{}` | {} | {was} |", t.name, t.doc);
     }
     s.push_str(
         "\n## Switches\n\n\
