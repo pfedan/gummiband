@@ -43,6 +43,8 @@ struct Pos {
 /// What the walk from the goal keeps: the room of the edges and scratch for the chord tests.
 struct Walk<'n> {
     net: crate::board::NetId,
+    /// How many vias a via of the connection stands for ([`Router::via_cluster`]).
+    cluster: usize,
     item: Item,
     necks: &'n [Rect],
     neck_w: f64,
@@ -78,6 +80,7 @@ impl Router<'_> {
         let nl = self.nl();
         let mut w = Walk {
             net: conn.net,
+            cluster: self.via_cluster(ci),
             item,
             necks,
             neck_w,
@@ -266,16 +269,16 @@ impl Router<'_> {
         if s == NONE || s == STEINER {
             return false;
         }
-        let net = w.net;
+        let (net, n) = (w.net, w.cluster);
         *w.vertex_ok
             .entry(s)
-            .or_insert_with(|| self.via_ok_vertex(s, net).is_some())
+            .or_insert_with(|| self.via_ok_vertex(s, net, n).is_some())
     }
 
     /// An unused via site where the net may place a via.
     fn walk_site(&self, w: &mut Walk, s: u32) -> bool {
-        let net = w.net;
-        *w.site_ok.entry(s).or_insert_with(|| self.via_ok_site(s, net))
+        let (net, n) = (w.net, w.cluster);
+        *w.site_ok.entry(s).or_insert_with(|| self.via_ok_site(s, net, n))
     }
 
     /// The gaps of an edge that have room for the track, with the loosest sides.
@@ -283,11 +286,25 @@ impl Router<'_> {
         if let Some(r) = w.room.get(&(l as u8, e)) {
             return r.clone();
         }
+        // as the search: at its neck width the track has to cross inside its neck, and a slot
+        // that does not let it get there takes the full width
         let mut it = w.item;
-        it.w = self.width_at_edge(l, e, w.item.w, w.necks, w.neck_w);
+        let mut wide = None;
+        if let Some(span) = self.neck_span(l, e, w.item.w, w.necks, w.neck_w, w.item.net, w.item.c) {
+            it.w = w.neck_w;
+            it.span = span;
+            if span != super::ANYWHERE {
+                wide = Some(self.edge_view(l, e, &w.item));
+            }
+        }
         let view = self.edge_view(l, e, &it);
         let r: Vec<bool> = (0..=self.cross[l][e as usize].len())
-            .map(|j| Self::slot_interval(&view, [2, 2], j, &mut w.scratch).is_some())
+            .map(|j| {
+                Self::slot_interval(&view, [2, 2], j, &mut w.scratch).is_some()
+                    || wide
+                        .as_ref()
+                        .is_some_and(|v| Self::slot_interval(v, [2, 2], j, &mut w.scratch).is_some())
+            })
             .collect();
         w.room.insert((l as u8, e), r.clone());
         r

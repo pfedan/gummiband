@@ -1,3 +1,6 @@
+// the report of a route is one `json!` with more fields than the default limit takes
+#![recursion_limit = "256"]
+
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -895,6 +898,10 @@ fn main() -> Result<()> {
                 ),
                 Event::PlacementKept { seed } => println!("best placement: seed {seed}"),
                 Event::MovableParts { count } => println!("movable parts: {count}"),
+                Event::RoutedAgain { open } => println!(
+                    "areas: {open} connection{} open with the fill, routing again with every net as tracks",
+                    if open == 1 { "" } else { "s" }
+                ),
             };
             let hooks = Hooks {
                 stop: open_end.as_ref(),
@@ -918,6 +925,12 @@ fn main() -> Result<()> {
                     "areas: {} vias set for islands of fill; the fill model ran {} times in the search, {:.1} s over its threads",
                     r.area_vias, r.area_model_runs, r.area_model_seconds
                 );
+            }
+            if let Some(a) = &r.area_repair {
+                println!("areas: {}", a.line());
+            }
+            if let Some(a) = &r.area_fallback {
+                println!("areas: {}", a.line());
             }
             for t in r.tries.iter().skip(1) {
                 println!(
@@ -1079,7 +1092,21 @@ fn main() -> Result<()> {
             }
             let viol = &r.violations;
             let spots = gummiband_core::check::spots(&viol).len();
+            if let Some(s) = r.spread.as_ref().filter(|s| s.tried > 0) {
+                println!(
+                    "squeezed places with room: {} laid again ({} tracks), {} kept their copper",
+                    s.laid,
+                    s.tracks,
+                    s.back.len()
+                );
+                for k in &s.back {
+                    println!("  {} at ({:.3}, {:.3}): {}", k.what, k.at.x, k.at.y, k.why);
+                }
+            }
             println!("clearance check: {} violations at {spots} spots", viol.len());
+            for t in r.tight_pads() {
+                println!("  {t}");
+            }
             let mut kinds = std::collections::BTreeMap::new();
             for v in viol {
                 *kinds
@@ -1165,6 +1192,7 @@ fn main() -> Result<()> {
                     "connections": st.conns,
                     "routed": st.routed,
                     "unrouted": st.unrouted,
+                    "tight_pads": r.tight_pads(),
                     "pairs": r.pairs,
                     "matching": matching,
                     "vias": st.vias,
@@ -1188,6 +1216,8 @@ fn main() -> Result<()> {
                     "pours": r.legal.pours,
                     "areas": r.areas,
                     "area_vias": r.area_vias,
+                    "area_repair": r.area_repair,
+                    "area_fallback": r.area_fallback,
                     "area_model_seconds": r.area_model_seconds,
                     "area_model_runs": r.area_model_runs,
                     "violations": viol.iter().map(|v| serde_json::json!({

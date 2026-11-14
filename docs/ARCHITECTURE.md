@@ -117,8 +117,9 @@ front end.
   `RouteOptions::net_options`, which the MCP server fills from its session.
 - `route_board(board, options, hooks)` takes a board model and returns `Routed`: the search
   (`finish_nets` around `route_pairs` or `route_board` of the core), then room for meanders, the
-  45 degree step, length tuning, the last check on the finished copper, the length rules, the
-  clearance check and the soft copper that moved. The last check (`gummiband_core::legal`) is the
+  45 degree step, length tuning, the exit pieces of the pads as tracks (`exit::stub_tracks`),
+  the last check on the finished copper, the length rules, the clearance check and the soft
+  copper that moved. The last check (`gummiband_core::legal`) is the
   final word on what was routed: a track that still touches copper of another net is taken out
   with what hangs on it, and every net is followed through its pads, tracks, vias and planes
   (pads that touch are one piece, a via joins the pad its copper overlaps and the track it sits
@@ -227,12 +228,76 @@ each layer stays planar by construction.
   piece into the courtyard is narrow and the round end of the wide one stays out of it. On the
   finished geometry the necks widen piece by piece as far as there is room
   (`relax::widen_necks`).
-- Layer changes on current paths: a connection between two pins that take the minimum width of
-  their class (`Board::current_min`: not for the nets of a differential pair) pays as many vias
-  per layer change as carry that width (`Router::via_factor`, `Board::vias_for`, IPC-2221), and
-  at the very end (`relax::stitch_vias`, after the placement rounds) the missing vias go next to
-  the via, in a row on a straight track with a piece of the other layer over them or around it
-  with a piece on each layer, tested with the rules of the check (`check::Copper::clear`).
+- Pad exits (`exit.rs`, `GB_EXITS=0`: off): between the pads of a fine pitch part a track has
+  room on the middle line of its pad and hardly anywhere else, so its first piece is constructed
+  and not left to the relaxation. The rule (`exit::plan`): a pad on one routing layer without a
+  hole, convex, at least 1.25 times as long as wide, with its pin on the middle line, whose net
+  is routed (not one of a differential pair), and with a pad of another net of the same part
+  beside one of its long sides so near that a track on the middle line has less than one
+  clearance of room to the side. The exit point lies on the middle line beyond the end of the
+  pad, as near to it as a track may turn there by 45 degrees towards either neighbour and keep
+  its clearance to that pad (searched in steps of 5 µm up to 0.6 mm; about 0.1 mm at 0.4 mm
+  pitch); both ends of the pad get one where the piece keeps its distance from other copper,
+  holes, keep-outs, the board edge and the pieces laid before, so a pad can also be left inwards
+  under its part. The piece is as wide as the track at the pin, or narrower down to the board
+  minimum where the row asks for it and the rules allow a neck there. Where even that is too
+  wide the pad is listed with what is missing (`Board::tight_pads`, `Routed::tight_pads`, a line
+  per pad in the report of both front ends): no route can mend a footprint that leaves no legal
+  way out.
+  The piece belongs to the pad for every step of the route: `Board::set_exits` (called by
+  `finish_nets` for every try) gives the pad obstacle the shape of pad and pieces together
+  (`Board::bare_shape` keeps the shape of the file), the mesh shuts the outline of such a pad for
+  its own net except at a gate of 0.02 mm in the middle of the far end of a piece, 0.01 mm
+  beyond the exit point (`Mesh::exit_edges`; an edge also stays open where the free triangle
+  behind it touches other copper of the net, so two pads of one net side by side still join
+  directly), and a track that crosses the outline there ends at the exit point
+  (`Router::seg_end`). The gate is narrow on purpose: through a wide one the track would pass
+  the corner of the piece and stand beside the middle line again. So the search judges every
+  candidate with the exit it will have, the capacity test sees the piece as copper of its net
+  between the neighbouring pads, and no step after the search can move, split or shorten the
+  piece, because it is no track. Beyond the exit point the track stays on the middle line for
+  another 0.15 mm (`GB_EXIT_RAIL`; the rails of `relax::pin_rails`): the tracks of a row leave it
+  side by side with a few µm to spare, and a first point that the neighbours push aside right
+  behind the fixed exit point breaks the clearance to the track on the other side.
+  During the search other nets keep their clearance from every piece, also from one that no
+  track takes in the end. Once the winner is known such a piece is given back
+  (`exit::release_unused`: the pad has the outline of the file again at that end): the tracks
+  of the nets that the search left too near to it get the rounds without tension of the polish
+  while the rest of the board sleeps (kept only with fewer clearance problems), and the last
+  steps of the search (wider necks, preferred widths, tapers), the comparison of two searches or
+  placements and the later steps of `gummiband_app::route_board` see the pads without those
+  pieces. At the end of `route_board` the pieces that carry a track become tracks of one line
+  each (`exit::stub_tracks`) and the board gets the pads of the file back
+  (`Board::without_exits`): the last check, the clearance check and the writer see plain copper.
+  The length of a net counts its pieces (`matching::net_length`). Pads with exits have no rail
+  in the relaxation. Not covered: the nets of differential pairs, and boards whose unlocked
+  copper is part of the topology.
+- Layer changes on current paths: a connection with a pin at one of its ends that takes the
+  minimum width of its class (`Board::current_min`: not for the nets of a differential pair)
+  pays as many vias per layer change as carry that width (`Router::via_factor`,
+  `Board::vias_for`, IPC-2221). One wide end is enough, because the copper of a net is shared:
+  the way from a wide pin to a fine pitch pin can be a piece of the way between two wide pins
+  once the rest of the net is laid, and the check counts it so. The room of those vias is kept
+  from the moment the search sets the via: it is one via with the radius of the circle around
+  them (`Board::cluster_radius`: the vias on a ring at the hole pitch, with copper of the width
+  of the path to the centre). Search and relaxation keep it to other copper. The search keeps
+  it off the pads of its own net as well and does not set such a via in a pad, where one via
+  may stand (`Router::site_clear`): the vias stand beside each other and out of the pads. The
+  check counts such a via as the vias it stands for (`Board::stands_for`). After the placement
+  rounds `relax::set_clusters` sets the vias on their ring with a piece of copper from the
+  centre on every layer with wide copper there, in every geometry that leaves `route_board`.
+  The first via stands towards the longest straight end of a track; where the ring does not
+  fit so (the relaxation does not hold a via off the pads of its own net), it is turned in
+  six steps. A via that does not join wide copper of two layers, or whose vias fit at no turn,
+  is one via of its class again. For those, and for
+  vias of kept copper, `relax::stitch_vias` looks for room afterwards: the missing vias go next
+  to the via, in a row on a straight track with a piece of the other layer over them or around
+  it with a piece on each layer, tested with the rules of the check (`check::Copper::clear`);
+  it counts the vias a layer change already has by their copper. Looking for room only
+  afterwards was the first form of this and left the layer change of VBUS_F on the LED
+  controller short on three of four seeds: the USB pair lay around the via by then.
+  `GB_NO_VIA_ROOM` switches the kept room off, `GB_LOG=current` tells what became of each such
+  via.
 - A chain whose new vias split triangles is checked before it is committed: consecutive
   triangles must still be neighbours, and a via must still be a corner of the triangles the
   chain arrives from and leaves through, since another via of the same chain may have split one
@@ -414,9 +479,13 @@ least half the minimum width inside (`inside`), on a pad that hangs on the area 
 model, or through a connection laid: `Router::area_joined`), or on a via whose landing lies in
 the fill on another layer (`lands`; an inner plane is such a layer). A via is only a change
 of layer: where its landing is not in the fill, the search goes on from it. What finds no way
-gets a via in its pad as a second chance and then the rip-up of the first pass: the
-connections around the pad give way, the pad goes first, they are laid again, the model runs
-again, and a connection whose end the new fill no longer holds is laid again as well. A net
+gets a via in its pad as a second chance and then a rip-up: the connections in its way give
+way, the pad goes first, they are laid again, the model runs again, and a connection whose
+end the new fill no longer holds is laid again as well. What is in the way of a pad is found
+by letting its connection look for a way through whatever lies there
+(`Router::area_blockers` with `Router::way_through`): a way into an area has no straight line
+to guess from, as the rip-up of the first pass does, and what shuts a pad off from the area
+often lies millimetres from it. A net
 whose area has no fill at all is joined by tracks. What the fill joins stays in the count of
 connections (`Router::area_base`), so that rules on a share of them (the second, negotiating
 search at 15 % open) mean the same as with tracks.
@@ -441,7 +510,31 @@ track end or a via in the fill of its net's area as held. It counts these nets b
 (`legal::count_areas`): a group of pads that neither the fill nor copper joins to the area is
 one open connection, in the count of the route and in its list of unrouted connections, one
 less where the area itself holds no pad (as KiCad's ratsnest counts); a connection the search
-gave up whose pad the fill joins after all is not open. After the route `Routed::areas` holds
+gave up whose pad the fill joins after all is not open.
+
+The search joins a pad to the fill as its model has it on the copper of the search (a short
+relaxation, a coarse raster). The copper that is written differs: tracks spread and parts
+shift, and a piece of fill that hung on the area can end as an island. The last check then
+takes back the track that ends in it. So after the check what it found open of these nets is
+laid again (`repair_areas` in `gummiband-app/src/route.rs`): the finished copper becomes kept
+copper of a board (`fill::with_copper`), and the open connections are laid on it with a small
+search as `scope` finish lays single nets, nothing else moving. The result is kept when fewer
+connections are open with it, or as many with fewer clearance violations, and
+`Routed::area_repair` says what was open and what is left (`GB_NO_AREA_REPAIR` switches the
+step off). It cannot help a pad that only gets out when its neighbours move; letting whole
+nets around the pad give way was tried on Corne and cost more connections than it joined.
+
+What is still open then is not chased pad by pad. One rule holds for every board: `areas` fill
+never ends with fewer connections than `areas` tracks. Where the route with the fill leaves
+any connection open, of a net left to its fill or of another net, the board is routed a second
+time with every net as tracks (`area_fallback` in `gummiband-app/src/route.rs`; the areas stay
+areas of the board), and the better of the two routes is the result: fewer connections open,
+or as many with fewer clearance violations, and a tie keeps the fill. `Routed::area_fallback`
+names what was open and gives both pairs of numbers. The price is the time of the second
+route, paid only where the fill left something open (`GB_NO_AREA_FALLBACK` switches the step
+off, for measurements of the fill alone).
+
+After the route `Routed::areas` holds
 the report of the model per net on the finished copper (`fill::with_copper` puts a geometry
 on the board as obstacles).
 
@@ -466,7 +559,25 @@ pieces went gives other numbers, and a track end or a via in the fill was then n
 ## Geometry
 
 1. Portals on every crossed edge (room for the neighbours and the edge end clearances) and the
-   funnel algorithm give a first taut polyline.
+   funnel algorithm give a first taut polyline. It runs from pin to pin, or to a via; at a pad
+   with exits (`exit.rs`) from the exit point, which is a fixed end like a pin for every step
+   below.
+   By default (`Router::disc_path`; `GB_NO_DISC` keeps the funnel line) the first polyline is replaced by a band that
+   is constructed from the topology alone. Every vertex at an end of an edge the track crosses
+   is a disc on the side the track passes it; its radius is what the copper at the vertex asks
+   for, counted squarely, plus the gaps of the tracks that lie between the track and the vertex
+   on that edge (the largest over the edges of the vertex). The funnel through the portals
+   those radii leave says which discs the string bends around and in which order; then the
+   disc the string violates most is wrapped and a wrap it has lifted off is dropped, until it
+   keeps them all. Two discs with less room between their vertices than they take give way in
+   proportion, and the check reports what is missing. No share of the slack of an edge enters,
+   so two tracks around the same vertices get radii that differ by their gap: parallel lines
+   and concentric arcs, each track built without looking at another. The relaxation runs
+   after it as before. Measured with `examples/band_stage.rs` (construction alone, quick
+   settings, seed 1): spots of the own check 57 to 9 on bga_dense, 70 to 39 on bus, 19 to 4 on
+   medium, 88 to 41 on parts_hard, with one crossing of two bands left on bus and on
+   parts_hard; the full pipeline ends clean on six boards either way, with 1 to 2.5 % less
+   length.
 2. Elastic optimizer (`relax`): every track is a chain of points under tension, obstacles,
    vias and other tracks push with their clearance, vias move as well and drag their tracks.
    All tracks relax in parallel (Jacobi rounds); the last quarter resolves clearances only.
@@ -480,12 +591,30 @@ pieces went gives other numbers, and a track end or a via in the fill was then n
 3. Taut pass: straight shortcuts wherever they keep all clearances (removes the waves).
 4. Fillets: every corner is rounded with the largest arc that keeps all clearances; the output
    uses real KiCad arcs.
-5. Clearance check in the core; for the nets with such a rule the pieces below the minimum out
+5. Arcs around pivots (`relax::pivot_pass`, `pivot.rs`; `GB_PIVOT_ARCS=0`: off): the shortcuts
+   leave a corner every 40 to 100 µm where a track turns around a pad corner or a via, and each
+   gets its own small arc. Once, on the finished copper and before the widths are fitted, every
+   track is built again from the corners it has (the ends of its lines and, for an arc, the
+   point where its tangents meet): one arc per thing it bends around (a vertex of an obstacle,
+   a rounded pad corner as one circle, the outline, a via), with the radius of what lies
+   between (the pivot, its clearance, and for every track further in its width and the
+   clearance to the next), and tangent lines. Every line and every chord of an arc passes the
+   clearance test of the shortcuts; a wrap that fails is taken out alone, and a corner that
+   had an arc keeps it. A track takes the new form only where that is fewer pieces under 50 µm,
+   or as many and fewer elements. The check has the last word twice. In the pass: of two nets
+   with more findings between them than before, the changed tracks next to those findings go
+   back to the copper they had, then all their tracks, then the whole board. At the end of the
+   pipeline: the steps after the pass (fitted widths, preferred width, the zip of the pairs,
+   the taper, straight pad exits) start from other copper than without it, so `route_fixed`
+   finishes the copper without the arcs as well wherever the end with them has a finding left,
+   and if that end has fewer clearance findings, fewer spots or fewer width findings, it is the
+   one that stays and gets the pass last, where nothing follows it.
+6. Clearance check in the core; for the nets with such a rule the pieces below the minimum out
    of exempt courtyards (`width`) and the widest way through their copper between the pins that
    can take the minimum (`current` where it carries less: copper by layer and thickness, a layer
    change by the barrels of all vias that join the same copper, `Board::current_width`,
    `Board::via_current_width`); the KiCad DRC is the final judge in the benchmark.
-6. Optional, `--angles 45` (`octo.rs`): the finished tracks become conventional 45 degree
+7. Optional, `--angles 45` (`octo.rs`): the finished tracks become conventional 45 degree
    routing. Per track a greedy walk along its path: the farthest point reachable with two legs on
    the grid (or a Z of three), else a staircase or the old piece; then 45 degree chamfers on the
    90 and 135 degree corners. Every leg is tested with the clearance rules of `check` against the
@@ -495,6 +624,16 @@ pieces went gives other numbers, and a track end or a via in the fill was then n
    copper of a routed file (`gummiband angles45`): `Board::soften` cuts the unlocked tracks into
    runs between vias, branches and pads, each run is one track, and `soft_changes` names the
    file items to replace; runs that did not change stay in the file.
+
+### Copper areas after the route
+
+`fill.rs` is a model of how KiCad fills a zone: a raster over the board, the clearances of the
+copper of other nets, thermal spokes, the minimum width, and the pieces that are left. `ground.rs`
+counts those pieces for a pour of one net over the whole board: how many there are on a layer,
+which share of the fill the largest holds, and how many pads of the net sit on another piece. A
+ground area works where it is one piece under the tracks, so this is the number to hold a route
+against; `cargo run --release --example ground BOARD.kicad_pcb [NET]` prints it for a routed
+file. It is a measurement: no step of the route reads it yet.
 
 ## Moving parts with the copper
 

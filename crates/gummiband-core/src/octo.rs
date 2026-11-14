@@ -241,7 +241,7 @@ impl<'a> Env<'a> {
             if vn == net {
                 continue;
             }
-            let need = vr + half + self.clr(net).max(self.clr(vn)) + MARGIN;
+            let need = vr + half + self.clr(net).max(self.clr(vn)).max(board.via_track_gap(net, vn, vr)) + MARGIN;
             if point_seg_dist(c, a, b) < need {
                 return Some(format!("via of {}", board.nets[vn as usize].name));
             }

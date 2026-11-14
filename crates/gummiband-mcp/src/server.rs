@@ -1486,6 +1486,15 @@ pub struct RouteOut {
     pub areas: Vec<RouteAreaOut>,
     /// Of `vias`, those set for islands of fill (area_stitch).
     pub area_vias: usize,
+    /// With areas "fill": one sentence on what was laid again at the end, because the last
+    /// check on the finished copper found it open. Absent when nothing was open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub area_repair: Option<String>,
+    /// With areas "fill": one sentence on the second route. Where the route leaves a
+    /// connection open, the board is routed again as areas "tracks" does it, and the better
+    /// of the two routes is the result. Absent when nothing was open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub area_fallback: Option<String>,
     /// Gummiband's own clearance check on the result.
     pub violations_total: usize,
     pub violations_by_kind: BTreeMap<String, usize>,
@@ -3560,6 +3569,7 @@ fn route_blocking(
             names.join(", ")
         ));
     }
+    notes.extend(routed.tight_pads().iter().map(|t| t.to_string()));
     // the second opinion of the fill model on the pours of the nets routed
     for p in &routed.legal.pours {
         notes.push(format!(
@@ -3663,6 +3673,8 @@ fn route_blocking(
         items_written: items,
         skipped_nets: outcome.skipped_nets.clone(),
         area_vias: routed.area_vias,
+        area_repair: routed.area_repair.as_ref().map(|a| a.line()),
+        area_fallback: routed.area_fallback.as_ref().map(|a| a.line()),
         areas: routed
             .areas
             .iter()

@@ -51,6 +51,9 @@ pub struct RouterConfig {
     pub margin: f64,
     /// Allow vias inside SMD pads for plane fan-outs (otherwise only as a last resort).
     pub via_in_pad: bool,
+    /// A via of a layer change on a current path keeps the room of all the vias that change
+    /// takes ([`Board::cluster_radius`]); off with `GB_NO_VIA_ROOM`.
+    pub via_room: bool,
     /// Extra cost (mm) for passing right next to a pad of another net that still waits for its
     /// route: keeps the escape of dense pin rows free.
     pub escape_cost: f64,
@@ -117,8 +120,9 @@ impl Default for RouterConfig {
             ripup_passes: knobs::RIPUP.num::<f64>() as usize,
             negotiate: 0,
             sites_per_tri: 3,
-            margin: 0.01,
+            margin: knobs::SEARCH_MARGIN.num(),
             via_in_pad: false,
+            via_room: !knobs::NO_VIA_ROOM.on(),
             escape_cost: knobs::ESCAPE.num(),
             area_escape: knobs::AREA_ESCAPE.num(),
             taps: false,
@@ -159,11 +163,18 @@ impl RouterConfig {
 /// check and the report take the finer step of the plan.
 const AREA_PASS_STEP: f64 = 0.07;
 
-/// Added to every clearance of the fill when the model runs inside the search, in mm: half a
-/// cell of its raster. The search works on the taut tracks and a coarse raster, the result is
-/// judged on the relaxed tracks and a fine one; with this reserve a strip of fill that the
-/// search counts on is one that is still there at the end.
-const AREA_PASS_SLACK: f64 = 0.035;
+/// Added to every clearance of the fill when the model runs inside the search, in mm: by
+/// default half a cell of its raster (`GB_AREA_SLACK`). The search works on the taut tracks
+/// and a coarse raster, the result is judged on the relaxed tracks and a fine one; with this
+/// reserve a strip of fill that the search counts on is one that is still there at the end.
+fn area_pass_slack() -> f64 {
+    knobs::AREA_SLACK.num()
+}
+
+/// The price of crossing a connection that lies there when an open connection into an area looks
+/// for what is in its way ([`Router::area_blockers`]), in mm of way: the middle one of the prices
+/// the open end of a run draws from.
+const AREA_CROSSING: f64 = 1.5;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Goal {
@@ -330,6 +341,26 @@ pub struct Router<'a> {
     pub soft_on: bool,
     /// Chains of the soft copper that could not be traced: they stay as they are.
     pub soft_lost: Vec<u32>,
+    /// The band of a track is built with the radius of the stack and gives way wrap by wrap
+    /// (`GB_BAND`, see [`Router::seg_path`]). A field, so that a measurement can build both
+    /// bands of one topology.
+    pub stack_band: bool,
+    /// The band of a track is constructed from discs around the vertices of its triangles,
+    /// with the radius the stack of tracks between it and the vertex asks for (the default; `GB_NO_DISC` turns it off, see
+    /// [`Router::disc_band`]). A field for the same reason as `stack_band`.
+    pub disc_band: bool,
+    /// With `disc_band`: two discs with no room between them give way in proportion instead of
+    /// costing the track its band, and a band may leave the triangles of its track. Fields for
+    /// measurements.
+    pub disc_local: bool,
+    pub disc_corridor: bool,
+    /// A track takes over the discs of the tracks inside it (`Router::inherit_discs`).
+    pub disc_inherit: bool,
+    /// Bands of the discs that cross go back to the band along the edges (`Router::tagged_from`).
+    pub disc_planar: bool,
+    /// Discs a segment's band keeps besides those of its own triangles: taken over from the
+    /// band of a neighbour where the check found the two too close ([`Router::disc_band`]).
+    pub(crate) extra_discs: HashMap<u32, Vec<crate::realize::Disc>>,
     /// Per pin: number of unrouted connections that start or end there.
     pending: Vec<u32>,
     /// Prices while a negotiation runs and in the passes after it.
@@ -557,7 +588,13 @@ pub struct Item {
     /// Side of the apex of each adjacent triangle (edge_tris order) the track passes:
     /// 0 = towards edges[e][0], 1 = towards edges[e][1], 2 = unknown or not relevant.
     pub sides: [u8; 2],
+    /// Where on the edge the track has to cross it, from edges[e][0]: a track at its neck
+    /// width under a minimum width rule only inside its neck ([`Router::neck_span`]).
+    pub span: (f64, f64),
 }
+
+/// No limit for [`Item::span`].
+pub const ANYWHERE: (f64, f64) = (f64::NEG_INFINITY, f64::INFINITY);
 
 /// A crossing already on an edge with all that packing needs from it.
 #[derive(Debug, Clone, Copy)]
@@ -586,6 +623,8 @@ struct EdgeView {
     /// Per adjacent triangle the bounds its apex sets on the searched track when it passes on
     /// side 0 (upper bound) or side 1 (lower bound).
     apex: [(f64, f64); 2],
+    /// Where the searched track has to cross ([`Item::span`]).
+    span: (f64, f64),
 }
 
 /// An extra obstacle at a triangle apex for capacity checks (a via about to be placed).
@@ -716,6 +755,13 @@ impl<'a> Router<'a> {
             torn: Vec::new(),
             soft_on: false,
             soft_lost: Vec::new(),
+            stack_band: crate::knobs::BAND.on(),
+            disc_band: !crate::knobs::NO_DISC.on(),
+            disc_local: true,
+            disc_corridor: false,
+            disc_inherit: true,
+            disc_planar: true,
+            extra_discs: HashMap::new(),
         };
         if !board.soft.chains.is_empty() {
             r.import_soft();
@@ -865,7 +911,7 @@ impl<'a> Router<'a> {
     /// Via at mesh vertex v of layer li, if any. A via vertex without via (a via that was
     /// ripped up, or a split that was not used) is a phantom: tracks keep their clearance from
     /// the point, so that they never bunch up at a free vertex.
-    fn via_at(&self, li: usize, v: u32) -> Option<ViaInfo> {
+    pub(crate) fn via_at(&self, li: usize, v: u32) -> Option<ViaInfo> {
         let site = self.m(li).vert_site[v as usize];
         if site == NONE {
             return None;
@@ -888,7 +934,13 @@ impl<'a> Router<'a> {
         if via.net == it.net {
             0.0
         } else {
-            via.r + via.clearance.max(it.c).max(board.item_gap(it.net, Some(via.net))) + it.w / 2.0
+            via.r
+                + via
+                    .clearance
+                    .max(it.c)
+                    .max(board.item_gap(it.net, Some(via.net)))
+                    .max(board.via_track_gap(it.net, via.net, via.r))
+                + it.w / 2.0
         }
     }
 
@@ -900,7 +952,52 @@ impl<'a> Router<'a> {
             if self.obs_net(d.obs) == Some(it.net) {
                 continue;
             }
-            need = need.max((self.eff_clearance(d.obs, it.c, it.net) + it.w / 2.0) * d.factor as f64);
+            let round = self.round_excess(li, e, end, d.obs);
+            need = need.max((self.eff_clearance(d.obs, it.c, it.net) + it.w / 2.0 - round) * d.factor as f64);
+        }
+        if let Some(via) = self.via_at(li, m.edges[e as usize][end]) {
+            need = need.max(Self::via_need(self.board, &via, it));
+        }
+        need
+    }
+
+    /// How far the vertex at this end of e lies outside the round copper it stands for, measured
+    /// along the edge. A circle is triangulated as a polygon around it, whose corners stick out by
+    /// up to the board's largest error (5 um); a channel that is measured from such a corner is
+    /// that much wider than the mesh edge says. Never more than the true room: for a wall square
+    /// to the edge it is exact, for anything else the copper is at least this far away.
+    fn round_excess(&self, li: usize, e: u32, end: usize, obs: u32) -> f64 {
+        if obs == OUTSIDE || !knobs::ROUND_EXACT.on() {
+            return 0.0;
+        }
+        let m = self.m(li);
+        let [u, v] = m.edges[e as usize];
+        let (at, other) = if end == 0 { (u, v) } else { (v, u) };
+        let (p, q) = (m.verts[at as usize], m.verts[other as usize]);
+        let len = p.dist(q);
+        if len <= 0.0 {
+            return 0.0;
+        }
+        let dir = (q - p) * (1.0 / len);
+        let reach = match &self.board.obstacles[obs as usize].shape {
+            crate::geom::Shape::Circle { c, r } => c.dot(dir) + r,
+            crate::geom::Shape::Capsule { a, b, r } => a.dot(dir).max(b.dot(dir)) + r,
+            crate::geom::Shape::Polygon(_) => return 0.0,
+        };
+        (p.dot(dir) - reach).clamp(0.0, self.board.rules.max_error)
+    }
+
+    /// [`Router::end_need`] counted squarely from the vertex: without the factor that an edge
+    /// along an obstacle side gets. This is what an arc around the vertex has to keep; the
+    /// factor is the price of crossing the edge at a slant, and an arc does not cross at one.
+    pub(crate) fn end_need_square(&self, li: usize, e: u32, end: usize, it: &Item) -> f64 {
+        let m = self.m(li);
+        let mut need: f64 = 0.0;
+        for d in m.demands(e, end) {
+            if self.obs_net(d.obs) == Some(it.net) {
+                continue;
+            }
+            need = need.max(self.eff_clearance(d.obs, it.c, it.net) + it.w / 2.0);
         }
         if let Some(via) = self.via_at(li, m.edges[e as usize][end]) {
             need = need.max(Self::via_need(self.board, &via, it));
@@ -909,7 +1006,7 @@ impl<'a> Router<'a> {
     }
 
     /// Need of a track at vertex v (vertex demands only), for a new edge.
-    fn vertex_need(&self, li: usize, v: u32, it: &Item) -> f64 {
+    pub(crate) fn vertex_need(&self, li: usize, v: u32, it: &Item) -> f64 {
         let m = self.m(li);
         let mut need: f64 = 0.0;
         for &t in &m.vert_tris[v as usize] {
@@ -925,13 +1022,14 @@ impl<'a> Router<'a> {
         need
     }
 
-    fn item_of(&self, seg: u32) -> Item {
+    pub(crate) fn item_of(&self, seg: u32) -> Item {
         let s = self.segs[seg as usize].as_ref().unwrap();
         Item {
             net: s.net,
             w: s.width,
             c: s.clearance,
             sides: [2, 2],
+            span: ANYWHERE,
         }
     }
 
@@ -1069,7 +1167,7 @@ impl<'a> Router<'a> {
     }
 
     /// Extra room asked for near hot spots, for an edge a-b.
-    fn hot_extra(&self, a: Point, b: Point) -> f64 {
+    pub(crate) fn hot_extra(&self, a: Point, b: Point) -> f64 {
         let mut x: f64 = 0.0;
         for &(c, extra) in self.cfg.hotspots.iter() {
             if point_seg_dist(c, a, b) < 1.0 {
@@ -1079,28 +1177,112 @@ impl<'a> Router<'a> {
         x
     }
 
-    /// Width of a track of `full` width with neck zones at edge e.
-    fn width_at_edge(&self, li: usize, e: u32, full: f64, necks: &[Rect], neck_w: f64) -> f64 {
+    #[allow(clippy::too_many_arguments)]
+    /// Where on edge e a track of the net crosses at its neck width, from edges[e][0]; None
+    /// where it has its full width on the whole edge. [`ANYWHERE`] without a minimum width
+    /// rule, and where not even the neck fits.
+    pub(crate) fn neck_span(
+        &self,
+        li: usize,
+        e: u32,
+        full: f64,
+        necks: &[Rect],
+        neck_w: f64,
+        net: NetId,
+        c: f64,
+    ) -> Option<(f64, f64)> {
         if necks.is_empty() {
-            return full;
+            return None;
         }
         let m = self.m(li);
         let [u, v] = m.edges[e as usize];
         let (a, b) = (m.verts[u as usize], m.verts[v as usize]);
-        // narrow where the edge touches a zone: the realized track narrows on every piece that
-        // touches a zone (that is what intersectsCourtyard() rules allow), and an exit from a
-        // fine pitch pad crosses its first edges right next to the pad
-        let hit = necks.iter().any(|r| r.touches_seg(a, b));
-        if hit { neck_w } else { full }
+        // Without a minimum width rule nothing ends a neck at its zone: every piece that
+        // touches the zone is narrow for its whole length, so the edge is narrow where it
+        // touches one.
+        if self.board.class_of(net).min_width.is_none() {
+            return necks.iter().any(|r| r.touches_seg(a, b)).then_some(ANYWHERE);
+        }
+        // Under a minimum width rule the realized track is narrow from its zone to the end of
+        // its neck, `neck_reach` beyond the zone (`realize::zone_cuts`). So the track is
+        // narrow on an edge where it can cross the edge inside the neck: where the part of the
+        // edge in the neck reaches into the stretch the narrow track may lie on, between what
+        // the two ends ask of it. An edge that only touches the neck at one end is crossed
+        // outside it, at full width. An edge at a pad of the net itself is crossed by the
+        // piece that comes from the pad: that piece is narrow up to its cut, half the full
+        // width beyond the neck.
+        let len = a.dist(b);
+        let it = Item {
+            net,
+            w: neck_w,
+            c,
+            sides: [2, 2],
+            span: ANYWHERE,
+        };
+        let lo = self.end_need_square(li, e, 0, &it);
+        let hi = len - self.end_need_square(li, e, 1, &it);
+        let own = (0..2).any(|end| m.demands(e, end).iter().any(|d| self.obs_net(d.obs) == Some(net)));
+        let reach = crate::realize::neck_reach(neck_w, c) + if own { full / 2.0 } else { 0.0 };
+        let mut span: Option<(f64, f64)> = None;
+        for r in necks {
+            let Some((t0, t1)) = r.grow(reach).clip_seg(a, b) else {
+                continue;
+            };
+            if lo > hi {
+                return Some(ANYWHERE);
+            }
+            if own || (t1 * len >= lo - 1e-9 && t0 * len <= hi + 1e-9) {
+                let s = span.get_or_insert((t0 * len, t1 * len));
+                *s = (s.0.min(t0 * len), s.1.max(t1 * len));
+            }
+        }
+        span
+    }
+
+    /// The width of a track on edge e in slot j of its crossings, and where it has to cross:
+    /// its neck width if it can cross inside its neck there, with the crossings that lie
+    /// between it and the neck, else its full width.
+    fn width_in_slot(
+        &self,
+        li: usize,
+        e: u32,
+        j: usize,
+        full: &Item,
+        necks: &[Rect],
+        neck_w: f64,
+    ) -> (f64, (f64, f64)) {
+        let Some(span) = self.neck_span(li, e, full.w, necks, neck_w, full.net, full.c) else {
+            return (full.w, ANYWHERE);
+        };
+        if span == ANYWHERE {
+            return (neck_w, ANYWHERE);
+        }
+        let narrow = Item {
+            w: neck_w,
+            span,
+            ..*full
+        };
+        let view = self.edge_view(li, e, &narrow);
+        let j = j.min(view.placed.len());
+        match Self::slot_interval(&view, narrow.sides, j, &mut Vec::new()) {
+            Some(_) => (neck_w, span),
+            None => (full.w, ANYWHERE),
+        }
     }
 
     /// Item of segment `seg` crossing edge e, with its sides relative to the two apexes.
-    fn item_on(&self, li: usize, e: u32, seg: u32) -> Item {
+    pub(crate) fn item_on(&self, li: usize, e: u32, seg: u32) -> Item {
         let mut it = self.item_of(seg);
         {
             let s = self.segs[seg as usize].as_ref().unwrap();
             if let Some(k) = s.crossings.iter().position(|c| c.e == e) {
                 it.w = s.widths.get(k).copied().unwrap_or(s.width);
+                // at its neck width under a minimum width rule the track stays in its neck
+                if it.w < s.width - 1e-9 && !s.necks.is_empty() {
+                    it.span = self
+                        .neck_span(li, e, s.width, &s.necks, s.neck_w, s.net, s.clearance)
+                        .unwrap_or(ANYWHERE);
+                }
             }
         }
         for (k, &t) in self.m(li).edge_tris[e as usize].iter().enumerate() {
@@ -1207,7 +1389,7 @@ impl<'a> Router<'a> {
     /// triangles next to e (an obstacle or via at the apex blocks the middle of the edge).
     fn apex_bounds(&self, li: usize, e: u32, items: &[Item], extra: Option<ExtraApex>) -> Vec<(f64, f64)> {
         let m = self.m(li);
-        let mut b = vec![(f64::NEG_INFINITY, f64::INFINITY); items.len()];
+        let mut b: Vec<(f64, f64)> = items.iter().map(|it| it.span).collect();
         let [u, v] = m.edges[e as usize];
         let pu = m.verts[u as usize];
         let pv = m.verts[v as usize];
@@ -1357,7 +1539,7 @@ impl<'a> Router<'a> {
         let items = self.items_on(li, e);
         let hot = self.hot_extra(pu, pv);
         let margin = self.cfg.margin;
-        let mut bounds = vec![(f64::NEG_INFINITY, f64::INFINITY); items.len()];
+        let mut bounds: Vec<(f64, f64)> = items.iter().map(|it| it.span).collect();
         let mut apex = [(f64::INFINITY, f64::NEG_INFINITY); 2];
         let len = pu.dist(pv);
         if len > 0.0 {
@@ -1404,6 +1586,7 @@ impl<'a> Router<'a> {
             need_u: self.end_need(li, e, 0, new) + margin + hot,
             need_v: self.end_need(li, e, 1, new) + margin + hot,
             apex,
+            span: new.span,
         }
     }
 
@@ -1413,7 +1596,7 @@ impl<'a> Router<'a> {
         let placed = &view.placed[..];
         let n = placed.len();
         let extra = view.hot;
-        let mut bounds = (f64::NEG_INFINITY, f64::INFINITY);
+        let mut bounds = view.span;
         for k in 0..2 {
             match sides[k] {
                 0 => bounds.1 = bounds.1.min(view.apex[k].0),
@@ -1488,7 +1671,7 @@ impl<'a> Router<'a> {
         let placed = &view.placed[..];
         let n = placed.len();
         let extra = view.hot;
-        let mut bounds = (f64::NEG_INFINITY, f64::INFINITY);
+        let mut bounds = view.span;
         for k in 0..2 {
             match sides[k] {
                 0 => bounds.1 = bounds.1.min(view.apex[k].0),
@@ -1725,13 +1908,27 @@ impl<'a> Router<'a> {
         (p.x.floor() as i32, p.y.floor() as i32)
     }
 
-    fn via_size(&self, net: NetId) -> (f64, f64, f64) {
+    /// Radius, drill and clearance of a via of `net` that stands for `n` vias: with more than
+    /// one (a layer change of a current path, [`Router::via_cluster`]) the radius is that of
+    /// the circle around them ([`Board::cluster_radius`]), so that the room they take is kept
+    /// from the moment the via is made.
+    fn via_size(&self, net: NetId, n: usize) -> (f64, f64, f64) {
         let c = self.board.class_of(net);
         (
-            c.via_diameter / 2.0,
+            self.board.cluster_radius(net, n),
             c.via_drill,
             c.clearance.max(self.board.rules.min_clearance),
         )
+    }
+
+    /// How many vias a via of connection ci stands for: [`Router::via_factor`], 1 with
+    /// `GB_NO_VIA_ROOM`.
+    fn via_cluster(&self, ci: usize) -> usize {
+        if self.cfg.via_room {
+            self.via_factor(ci) as usize
+        } else {
+            1
+        }
     }
 
     /// The pitch of every pin as [`Board::pin_room`] folds it: the nearest pin of the same part
@@ -1773,24 +1970,28 @@ impl<'a> Router<'a> {
         }
     }
 
-    /// How many vias a layer change of connection ci takes: one, or on a current path (between
-    /// two pins that take the minimum width of their class, [`Board::current_min`]) as many as
-    /// carry what that width carries ([`Board::vias_for`]).
+    /// How many vias a layer change of connection ci takes: one, or on a current path as many
+    /// as carry what the minimum width of its class carries ([`Board::current_min`],
+    /// [`Board::vias_for`]). A connection is on a current path when one of its ends is a pin
+    /// that takes that width: the copper of a net is shared, so the way from such a pin to a
+    /// fine pitch pin can be a piece of the way between two wide pins once the rest of the net
+    /// is laid, and the check counts it so. Only a connection between fine pitch pins of
+    /// exempt parts is free.
     fn via_factor(&self, ci: usize) -> f64 {
         let c = &self.conns[ci];
         let Some(min) = self.board.current_min(c.net) else {
             return 1.0;
         };
         match &c.goal {
-            Goal::Pins(goal) if !self.narrow_pin(c.from) && goal.iter().any(|&p| !self.narrow_pin(p)) => {
-                self.board.vias_for(min, self.via_size(c.net).1) as f64
+            Goal::Pins(goal) if !self.narrow_pin(c.from) || goal.iter().any(|&p| !self.narrow_pin(p)) => {
+                self.board.vias_for(min, self.via_size(c.net, 1).1) as f64
             }
             _ => 1.0,
         }
     }
 
-    fn via_info(&self, net: NetId) -> ViaInfo {
-        let (r, drill, clearance) = self.via_size(net);
+    fn via_info(&self, net: NetId, n: usize) -> ViaInfo {
+        let (r, drill, clearance) = self.via_size(net, n);
         ViaInfo {
             net,
             r,
@@ -1802,15 +2003,34 @@ impl<'a> Router<'a> {
     }
 
     /// Static and via spacing checks of a via of `net` at site `site`.
-    fn site_clear(&self, site: u32, net: NetId) -> bool {
-        let (r, drill, clr) = self.via_size(net);
+    fn site_clear(&self, site: u32, net: NetId, cluster: usize) -> bool {
+        let (r, drill, clr) = self.via_size(net, cluster);
         let s = &self.sub.shared.sites[site as usize];
         let p = s.p;
+        if cluster > 1 && s.pad.is_some() {
+            // a site in a pad does not see that pad among its neighbours: the vias of a layer
+            // change of several stay out of the pads of their net there as everywhere (below)
+            return false;
+        }
         for n in &s.nbrs {
             let o = &self.board.obstacles[n.obs as usize];
+            if let ObstacleKind::Keepout { .. } = o.kind {
+                // A keepout for tracks that lets vias in: the track that ends in the centre of
+                // the via still reaches half its width towards it. Nearer than that the
+                // relaxation would push the via away afterwards, into room the search has
+                // given to others.
+                let need = self.board.class_of(net).track_width / 2.0 + crate::board::KEEPOUT_GAP + self.cfg.margin;
+                if (n.dist as f64) < need {
+                    return false;
+                }
+                continue;
+            }
             let need = if o.net == Some(net) && o.kind != ObstacleKind::Hole {
                 match o.hole {
                     Some(_) => drill / 2.0 + self.board.rules.hole_to_hole,
+                    // the vias of a layer change of several stay out of the pads of their net
+                    // (`relax::set_clusters`)
+                    None if cluster > 1 && o.kind == ObstacleKind::Pad => r + clr,
                     None => 0.0,
                 }
             } else {
@@ -1860,22 +2080,22 @@ impl<'a> Router<'a> {
 
     /// Can a via of `net` be used at the existing via vertex of `site`? Some(true) if a via of
     /// the net is already there.
-    fn via_ok_vertex(&self, site: u32, net: NetId) -> Option<bool> {
+    fn via_ok_vertex(&self, site: u32, net: NetId, n: usize) -> Option<bool> {
         if let Some(via) = self.vias.get(&site) {
             return if via.net == net { Some(true) } else { None };
         }
-        if !self.site_clear(site, net) {
+        if !self.site_clear(site, net, n) {
             return None;
         }
         if self.soft() {
             return Some(false);
         }
-        self.vertex_fits(site, net).then_some(false)
+        self.vertex_fits(site, net, n).then_some(false)
     }
 
     /// Do the tracks around an unused via vertex keep their room with a via of `net`?
-    fn vertex_fits(&self, site: u32, net: NetId) -> bool {
-        let info = self.via_info(net);
+    fn vertex_fits(&self, site: u32, net: NetId, n: usize) -> bool {
+        let info = self.via_info(net, n);
         for li in 0..self.nl() {
             let m = self.m(li);
             // a via in a pad has no vertex on the pad's layer
@@ -1896,17 +2116,17 @@ impl<'a> Router<'a> {
     }
 
     /// Can a via of `net` be placed at the unused `site` (splitting its triangles)?
-    fn via_ok_site(&self, site: u32, net: NetId) -> bool {
-        if !self.sub.site_usable(site) || !self.site_clear(site, net) {
+    fn via_ok_site(&self, site: u32, net: NetId, n: usize) -> bool {
+        if !self.sub.site_usable(site) || !self.site_clear(site, net, n) {
             return false;
         }
-        self.soft() || self.site_fits(site, net)
+        self.soft() || self.site_fits(site, net, n)
     }
 
     /// Do the tracks around the unused `site` keep their room with a via of `net`?
-    fn site_fits(&self, site: u32, net: NetId) -> bool {
+    fn site_fits(&self, site: u32, net: NetId, n: usize) -> bool {
         let p = self.site_point(site);
-        let via = self.via_info(net);
+        let via = self.via_info(net, n);
         for li in 0..self.nl() {
             let m = self.m(li);
             let t = m.site_tri[site as usize];
@@ -2204,7 +2424,7 @@ impl<'a> Router<'a> {
     }
 
     fn in_plane(&self, p: Point, net: NetId) -> bool {
-        let (r, _, _) = self.via_size(net);
+        let (r, _, _) = self.via_size(net, 1);
         self.board.planes.iter().any(|pl| pl.net == net && pl.takes_via(p, r))
     }
 
@@ -2224,12 +2444,12 @@ impl<'a> Router<'a> {
         self.via_cells.entry(Self::via_cell(n.at)).or_default().push(site);
     }
 
-    fn add_via(&mut self, site: u32, net: NetId) {
+    fn add_via(&mut self, site: u32, net: NetId, n: usize) {
         if let Some(via) = self.vias.get_mut(&site) {
             via.users += 1;
             return;
         }
-        let mut info = self.via_info(net);
+        let mut info = self.via_info(net, n);
         info.users = 1;
         self.vias.insert(site, info);
         self.via_cells
@@ -2314,6 +2534,7 @@ impl<'a> Router<'a> {
         let cls = self.board.class_of(net);
         // a layer change on a current path takes as many vias as carry the current
         let mut via_cost = self.cfg.via_cost * self.via_factor(ci);
+        let cluster = self.via_cluster(ci);
         if let Some(p) = self.prices.as_ref().filter(|p| p.soft && p.via > 0.0) {
             via_cost = via_cost.max((p.via * p.crossing * self.via_factor(ci)).min(p.via_cap * via_cost));
         }
@@ -2322,6 +2543,7 @@ impl<'a> Router<'a> {
             w: cls.track_width,
             c: cls.clearance.max(self.board.rules.min_clearance),
             sides: [2, 2],
+            span: ANYWHERE,
         };
         let (necks, neck_w) = self.necks(ci);
         let src = &self.board.pins[conn.from];
@@ -2501,6 +2723,8 @@ impl<'a> Router<'a> {
         }
 
         let mut views: FastMap<(u8, u32), EdgeView> = FastMap::default();
+        // the same edges for the track at its full width, where its neck is only a part of the edge
+        let mut views_wide: FastMap<(u8, u32), EdgeView> = FastMap::default();
         let mut scratch: Vec<f64> = Vec::new();
         let prices = self.prices.as_ref();
         let soft = prices.filter(|p| p.soft);
@@ -2528,6 +2752,10 @@ impl<'a> Router<'a> {
             }
             let free = m.status[t as usize] == NONE;
             let e = m.tri_edges[t as usize][k as usize];
+            // a pad with exits is left and reached at an exit
+            if !m.exit_edges.is_empty() && m.exit_edges.get(&e) == Some(&NONE) {
+                return;
+            }
             let k2 = m.local_edge(t2, e) as u8;
             let from_pour = !free && self.tri_pour(lu, t).is_some();
             if !free && s2 != NONE {
@@ -2576,7 +2804,15 @@ impl<'a> Router<'a> {
                 block = top.block_up;
             }
             let mut item = item;
-            item.w = self.width_at_edge(lu, e, item.w, &necks, neck_w);
+            // At its neck width the track has to cross inside its neck. Where that is only a
+            // part of the edge, a slot that does not let it get there takes the full width.
+            let full_w = item.w;
+            let mut part = false;
+            if let Some(span) = self.neck_span(lu, e, full_w, &necks, neck_w, item.net, item.c) {
+                item.w = neck_w;
+                item.span = span;
+                part = span != ANYWHERE;
+            }
             let mut price = prices.map_or(0.0, |p| p.history[lu].get(e as usize).copied().unwrap_or(0.0));
             if free && let Some((cp, cs)) = chord_from {
                 // the chord in t fixes the side of t's apex on the exit edge ...
@@ -2587,9 +2823,17 @@ impl<'a> Router<'a> {
                     let e_in = m.tri_edges[t as usize][ke as usize];
                     let mut it_in = item;
                     it_in.sides = [2, 2];
-                    it_in.w = self.width_at_edge(lu, e_in, cls.track_width, &necks, neck_w);
+                    it_in.w = cls.track_width;
+                    it_in.span = ANYWHERE;
                     let si = m.edge_tris[e_in as usize].iter().position(|&x| x == t).unwrap();
                     it_in.sides[si] = self.side_of_pos(lu, t, e_in, CPos::Edge(k));
+                    let wide_in = it_in;
+                    let mut part_in = false;
+                    if let Some(span) = self.neck_span(lu, e_in, cls.track_width, &necks, neck_w, item.net, item.c) {
+                        it_in.w = neck_w;
+                        it_in.span = span;
+                        part_in = span != ANYWHERE;
+                    }
                     // Only the apex of t is taken here. The side of the apex before the edge is
                     // known as well, and the two together leave the track less than each alone,
                     // which is what `validate` counts as an edge over capacity. Testing both was
@@ -2599,7 +2843,15 @@ impl<'a> Router<'a> {
                     let view = views
                         .entry((lu as u8, e_in))
                         .or_insert_with(|| self.edge_view(lu, e_in, &it_in));
-                    if Self::slot_interval(view, it_in.sides, js, &mut scratch).is_none() {
+                    let mut view = &*view;
+                    let mut fits = Self::slot_interval(view, it_in.sides, js, &mut scratch).is_some();
+                    if !fits && part_in {
+                        view = views_wide
+                            .entry((lu as u8, e_in))
+                            .or_insert_with(|| self.edge_view(lu, e_in, &wide_in));
+                        fits = Self::slot_interval(view, it_in.sides, js, &mut scratch).is_some();
+                    }
+                    if !fits {
                         let Some(p) = soft else { return };
                         price += p.crossing + p.overflow * Self::slot_overflow(view, it_in.sides, js, &mut scratch).0;
                     }
@@ -2611,9 +2863,22 @@ impl<'a> Router<'a> {
             let dir = (pv - pu) * (1.0 / len);
             let n = self.cross[lu][e as usize].len();
             let escape = self.escape_penalty(lu, e, net);
-            let view = views
+            let view = &*views
                 .entry((lu as u8, e))
                 .or_insert_with(|| self.edge_view(lu, e, &item));
+            let wide = Item {
+                w: full_w,
+                span: ANYWHERE,
+                ..item
+            };
+            let view_wide = match part {
+                true => Some(
+                    &*views_wide
+                        .entry((lu as u8, e))
+                        .or_insert_with(|| self.edge_view(lu, e, &wide)),
+                ),
+                false => None,
+            };
             // the chords in t stay the same from slot to slot
             if free && chord_from.is_some() {
                 self.chord_coords(t, lu, net, &mut coords);
@@ -2681,7 +2946,13 @@ impl<'a> Router<'a> {
                         }
                     }
                 }
-                let (lo, hi) = match (Self::slot_interval(view, item.sides, j, &mut scratch), soft) {
+                let (mut view, mut item) = (view, item);
+                let mut fit = Self::slot_interval(view, item.sides, j, &mut scratch);
+                if let (None, Some(vw)) = (fit, view_wide) {
+                    (view, item) = (vw, wide);
+                    fit = Self::slot_interval(view, item.sides, j, &mut scratch);
+                }
+                let (lo, hi) = match (fit, soft) {
                     (Some(i), _) => i,
                     (None, Some(s)) => {
                         if s.solid && self.pack(lu, e, &[item], None).is_none() {
@@ -2842,7 +3113,9 @@ impl<'a> Router<'a> {
                     {
                         for &site in list {
                             let q = self.site_point(site);
-                            let ok = *site_ok.entry(site).or_insert_with(|| self.via_ok_site(site, net));
+                            let ok = *site_ok
+                                .entry(site)
+                                .or_insert_with(|| self.via_ok_site(site, net, cluster));
                             if !self.sub.site_usable(site) || !ok {
                                 continue;
                             }
@@ -2920,7 +3193,9 @@ impl<'a> Router<'a> {
                         if site == NONE || site == STEINER {
                             continue;
                         }
-                        let ok = *vertex_ok.entry(site).or_insert_with(|| self.via_ok_vertex(site, net));
+                        let ok = *vertex_ok
+                            .entry(site)
+                            .or_insert_with(|| self.via_ok_vertex(site, net, cluster));
                         let Some(existing) = ok else {
                             continue;
                         };
@@ -2929,7 +3204,11 @@ impl<'a> Router<'a> {
                             if let Some((ep, es)) = entry_pos {
                                 vc += s.crossing * self.chords_crossed(t, lu, net, ep, es, CPos::Vertex(i)) as f64;
                             }
-                            if !existing && !*via_fits.entry(site).or_insert_with(|| self.vertex_fits(site, net)) {
+                            if !existing
+                                && !*via_fits
+                                    .entry(site)
+                                    .or_insert_with(|| self.vertex_fits(site, net, cluster))
+                            {
                                 vc += s.crossing;
                             }
                         } else if let Some((ep, es)) = entry_pos
@@ -3001,7 +3280,7 @@ impl<'a> Router<'a> {
                             p = nodes[p as usize].via_up;
                         }
                     }
-                    let (_, own_drill, _) = self.via_size(net);
+                    let (_, own_drill, _) = self.via_size(net, 1);
                     let hole_gap = own_drill + self.board.rules.hole_to_hole;
                     for at in 0..cand.len() {
                         if tried >= self.cfg.sites_per_tri {
@@ -3031,11 +3310,16 @@ impl<'a> Router<'a> {
                         {
                             continue;
                         }
-                        if !*site_ok.entry(site).or_insert_with(|| self.via_ok_site(site, net)) {
+                        if !*site_ok
+                            .entry(site)
+                            .or_insert_with(|| self.via_ok_site(site, net, cluster))
+                        {
                             continue;
                         }
                         if let Some(s) = soft
-                            && !*via_fits.entry(site).or_insert_with(|| self.site_fits(site, net))
+                            && !*via_fits
+                                .entry(site)
+                                .or_insert_with(|| self.site_fits(site, net, cluster))
                         {
                             vc += s.crossing;
                         }
@@ -3305,7 +3589,7 @@ impl<'a> Router<'a> {
             let last_t = run.last().unwrap().0;
             let end = match chain.get(j).map(|n| n.kind) {
                 Some(NK::Vert { site, .. }) | Some(NK::GoalVia { site }) => {
-                    self.add_via(site, net);
+                    self.add_via(site, net, self.via_cluster(ci));
                     via_ids.push(site);
                     End::Via(site)
                 }
@@ -3485,7 +3769,14 @@ impl<'a> Router<'a> {
             crossings.push((e, from, slot));
         }
         for (e, from, slot) in crossings {
-            let w = self.width_at_edge(li, e, s.width, &s.necks, s.neck_w);
+            let full = Item {
+                net: s.net,
+                w: s.width,
+                c: s.clearance,
+                sides: [2, 2],
+                span: ANYWHERE,
+            };
+            let (w, _) = self.width_in_slot(li, e, slot as usize, &full, &s.necks, s.neck_w);
             s.widths.push(w);
             let list = &mut self.cross[li][e as usize];
             let j = (slot as usize).min(list.len());
@@ -3985,12 +4276,18 @@ impl<'a> Router<'a> {
                 if !self.conn_segs[ci].is_empty() {
                     continue;
                 }
-                let victims = self.blockers(ci);
+                let victims = self.area_blockers(ci);
                 for &v in &victims {
                     self.rip_up(v);
                 }
                 moved |= !victims.is_empty();
-                let ok = self.route_area(ci);
+                let mut ok = self.route_area(ci);
+                if !ok && !vip {
+                    // the way that named the victims may have begun with a via in the pad
+                    self.cfg.via_in_pad = true;
+                    ok = self.route_area(ci);
+                    self.cfg.via_in_pad = vip;
+                }
                 for &v in &victims {
                     if !self.route_one(v) {
                         still.push(v);
@@ -4018,6 +4315,30 @@ impl<'a> Router<'a> {
             failed = still;
         }
         routed(self)
+    }
+
+    /// What gives way for open connection `ci` of the second pass. A connection into an area
+    /// has no straight line to guess from as [`Router::blockers`] does: there the guess is the
+    /// copper within a millimetre of the pad, and what shuts the pad off from the area often
+    /// lies farther out. So the connection looks for its way through whatever lies there
+    /// ([`Router::way_through`], with a via in the pad where there is no other way) and what it
+    /// runs into goes. Where there is no way even so, the guess stands.
+    fn area_blockers(&self, ci: usize) -> Vec<usize> {
+        if self.conns[ci].goal != Goal::Area {
+            return self.blockers(ci);
+        }
+        let found = self.way_through(ci, AREA_CROSSING).or_else(|| {
+            let mut r = self.clone();
+            r.cfg.via_in_pad = true;
+            r.way_through(ci, AREA_CROSSING)
+        });
+        match found {
+            Some((mut hit, _)) => {
+                hit.retain(|&cj| cj != ci && !self.conn_segs[cj].is_empty());
+                hit
+            }
+            None => self.blockers(ci),
+        }
     }
 
     /// The end of a routed connection into an area still lies in what the model has as the area
@@ -4096,7 +4417,7 @@ impl<'a> Router<'a> {
             crate::relax::relax(self.board, &self.sub, &mut geo, &short);
         }
         let goals = crate::prof::time(crate::prof::Slot::AreaModel, || {
-            crate::fill::goals(self.board, plan, &geo, AREA_PASS_STEP, AREA_PASS_SLACK, true)
+            crate::fill::goals(self.board, plan, &geo, AREA_PASS_STEP, area_pass_slack(), true)
         });
         crate::prof::add(crate::prof::Slot::AreaModels, 1);
         self.area_goals = std::sync::Arc::new(goals);
@@ -4976,7 +5297,7 @@ fn jitter(seed: u64, x: u64) -> f64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::board::{LayerSet, Net, Obstacle, ObstacleKind, Pin};
     use crate::geom::{Polygon, Shape};
@@ -4998,7 +5319,7 @@ mod tests {
     }
 
     /// A board of small square pads: (footprint, net, x, y) per pin, on a 20 mm square.
-    fn pad_board(pins: &[(&str, &str, f64, f64)]) -> Board {
+    pub(crate) fn pad_board(pins: &[(&str, &str, f64, f64)]) -> Board {
         let mut b = crate::topo::tests::two_pad_board();
         b.outline = vec![Polygon::new(vec![pt(0., 0.), pt(20., 0.), pt(20., 20.), pt(0., 20.)])];
         b.nets.clear();
@@ -5299,6 +5620,51 @@ mod tests {
         assert!(crate::check::check(&b, &geo).is_empty());
     }
 
+    /// Two wide pads of a 4.1 A rule on two layers: the via of the layer change takes the room
+    /// of the three vias the current needs from the moment the search sets it, and not in a
+    /// pad. With `via_room` off it is the via of its class.
+    #[test]
+    fn a_layer_change_on_a_current_path_keeps_the_room_of_its_vias() {
+        let b = crate::check::tests::current_board();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let route = |via_room: bool| {
+            let mut r = Router::new(
+                &b,
+                &sub,
+                RouterConfig {
+                    via_room,
+                    ..Default::default()
+                },
+            );
+            r.plan();
+            assert_eq!(r.run(), 1);
+            r.geometry()
+        };
+        let geo = route(true);
+        let vias: Vec<&crate::realize::Via> = geo.vias.iter().filter(|v| v.drill > 0.0).collect();
+        assert_eq!(vias.len(), 1, "{:?}", geo.vias);
+        assert!(
+            (vias[0].diameter - 2.0 * b.cluster_radius(0, 3)).abs() < 1e-9,
+            "{:?}",
+            vias[0]
+        );
+        assert_eq!(b.stands_for(0, vias[0].diameter), 3);
+        let found = crate::check::check(&b, &geo);
+        assert!(found.is_empty(), "{found:?}");
+        // one via may stand in a pad of its net, the room of three is not taken there: the
+        // vias stand out of the pads
+        let r = Router::new(&b, &sub, RouterConfig::default());
+        let in_pads: Vec<u32> = (0..sub.shared.sites.len() as u32)
+            .filter(|&i| sub.shared.sites[i as usize].pad.is_some())
+            .collect();
+        assert!(in_pads.iter().any(|&i| r.site_clear(i, 0, 1)));
+        assert!(in_pads.iter().all(|&i| !r.site_clear(i, 0, 3)));
+        let geo = route(false);
+        let vias: Vec<&crate::realize::Via> = geo.vias.iter().filter(|v| v.drill > 0.0).collect();
+        assert_eq!(vias.len(), 1, "{:?}", geo.vias);
+        assert!((vias[0].diameter - 0.8).abs() < 1e-9, "{:?}", vias[0]);
+    }
+
     #[test]
     fn a_kept_via_into_the_plane_needs_no_fan_out() {
         let mut b = crate::topo::tests::two_pad_board();
@@ -5338,6 +5704,7 @@ mod tests {
             need_u: 0.1,
             need_v: 0.1,
             apex: [(f64::INFINITY, f64::NEG_INFINITY); 2],
+            span: ANYWHERE,
         };
         let mut lo = Vec::new();
         // three tracks need 0.1 + 0.4 + 0.4 + 0.1 mm
@@ -5351,6 +5718,47 @@ mod tests {
         let wide = view(1.0);
         assert!(Router::slot_interval(&wide, [2, 2], 1, &mut lo).is_some());
         assert!(Router::slot_overflow(&wide, [2, 2], 1, &mut lo).0.abs() < 1e-9);
+    }
+
+    /// A track at its neck width has to cross an edge inside its neck. A crossing that lies
+    /// between it and the neck keeps it out: that slot has no room for the narrow track, and
+    /// the search falls back on the full width there.
+    #[test]
+    fn a_crossing_between_a_track_and_its_neck_takes_the_neck_away() {
+        let p = Placed {
+            need_u: 0.3,
+            need_v: 0.3,
+            bounds: ANYWHERE,
+            gap_next: 0.5,
+            gap_to_new: 0.5,
+            gap_from_new: 0.5,
+        };
+        // an edge of 2 mm, the neck of the searched track on its last 0.5 mm
+        let view = |span| EdgeView {
+            placed: vec![p],
+            len: 2.0,
+            hot: 0.0,
+            need_u: 0.34,
+            need_v: 0.34,
+            apex: [(f64::INFINITY, f64::NEG_INFINITY); 2],
+            span,
+        };
+        let mut lo = Vec::new();
+        let narrow = view((1.5, 2.0));
+        // behind the other crossing, next to the neck: in the neck
+        let (a, b) = Router::slot_interval(&narrow, [2, 2], 1, &mut lo).unwrap();
+        assert!(a >= 1.5 - 1e-9 && b <= 1.66 + 1e-9, "{a} {b}");
+        // before it: the other crossing would have to lie at 2.0 or beyond
+        assert!(Router::slot_interval(&narrow, [2, 2], 0, &mut lo).is_none());
+        // anywhere on the edge both slots have room
+        let free = view(ANYWHERE);
+        assert!(Router::slot_interval(&free, [2, 2], 0, &mut lo).is_some());
+        assert!(Router::slot_interval(&free, [2, 2], 1, &mut lo).is_some());
+        // and a placed track bound to its neck keeps a new one out of the slot behind it
+        let mut bound = view(ANYWHERE);
+        bound.placed[0].bounds = (1.5, 2.0);
+        assert!(Router::slot_interval(&bound, [2, 2], 0, &mut lo).is_some());
+        assert!(Router::slot_interval(&bound, [2, 2], 1, &mut lo).is_none());
     }
 
     /// Under a minimum width rule a fine pitch pin between two wide ones joins last: the two
@@ -5452,6 +5860,66 @@ mod tests {
             locked: true,
         });
         b
+    }
+
+    /// A keepout for tracks that lets vias in: no via right at its edge, where the track that
+    /// ends in the via would reach into the keepout and the relaxation would push the via away
+    /// afterwards. Farther out, and inside the keepout, the sites stay.
+    #[test]
+    fn no_via_at_the_edge_of_a_keepout_for_tracks() {
+        let plain = crate::topo::tests::two_pad_board();
+        let sub0 = Substrate::build(&plain, &SubstrateConfig::default());
+        let r0 = Router::new(&plain, &sub0, RouterConfig::default());
+        let clear0: Vec<Point> = (0..sub0.shared.sites.len() as u32)
+            .filter(|&i| r0.site_clear(i, 0, 1))
+            .map(|i| sub0.shared.sites[i as usize].p)
+            .collect();
+        // a site in the middle of the board, and the keepout 0.05 mm to its right
+        let at = *clear0
+            .iter()
+            .min_by(|a, b| a.dist(pt(5.0, 5.0)).total_cmp(&b.dist(pt(5.0, 5.0))))
+            .unwrap();
+        let edge = at.x + 0.05;
+        let mut b = plain.clone();
+        b.obstacles.push(crate::board::Obstacle {
+            shape: Shape::Polygon(crate::geom::Polygon::new(vec![
+                pt(edge, -1.),
+                pt(edge + 3.0, -1.),
+                pt(edge + 3.0, 11.),
+                pt(edge, 11.),
+            ])),
+            layers: crate::board::LayerSet::single(1),
+            net: None,
+            kind: ObstacleKind::Keepout {
+                vias: false,
+                tracks: true,
+                mask: false,
+            },
+            hole: None,
+            clearance: 0.0,
+            pin: None,
+            locked: true,
+        });
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let r = Router::new(&b, &sub, RouterConfig::default());
+        let clear = |p: Point| {
+            let i = sub.shared.sites.iter().position(|s| s.p.dist(p) < 1e-9);
+            i.is_some_and(|i| r.site_clear(i as u32, 0, 1))
+        };
+        let band = b.class_of(0).track_width / 2.0 + crate::board::KEEPOUT_GAP;
+        assert!(0.05 < band);
+        assert!(!clear(at), "a via {at:?} at 0.05 mm from the keepout");
+        let (mut out, mut inside) = (0, 0);
+        for &p in &clear0 {
+            if p.x < edge - band - 0.02 {
+                assert!(clear(p), "the site {p:?} outside the keepout is lost");
+                out += 1;
+            } else if p.x > edge + 0.01 && p.x < edge + 2.99 {
+                assert!(clear(p), "the site {p:?} inside the keepout is lost");
+                inside += 1;
+            }
+        }
+        assert!(out > 0 && inside > 0, "{out} sites outside, {inside} inside");
     }
 
     fn route_all(b: &Board) -> crate::realize::Geometry {
@@ -5600,5 +6068,113 @@ mod tests {
         );
         free.area_pads_wait();
         assert_eq!(paying(&free, 1), 0);
+    }
+
+    /// A pad of an area net that a track of another net shuts off from the area, on a board
+    /// that takes no via: the track lies 2.5 mm from the pad, farther than the guess from a
+    /// straight line looks (the pad has none into an area). The second pass finds the track by
+    /// looking for the way of the pad through it, takes it out, lays the pad into the area and
+    /// the track again around the other side of the pad.
+    #[test]
+    fn the_second_pass_takes_out_what_shuts_a_pad_off_from_the_area_farther_out() {
+        let mut b = pad_board(&[
+            ("J", "G", 4.0, 10.0),
+            ("J", "G", 16.0, 10.0),
+            ("J", "S", 6.5, 0.5),
+            ("J", "S", 6.5, 19.5),
+        ]);
+        // no via anywhere
+        b.obstacles.push(crate::board::Obstacle {
+            shape: Shape::Polygon(b.outline[0].clone()),
+            layers: crate::board::LayerSet::all(b.layers.len()),
+            net: None,
+            kind: ObstacleKind::Keepout {
+                vias: true,
+                tracks: false,
+                mask: false,
+            },
+            hole: None,
+            clearance: 0.0,
+            pin: None,
+            locked: true,
+        });
+        // the area of G: the right part of the front, with the second pad of G in it
+        let mut area = crate::fill::Area::pour(
+            0,
+            0,
+            vec![Polygon::new(vec![pt(12., 0.), pt(20., 0.), pt(20., 20.), pt(12., 20.)])],
+        );
+        area.connect = crate::fill::Connect::Solid;
+        b.areas = Some(std::sync::Arc::new(crate::fill::AreaPlan {
+            areas: vec![area],
+            nets: vec![0],
+            ..Default::default()
+        }));
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        assert_eq!(r.run(), 1);
+        // the track of S runs between the pad and the area, and nothing of it within the
+        // millimetre around the pad that the guess looks at
+        let xs = |r: &Router| -> Vec<f64> {
+            let geo = r.geometry();
+            geo.tracks
+                .iter()
+                .filter(|t| t.net == 1)
+                .flat_map(|t| t.pts.iter().map(|p| p.x))
+                .collect()
+        };
+        assert!(xs(&r).iter().all(|&x| x > 5.5 && x < 7.5));
+        assert_eq!(r.area_pass(), 2, "open: {:?}", r.unrouted());
+        let g = (0..r.conns.len()).find(|&ci| r.conns[ci].net == 0).unwrap();
+        assert_eq!(r.conns[g].goal, Goal::Area);
+        assert!(r.area_end_holds(g));
+        // S went around the pad on the side away from the area
+        assert!(xs(&r).iter().any(|&x| x < 4.0));
+        assert!(crate::check::check(&b, &r.geometry()).is_empty());
+    }
+
+    /// A custom rule between the tracks of two nets holds against the track that ends in the
+    /// centre of a via too: the passing track keeps the rule from that track, which is nearer
+    /// than the classes ask from the edge of the via.
+    #[test]
+    fn a_track_keeps_the_rule_of_tracks_from_the_track_that_ends_in_a_via() {
+        let mut b = pad_board(&[("J", "A", 1.0, 1.0), ("J", "B", 2.0, 1.0)]);
+        let (w, c) = (b.class_of(0).track_width, b.class_of(0).clearance);
+        let r = w / 2.0 + 0.175;
+        let via = ViaInfo {
+            net: 1,
+            r,
+            drill: 0.3,
+            clearance: c,
+            users: 1,
+            kept: false,
+        };
+        let it = Item {
+            net: 0,
+            w,
+            c,
+            sides: [2, 2],
+            span: ANYWHERE,
+        };
+        // the classes alone: the edge of the via and the clearance
+        let plain = Router::via_need(&b, &via, &it);
+        assert!((plain - (r + c + w / 2.0)).abs() < 1e-9, "{plain}");
+        // a rule the via covers anyway changes nothing
+        b.pair_clearance.insert((0, 1), c + 0.1);
+        assert_eq!(Router::via_need(&b, &via, &it), plain);
+        // three widths between the tracks: counted from the track of B in the centre of the via
+        let rule = c + 0.3;
+        b.pair_clearance.insert((0, 1), rule);
+        let need = Router::via_need(&b, &via, &it);
+        assert!(
+            (need - (w / 2.0 + rule + w / 2.0)).abs() < 1e-9,
+            "{need} against {plain}"
+        );
+        // and only between the two nets of the rule
+        let other = Item { net: 0, ..it };
+        b.pair_clearance.clear();
+        b.pair_clearance.insert((0, 5), rule);
+        assert_eq!(Router::via_need(&b, &via, &other), plain);
     }
 }

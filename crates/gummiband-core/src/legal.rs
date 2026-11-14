@@ -207,6 +207,18 @@ impl<'a> NetCopper<'a> {
                 }
             }
         }
+        // a track that runs across the centre of a pad of its net joins it, also where it does
+        // not end there (KiCad joins them: the pad's anchor lies on the track)
+        for i in 0..self.tracks.len() {
+            let t = self.tracks[i];
+            let node = self.track_node(i);
+            for j in 0..self.pins.len() {
+                let pn = &b.pins[self.pins[j]];
+                if pn.layers.has(t.layer) && on_track(t, pn.pos) && self.on_pad(self.pins[j], pn.pos, Some(t.layer)) {
+                    self.join(node, j);
+                }
+            }
+        }
         // vias: on a pad (the via's copper overlaps the pad, as KiCad joins them), in a plane, on
         // kept copper, on the middle of a track, on each other
         for i in 0..self.vias.len() {
@@ -641,6 +653,14 @@ fn trim_stubs(board: &Board, geo: &mut Geometry) -> usize {
             if !at_end {
                 reverse(&mut geo.tracks[i]);
             }
+            if crate::knobs::log(crate::knobs::Log::Areas) {
+                let t = &geo.tracks[i];
+                let (a, b) = (t.pts[0], *t.pts.last().unwrap());
+                eprintln!(
+                    "areas: taken back: {} on {} from ({:.3}, {:.3}), its end at ({:.3}, {:.3}) lies on nothing of its net",
+                    board.nets[net as usize].name, board.layers[t.layer as usize].name, a.x, a.y, b.x, b.y
+                );
+            }
             match last_junction(board, geo, i) {
                 Some((k, tail)) => {
                     let t = &mut geo.tracks[i];
@@ -976,6 +996,34 @@ pub fn enforce(board: &Board, geo: &mut Geometry, stats: &mut RunStats) -> Legal
     nets.dedup();
     // 2. what is connected is counted on the copper
     count_open(board, geo, &nets, &dropped, stats, &mut legal);
+    if crate::knobs::log(crate::knobs::Log::Areas)
+        && let Some(plan) = &board.areas
+    {
+        for (i, t) in geo.tracks.iter().enumerate() {
+            if !plan.holds(t.net) || t.origin.is_some() || t.pts.len() < 2 {
+                continue;
+            }
+            let (a, b) = (t.pts[0], *t.pts.last().unwrap());
+            let word = |p: Point| {
+                if held(board, geo, t.net, i, p, t.layer) {
+                    "held"
+                } else {
+                    "on nothing"
+                }
+            };
+            eprintln!(
+                "areas: track of {} on {}: ({:.3}, {:.3}) {}, ({:.3}, {:.3}) {}",
+                board.nets[t.net as usize].name,
+                board.layers[t.layer as usize].name,
+                a.x,
+                a.y,
+                word(a),
+                b.x,
+                b.y,
+                word(b)
+            );
+        }
+    }
     // 3. stubs are taken back: an end on nothing connects nothing
     legal.trimmed = trim_stubs(board, geo);
     // 4. and the copper is counted once more, as the final word
@@ -1723,6 +1771,29 @@ mod tests {
         let legal = enforce(&b, &mut geo, &mut st);
         assert_eq!((legal.not_finite, geo.tracks.len(), st.routed), (1, 0, 0));
         assert_eq!(legal.open.len(), 1);
+    }
+
+    /// A track that runs across a pad of its net without ending on it joins that pad, as KiCad
+    /// has it: the pad's centre lies on the track.
+    #[test]
+    fn a_track_across_the_centre_of_a_pad_joins_it() {
+        let b = board(&[("A", 2., 10.), ("A", 10., 10.), ("A", 18., 10.)]);
+        let mut geo = Geometry {
+            tracks: vec![track(0, &[(2., 10.), (18., 10.)])],
+            vias: Vec::new(),
+        };
+        let mut st = stats(2);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert!(legal.open.is_empty(), "{:?}", legal.open);
+        assert_eq!(st.routed, 2);
+        // beside the centre by more than half the width it joins nothing
+        let mut geo = Geometry {
+            tracks: vec![track(0, &[(2., 10.), (10., 10.15), (18., 10.)])],
+            vias: Vec::new(),
+        };
+        let mut st = stats(2);
+        let legal = enforce(&b, &mut geo, &mut st);
+        assert_eq!((legal.open.len(), st.routed), (1, 1));
     }
 
     #[test]

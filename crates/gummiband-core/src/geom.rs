@@ -565,9 +565,133 @@ pub fn arc_polyline(a: Point, m: Point, b: Point, max_error: f64) -> Vec<Point> 
     v
 }
 
+/// A **bow** is the piece of an arc between two points of it that are less than half a turn
+/// apart: the arc from a to b about c with radius r, on the side of its chord away from c.
+/// Whether the direction `d` from c points at the bow.
+fn in_bow(a: Point, b: Point, c: Point, d: Point) -> bool {
+    let (u, v) = (a - c, b - c);
+    let s = u.cross(v);
+    if s.abs() < 1e-18 {
+        // no bow: the two points are one
+        return false;
+    }
+    u.cross(d) * s >= 0.0 && d.cross(v) * s >= 0.0 && d.dot(u + v) > 0.0
+}
+
+/// The distance from p to the bow from a to b about c with radius r.
+pub fn bow_point_dist(a: Point, b: Point, c: Point, r: f64, p: Point) -> f64 {
+    let v = p - c;
+    if in_bow(a, b, c, v) {
+        (v.len() - r).abs()
+    } else {
+        p.dist(a).min(p.dist(b))
+    }
+}
+
+/// The distance between the bow from a to b about c with radius r and the segment from s to t.
+pub fn bow_seg_dist(a: Point, b: Point, c: Point, r: f64, s: Point, t: Point) -> f64 {
+    let mut d = bow_point_dist(a, b, c, r, s)
+        .min(bow_point_dist(a, b, c, r, t))
+        .min(point_seg_dist(a, s, t))
+        .min(point_seg_dist(b, s, t));
+    let e = t - s;
+    let l2 = e.len2();
+    if l2 > 1e-24 {
+        // the foot of the centre on the line, and how far the line is from the centre
+        let k = (c - s).dot(e) / l2;
+        let foot = s + e * k;
+        let h = foot.dist(c);
+        if h < r {
+            // where the line cuts the circle
+            let half = (r * r - h * h).sqrt() / l2.sqrt();
+            for x in [k - half, k + half] {
+                if (0.0..=1.0).contains(&x) && in_bow(a, b, c, s + e * x - c) {
+                    return 0.0;
+                }
+            }
+        }
+        if (0.0..=1.0).contains(&k) && h > 1e-12 && in_bow(a, b, c, foot - c) {
+            d = d.min((h - r).abs());
+        }
+    }
+    d
+}
+
+/// The distance between two bows.
+#[allow(clippy::too_many_arguments)]
+pub fn bow_bow_dist(a1: Point, b1: Point, c1: Point, r1: f64, a2: Point, b2: Point, c2: Point, r2: f64) -> f64 {
+    let mut d = bow_point_dist(a2, b2, c2, r2, a1)
+        .min(bow_point_dist(a2, b2, c2, r2, b1))
+        .min(bow_point_dist(a1, b1, c1, r1, a2))
+        .min(bow_point_dist(a1, b1, c1, r1, b2));
+    let u = c2 - c1;
+    let apart = u.len();
+    if apart > 1e-12 {
+        let u = u * (1.0 / apart);
+        // where the circles cut each other
+        if apart < r1 + r2 && apart > (r1 - r2).abs() {
+            let x = (apart * apart + r1 * r1 - r2 * r2) / (2.0 * apart);
+            let h = (r1 * r1 - x * x).max(0.0).sqrt();
+            for side in [1.0, -1.0] {
+                let p = c1 + u * x + u.perp() * (h * side);
+                if in_bow(a1, b1, c1, p - c1) && in_bow(a2, b2, c2, p - c2) {
+                    return 0.0;
+                }
+            }
+        }
+        // the nearest points of two circles lie on the line through their centres
+        for s1 in [1.0, -1.0] {
+            for s2 in [1.0, -1.0] {
+                let (d1, d2) = (u * s1, u * s2);
+                if in_bow(a1, b1, c1, d1) && in_bow(a2, b2, c2, d2) {
+                    d = d.min((c1 + d1 * r1).dist(c2 + d2 * r2));
+                }
+            }
+        }
+    }
+    d
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bow_is_measured_as_the_arc_it_is() {
+        // a quarter of the unit circle, from (1, 0) to (0, 1)
+        let (a, b, c) = (pt(1.0, 0.0), pt(0.0, 1.0), pt(0.0, 0.0));
+        let h = 0.5f64.sqrt();
+        // a point outside over its middle, one inside, one beside its end
+        assert!((bow_point_dist(a, b, c, 1.0, pt(2.0 * h, 2.0 * h)) - 1.0).abs() < 1e-12);
+        assert!((bow_point_dist(a, b, c, 1.0, pt(0.5 * h, 0.5 * h)) - 0.5).abs() < 1e-12);
+        assert!((bow_point_dist(a, b, c, 1.0, pt(1.0, -0.3)) - 0.3).abs() < 1e-12);
+        // the chord is 0.29 inside the bow at its middle: a line 0.1 outside the bow
+        let (s, t) = (
+            pt(1.1 * h, 1.1 * h) + pt(1.0, -1.0),
+            pt(1.1 * h, 1.1 * h) + pt(-1.0, 1.0),
+        );
+        assert!((bow_seg_dist(a, b, c, 1.0, s, t) - 0.1).abs() < 1e-12);
+        assert!((seg_seg_dist(a, b, s, t) - (1.1 - h)).abs() < 1e-12);
+        // a line through it, a line that ends before it, a line inside the circle
+        assert_eq!(bow_seg_dist(a, b, c, 1.0, pt(0.0, 0.0), pt(2.0, 2.0)), 0.0);
+        assert!((bow_seg_dist(a, b, c, 1.0, pt(0.0, 0.0), pt(0.5 * h, 0.5 * h)) - 0.5).abs() < 1e-12);
+        assert!((bow_seg_dist(a, b, c, 1.0, pt(0.2, 0.1), pt(0.1, 0.2)) - (1.0 - 0.05f64.sqrt())).abs() < 1e-12);
+        // a bow about the same centre, 0.25 further out; one about another centre that faces
+        // it, 0.1 apart; one that turns its back, measured to its ends; two that cross
+        let o = |r: f64| (pt(r, 0.0), pt(0.0, r));
+        let (a2, b2) = o(1.25);
+        assert!((bow_bow_dist(a, b, c, 1.0, a2, b2, c, 1.25) - 0.25).abs() < 1e-12);
+        let far = pt(2.1 * h, 2.1 * h);
+        let (a3, b3) = (far + pt(-1.0, 0.0), far + pt(0.0, -1.0));
+        assert!((bow_bow_dist(a, b, c, 1.0, a3, b3, far, 1.0) - 0.1).abs() < 1e-12);
+        let (a4, b4) = (far + pt(1.0, 0.0), far + pt(0.0, 1.0));
+        assert!((bow_bow_dist(a, b, c, 1.0, a4, b4, far, 1.0) - (a4.len() - 1.0)).abs() < 1e-12);
+        let near = pt(1.5 * h, 1.5 * h);
+        assert_eq!(
+            bow_bow_dist(a, b, c, 1.0, near + pt(-1.0, 0.0), near + pt(0.0, -1.0), near, 1.0),
+            0.0
+        );
+    }
 
     #[test]
     fn nearest_points_of_two_segments() {

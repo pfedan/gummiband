@@ -32,6 +32,10 @@ Columns:
   pieces/spots  Gummiband's own clearance check: violating pieces of copper, and places
   vias, mm      vias and track length written
   island vias   of the vias, those set for islands of fill without a search
+  second route  with `fill`, where the route left a connection open and the board was routed
+                again with every net as tracks: which of the two is the result (`tracks`, or
+                `fill`), and after the colon the connections open with the fill and with the
+                tracks; the columns before it describe that result, cpu s is of both routes
   cpu s         CPU seconds of the route (user and system, all threads)
   model s       seconds inside the fill model during the search, summed over the threads
                 (wall time of each run, so under load more than its share of the CPU), and
@@ -114,6 +118,12 @@ def kicad(board, pcb, nets, name):
     }
 
 
+def second_route(f):
+    if not f:
+        return ""
+    return f'{"tracks" if f["kept"] else "fill"}: {f["fill"][0]} and {f["tracks"][0]} open'
+
+
 def run(board, nets, seed, mode, args, use_kicad, keep):
     base = os.path.splitext(os.path.basename(board))[0]
     name = f"{base}.s{seed}.{mode}"
@@ -138,6 +148,7 @@ def run(board, nets, seed, mode, args, use_kicad, keep):
         "pieces/spots": f"{m.group(1)}/{m.group(2)}" if m else "?",
         "vias": j["vias"],
         "island vias": j.get("area_vias", 0),
+        "second route": second_route(j.get("area_fallback")),
         "mm": round(j["length_mm"]),
         "cpu s": round(seconds, 1),
         "model s": f'{j.get("area_model_seconds", 0.0):.1f} ({j.get("area_model_runs", 0)})',
@@ -188,7 +199,7 @@ def main():
         plan += [(os.path.join(ROOT, "bench", "boards", "areas", n + ".kicad_pcb"), nets) for n, nets in AREA_BOARDS]
     os.makedirs(OUT, exist_ok=True)
     head = ["board", "seed", "mode", "routed", "open pads", "groups", "pieces/spots", "vias", "island vias", "mm", "cpu s",
-            "model s"]
+            "model s", "second route"]
     if o.kicad:
         head += ["unconn", "clear", "dangling"]
     head += ["not reached", "error"]

@@ -146,6 +146,8 @@ pub enum Log {
     Timing,
     Validate,
     ValidateEach,
+    Areas,
+    Current,
 }
 
 /// A topic of `GB_LOG` with its name in the list.
@@ -239,6 +241,18 @@ pub static TOPICS: &[Topic] = &[
         was: "VALIDATE_EACH",
         doc: "Check the inner state after every routed connection and print the one that broke it (slow).",
     },
+    Topic {
+        log: Log::Areas,
+        name: "areas",
+        was: "",
+        doc: "`areas fill`, in the last check: every track of a net left to its fill with its two ends and whether each is held, and the track ends that are taken back.",
+    },
+    Topic {
+        log: Log::Current,
+        name: "current",
+        was: "",
+        doc: "The layer changes of current paths that kept the room of their vias: per via whether it got them, and what was in the way where it did not.",
+    },
 ];
 
 /// The topics a value of `GB_LOG` turns on, as a bit per [`Log`], and the names it has that are
@@ -306,8 +320,18 @@ knobs! {
         "A plain search that leaves at most 15 % of the connections open starts a negotiated search on its own.";
     TAPER = "GB_TAPER", Switch, NotZero, "on",
         "The last step tapers a track at a spot that misses its clearance by a little.";
+    EXITS = "GB_EXITS", Switch, NotZero, "on",
+        "A track leaves a pad in a tight row by a fixed straight piece on the middle line of the pad (`exit.rs`).";
+    EXIT_INWARD = "GB_EXIT_INWARD", Experiment, NotZero, "on",
+        "Pads in a tight row get an exit under the part too, where there is room (off: outwards only).";
+    EXIT_RAIL = "GB_EXIT_RAIL", Experiment, Num, "0.15",
+        "How far beyond its exit point a track stays on the middle line of its pad, in mm (0: it may turn at the exit point).";
     STITCH = "GB_STITCH", Switch, NotZero, "on",
         "Layer changes of current paths get the vias that carry their current (`relax::stitch_vias`).";
+    PIVOT_ARCS = "GB_PIVOT_ARCS", Switch, NotZero, "on",
+        "The finished copper gets its last form from its pivots (`relax::pivot_pass`): one arc around each pad corner, via or bundle a track bends around, with the radius of what lies between, and tangent lines. A track keeps the corners the shortcuts gave it where such an arc or line comes too close, and where the own check finds something new.";
+    SPREAD = "GB_SPREAD", Switch, NotZero, "on",
+        "Where the own check finds tracks too near to something and the passage has room for them, the tracks through it are laid again as one group (`spread::spread`): from one side outwards with the clearance and 2 um, lines and arcs, taken only if the check then finds nothing new.";
     ZIP = "GB_ZIP", Switch, NotZero, "on",
         "Pairs the search pulled together close up to their gap at the end (`pairs::zip`).";
     GOAL_CHECK = "GB_GOAL_CHECK", Switch, NotZero, "on",
@@ -326,10 +350,20 @@ knobs! {
         "Open end: a new via that reaches the plane of its net stays in it when it is moved.";
     NO_RELAX = "GB_NO_RELAX", Switch, Set, "off",
         "The search returns its best topology without the geometry stage (for `examples/relax_bench.rs`).";
+    NO_AREA_REPAIR = "GB_NO_AREA_REPAIR", Switch, Set, "off",
+        "`areas fill`: what the last check finds open of the nets left to their fill is not laid again on the finished copper.";
+    NO_AREA_FALLBACK = "GB_NO_AREA_FALLBACK", Switch, Set, "off",
+        "`areas fill`: a board whose route leaves a connection open is not routed a second time with every net as tracks.";
+    NO_VIA_ROOM = "GB_NO_VIA_ROOM", Switch, Set, "off",
+        "A layer change on a current path does not keep the room of all its vias from the moment the search sets it: the vias after the first are set after the relaxation where room is left, as before.";
     NO_POLISH = "GB_NO_POLISH", Switch, Set, "off",
         "Skips the polish relaxation of a winner that has clearance spots left.";
+    NO_DISC = "GB_NO_DISC", Switch, Set, "off",
+        "The first line of a track comes from the funnel through its portals, with a share of the slack, instead of the band pulled taut against the discs around the vertices of its triangles.";
     NO_ARCS = "GB_NO_ARCS", Switch, Set, "off",
         "Tracks are realised as polylines, without arcs around the corners.";
+    BAND = "GB_BAND", Experiment, Set, "off",
+        "The band of a track takes the radius of the stack where the track lies next to the vertex it bends around, and where a wrap has no tangent, leaves its portal or its triangles, that wrap alone becomes a corner; today such a track loses all its arcs.";
     NO_TUNE_ROOM = "GB_NO_TUNE_ROOM", Switch, Set, "off",
         "CLI `route`: length tuning does not make room for its meanders first.";
 
@@ -370,6 +404,8 @@ knobs! {
         "How many candidates of the search go on to the geometry stage.";
     FULL = "GB_FULL", Experiment, Num, "6",
         "How many finalists get the full relaxation after the short one.";
+    RIVALS = "GB_RIVALS", Experiment, Num, "2",
+        "How many runners-up of the geometry stage are finished next to the winner; the best finished result is the route (0: the winner alone).";
     DIRS_ALL = "GB_DIRS_ALL", Experiment, Set, "off",
         "Every run of the portfolio uses the preferred layer directions, not every third.";
     PLACE_ROUNDS = "GB_PLACE_ROUNDS", Experiment, Num, "2",
@@ -402,16 +438,26 @@ knobs! {
         "Rip-up passes of a router run.";
     ESCAPE = "GB_ESCAPE", Experiment, Num, "0",
         "Extra cost in mm for passing right next to a pad of another net that still waits for its route.";
+    SEARCH_MARGIN = "GB_SEARCH_MARGIN", Experiment, Num, "0.01",
+        "Search: room a track or via asks for beyond its clearance, in mm.";
     AREA_ESCAPE = "GB_AREA_ESCAPE", Experiment, Num, "2",
         "`areas fill`: extra cost in mm for passing right next to a pad of a net left to the fill of its area, while the other nets are laid.";
+    AREA_SLACK = "GB_AREA_SLACK", Experiment, Num, "0.035",
+        "`areas fill`: added to every clearance of the fill when the model runs inside the search, in mm; more of it and the search counts on wider strips of fill only.";
     SHARE_KIND = "GB_SHARE_KIND", Experiment, Value, "all kinds",
         "`--patterns shares`: only the shares of this kind (`neighbours` or `decap`).";
     SKEW_WEIGHT = "GB_SKEW_WEIGHT", Experiment, Num, "0.5",
         "Weight of a mm of skew need in the cost of a candidate.";
     REFINE = "GB_REFINE", Experiment, Num, "0.6",
         "Triangulation: long obstacle sides get a vertex every this many mm.";
+    FEET = "GB_FEET", Experiment, Num, "0",
+        "Triangulation: a corner within this many mm of a side of other copper puts a vertex at its foot on that side (0: none).";
+    ROUND_EXACT = "GB_ROUND_EXACT", Experiment, Set, "off",
+        "Search: room next to round copper is measured from the circle, not from the corners of the polygon around it.";
     RELAX_IT = "GB_RELAX_IT", Experiment, Num, "400",
         "Rounds of a full relaxation.";
+    RELAX_SETTLE = "GB_RELAX_SETTLE", Experiment, Num, "0",
+        "Relaxation: up to this many further rounds that only resolve clearances, until nothing moves.";
     SPACING = "GB_SPACING", Experiment, Num, "0.05",
         "Relaxation: distance of the points on a track in mm.";
     COARSE = "GB_COARSE", Experiment, Value, "twice the spacing, at least 0.1",
@@ -451,7 +497,12 @@ pub fn markdown() -> String {
          | Topic | Output | Replaces |\n| --- | --- | --- |\n",
     );
     for t in TOPICS {
-        let _ = writeln!(s, "| `{}` | {} | `GB_{}` |", t.name, t.doc, t.was);
+        let was = if t.was.is_empty() {
+            String::new()
+        } else {
+            format!("`GB_{}`", t.was)
+        };
+        let _ = writeln!(s, "| `{}` | {} | {was} |", t.name, t.doc);
     }
     s.push_str(
         "\n## Switches\n\n\

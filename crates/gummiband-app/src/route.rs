@@ -802,6 +802,9 @@ pub enum Event<'a> {
     PlacementKept { seed: u64 },
     /// `move_parts`: so many parts may move.
     MovableParts { count: usize },
+    /// `areas` fill: the route left so many connections open, and the board is routed a second
+    /// time with every net as tracks ([`AreaFallback`]).
+    RoutedAgain { open: usize },
 }
 
 /// Room made for the meanders of the length tuning.
@@ -874,16 +877,97 @@ pub struct Routed {
     pub legal: gummiband_core::legal::Legal,
     /// The same for every alternative of the open end, in their order.
     pub legal_alternatives: Vec<gummiband_core::legal::Legal>,
+    /// The squeezed places laid again at the end (`spread.rs`). None: the step was off.
+    pub spread: Option<gummiband_core::spread::Report>,
     /// With `areas` fill: what the fill of every net left to it reaches on the finished copper,
     /// by the fill model.
     pub areas: Vec<crate::areas::NetReport>,
     /// Of the vias written, those set for islands of fill (`area_stitch`).
     pub area_vias: usize,
+    /// With `areas` fill: what was laid again at the end because the last check found it open.
+    /// None: nothing was open, or the step did not run.
+    pub area_repair: Option<AreaRepair>,
+    /// With `areas` fill: the second route, with every net as tracks, of a board whose route
+    /// with the fill left a connection open ([`area_fallback`]). None: nothing was open, or
+    /// the step did not run.
+    pub area_fallback: Option<AreaFallback>,
     /// Seconds the fill model took inside the search, summed over the threads of the search,
     /// and how often it ran.
     pub area_model_seconds: f64,
     pub area_model_runs: u64,
     write: WriteOptions,
+}
+
+/// The last step of a route with `areas` fill ([`repair_areas`]).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AreaRepair {
+    /// The connections the last check found open, as `"NET from PIN"`.
+    pub open: Vec<String>,
+    /// Of them, those that are still open at the end.
+    pub left: Vec<String>,
+    /// Whether the result was kept: it is, when fewer connections are open with it, or as many
+    /// with fewer clearance violations.
+    pub kept: bool,
+    pub seconds: f64,
+}
+
+impl AreaRepair {
+    /// The step in one sentence, for the report of a route.
+    pub fn line(&self) -> String {
+        let n = self.open.len();
+        let what = format!(
+            "the last check found {n} connection{} open on the finished copper ({})",
+            if n == 1 { "" } else { "s" },
+            self.open.join(", ")
+        );
+        if !self.kept {
+            return format!("{what}; laying them again on that copper did not help, the result stays as it was");
+        }
+        let left = match self.left.len() {
+            0 => "all of them are joined now".to_string(),
+            l => format!("{l} still open ({})", self.left.join(", ")),
+        };
+        format!("{what}; they were laid again on that copper: {left}")
+    }
+}
+
+/// The second route of `areas` fill ([`area_fallback`]).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AreaFallback {
+    /// The connections that were open with the fill, as `"NET from PIN"`.
+    pub open: Vec<String>,
+    /// Connections open and clearance violations of the route with the fill.
+    pub fill: (usize, usize),
+    /// The same of the route with every net as tracks.
+    pub tracks: (usize, usize),
+    /// Whether the route with the tracks is the result: it is, when fewer connections are open
+    /// with it, or as many with fewer clearance violations.
+    pub kept: bool,
+    /// Seconds of the second route.
+    pub seconds: f64,
+}
+
+impl AreaFallback {
+    /// The step in one sentence, for the report of a route.
+    pub fn line(&self) -> String {
+        let n = self.open.len();
+        let side = |(open, violations): (usize, usize)| format!("{open} open, {violations} clearance violations");
+        let shown: Vec<&str> = self.open.iter().take(8).map(String::as_str).collect();
+        format!(
+            "with the nets left to their fill {n} connection{} stayed open ({}{}), so the board was routed again with every net as tracks: {} against {} with the fill; the result is the route {}",
+            if n == 1 { "" } else { "s" },
+            shown.join(", "),
+            if n > shown.len() { ", ..." } else { "" },
+            side(self.tracks),
+            side(self.fill),
+            if self.kept { "with the tracks" } else { "with the fill" },
+        )
+    }
+}
+
+/// Whether `open`, an entry of the open connections (`"NET from PIN"`), is one of `net`.
+fn open_of(open: &str, net: &str) -> bool {
+    open.strip_prefix(net).is_some_and(|rest| rest.starts_with(" from "))
 }
 
 /// What of the options the writer needs.
@@ -908,6 +992,65 @@ pub fn route_board(board: &Board, opts: &RouteOptions, hooks: &Hooks) -> Result<
 }
 
 fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) -> Result<Routed> {
+    let first = route_with(t0, board, opts, hooks, true)?;
+    area_fallback(t0, board, opts, hooks, first)
+}
+
+/// `areas` fill never ends with fewer connections than `areas` tracks.
+///
+/// With the fill a pad can end that neither the fill nor a track to the fill reaches: the fill
+/// around it is an island, or the pad lies shut in by the tracks of others. And the other nets
+/// are laid on a board that differs from the one they would have had. As tracks every net
+/// joins its pads one to the next and needs no fill near them. So where `first`, the route
+/// with the fill, leaves any connection open, the board is routed a second time as `areas`
+/// tracks does it (the areas stay areas of the board), and the better of the two is the
+/// result: fewer connections open, or as many with fewer clearance violations. A tie keeps
+/// the fill.
+///
+/// The rule is the same for every board and every net and knows no thresholds. Its price is
+/// the time of the second route, paid only where the fill left something open.
+fn area_fallback(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks, mut first: Routed) -> Result<Routed> {
+    use std::sync::atomic::Ordering;
+    let filled = board.areas.as_ref().is_some_and(|p| !p.nets.is_empty());
+    let open = first.res.stats.unrouted.clone();
+    if !filled
+        || open.is_empty()
+        || gummiband_core::knobs::NO_AREA_FALLBACK.on()
+        || hooks.stop.is_some_and(|s| s.load(Ordering::Relaxed))
+    {
+        return Ok(first);
+    }
+    hooks.emit(Event::RoutedAgain { open: open.len() });
+    let t1 = Instant::now();
+    let mut as_tracks = board.clone();
+    as_tracks.areas = None;
+    let mut second = route_with(t1, &as_tracks, opts, hooks, true)?;
+    let worth = |r: &Routed| (r.res.stats.unrouted.len(), r.violations.len());
+    let kept = worth(&second) < worth(&first);
+    let report = AreaFallback {
+        open,
+        fill: worth(&first),
+        tracks: worth(&second),
+        kept,
+        seconds: t1.elapsed().as_secs_f64(),
+    };
+    let seconds = t0.elapsed().as_secs_f64();
+    if kept {
+        // the time of the search is the time of both
+        second.search_seconds += first.search_seconds;
+        second.area_model_seconds += first.area_model_seconds;
+        second.area_model_runs += first.area_model_runs;
+        first = second;
+    }
+    first.seconds = seconds;
+    first.area_fallback = Some(report);
+    Ok(first)
+}
+
+/// [`route_from`]; with `repair` the connections of the nets left to their fill that the last
+/// check finds open are laid again on the finished copper ([`repair_areas`]). The route that
+/// lays them runs without it.
+fn route_with(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks, repair: bool) -> Result<Routed> {
     opts.validate(hooks.stop.is_some()).map_err(anyhow::Error::msg)?;
     let model_before = (prof::value(prof::Slot::AreaModel), prof::value(prof::Slot::AreaModels));
     let sub_cfg = opts.substrate_config();
@@ -987,6 +1130,10 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     } else {
         routed_board.with_offsets(&res.offsets)
     };
+    // an exit piece that no track took is no copper: the steps from here on see the pads
+    // without those pieces, as the last steps of the search did
+    let released = gummiband_core::exit::release_unused(&final_board, &res.geometry);
+    let final_board = released.unwrap_or(final_board);
     let b = &final_board;
     // room for the meanders: the copper next to the nets that want length steps aside
     // (the pairs make it while they are one wide track)
@@ -1040,6 +1187,20 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
             seconds: t1.elapsed().as_secs_f64(),
         }
     });
+    // up to here the exit pieces of the pads were part of their pads (`exit.rs`); from here on
+    // they are tracks of the route, and the pads are the pads of the file
+    let plain = (!b.exits.is_empty()).then(|| {
+        let stubs = |g: &mut Geometry| {
+            let s = gummiband_core::exit::stub_tracks(b, g);
+            g.tracks.extend(s);
+        };
+        stubs(&mut res.geometry);
+        res.alternatives.iter_mut().for_each(|(_, g)| stubs(g));
+        res.frames.iter_mut().for_each(|(_, g, _)| stubs(g));
+        b.without_exits()
+    });
+    let final_board = plain.unwrap_or(final_board);
+    let b = &final_board;
     // the last word, on the finished copper: no short between two nets is written, and a
     // connection counts as routed only if the copper holds together
     // islands of fill that hold pads of a net left to its fill get their via
@@ -1048,13 +1209,35 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
         None => 0,
     };
     res.stats.vias += area_vias;
-    let legal = gummiband_core::legal::enforce(b, &mut res.geometry, &mut res.stats);
+    let mut legal = gummiband_core::legal::enforce(b, &mut res.geometry, &mut res.stats);
+    // what the last check found open of the nets left to their fill is laid again, on the
+    // copper as it is now
+    let mut area_vias = area_vias;
+    let area_repair = if repair {
+        repair_areas(b, &mut res, &mut legal, &mut area_vias, opts, hooks)
+    } else {
+        None
+    };
     // the alternatives of the open end are written as boards too
     let legal_alternatives = res
         .alternatives
         .iter_mut()
         .map(|(stats, geometry)| gummiband_core::legal::enforce(b, geometry, stats))
         .collect();
+    // and no joint that is no corner, no change of width and no junction (the lines that grow
+    // in width are cut into pieces for it, and neighbours end up with one width)
+    res.geometry.join_lines(b);
+    res.alternatives.iter_mut().for_each(|(_, g)| {
+        g.join_lines(b);
+    });
+    // and where tracks are too near to something in a passage that has room for them, they are
+    // laid again as one group
+    let spread = gummiband_core::knobs::SPREAD.on().then(|| {
+        res.alternatives.iter_mut().for_each(|(_, g)| {
+            gummiband_core::spread::spread(b, g);
+        });
+        gummiband_core::spread::spread(b, &mut res.geometry)
+    });
     let matching = gummiband_core::matching::check(b, &res.geometry);
     let violations = gummiband_core::check::check(b, &res.geometry);
     let soft = gummiband_core::import::soft_changes(b, &res.geometry);
@@ -1088,8 +1271,11 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
         violations,
         legal,
         legal_alternatives,
+        spread,
         areas,
         area_vias,
+        area_repair,
+        area_fallback: None,
         area_model_seconds: (prof::value(prof::Slot::AreaModel) - model_before.0) as f64 * 1e-9,
         area_model_runs: prof::value(prof::Slot::AreaModels) - model_before.1,
         write: WriteOptions {
@@ -1100,7 +1286,161 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     })
 }
 
+/// Lays again what the last check found open of the nets left to the fill of their area.
+///
+/// The search joins a pad to the fill as its model has it on the copper of the search. The
+/// copper that is written differs: the tracks spread, parts shift, and a piece of fill that
+/// hung on the area can end as an island. The last check counts on the finished copper and
+/// takes back a track that ends in such a piece, and up to here nobody laid it again.
+///
+/// So the finished copper becomes kept copper of a board, and the open connections are laid on
+/// it as `scope` finish lays single nets, with everything else in its place. The result is kept
+/// when fewer connections are open with it, or as many with fewer clearance violations.
+///
+/// Nothing gives way for them. Tried on Corne (a pad under the microcontroller that only gets
+/// out when its neighbours move): nine nets within 2 mm gave way and nine of their connections
+/// stayed open, on a board that is as full as the search could make it.
+fn repair_areas(
+    b: &Board,
+    res: &mut gummiband_core::RouteResult,
+    legal: &mut gummiband_core::legal::Legal,
+    area_vias: &mut usize,
+    opts: &RouteOptions,
+    hooks: &Hooks,
+) -> Option<AreaRepair> {
+    use std::sync::atomic::Ordering;
+    let plan = b.areas.as_ref().filter(|p| !p.nets.is_empty())?;
+    if gummiband_core::knobs::NO_AREA_REPAIR.on() || hooks.stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
+        return None;
+    }
+    let of_nets = |u: &String, nets: &[String]| nets.iter().any(|n| open_of(u, n));
+    let all: Vec<String> = plan.nets.iter().map(|&n| b.nets[n as usize].name.clone()).collect();
+    let open: Vec<String> = res
+        .stats
+        .unrouted
+        .iter()
+        .filter(|u| of_nets(u, &all))
+        .cloned()
+        .collect();
+    // copper of the file in the geometry (soft copper of a shove) has its place in the file
+    if open.is_empty() || res.geometry.tracks.iter().any(|t| t.origin.is_some()) {
+        return None;
+    }
+    let t0 = Instant::now();
+    let nets: Vec<String> = all
+        .into_iter()
+        .filter(|n| open.iter().any(|u| of_nets(u, std::slice::from_ref(n))))
+        .collect();
+    let mut work = gummiband_core::fill::with_copper(b, &res.geometry);
+    work.movable.clear();
+    let again = RouteOptions {
+        scope: Scope::Finish,
+        nets: nets.clone(),
+        move_parts: Some(false),
+        shove: Some(false),
+        give: Some(0.0),
+        tune: false,
+        open_end_seconds: Some(0.0),
+        // a few pads on a board that is laid: the small search of a quick route
+        runs: Some(opts.runs().min(4)),
+        generations: Some(opts.generations().min(1)),
+        geometry_generations: Some(opts.geometry_generations().min(1)),
+        frames: None,
+        ..opts.clone()
+    };
+    let second = match route_with(Instant::now(), &work, &again, &Hooks::default(), false) {
+        Ok(r) if r.res.offsets.is_empty() => r,
+        _ => return None,
+    };
+    let mut geo = res.geometry.clone();
+    geo.tracks.extend(second.res.geometry.tracks.iter().cloned());
+    geo.vias.extend(second.res.geometry.vias.iter().cloned());
+    // the nets left to their fill are counted by the fill, in the last check: it has the last
+    // word on them in both directions
+    let mut stats = res.stats.clone();
+    let checked = gummiband_core::legal::enforce(b, &mut geo, &mut stats);
+    stats.vias = geo.vias.iter().filter(|v| v.drill > 0.0).count();
+    stats.length = geo
+        .tracks
+        .iter()
+        .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
+        .sum();
+    let worth =
+        |s: &gummiband_core::RunStats, g: &Geometry| (s.unrouted.len(), gummiband_core::check::check(b, g).len());
+    let kept = worth(&stats, &geo) < worth(&res.stats, &res.geometry);
+    if kept {
+        res.geometry = geo;
+        res.stats = stats;
+        *area_vias += second.area_vias;
+        // the last word is the one on the copper that is written; what the first check took
+        // out stays told
+        *legal = gummiband_core::legal::Legal {
+            not_finite: legal.not_finite + checked.not_finite,
+            dropped: legal.dropped.iter().chain(&checked.dropped).cloned().collect(),
+            dropped_taps: legal.dropped_taps + checked.dropped_taps,
+            put_back: legal.put_back.iter().chain(&checked.put_back).cloned().collect(),
+            trimmed: legal.trimmed + checked.trimmed,
+            ..checked
+        };
+    }
+    let left = res
+        .stats
+        .unrouted
+        .iter()
+        .filter(|u| of_nets(u, &nets))
+        .cloned()
+        .collect();
+    Some(AreaRepair {
+        open,
+        left,
+        kept,
+        seconds: t0.elapsed().as_secs_f64(),
+    })
+}
+
+/// A pad whose row leaves a track no legal way out, see [`Routed::tight_pads`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TightPad {
+    /// "U3.12"
+    pub pad: String,
+    pub net: String,
+    /// Width of the piece that leaves the pad, in mm.
+    pub width_mm: f64,
+    /// How much the footprint lacks for that width and the clearance, in µm.
+    pub missing_um: f64,
+}
+
+impl std::fmt::Display for TightPad {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "pad {} ({}): the row leaves a track of {:.3} mm {:.0} µm less than its clearance",
+            self.pad, self.net, self.width_mm, self.missing_um
+        )
+    }
+}
+
 impl Routed {
+    /// The pads of the routed nets where the footprint itself leaves a track no legal way out:
+    /// on the middle line of the pad, at the narrowest width the rules allow there, it is nearer
+    /// to the next pad of another net than its clearance. No route can mend that; the rules or
+    /// the footprint can.
+    pub fn tight_pads(&self) -> Vec<TightPad> {
+        let b = &self.board;
+        b.tight_pads
+            .iter()
+            .map(|t| {
+                let pin = &b.pins[t.pin];
+                TightPad {
+                    pad: pin.name.clone(),
+                    net: b.nets[pin.net as usize].name.clone(),
+                    width_mm: t.width,
+                    missing_um: t.missing * 1000.0,
+                }
+            })
+            .collect()
+    }
+
     /// The board file with `geometry` (the result's own, or one of its alternatives) in place
     /// of the copper that goes, and the number of items written. Soft copper that rests stays
     /// in the file as it is; the meanders of the tuning become KiCad tuning patterns.
@@ -1134,7 +1474,7 @@ impl Routed {
                         net: t.net,
                     },
                     Elem::Arc(a, mid, b) => write::Item::Arc {
-                        width: t.piece_width(a, b),
+                        width: t.arc_width(a, mid, b),
                         a,
                         mid,
                         b,
@@ -1697,4 +2037,126 @@ pub fn route_file(board: &Path, output: &Path, opts: &RouteOptions, hooks: &Hook
         frames: opts.frames.clone(),
         _temp: temp,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A route with `areas fill` whose last check finds a pad of the area net open: here as if
+    /// it had taken back the copper that joined the pads of VBUS to the area on the back. The
+    /// step after the check lays the open connections again on the copper that is left, the
+    /// fill reaches every pad again, and the report says what happened.
+    #[test]
+    fn what_the_last_check_finds_open_of_an_area_net_is_laid_again() {
+        let board =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/boards/areas/area_far.kicad_pcb");
+        let dir = std::env::temp_dir().join(format!("gummiband-app-area-repair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let opts = RouteOptions {
+            runs: Some(4),
+            generations: Some(1),
+            geometry_generations: Some(1),
+            move_parts: Some(false),
+            areas: Areas::Fill,
+            ..Default::default()
+        };
+        let out = route_file(&board, &dir.join("out.kicad_pcb"), &opts, &Hooks::default()).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let mut routed = out.routed;
+        // the route itself left nothing open, so the step had nothing to do
+        assert!(routed.res.stats.unrouted.is_empty());
+        assert!(routed.area_repair.is_none());
+        let b = routed.board.clone();
+        let vbus = b.net_id("VBUS").unwrap();
+        let before = routed.res.geometry.vias.iter().filter(|v| v.net == vbus).count();
+        assert!(before > 0);
+        routed.res.geometry.tracks.retain(|t| t.net != vbus);
+        routed.res.geometry.vias.retain(|v| v.net != vbus);
+        let mut legal = gummiband_core::legal::enforce(&b, &mut routed.res.geometry, &mut routed.res.stats);
+        let open = routed.res.stats.unrouted.clone();
+        assert!(
+            !open.is_empty() && open.iter().all(|u| u.starts_with("VBUS from ")),
+            "{open:?}"
+        );
+        let conns = routed.res.stats.conns;
+        assert_eq!(routed.res.stats.routed, conns - open.len());
+        let mut vias = 0;
+        let rep = repair_areas(&b, &mut routed.res, &mut legal, &mut vias, &opts, &Hooks::default()).unwrap();
+        assert!(rep.kept, "{}", rep.line());
+        assert_eq!(rep.open, open);
+        assert!(rep.left.is_empty(), "{}", rep.line());
+        assert!(rep.line().ends_with("all of them are joined now"), "{}", rep.line());
+        let st = &routed.res.stats;
+        assert!(st.unrouted.is_empty(), "{:?}", st.unrouted);
+        assert_eq!(st.routed, conns);
+        assert!(legal.open.is_empty());
+        let geo = &routed.res.geometry;
+        assert!(geo.vias.iter().any(|v| v.net == vbus));
+        assert_eq!(st.vias, geo.vias.iter().filter(|v| v.drill > 0.0).count());
+        assert!(gummiband_core::check::check(&b, geo).is_empty());
+        // the fill reaches every pad on the copper as it is now
+        let plan = b.areas.as_ref().unwrap();
+        let work = gummiband_core::fill::with_copper(&b, geo);
+        let (report, _) = crate::areas::net_report(&work, &plan.areas, vbus, &plan.options, false);
+        assert_eq!(report.reached, report.pads, "{}", report.summary);
+        // with nothing open the step does not run
+        assert!(repair_areas(&b, &mut routed.res, &mut legal, &mut vias, &opts, &Hooks::default()).is_none());
+    }
+
+    /// A route with `areas fill` that ends with a connection of an area net open: here as if
+    /// the fill of VBUS had left one. The board is routed again with every net as tracks, that
+    /// route joins everything, and it is the result.
+    #[test]
+    fn a_net_whose_fill_leaves_a_connection_open_is_laid_as_tracks() {
+        let board =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/boards/areas/area_far.kicad_pcb");
+        let dir = std::env::temp_dir().join(format!("gummiband-app-area-fallback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let opts = RouteOptions {
+            runs: Some(4),
+            generations: Some(1),
+            geometry_generations: Some(1),
+            move_parts: Some(false),
+            areas: Areas::Fill,
+            ..Default::default()
+        };
+        let out = route_file(&board, &dir.join("out.kicad_pcb"), &opts, &Hooks::default()).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let b = &out.kb.board;
+        let vbus = b.net_id("VBUS").unwrap();
+        assert!(b.areas.as_ref().unwrap().holds(vbus));
+        // the fill joined everything, so the board was routed once
+        let mut first = out.routed;
+        assert!(first.res.stats.unrouted.is_empty());
+        assert!(first.area_fallback.is_none());
+        let length = |r: &Routed, net| -> f64 {
+            let of_net = r.res.geometry.tracks.iter().filter(|t| t.net == net);
+            of_net
+                .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
+                .sum()
+        };
+        let with_fill = length(&first, vbus);
+        let pin = &b.pins[b.nets[vbus as usize].pins[0]].name;
+        first.res.stats.unrouted.push(format!("VBUS from {pin}"));
+        let r = area_fallback(Instant::now(), b, &opts, &Hooks::default(), first).unwrap();
+        let rep = r.area_fallback.as_ref().unwrap();
+        assert_eq!(rep.open, [format!("VBUS from {pin}")]);
+        assert_eq!((rep.fill.0, rep.tracks.0), (1, 0), "{}", rep.line());
+        assert!(rep.kept, "{}", rep.line());
+        assert!(
+            rep.line().ends_with("the result is the route with the tracks"),
+            "{}",
+            rep.line()
+        );
+        // the result is the second route: VBUS as tracks from pad to pad
+        assert!(r.res.stats.unrouted.is_empty(), "{:?}", r.res.stats.unrouted);
+        assert!(r.board.areas.is_none());
+        assert!(
+            length(&r, vbus) > with_fill + 1.0,
+            "{} against {with_fill}",
+            length(&r, vbus)
+        );
+        assert!(r.areas.is_empty());
+    }
 }

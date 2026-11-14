@@ -2,9 +2,11 @@
 
 pub mod board;
 pub mod check;
+pub mod exit;
 pub mod fill;
 pub mod follow;
 pub mod geom;
+pub mod ground;
 pub mod import;
 mod improve;
 pub mod index;
@@ -14,13 +16,16 @@ pub mod matching;
 pub mod math;
 pub mod octo;
 pub mod pairs;
+pub mod passage;
 pub mod patterns;
+pub mod pivot;
 pub mod prof;
 pub mod realize;
 pub mod refplane;
 pub mod region;
 pub mod relax;
 pub mod route;
+pub mod spread;
 pub mod topo;
 pub mod tune;
 
@@ -267,7 +272,7 @@ pub struct RouteResult {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Progress {
     /// "portfolio", "generation 2", "geometry", "geometry generation 1", "polish",
-    /// "placement round 1", "open end" ([`OPEN_END_PHASE`])
+    /// "exits given back", "placement round 1", "open end" ([`OPEN_END_PHASE`])
     pub phase: String,
     pub routed: usize,
     pub conns: usize,
@@ -528,6 +533,48 @@ fn evaluate_inner<'a>(
     (candidate(board, &r, geo, routed, cfg_used, generation), r)
 }
 
+/// Count the connections of a run on its copper. The router counts a connection as routed once
+/// it has segments, wherever they end: on kept copper of the net that leads nowhere, or on the
+/// connection's own side of the net. The copper has the last word, as it has in the last check:
+/// every piece of a net beyond its first that the run does not know as open is one connection
+/// less. Otherwise such a run wins against one that really connects everything, and the
+/// connection is found missing only when nothing can be done about it any more.
+fn count_apart(board: &Board, r: &Router, geo: &Geometry, stats: &mut RunStats) {
+    count_apart_of(board, r.conns.iter().map(|c| c.net).collect(), geo, stats);
+}
+
+/// [`count_apart`] for the nets given.
+fn count_apart_of(board: &Board, mut nets: Vec<board::NetId>, geo: &Geometry, stats: &mut RunStats) {
+    nets.sort_unstable();
+    nets.dedup();
+    nets.retain(|&n| !board.areas.as_ref().is_some_and(|a| a.holds(n)));
+    // the end of a tap lies on its track only once it is snapped there
+    let mut snapped;
+    let geo = if geo.tracks.iter().any(|t| t.tap.is_some()) {
+        snapped = geo.clone();
+        relax::snap_taps(&mut snapped.tracks);
+        &snapped
+    } else {
+        geo
+    };
+    for (net, pins) in legal::open_in_copper(board, geo, &nets) {
+        let net_name = &board.nets[net as usize].name;
+        let prefix = format!("{net_name} from ");
+        let known = stats.unrouted.iter().filter(|u| u.starts_with(&prefix)).count();
+        for &pin in pins.iter().skip(known) {
+            let pin = if pin == usize::MAX {
+                board.nets[net as usize].pins.first().copied().unwrap_or(0)
+            } else {
+                pin
+            };
+            let open = format!("{net_name} from {}", board.pins[pin].name);
+            stats.blocked.push((open.clone(), Vec::new()));
+            stats.unrouted.push(open);
+            stats.routed = stats.routed.saturating_sub(1);
+        }
+    }
+}
+
 /// What a finished router run is worth, with `geo` as its geometry.
 fn candidate(
     board: &Board,
@@ -585,6 +632,8 @@ fn candidate(
         shorts: None,
         skew_need: skew_need(board, &geo),
     };
+    let mut stats = stats;
+    count_apart(board, r, &geo, &mut stats);
     Candidate {
         stats,
         geo,
@@ -598,6 +647,30 @@ fn candidate(
         flaw: 0.0,
         cfg,
     }
+}
+
+/// The winner of a search, for a measurement that wants its router again
+/// ([`rebuild_router`], `examples/band_stage.rs`).
+pub struct Winner {
+    pub order: Vec<(NetId, usize)>,
+    pub cfg: RouterConfig,
+    /// After the geometry stage, before the finishing steps.
+    pub before_finish: Geometry,
+    pub finished: Geometry,
+}
+
+/// Set by a measurement: every search then leaves its winner in [`WINNERS`].
+pub static KEEP_WINNERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static WINNERS: std::sync::Mutex<Vec<Winner>> = std::sync::Mutex::new(Vec::new());
+
+/// The router of a winner again, from its order and configuration.
+pub fn rebuild_router<'a>(board: &'a Board, sub: &Substrate, w: &Winner) -> Router<'a> {
+    let identity: Genome = w.order.iter().enumerate().map(|(i, &k)| (k, i as f64)).collect();
+    let mut r = Router::new(board, sub, w.cfg.clone());
+    r.plan();
+    r.reorder(|c| identity.get(&(c.net, c.from)).copied().unwrap_or(f64::MAX));
+    r.run();
+    r
 }
 
 /// Environment controlled debugging output of a finished router run.
@@ -758,6 +831,7 @@ pub fn finish_nets<T>(
         if shove {
             b.soften(nets);
         }
+        b.set_exits();
         let (sub, res, extra) = route(&b, try_search);
         let (open, violations) = measure(&b, &res);
         let t = GiveTry {
@@ -832,14 +906,27 @@ pub fn route_board(
     search: &SearchConfig,
 ) -> (Substrate, RouteResult) {
     let (sub, mut res) = place_and_route(board, sub_cfg, base, search);
+    let moved;
+    let b = if res.offsets.is_empty() {
+        board
+    } else {
+        moved = board.with_offsets(&res.offsets);
+        &moved
+    };
+    // a layer change of a current path was one via with the room of all its vias up to here
+    // (`RouterConfig::via_room`): now it gets them, in every geometry that leaves this function
+    let set = relax::set_clusters(b, &mut res.geometry);
+    if set > 0 {
+        eprintln!("current paths: {set} vias set in the room their layer changes kept");
+    }
+    res.stats.vias += set;
+    for (stats, geo) in &mut res.alternatives {
+        stats.vias += relax::set_clusters(b, geo);
+    }
+    for (_, geo, _) in &mut res.frames {
+        relax::set_clusters(b, geo);
+    }
     if knobs::STITCH.on() {
-        let moved;
-        let b = if res.offsets.is_empty() {
-            board
-        } else {
-            moved = board.with_offsets(&res.offsets);
-            &moved
-        };
         // nothing moves any more; what makes a new clearance problem is not kept
         let mut geo = res.geometry.clone();
         let added = relax::stitch_vias(b, &mut geo);
@@ -862,15 +949,20 @@ fn place_and_route(
     base: &RouterConfig,
     search: &SearchConfig,
 ) -> (Substrate, RouteResult) {
-    let score = |b: &Board, r: &RouteResult| -> (usize, f64, Vec<geom::Point>) {
-        let v = check::check(b, &r.geometry);
+    let score = |b: &Board, r: &RouteResult| -> (usize, f64, Vec<geom::Point>, usize) {
+        // on the pads as the last steps of the search saw them (`exit::release_unused`)
+        let free = exit::release_unused(b, &r.geometry);
+        let v = check::check(free.as_ref().unwrap_or(b), &r.geometry);
         let shorts = v.iter().filter(|x| x.actual <= 0.0).count();
         let cost = r.stats.cost() + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0;
         // places that ask for room: clearance problems, and the pins of open connections,
         // where the parts around may step aside to let a track out
         let mut hot: Vec<geom::Point> = v.iter().map(|x| x.at).collect();
         hot.extend(open_pins(b, &r.stats.unrouted));
-        (r.stats.routed, cost, hot)
+        // the problems a new search would have to solve: one squeezed place is one problem,
+        // however many pieces of copper the check names there
+        let problems = check::spots(&v).len() + r.stats.unrouted.len();
+        (r.stats.routed, cost, hot, problems)
     };
     let (sub, res) = route_search(board, sub_cfg, base, search);
     if board.movable.is_empty() || search.geometry_generations == 0 {
@@ -950,7 +1042,7 @@ fn place_and_route(
         // a full new search pays off only for a handful of local problems, and only on boards
         // where a search is not expensive; otherwise the fast path above is all there is.
         // By board size and not by the clock: the result must not depend on the machine.
-        if hot.len() > 20 || best.1.stats.conns > 400 || search.stopped() {
+        if best_score.3 > 20 || best.1.stats.conns > 400 || search.stopped() {
             continue;
         }
         let moved = board.with_offsets(&next);
@@ -1028,7 +1120,9 @@ fn better_search(
     plain: (Substrate, RouteResult),
 ) -> (Substrate, RouteResult) {
     let key = |r: &RouteResult| {
-        let v = check::check(board, &r.geometry);
+        // each result on the pads as its last steps saw them (`exit::release_unused`)
+        let free = exit::release_unused(board, &r.geometry);
+        let v = check::check(free.as_ref().unwrap_or(board), &r.geometry);
         let shorts = v.iter().filter(|x| x.actual <= 0.0).count();
         (
             r.stats.routed,
@@ -1218,9 +1312,24 @@ fn search_fixed(
     // relax the finalists of the best completion and keep the cleanest geometry; then, if
     // asked, run generations that select by the clearance violations after the geometry step
     let full_relax = relax::RelaxConfig::default();
+    // A candidate is judged on the board its finishing steps will see: an exit piece that none
+    // of its tracks took is no copper there (`exit::release_unused`). On the board of the search
+    // a track pressed against such a piece counts as a violation that is gone in the end, and
+    // two pads that only their unused pieces join count as connected. Both differ from
+    // candidate to candidate, and a choice by them is a choice by what will not be there.
+    let judge = |c: &mut Candidate, geo: &Geometry| -> Vec<check::Violation> {
+        let free = exit::release_unused(board, geo);
+        let seen = free.as_ref().unwrap_or(board);
+        if free.is_some() {
+            count_apart_of(seen, c.order.iter().map(|o| o.0).collect(), geo, &mut c.stats);
+        }
+        prof::time(prof::Slot::Check, || check::check(seen, geo))
+    };
     let geo_eval_with = |mut c: Candidate, cfg: &relax::RelaxConfig| -> Candidate {
         relax::relax(board, &sub, &mut c.geo, cfg);
-        let v = prof::time(prof::Slot::Check, || check::check(board, &c.geo));
+        let geo = std::mem::take(&mut c.geo);
+        let v = judge(&mut c, &geo);
+        c.geo = geo;
         let mut nets: Vec<NetId> = v.iter().flat_map(|x| [Some(x.nets.0), x.nets.1]).flatten().collect();
         nets.sort_unstable();
         nets.dedup();
@@ -1238,7 +1347,7 @@ fn search_fixed(
         if !relax::relax_while(board, &sub, &mut geo, &full_relax, go_on) {
             return c;
         }
-        let v = prof::time(prof::Slot::Check, || check::check(board, &geo));
+        let v = judge(&mut c, &geo);
         let mut nets: Vec<NetId> = v.iter().flat_map(|x| [Some(x.nets.0), x.nets.1]).flatten().collect();
         nets.sort_unstable();
         nets.dedup();
@@ -1282,10 +1391,15 @@ fn search_fixed(
     for c in &judged {
         portfolio.push(c.stats.clone());
     }
-    let mut best = judged
-        .into_iter()
-        .min_by(|a, b| full_cost(a).total_cmp(&full_cost(b)))
-        .unwrap();
+    let mut judged = judged;
+    judged.sort_by(|a, b| full_cost(a).total_cmp(&full_cost(b)));
+    // The runners-up. The numbers of the choice are taken before the finishing steps, and
+    // those take away nine tenths of the findings of one candidate and a fifth of another's.
+    // So the best few are finished as well, and the finished results decide (below).
+    let n_rivals: usize = knobs::RIVALS.num();
+    let mut rivals: Vec<Candidate> = judged.split_off(1);
+    rivals.truncate(n_rivals);
+    let mut best = judged.pop().unwrap();
     search.report("geometry", &best.stats);
     if search.frames {
         frames.push((label(&best, "geometry"), best.geo.clone(), true));
@@ -1409,10 +1523,15 @@ fn search_fixed(
             let better = c.stats.routed > best.stats.routed
                 || (c.stats.routed == best.stats.routed && full_cost(&c) < full_cost(&best));
             if better {
-                best = c;
+                rivals.push(std::mem::replace(&mut best, c));
                 best_router = router;
+            } else if c.stats.violations.is_some() {
+                rivals.push(c);
             }
         }
+        rivals.retain(|c| c.stats.routed == best.stats.routed && c.stats.violations.is_some());
+        rivals.sort_by(|a, b| full_cost(a).total_cmp(&full_cost(b)));
+        rivals.truncate(n_rivals);
         search.report_at(
             &format!("geometry generation {generation}"),
             &best.stats,
@@ -1491,9 +1610,10 @@ fn search_fixed(
     let pairs: Vec<NetId> = board.diff_pairs().into_iter().flat_map(|(a, b)| [a, b]).collect();
     let target = |n: NetId| board.target_width(n, search.prefer_width, &pairs);
     let grows = (0..board.nets.len() as NetId).any(|n| target(n) > 0.0);
-    let finish = |mut best: Candidate, report: bool| -> Candidate {
+    // room first: these steps relax again
+    let prepare = |board: &Board, sub: &Substrate, mut best: Candidate, report: bool| -> Candidate {
         if search.air > 0.0 {
-            if let Some(c) = improve::give_air(board, &sub, &best, search.air) {
+            if let Some(c) = improve::give_air(board, sub, &best, search.air) {
                 best = c;
                 if report {
                     search.report("air", &best.stats);
@@ -1501,18 +1621,26 @@ fn search_fixed(
             }
         }
         if grows {
-            if let Some(c) = improve::make_room(board, &sub, &best, target, search.air / 2.0) {
+            if let Some(c) = improve::make_room(board, sub, &best, target, search.air / 2.0) {
                 best = c;
                 if report {
                     search.report("room", &best.stats);
                 }
             }
         }
+        best
+    };
+    // the steps on the finished copper, with the arcs around pivots before them or without
+    let tail = |board: &Board, sub: &Substrate, mut best: Candidate, arcs: bool| -> Candidate {
+        // the last form of the tracks: arcs around their pivots and tangent lines
+        if arcs {
+            relax::pivot_pass(board, sub, &mut best.geo);
+        }
         // tracks as wide as the surroundings allow; a net that gets a new violation by it falls back
         let plain = best.geo.clone();
         let known: std::collections::HashSet<(NetId, Option<NetId>)> =
             check::check(board, &plain).iter().map(|v| v.nets).collect();
-        relax::widen_necks(board, &sub, &mut best.geo);
+        relax::widen_necks(board, sub, &mut best.geo);
         for _ in 0..4 {
             let bad: Vec<NetId> = check::check(board, &best.geo)
                 .iter()
@@ -1545,7 +1673,7 @@ fn search_fixed(
         }
         if grows {
             let plain = best.geo.clone();
-            relax::prefer_width(board, &sub, &mut best.geo, target, search.air / 2.0);
+            relax::prefer_width(board, sub, &mut best.geo, target, search.air / 2.0);
             if check::check(board, &best.geo).len() > check::check(board, &plain).len() {
                 best.geo = plain;
             }
@@ -1564,43 +1692,183 @@ fn search_fixed(
         }
         best
     };
-    let mut best = finish(best, true);
-    // tracks with a clearance problem at their pad go back onto the middle of their fine pitch
-    // pad, one by one, where that leaves fewer problems
-    let mut now = check::check(board, &best.geo);
-    let mut straightened = 0;
-    for ti in 0..best.geo.tracks.len() {
-        let t = &best.geo.tracks[ti];
-        let (Some(&first), Some(&last)) = (t.pts.first(), t.pts.last()) else {
-            continue;
-        };
-        let near = |v: &check::Violation| {
-            (v.nets.0 == t.net || v.nets.1 == Some(t.net)) && (v.at.dist(first) < 1.5 || v.at.dist(last) < 1.5)
-        };
-        if !now.iter().any(near) {
-            continue;
-        }
-        let mut g = best.geo.clone();
-        if relax::straighten_exits(board, &mut g, Some(ti)) > 0 {
-            let after = check::check(board, &g);
-            if after.len() < now.len() {
-                best.stats.violations = Some(after.len());
+    // An exit piece that no track of the winner took is no copper. From here on the pads are
+    // without those pieces, so the steps below see the room as it is. A track that the search
+    // left too near to such a piece was pressed against copper that is not there: the nets of
+    // those spots get the rounds without tension of the polish to use the room, while the rest
+    // of the board sleeps and moves only where they push. The alternatives of the open end keep
+    // the board of the search.
+    let released = exit::release_unused(board, &best.geo).map(|free| {
+        let sub = Substrate::build(&free, sub_cfg);
+        (free, sub)
+    });
+    if let Some((free, free_sub)) = &released {
+        let before = check::check(free, &best.geo);
+        let pressed: Vec<NetId> = check::check(board, &best.geo)
+            .iter()
+            .filter(|v| {
+                !before
+                    .iter()
+                    .any(|w| w.nets == v.nets && w.at == v.at && w.actual == v.actual)
+            })
+            .flat_map(|v| [Some(v.nets.0), v.nets.1])
+            .flatten()
+            .collect();
+        if !pressed.is_empty() {
+            let polish = relax::RelaxConfig {
+                tension: 0.0,
+                ..full_relax.clone()
+            };
+            let mut g = best.geo.clone();
+            g.tracks.iter_mut().for_each(|t| t.resting = !pressed.contains(&t.net));
+            g.vias.iter_mut().for_each(|v| v.resting = !pressed.contains(&v.net));
+            relax::relax(free, free_sub, &mut g, &polish);
+            g.tracks
+                .iter_mut()
+                .zip(&best.geo.tracks)
+                .for_each(|(t, o)| t.resting = o.resting);
+            g.vias
+                .iter_mut()
+                .zip(&best.geo.vias)
+                .for_each(|(v, o)| v.resting = o.resting);
+            let after = check::check(free, &g).len();
+            if after < before.len() {
                 best.geo = g;
-                now = after;
-                straightened += 1;
+                best.stats.violations = Some(after);
+                search.report("exits given back", &best.stats);
             }
         }
     }
-    if straightened > 0 {
-        eprintln!(
-            "pad exits: {straightened} tracks back on the middle of their pads, {} violations left",
-            now.len()
-        );
+    let whole = board;
+    let board = released.as_ref().map_or(whole, |r| &r.0);
+    let free_sub = released.as_ref().map_or(&sub, |r| &r.1);
+    let kept = KEEP_WINNERS
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .then(|| (best.order.clone(), best.cfg.clone(), best.geo.clone()));
+    // tracks with a clearance problem at their pad go back onto the middle of their fine pitch
+    // pad, one by one, where that leaves fewer problems
+    let exits = |board: &Board, mut best: Candidate| -> (Candidate, usize, usize) {
+        let mut now = check::check(board, &best.geo);
+        let mut straightened = 0;
+        for ti in 0..best.geo.tracks.len() {
+            let t = &best.geo.tracks[ti];
+            let (Some(&first), Some(&last)) = (t.pts.first(), t.pts.last()) else {
+                continue;
+            };
+            let near = |v: &check::Violation| {
+                (v.nets.0 == t.net || v.nets.1 == Some(t.net)) && (v.at.dist(first) < 1.5 || v.at.dist(last) < 1.5)
+            };
+            if !now.iter().any(near) {
+                continue;
+            }
+            let mut g = best.geo.clone();
+            if relax::straighten_exits(board, &mut g, Some(ti)) > 0 {
+                let after = check::check(board, &g);
+                if after.len() < now.len() {
+                    best.stats.violations = Some(after.len());
+                    best.geo = g;
+                    now = after;
+                    straightened += 1;
+                }
+            }
+        }
+        let left = now.len();
+        (best, straightened, left)
+    };
+    // The arcs around pivots are judged at the very end. The steps after them start from other
+    // copper and each keeps what its own check likes, so the end with the arcs is not bound by
+    // the end without them. Where it has more clearance findings, more spots or more width
+    // findings, the copper without the arcs is finished instead and gets the pass last, where
+    // nothing follows it and its own check bounds it.
+    let score = |board: &Board, g: &Geometry| -> [usize; 3] {
+        let all = check::check(board, g);
+        let clear: Vec<check::Violation> = all.iter().filter(|v| !v.is_width()).cloned().collect();
+        [clear.len(), check::spots(&clear).len(), all.len() - clear.len()]
+    };
+    let finish = |board: &Board, sub: &Substrate, best: Candidate, winner: bool| -> Candidate {
+        let best = prepare(board, sub, best, winner);
+        let last = |c: Candidate, arcs: bool| -> (Candidate, usize, usize) {
+            let c = tail(board, sub, c, arcs);
+            if winner { exits(board, c) } else { (c, 0, 0) }
+        };
+        let (best, straightened, left) = if !knobs::PIVOT_ARCS.on() {
+            last(best, false)
+        } else {
+            let with = last(best.clone(), true);
+            let a = score(board, &with.0.geo);
+            if a == [0; 3] {
+                with
+            } else {
+                let mut plain = last(best, false);
+                let b = score(board, &plain.0.geo);
+                if a.iter().zip(&b).all(|(a, b)| a <= b) {
+                    with
+                } else {
+                    pivot::LAST_INSTEAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    relax::pivot_pass(board, sub, &mut plain.0.geo);
+                    plain
+                }
+            }
+        };
+        if straightened > 0 {
+            eprintln!("pad exits: {straightened} tracks back on the middle of their pads, {left} violations left");
+        }
+        best
+    };
+    let best = finish(board, free_sub, best, true);
+    // The finished runners-up against the finished winner, each on its own board without its
+    // unused exit pieces: open connections on the copper first, then the findings of the check.
+    // The open end has made its own choice among its mutants and keeps it.
+    let finished = |b: &Board, mut c: Candidate| -> (Candidate, (usize, f64)) {
+        count_apart_of(b, c.order.iter().map(|o| o.0).collect(), &c.geo, &mut c.stats);
+        let v = check::check(b, &c.geo);
+        let shorts = v.iter().filter(|x| x.actual <= 0.0).count();
+        c.stats.violations = Some(v.len());
+        c.stats.shorts = Some(shorts);
+        let open = c.stats.conns.saturating_sub(c.stats.routed);
+        (c, (open, (v.len() + 5 * shorts) as f64))
+    };
+    let (mut best, mut best_key) = finished(board, best);
+    if !open {
+        for rival in std::mem::take(&mut rivals) {
+            if best_key == (0, 0.0) {
+                break;
+            }
+            let polished = if rival.stats.violations.unwrap_or(0) > 0 && !knobs::NO_POLISH.on() {
+                let polish = relax::RelaxConfig {
+                    tension: 0.0,
+                    ..full_relax.clone()
+                };
+                let p = geo_eval_with(rival.clone(), &polish);
+                if full_cost(&p) < full_cost(&rival) { p } else { rival }
+            } else {
+                rival
+            };
+            let own = exit::release_unused(whole, &polished.geo).map(|free| {
+                let sub = Substrate::build(&free, sub_cfg);
+                (free, sub)
+            });
+            let (b, s) = own.as_ref().map_or((whole, &sub), |r| (&r.0, &r.1));
+            let (c, key) = finished(b, finish(b, s, polished, true));
+            if key < best_key {
+                best = c;
+                best_key = key;
+                search.report("runner-up", &best.stats);
+            }
+        }
+    }
+    if let Some((order, cfg, before_finish)) = kept {
+        WINNERS.lock().unwrap().push(Winner {
+            order,
+            cfg,
+            before_finish,
+            finished: best.geo.clone(),
+        });
     }
     let alternatives = others
         .into_iter()
         .map(|c| {
-            let c = finish(c, false);
+            let c = finish(whole, &sub, c, false);
             (c.stats, c.geo)
         })
         .collect();
@@ -1861,6 +2129,39 @@ fn mutate_geo(best: &Candidate, rng: &mut Rng) -> Genome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run that says it routed everything while its copper leaves the net in two pieces has
+    /// one connection less; one that knows the connection open is not counted twice, and
+    /// copper that joins the pins leaves the count alone.
+    #[test]
+    fn a_run_is_counted_on_its_copper() {
+        let b = topo::tests::two_pad_board();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        let all = || RunStats {
+            conns: 1,
+            routed: 1,
+            ..Default::default()
+        };
+        let apart = Geometry {
+            tracks: Vec::new(),
+            vias: Vec::new(),
+        };
+        let mut st = all();
+        count_apart(&b, &r, &apart, &mut st);
+        assert_eq!((st.routed, st.unrouted.len()), (0, 1), "{:?}", st.unrouted);
+        count_apart(&b, &r, &apart, &mut st);
+        assert_eq!((st.routed, st.unrouted.len()), (0, 1), "counted once");
+        let mut joined = apart.clone();
+        let mut t = check::tests::line((2.0, 5.0), (8.0, 5.0), 0);
+        t.width = 0.2;
+        t.neck_w = 0.2;
+        joined.tracks.push(t);
+        let mut st = all();
+        count_apart(&b, &r, &joined, &mut st);
+        assert_eq!((st.routed, st.unrouted.len()), (1, 0), "{:?}", st.unrouted);
+    }
     use crate::board::Block;
     use crate::geom::{Polygon, Rect, pt};
 

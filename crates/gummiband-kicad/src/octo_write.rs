@@ -66,7 +66,7 @@ pub fn angles_45(kb: &KicadBoard, nets: &[String]) -> Result<(String, Angles45)>
                     net: t.net,
                 },
                 Elem::Arc(a, mid, b) => Item::Arc {
-                    width: t.piece_width(a, b),
+                    width: t.arc_width(a, mid, b),
                     a,
                     mid,
                     b,

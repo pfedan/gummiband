@@ -87,18 +87,21 @@ pub fn sweep(a: Point, m: Point, b: Point, c: Point) -> f64 {
 
 /// Length of a net as KiCad's DRC counts it for `length` and `skew` rules.
 pub fn net_length(board: &Board, geo: &Geometry, net: NetId) -> NetLength {
-    let tracks: Vec<&Track> = geo.tracks.iter().filter(|t| t.net == net && t.pts.len() >= 2).collect();
+    let mut tracks: Vec<&Track> = geo.tracks.iter().filter(|t| t.net == net && t.pts.len() >= 2).collect();
+    // the exit pieces of the net are copper of it as well (`exit.rs`)
+    let stubs = crate::exit::stubs_of(board, tracks.iter().copied());
+    tracks.extend(stubs.iter());
     let mut chains = chains(&tracks);
     let vias: Vec<&Via> = geo.vias.iter().filter(|v| v.net == net && v.drill > 0.0).collect();
-    let pads: Vec<(Point, &Obstacle)> = board.nets[net as usize]
+    let pads: Vec<(Point, &Obstacle, &crate::geom::Shape)> = board.nets[net as usize]
         .pins
         .iter()
         .flat_map(|&p| {
             let pin = &board.pins[p];
             pin.obstacles
                 .iter()
-                .map(move |&o| (pin.pos, &board.obstacles[o]))
-                .filter(|(_, o)| o.kind == ObstacleKind::Pad)
+                .map(move |&o| (pin.pos, &board.obstacles[o], board.bare_shape(o)))
+                .filter(|(_, o, _)| o.kind == ObstacleKind::Pad)
         })
         .collect();
     let mut len = NetLength::default();
@@ -111,9 +114,9 @@ pub fn net_length(board: &Board, geo: &Geometry, net: NetId) -> NetLength {
             .filter(|(_, c)| start_of(c).dist(v.at) <= r + 1e-6 || end_of(c).dist(v.at) <= r + 1e-6)
             .map(|(l, _)| *l)
             .collect();
-        if let Some((_, o)) = pads
+        if let Some((_, o, _)) = pads
             .iter()
-            .find(|(_, o)| o.hole.is_none() && o.shape.dist_to_point(v.at) <= r)
+            .find(|(_, o, _)| o.hole.is_none() && o.shape.dist_to_point(v.at) <= r)
         {
             layers.extend(o.layers.iter().next());
         }
@@ -133,8 +136,8 @@ pub fn net_length(board: &Board, geo: &Geometry, net: NetId) -> NetLength {
             }
         }
     }
-    for &(at, o) in &pads {
-        let inside = |p: Point| o.shape.dist_to_point(p) <= 0.0;
+    for &(at, o, shape) in &pads {
+        let inside = |p: Point| shape.dist_to_point(p) <= 0.0;
         for (layer, c) in chains.iter_mut() {
             if !o.layers.has(*layer) {
                 continue;

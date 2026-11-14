@@ -318,6 +318,48 @@ pub struct Board {
     /// (`A.intersectsCourtyard('U4')`): reference and minimum, below the net class clearance.
     #[serde(default)]
     pub courtyard_clearance: Vec<(String, f64)>,
+    /// The exits of tracks from pads in tight rows, sorted by pin ([`Board::set_exits`]).
+    #[serde(default)]
+    pub exits: Vec<Exit>,
+    /// The pads that carry an exit, as the file has them: obstacle and its shape without the
+    /// exit pieces.
+    #[serde(default)]
+    pub bare_pads: Vec<(usize, Shape)>,
+    /// Pads whose row leaves a track on the middle line less than its clearance.
+    #[serde(default)]
+    pub tight_pads: Vec<TightPad>,
+    /// Set by [`Board::set_exits`]: this board lays out exits, and a copy with moved parts
+    /// ([`Board::with_offsets`]) lays them out anew.
+    #[serde(default)]
+    pub exits_on: bool,
+}
+
+/// The way a track leaves a pad in a tight row: one straight piece on the middle line of the
+/// pad, from the pin to `at` beyond the end of the pad. The piece belongs to the pad for every
+/// step of the route (the shape of the pad obstacle holds it), tracks of the net end at `at`, and
+/// it becomes a line of its own when the board is written. See `exit.rs`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Exit {
+    pub pin: usize,
+    /// The pad obstacle that holds the piece.
+    pub obs: usize,
+    /// The exit point: where the tracks of the net end.
+    pub at: Point,
+    /// From the pin towards `at`.
+    pub dir: Point,
+    /// Width of the piece.
+    pub width: f64,
+    /// What the row leaves beside the piece after the clearance (negative: missing).
+    pub spare: f64,
+}
+
+/// A pad in a row that is too tight for its track: on the middle line of the pad a piece of
+/// `width` comes `missing` mm nearer to the next pad of another net than the clearance allows.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TightPad {
+    pub pin: usize,
+    pub width: f64,
+    pub missing: f64,
 }
 
 /// A min, opt and max value of a custom rule constraint.
@@ -436,6 +478,12 @@ impl Board {
             for p in b.pins.iter_mut().filter(|p| &p.footprint == fp) {
                 p.pos = p.pos + d;
             }
+            // the shapes under the exits go along; the exits are laid out again below
+            for (o, shape) in b.bare_pads.iter_mut() {
+                if self.obstacles[*o].pin.is_some_and(|p| &self.pins[p].footprint == fp) {
+                    *shape = shape.translated(d);
+                }
+            }
             if let Some(r) = b.courtyards.get_mut(fp) {
                 *r = Rect {
                     min: r.min + d,
@@ -449,6 +497,10 @@ impl Board {
                     }
                 }
             }
+        }
+        // what is free at the end of a pad depends on where the other parts are
+        if b.exits_on {
+            b.set_exits();
         }
         b
     }
@@ -703,8 +755,8 @@ impl Board {
     }
 
     /// Nets with unlocked tracks within `radius` of the pins of unrouted connections, given as
-    /// "NET from PIN": around the pin and the pins of its net, or for a plane net around the pin
-    /// only.
+    /// "NET from PIN": around the pin and the pins of its net, or around the pin only for a
+    /// plane net and for a net left to the fill of its area.
     pub fn nets_near_pins(&self, unrouted: &[String], radius: f64) -> Vec<String> {
         let mut out = Vec::new();
         for u in unrouted {
@@ -716,8 +768,10 @@ impl Board {
                 continue;
             };
             // a pin of a plane net goes to its plane through a via next to it: the other pins of
-            // the net (all over the board) are no end of that connection
-            let to_plane = self.planes.iter().any(|p| p.net == pin.net);
+            // the net (all over the board) are no end of that connection. A pin of a net left
+            // to its fill (`areas fill`) goes to the fill next to it in the same way.
+            let filled = |n: NetId| self.areas.as_ref().is_some_and(|a| a.holds(n));
+            let to_plane = self.planes.iter().any(|p| p.net == pin.net) || filled(pin.net);
             let targets = self.nets[pin.net as usize]
                 .pins
                 .iter()
@@ -731,8 +785,9 @@ impl Board {
                         && let Some(n) = o.net
                     {
                         let name = self.nets[n as usize].name.clone();
-                        // plane nets stay: they have hundreds of small stubs and vias
-                        let plane = self.planes.iter().any(|p| p.net == n);
+                        // plane nets stay: they have hundreds of small stubs and vias, and
+                        // so do the nets left to their fill
+                        let plane = self.planes.iter().any(|p| p.net == n) || filled(n);
                         if n != pin.net && !plane && !out.contains(&name) {
                             out.push(name);
                         }
@@ -893,6 +948,58 @@ impl Board {
         ((n - 1e-9).ceil() as usize).max(1)
     }
 
+    /// The vias a layer change of a current path of `net` takes ([`Board::vias_for`] with the
+    /// via of its class), 1 where the net has no minimum width or one via carries it.
+    pub fn via_cluster(&self, net: NetId) -> usize {
+        match self.current_min(net) {
+            Some(min) => self.vias_for(min, self.class_of(net).via_drill),
+            None => 1,
+        }
+    }
+
+    /// The pitch of the vias of one layer change: the holes keep their distance, with a
+    /// little to spare.
+    pub fn via_pitch(&self, drill: f64) -> f64 {
+        drill + self.rules.hole_to_hole + 0.02
+    }
+
+    /// How far from its centre a layer change of `n` vias of `net` lies: the vias stand on a
+    /// ring at [`Board::via_pitch`] from one to the next (two: side by side), and a piece of
+    /// copper of the width of the path joins each to the centre, where the tracks end.
+    pub fn cluster_ring(&self, net: NetId, n: usize) -> f64 {
+        if n < 2 {
+            return 0.0;
+        }
+        let drill = self.class_of(net).via_drill;
+        self.via_pitch(drill) / (2.0 * math::sin(std::f64::consts::PI / n as f64))
+    }
+
+    /// The radius of the circle around a layer change of `n` vias of `net`
+    /// ([`Board::cluster_ring`]): the room the search and the relaxation keep for it while it
+    /// is still one via. With one via: the radius of that via.
+    pub fn cluster_radius(&self, net: NetId, n: usize) -> f64 {
+        let cls = self.class_of(net);
+        let r = cls.via_diameter / 2.0;
+        if n < 2 {
+            return r;
+        }
+        let w = cls.track_width.max(self.current_min(net).unwrap_or(0.0));
+        self.cluster_ring(net, n) + r.max(w / 2.0)
+    }
+
+    /// How many vias a via of `net` with this diameter stands for: [`Board::via_cluster`]
+    /// where it has the size of the circle around them (the search made it for a layer
+    /// change of a current path, and [`crate::relax::stitch_vias`] has not set the vias
+    /// yet), else one.
+    pub fn stands_for(&self, net: NetId, diameter: f64) -> usize {
+        let n = self.via_cluster(net);
+        if n > 1 && diameter / 2.0 >= self.cluster_radius(net, n) - 1e-6 {
+            n
+        } else {
+            1
+        }
+    }
+
     /// What the copper of a current path of the net carries at least, as a width: the minimum
     /// of the width rule of its class. Not for a net of a differential pair, whose width is a
     /// matter of its impedance ([`Board::in_diff_pair`]).
@@ -924,6 +1031,22 @@ impl Board {
         let base = self.clearance(Some(a), Some(b));
         let key = (a.min(b), a.max(b));
         self.pair_clearance.get(&key).map_or(base, |&c| c.max(base))
+    }
+
+    /// What a custom rule between the tracks of two nets asks between a track of `net` and the
+    /// edge of a via of `via_net` with radius `r` (0: no such rule, the classes decide). The
+    /// track of the via's net ends in the centre of the via and is copper of its own there: it
+    /// reaches half its width towards the passing track where the via reaches `r`, and the
+    /// rule holds against it. With 0.5 mm between two 0.25 mm tracks and a 0.6 mm via that is
+    /// 0.325 mm from the edge of the via, where the classes ask 0.2.
+    pub fn via_track_gap(&self, net: NetId, via_net: NetId, r: f64) -> f64 {
+        if self.pair_clearance.is_empty() {
+            return 0.0;
+        }
+        let key = (net.min(via_net), net.max(via_net));
+        self.pair_clearance
+            .get(&key)
+            .map_or(0.0, |&c| (c + self.class_of(via_net).track_width / 2.0 - r).max(0.0))
     }
 
     /// Clearance of custom rules between any copper of two nets (0: none, the class decides).
@@ -1160,5 +1283,18 @@ mod tests {
         assert_eq!(b.nets_near_pins(&open, 2.0), vec!["A".to_string(), "B".to_string()]);
         b.planes.push(Plane::new(0, 1, rect(0.0, 0.0, 50.0, 50.0)));
         assert_eq!(b.nets_near_pins(&open, 2.0), vec!["A".to_string()]);
+        // a net left to the fill of its area goes to the fill next to the pin, as to a plane
+        b.planes.clear();
+        b.areas = Some(std::sync::Arc::new(crate::fill::AreaPlan {
+            nets: vec![0],
+            ..Default::default()
+        }));
+        assert_eq!(b.nets_near_pins(&open, 2.0), vec!["A".to_string()]);
+        // and a net left to its fill does not give way itself
+        b.areas = Some(std::sync::Arc::new(crate::fill::AreaPlan {
+            nets: vec![0, 1],
+            ..Default::default()
+        }));
+        assert!(b.nets_near_pins(&open, 2.0).is_empty());
     }
 }
