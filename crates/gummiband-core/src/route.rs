@@ -165,6 +165,11 @@ const AREA_PASS_STEP: f64 = 0.07;
 /// search counts on is one that is still there at the end.
 const AREA_PASS_SLACK: f64 = 0.035;
 
+/// The price of crossing a connection that lies there when an open connection into an area looks
+/// for what is in its way ([`Router::area_blockers`]), in mm of way: the middle one of the prices
+/// the open end of a run draws from.
+const AREA_CROSSING: f64 = 1.5;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Goal {
     /// Any of these pins.
@@ -4225,12 +4230,18 @@ impl<'a> Router<'a> {
                 if !self.conn_segs[ci].is_empty() {
                     continue;
                 }
-                let victims = self.blockers(ci);
+                let victims = self.area_blockers(ci);
                 for &v in &victims {
                     self.rip_up(v);
                 }
                 moved |= !victims.is_empty();
-                let ok = self.route_area(ci);
+                let mut ok = self.route_area(ci);
+                if !ok && !vip {
+                    // the way that named the victims may have begun with a via in the pad
+                    self.cfg.via_in_pad = true;
+                    ok = self.route_area(ci);
+                    self.cfg.via_in_pad = vip;
+                }
                 for &v in &victims {
                     if !self.route_one(v) {
                         still.push(v);
@@ -4258,6 +4269,30 @@ impl<'a> Router<'a> {
             failed = still;
         }
         routed(self)
+    }
+
+    /// What gives way for open connection `ci` of the second pass. A connection into an area
+    /// has no straight line to guess from as [`Router::blockers`] does: there the guess is the
+    /// copper within a millimetre of the pad, and what shuts the pad off from the area often
+    /// lies farther out. So the connection looks for its way through whatever lies there
+    /// ([`Router::way_through`], with a via in the pad where there is no other way) and what it
+    /// runs into goes. Where there is no way even so, the guess stands.
+    fn area_blockers(&self, ci: usize) -> Vec<usize> {
+        if self.conns[ci].goal != Goal::Area {
+            return self.blockers(ci);
+        }
+        let found = self.way_through(ci, AREA_CROSSING).or_else(|| {
+            let mut r = self.clone();
+            r.cfg.via_in_pad = true;
+            r.way_through(ci, AREA_CROSSING)
+        });
+        match found {
+            Some((mut hit, _)) => {
+                hit.retain(|&cj| cj != ci && !self.conn_segs[cj].is_empty());
+                hit
+            }
+            None => self.blockers(ci),
+        }
     }
 
     /// The end of a routed connection into an area still lies in what the model has as the area
@@ -5942,6 +5977,70 @@ pub(crate) mod tests {
         );
         free.area_pads_wait();
         assert_eq!(paying(&free, 1), 0);
+    }
+
+    /// A pad of an area net that a track of another net shuts off from the area, on a board
+    /// that takes no via: the track lies 2.5 mm from the pad, farther than the guess from a
+    /// straight line looks (the pad has none into an area). The second pass finds the track by
+    /// looking for the way of the pad through it, takes it out, lays the pad into the area and
+    /// the track again around the other side of the pad.
+    #[test]
+    fn the_second_pass_takes_out_what_shuts_a_pad_off_from_the_area_farther_out() {
+        let mut b = pad_board(&[
+            ("J", "G", 4.0, 10.0),
+            ("J", "G", 16.0, 10.0),
+            ("J", "S", 6.5, 0.5),
+            ("J", "S", 6.5, 19.5),
+        ]);
+        // no via anywhere
+        b.obstacles.push(crate::board::Obstacle {
+            shape: Shape::Polygon(b.outline[0].clone()),
+            layers: crate::board::LayerSet::all(b.layers.len()),
+            net: None,
+            kind: ObstacleKind::Keepout {
+                vias: true,
+                tracks: false,
+                mask: false,
+            },
+            hole: None,
+            clearance: 0.0,
+            pin: None,
+            locked: true,
+        });
+        // the area of G: the right part of the front, with the second pad of G in it
+        let mut area = crate::fill::Area::pour(
+            0,
+            0,
+            vec![Polygon::new(vec![pt(12., 0.), pt(20., 0.), pt(20., 20.), pt(12., 20.)])],
+        );
+        area.connect = crate::fill::Connect::Solid;
+        b.areas = Some(std::sync::Arc::new(crate::fill::AreaPlan {
+            areas: vec![area],
+            nets: vec![0],
+            ..Default::default()
+        }));
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let mut r = Router::new(&b, &sub, RouterConfig::default());
+        r.plan();
+        assert_eq!(r.run(), 1);
+        // the track of S runs between the pad and the area, and nothing of it within the
+        // millimetre around the pad that the guess looks at
+        let xs = |r: &Router| -> Vec<f64> {
+            let geo = r.geometry();
+            geo.tracks
+                .iter()
+                .filter(|t| t.net == 1)
+                .flat_map(|t| t.pts.iter().map(|p| p.x))
+                .collect()
+        };
+        assert!(xs(&r).iter().all(|&x| x > 5.5 && x < 7.5));
+        assert_eq!(r.area_pass(), 2, "open: {:?}", r.unrouted());
+        let g = (0..r.conns.len()).find(|&ci| r.conns[ci].net == 0).unwrap();
+        assert_eq!(r.conns[g].goal, Goal::Area);
+        assert!(r.area_end_holds(g));
+        // S went around the pad on the side away from the area
+        assert!(xs(&r).iter().any(|&x| x < 4.0));
+        assert!(crate::check::check(&b, &r.geometry()).is_empty());
     }
 
     /// A custom rule between the tracks of two nets holds against the track that ends in the
