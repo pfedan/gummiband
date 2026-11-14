@@ -723,7 +723,7 @@ that neither fill nor copper joins to the area is listed in `unrouted` like any 
 connection; `pour` names nets that get a pour after the route, each "NET" or
 "NET:LAYER,LAYER", the outer layers where none is given; `area_stitch`, true with areas
 "fill", gives an island of fill that holds pads one via where it joins the area instead of a
-track, and `area_vias` in the result counts them; where the last check on the finished copper finds a connection of such a net open, it is laid again on that copper and `area_repair` in the result says so in one sentence; not with `pairs`, the open end or shove), `placements` 0 (a value tries that many placements from the netlist, routes
+track, and `area_vias` in the result counts them; where the last check on the finished copper finds a connection of such a net open, it is laid again on that copper and `area_repair` in the result says so in one sentence; where the route with the fill still leaves a connection open, the board is routed a second time with every net as tracks, the better of the two routes is the result, and `area_fallback` says so in one sentence; not with `pairs`, the open end or shove), `placements` 0 (a value tries that many placements from the netlist, routes
 each and goes on with the best, as `--placements`; first seed `placement_seed`, default 1; the
 output has the parts where the best placement put them and `placement` lists the tries; to keep
 and compare the placed boards use `try_seeds`), `net_widths` and `net_priorities` none (JSON

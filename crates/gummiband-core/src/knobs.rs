@@ -146,6 +146,7 @@ pub enum Log {
     Timing,
     Validate,
     ValidateEach,
+    Areas,
 }
 
 /// A topic of `GB_LOG` with its name in the list.
@@ -238,6 +239,12 @@ pub static TOPICS: &[Topic] = &[
         name: "validate-each",
         was: "VALIDATE_EACH",
         doc: "Check the inner state after every routed connection and print the one that broke it (slow).",
+    },
+    Topic {
+        log: Log::Areas,
+        name: "areas",
+        was: "",
+        doc: "`areas fill`, in the last check: every track of a net left to its fill with its two ends and whether each is held, and the track ends that are taken back.",
     },
 ];
 
@@ -338,6 +345,8 @@ knobs! {
         "The search returns its best topology without the geometry stage (for `examples/relax_bench.rs`).";
     NO_AREA_REPAIR = "GB_NO_AREA_REPAIR", Switch, Set, "off",
         "`areas fill`: what the last check finds open of the nets left to their fill is not laid again on the finished copper.";
+    NO_AREA_FALLBACK = "GB_NO_AREA_FALLBACK", Switch, Set, "off",
+        "`areas fill`: a board whose route leaves a connection open is not routed a second time with every net as tracks.";
     NO_POLISH = "GB_NO_POLISH", Switch, Set, "off",
         "Skips the polish relaxation of a winner that has clearance spots left.";
     NO_ARCS = "GB_NO_ARCS", Switch, Set, "off",
@@ -477,7 +486,12 @@ pub fn markdown() -> String {
          | Topic | Output | Replaces |\n| --- | --- | --- |\n",
     );
     for t in TOPICS {
-        let _ = writeln!(s, "| `{}` | {} | `GB_{}` |", t.name, t.doc, t.was);
+        let was = if t.was.is_empty() {
+            String::new()
+        } else {
+            format!("`GB_{}`", t.was)
+        };
+        let _ = writeln!(s, "| `{}` | {} | {was} |", t.name, t.doc);
     }
     s.push_str(
         "\n## Switches\n\n\

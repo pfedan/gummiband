@@ -50,6 +50,7 @@ Output for the developer; the routed board stays the same.
 | `timing` | Cumulative phase timers and work counters at the end of a route, and the split of each relaxation. | `GB_TIMING` |
 | `validate` | After a router run: check the inner state of the router and print the problems. | `GB_VALIDATE` |
 | `validate-each` | Check the inner state after every routed connection and print the one that broke it (slow). | `GB_VALIDATE_EACH` |
+| `areas` | `areas fill`, in the last check: every track of a net left to its fill with its two ends and whether each is held, and the track ends that are taken back. |  |
 
 ## Switches
 
@@ -73,6 +74,7 @@ Each turns off a behaviour that is on by default (or, for the `GB_NO_*` names, a
 | `GB_PLANE_HOLD` | `0` turns it off | on | Open end: a new via that reaches the plane of its net stays in it when it is moved. |
 | `GB_NO_RELAX` | set to anything | off | The search returns its best topology without the geometry stage (for `examples/relax_bench.rs`). |
 | `GB_NO_AREA_REPAIR` | set to anything | off | `areas fill`: what the last check finds open of the nets left to their fill is not laid again on the finished copper. |
+| `GB_NO_AREA_FALLBACK` | set to anything | off | `areas fill`: a board whose route leaves a connection open is not routed a second time with every net as tracks. |
 | `GB_NO_POLISH` | set to anything | off | Skips the polish relaxation of a winner that has clearance spots left. |
 | `GB_NO_ARCS` | set to anything | off | Tracks are realised as polylines, without arcs around the corners. |
 | `GB_NO_TUNE_ROOM` | set to anything | off | CLI `route`: length tuning does not make room for its meanders first. |
