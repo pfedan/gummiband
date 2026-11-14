@@ -78,6 +78,7 @@ Each turns off a behaviour that is on by default (or, for the `GB_NO_*` names, a
 | `GB_NO_AREA_FALLBACK` | set to anything | off | `areas fill`: a board whose route leaves a connection open is not routed a second time with every net as tracks. |
 | `GB_NO_VIA_ROOM` | set to anything | off | A layer change on a current path does not keep the room of all its vias from the moment the search sets it: the vias after the first are set after the relaxation where room is left, as before. |
 | `GB_NO_POLISH` | set to anything | off | Skips the polish relaxation of a winner that has clearance spots left. |
+| `GB_NO_DISC` | set to anything | off | The first line of a track comes from the funnel through its portals, with a share of the slack, instead of the band pulled taut against the discs around the vertices of its triangles. |
 | `GB_NO_ARCS` | set to anything | off | Tracks are realised as polylines, without arcs around the corners. |
 | `GB_NO_TUNE_ROOM` | set to anything | off | CLI `route`: length tuning does not make room for its meanders first. |
 
@@ -90,7 +91,6 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_EXIT_INWARD` | `0` turns it off | on | Pads in a tight row get an exit under the part too, where there is room (off: outwards only). |
 | `GB_EXIT_RAIL` | number | 0.15 | How far beyond its exit point a track stays on the middle line of its pad, in mm (0: it may turn at the exit point). |
 | `GB_BAND` | set to anything | off | The band of a track takes the radius of the stack where the track lies next to the vertex it bends around, and where a wrap has no tangent, leaves its portal or its triangles, that wrap alone becomes a corner; today such a track loses all its arcs. |
-| `GB_DISC` | set to anything | off | The band of a track is built from discs around every vertex of its triangles, each with the radius the tracks between it and the vertex ask for, pulled taut against them; no portal and no share of the slack. |
 | `GB_EVO_SEED` | value | 0x5eed | Seed of the search when the caller gives none (`route --seed`). Search changes are judged over several seeds with it. |
 | `GB_GPU` | set to anything | off | Relaxation rounds on the GPU; needs a binary built with the `gpu` feature. |
 | `GB_OPEN_GENERATIONS` | value | no limit | Benchmarks: the open end stops by itself after this many generations. |
@@ -109,6 +109,7 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_GEO_SCREEN` | value | off | `k`: a geometry generation relaxes all candidates briefly and only the best k fully. |
 | `GB_FINALISTS` | number | 24 | How many candidates of the search go on to the geometry stage. |
 | `GB_FULL` | number | 6 | How many finalists get the full relaxation after the short one. |
+| `GB_RIVALS` | number | 2 | How many runners-up of the geometry stage are finished next to the winner; the best finished result is the route (0: the winner alone). |
 | `GB_DIRS_ALL` | set to anything | off | Every run of the portfolio uses the preferred layer directions, not every third. |
 | `GB_PLACE_ROUNDS` | number | 2 | Rounds in which parts give way at hot spots (`--move-parts`). |
 | `GB_PLACE_AFTER_STOP` | set to anything | off | An open end that was stopped still gets the placement rounds. |

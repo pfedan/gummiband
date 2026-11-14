@@ -346,7 +346,7 @@ pub struct Router<'a> {
     /// bands of one topology.
     pub stack_band: bool,
     /// The band of a track is constructed from discs around the vertices of its triangles,
-    /// with the radius the stack of tracks between it and the vertex asks for (`GB_DISC`, see
+    /// with the radius the stack of tracks between it and the vertex asks for (the default; `GB_NO_DISC` turns it off, see
     /// [`Router::disc_band`]). A field for the same reason as `stack_band`.
     pub disc_band: bool,
     /// With `disc_band`: two discs with no room between them give way in proportion instead of
@@ -756,7 +756,7 @@ impl<'a> Router<'a> {
             soft_on: false,
             soft_lost: Vec::new(),
             stack_band: crate::knobs::BAND.on(),
-            disc_band: crate::knobs::DISC.on(),
+            disc_band: !crate::knobs::NO_DISC.on(),
             disc_local: true,
             disc_corridor: false,
             disc_inherit: true,

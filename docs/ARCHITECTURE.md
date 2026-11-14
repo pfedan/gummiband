@@ -562,7 +562,7 @@ pieces went gives other numbers, and a track end or a via in the fill was then n
    funnel algorithm give a first taut polyline. It runs from pin to pin, or to a via; at a pad
    with exits (`exit.rs`) from the exit point, which is a fixed end like a pin for every step
    below.
-   Experimental, `GB_DISC` (`Router::disc_path`): the first polyline is replaced by a band that
+   By default (`Router::disc_path`; `GB_NO_DISC` keeps the funnel line) the first polyline is replaced by a band that
    is constructed from the topology alone. Every vertex at an end of an edge the track crosses
    is a disc on the side the track passes it; its radius is what the copper at the vertex asks
    for, counted squarely, plus the gaps of the tracks that lie between the track and the vertex
