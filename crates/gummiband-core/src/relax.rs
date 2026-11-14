@@ -117,8 +117,11 @@ impl Calm {
                 last.resize(new.len(), Point::default());
                 continue;
             }
-            for ((p, q), l) in old.iter().zip(new.iter_mut()).zip(last.iter_mut()) {
-                if p == q {
+            // the ends are not pushed: they stand on a pad, go with their via or slide along
+            // the track they end on, and have to arrive where those are
+            let inner = 1..new.len().saturating_sub(1);
+            for (k, ((p, q), l)) in old.iter().zip(new.iter_mut()).zip(last.iter_mut()).enumerate() {
+                if p == q || !inner.contains(&k) {
                     *l = Point::default();
                     continue;
                 }
