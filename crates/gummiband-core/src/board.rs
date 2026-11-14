@@ -755,8 +755,8 @@ impl Board {
     }
 
     /// Nets with unlocked tracks within `radius` of the pins of unrouted connections, given as
-    /// "NET from PIN": around the pin and the pins of its net, or for a plane net around the pin
-    /// only.
+    /// "NET from PIN": around the pin and the pins of its net, or around the pin only for a
+    /// plane net and for a net left to the fill of its area.
     pub fn nets_near_pins(&self, unrouted: &[String], radius: f64) -> Vec<String> {
         let mut out = Vec::new();
         for u in unrouted {
@@ -768,8 +768,10 @@ impl Board {
                 continue;
             };
             // a pin of a plane net goes to its plane through a via next to it: the other pins of
-            // the net (all over the board) are no end of that connection
-            let to_plane = self.planes.iter().any(|p| p.net == pin.net);
+            // the net (all over the board) are no end of that connection. A pin of a net left
+            // to its fill (`areas fill`) goes to the fill next to it in the same way.
+            let filled = |n: NetId| self.areas.as_ref().is_some_and(|a| a.holds(n));
+            let to_plane = self.planes.iter().any(|p| p.net == pin.net) || filled(pin.net);
             let targets = self.nets[pin.net as usize]
                 .pins
                 .iter()
@@ -783,8 +785,9 @@ impl Board {
                         && let Some(n) = o.net
                     {
                         let name = self.nets[n as usize].name.clone();
-                        // plane nets stay: they have hundreds of small stubs and vias
-                        let plane = self.planes.iter().any(|p| p.net == n);
+                        // plane nets stay: they have hundreds of small stubs and vias, and
+                        // so do the nets left to their fill
+                        let plane = self.planes.iter().any(|p| p.net == n) || filled(n);
                         if n != pin.net && !plane && !out.contains(&name) {
                             out.push(name);
                         }
@@ -1228,5 +1231,18 @@ mod tests {
         assert_eq!(b.nets_near_pins(&open, 2.0), vec!["A".to_string(), "B".to_string()]);
         b.planes.push(Plane::new(0, 1, rect(0.0, 0.0, 50.0, 50.0)));
         assert_eq!(b.nets_near_pins(&open, 2.0), vec!["A".to_string()]);
+        // a net left to the fill of its area goes to the fill next to the pin, as to a plane
+        b.planes.clear();
+        b.areas = Some(std::sync::Arc::new(crate::fill::AreaPlan {
+            nets: vec![0],
+            ..Default::default()
+        }));
+        assert_eq!(b.nets_near_pins(&open, 2.0), vec!["A".to_string()]);
+        // and a net left to its fill does not give way itself
+        b.areas = Some(std::sync::Arc::new(crate::fill::AreaPlan {
+            nets: vec![0, 1],
+            ..Default::default()
+        }));
+        assert!(b.nets_near_pins(&open, 2.0).is_empty());
     }
 }
