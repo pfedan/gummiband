@@ -504,6 +504,16 @@ connections are open with it, or as many with fewer clearance violations, and
 step off). It cannot help a pad that only gets out when its neighbours move; letting whole
 nets around the pad give way was tried on Corne and cost more connections than it joined.
 
+What is still open then is not chased pad by pad. One rule holds for every board: `areas` fill
+never ends with fewer connections than `areas` tracks. Where the route with the fill leaves
+any connection open, of a net left to its fill or of another net, the board is routed a second
+time with every net as tracks (`area_fallback` in `gummiband-app/src/route.rs`; the areas stay
+areas of the board), and the better of the two routes is the result: fewer connections open,
+or as many with fewer clearance violations, and a tie keeps the fill. `Routed::area_fallback`
+names what was open and gives both pairs of numbers. The price is the time of the second
+route, paid only where the fill left something open (`GB_NO_AREA_FALLBACK` switches the step
+off, for measurements of the fill alone).
+
 After the route `Routed::areas` holds
 the report of the model per net on the finished copper (`fill::with_copper` puts a geometry
 on the board as obstacles).

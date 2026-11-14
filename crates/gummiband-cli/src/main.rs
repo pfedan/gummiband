@@ -898,6 +898,10 @@ fn main() -> Result<()> {
                 ),
                 Event::PlacementKept { seed } => println!("best placement: seed {seed}"),
                 Event::MovableParts { count } => println!("movable parts: {count}"),
+                Event::RoutedAgain { open } => println!(
+                    "areas: {open} connection{} open with the fill, routing again with every net as tracks",
+                    if open == 1 { "" } else { "s" }
+                ),
             };
             let hooks = Hooks {
                 stop: open_end.as_ref(),
@@ -923,6 +927,9 @@ fn main() -> Result<()> {
                 );
             }
             if let Some(a) = &r.area_repair {
+                println!("areas: {}", a.line());
+            }
+            if let Some(a) = &r.area_fallback {
                 println!("areas: {}", a.line());
             }
             for t in r.tries.iter().skip(1) {
@@ -1210,6 +1217,7 @@ fn main() -> Result<()> {
                     "areas": r.areas,
                     "area_vias": r.area_vias,
                     "area_repair": r.area_repair,
+                    "area_fallback": r.area_fallback,
                     "area_model_seconds": r.area_model_seconds,
                     "area_model_runs": r.area_model_runs,
                     "violations": viol.iter().map(|v| serde_json::json!({
