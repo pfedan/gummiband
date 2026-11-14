@@ -75,6 +75,7 @@ struct Calm {
     /// The share of its move a point in this cell takes, and the round that last halved it.
     cell: Vec<f64>,
     halved: Vec<usize>,
+    grown: Vec<usize>,
     /// The same per via.
     via: Vec<f64>,
     /// The moves of the round before, while the tracks keep their points.
@@ -85,6 +86,9 @@ struct Calm {
 impl Calm {
     /// The least share: a swing of a full step is down to a micrometre.
     const FLOOR: f64 = 1.0 / 32.0;
+    /// What keeps going the same way gets its step back, slower than it lost it: a swing that
+    /// has died down leaves a slow drift to where the pushes balance, and that has to arrive.
+    const GROW: f64 = 1.25;
 
     fn round(
         &mut self,
@@ -111,9 +115,13 @@ impl Calm {
                 }
                 let mv = *q - *p;
                 let c = cells.cell_of(*p);
-                if mv.dot(*l) < 0.0 && self.halved[c] != it {
+                let turn = mv.dot(*l);
+                if turn < 0.0 && self.halved[c] != it {
                     self.halved[c] = it;
                     self.cell[c] = (self.cell[c] * 0.5).max(Self::FLOOR);
+                } else if turn > 0.0 && self.halved[c] != it && self.grown[c] != it {
+                    self.grown[c] = it;
+                    self.cell[c] = (self.cell[c] * Self::GROW).min(1.0);
                 }
                 let mv = mv * self.cell[c];
                 *q = *p + mv;
@@ -125,8 +133,11 @@ impl Calm {
         }
         for (vi, (p, q)) in old_vias.iter().zip(vias.iter_mut()).enumerate() {
             let mv = *q - *p;
-            if mv.dot(self.last_vias[vi]) < 0.0 {
+            let turn = mv.dot(self.last_vias[vi]);
+            if turn < 0.0 {
                 self.via[vi] = (self.via[vi] * 0.5).max(Self::FLOOR);
+            } else if turn > 0.0 {
+                self.via[vi] = (self.via[vi] * Self::GROW).min(1.0);
             }
             let mv = mv * self.via[vi];
             *q = *p + mv;
@@ -1078,12 +1089,13 @@ pub fn relax_while(
     // Copper that is pushed from two sides with less room than the pushes ask for swings back
     // and forth by a full step, and the last round would freeze one of the two ends of the
     // swing: one neighbour clean, the other short by the whole swing. A point or via that turns
-    // back on its last move takes half the step from then on, so the swing dies down in the
-    // middle, where each side gets its share of the room. The gain of a point lives in its
+    // back on its last move takes half the step, so the swing dies down in the middle, where
+    // each side gets its share of the room. The gain of a point lives in its
     // cell, since the points are laid anew every tenth round.
     let mut calm = Calm {
         cell: vec![1.0; cells.len()],
         halved: vec![usize::MAX; cells.len()],
+        grown: vec![usize::MAX; cells.len()],
         via: vec![1.0; vias.len()],
         last_tracks: Vec::new(),
         last_vias: Vec::new(),
