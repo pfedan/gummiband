@@ -591,6 +591,31 @@ impl<'a> Copper<'a> {
                     actual: d,
                     required: need,
                 });
+            } else if let (
+                Piece::Via {
+                    c, r: vr, drill, half, ..
+                },
+                Some(onet),
+                ObstacleKind::Pad | ObstacleKind::Track | ObstacleKind::Via,
+            ) = (p, o.net, o.kind)
+                && *drill > 0.0
+                && *half == Point::default()
+            {
+                // the drill of a via against the copper of another net (KiCad's hole_clearance)
+                let hole = d + vr - drill / 2.0;
+                let gap = board.hole_gap_at(net, *c);
+                if hole < gap + extra - tol {
+                    out.push(Violation {
+                        what: format!(
+                            "hole {}~{}",
+                            board.nets[net as usize].name, board.nets[onet as usize].name
+                        ),
+                        nets: (net, Some(onet)),
+                        at,
+                        actual: hole,
+                        required: gap,
+                    });
+                }
             }
         }
         for j in self.idx.query(&bb) {
@@ -675,11 +700,25 @@ impl<'a> Copper<'a> {
             };
             // the drill of a via against the copper of another net (KiCad's hole_clearance): more
             // than the copper clearance asks where the ring is narrow or the rule is wide
-            if let (Piece::Seg { r: sr, .. }, Piece::Via { drill, .. })
-            | (Piece::Via { drill, .. }, Piece::Seg { r: sr, .. }) = (p, q)
-                && *drill > 0.0
-            {
-                let hole = d + reach - sr - drill / 2.0;
+            // (between two vias: the drill of each against the ring of the other)
+            let ring = |x: &Piece| match *x {
+                Piece::Via { r, drill, half, .. } if drill > 0.0 && half == Point::default() => Some(r - drill / 2.0),
+                _ => None,
+            };
+            let hole = match (p, q) {
+                (Piece::Seg { r: sr, .. }, Piece::Via { drill, .. })
+                | (Piece::Via { drill, .. }, Piece::Seg { r: sr, .. })
+                    if *drill > 0.0 =>
+                {
+                    Some(d + reach - sr - drill / 2.0)
+                }
+                (Piece::Via { .. }, Piece::Via { .. }) => match (ring(p), ring(q)) {
+                    (Some(a), Some(b)) => Some(d + a.min(b)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(hole) = hole {
                 let gap = board.hole_gap_at(net, at).max(board.hole_gap_at(qnet, at));
                 if hole < gap + extra - tol && d >= need + extra - tol {
                     out.push(Violation {
@@ -728,7 +767,10 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
         .collect();
     // a custom rule may lower the clearance in a courtyard (fine pitch power ICs)
     if !board.courtyard_clearance.is_empty() || !board.rule_areas.is_empty() {
+        // (a copper clearance: what a drill, a keep-out or a mask opening asks stays as it is)
+        let other = |v: &Violation| ["hole", "keepout ", "mask "].iter().any(|k| v.what.starts_with(k));
         out.retain_mut(|v| match board.courtyard_clearance_at(v.at, v.required) {
+            _ if other(v) => true,
             Some(min) if v.actual >= min - TOL => false,
             Some(min) => {
                 v.required = v.required.min(min);

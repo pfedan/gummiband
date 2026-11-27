@@ -14,7 +14,8 @@
 //! `--dump STATE.json` keeps the routed state (board, copper, findings), and `--from
 //! STATE.json` reads one instead of routing: the same spots without the route.
 //! Usage: passages BOARD OUT.json [--seed N] [--runs N] [--generations N]
-//!        [--geometry-generations N] [--no-move-parts] [--dump STATE.json]
+//!        [--geometry-generations N] [--no-move-parts] [--preset WORD] [--field-rules STEP]
+//!        [--dump STATE.json]
 //!        passages --from STATE.json OUT.json
 use std::path::Path;
 
@@ -59,6 +60,11 @@ fn route(args: &[String]) -> anyhow::Result<State> {
             Some(false)
         } else {
             d.move_parts
+        },
+        field_rules: flag("--field-rules").unwrap_or(d.field_rules.clone()),
+        preset: match flag("--preset") {
+            Some(word) => gummiband_app::Preset::parse(&word).map_err(anyhow::Error::msg)?,
+            None => d.preset,
         },
         ..d
     };

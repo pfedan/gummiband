@@ -1978,9 +1978,6 @@ impl<'a> Router<'a> {
     /// has the size and the clearance of that rule ([`Board::via_at`], [`Board::clearance_at`]).
     fn via_size_at(&self, net: NetId, n: usize, p: Point) -> (f64, f64, f64) {
         let (r, drill, c) = self.via_size(net, n);
-        if !self.board.local_vias() && !self.board.local_clearances() {
-            return (r, drill, c);
-        }
         let c = self.board.clearance_at(p, c);
         if n > 1 {
             return (r, drill, c);

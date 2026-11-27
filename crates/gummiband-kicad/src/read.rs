@@ -410,11 +410,17 @@ impl Reader {
     }
 
     fn read_rules(&mut self, pro: Option<&serde_json::Value>) {
+        // What a project does not say, KiCad checks with its own defaults: a board without a
+        // project file is routed for those, so that its check finds what the router kept.
+        // (KiCad's edge clearance without a project is 0.5 mm; that one moves the placement and
+        // is left as it was.)
+        let rules = &mut self.b.rules;
+        rules.hole_clearance = 0.25;
+        rules.min_via_diameter = 0.5;
         let Some(r) = pro.and_then(|p| p.pointer("/board/design_settings/rules")) else {
             return;
         };
         let g = |k: &str| r.get(k).and_then(|v| v.as_f64());
-        let rules = &mut self.b.rules;
         if let Some(v) = g("min_clearance") {
             rules.min_clearance = v.max(rules.min_clearance.min(v));
         }

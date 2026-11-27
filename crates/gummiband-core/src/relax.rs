@@ -1011,7 +1011,21 @@ pub fn relax_while(
     let mut vias: Vec<(Point, f64, u32, f64)> = geo
         .vias
         .iter()
-        .map(|v| (v.at, v.diameter / 2.0, v.net, board.clearance_at(v.at, clr(v.net))))
+        .map(|v| {
+            // other copper keeps the hole clearance from the drill, whatever the ring is
+            let ring = if v.drill > 0.0 && !v.is_pair() {
+                (v.diameter - v.drill) / 2.0
+            } else {
+                f64::INFINITY
+            };
+            let c = board.clearance_at(v.at, clr(v.net));
+            (
+                v.at,
+                v.diameter / 2.0,
+                v.net,
+                c.max(board.hole_gap_at(v.net, v.at) - ring),
+            )
+        })
         .collect();
     // (where a place has a clearance of its own, copper there asks only that: `Board::clearance_at`)
     let local = board.local_clearances();
