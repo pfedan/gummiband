@@ -176,6 +176,11 @@ the environment that belong to the pipeline are read there (`GB_SHIFT`, `GB_NO_T
 - Locked tracks and vias are obstacles of their net; their endpoints join the net's pin set, so a
   pre-routed lane counts as connected copper the router may attach to.
 - Unlocked tracks and vias are removed (or kept with `--keep-unlocked`).
+- A keep-out zone with holes (KiCad writes the outline first and each hole as a polygon of its
+  own; the usual case is a keep-out along the board edge, a rectangle with the board as its
+  hole) is cut into pieces without holes that touch along vertical lines
+  (`geom::without_holes`), each an obstacle. Planes and other zones still take the outline
+  alone.
 
 ## Routing substrate
 
@@ -311,7 +316,17 @@ each layer stays planar by construction.
   minimum (`Board::narrow_pin`) join last, so that each ends a branch and the current between
   two other pins never passes a neck.
 - Rip-up and reroute of connections near a failed one, via-in-pad as a last resort for
-  fan-outs.
+  fan-outs. What gives way is a guess: the connections that pass within a millimetre or so of
+  the straight line of the failed one (`Router::blockers`), up to six, whatever comes of it.
+  Experimental (`RouterConfig::ripup_cut`, `GB_RIPUP_CUT`, off by default): the failed
+  connection looks for its way through everything at the price of a crossing
+  (`Router::way_through`, as the open end and the area pass do), and what it runs into gives
+  way, nothing else; if it still finds no way, it looks again from there, up to three times.
+  The state before is kept and comes back when more connections are open afterwards, or as
+  many with the failed one still open (`Router::rip_cut`): a rip-up may move an open
+  connection to another place and never adds one. It applies while at most 15 % of the
+  connections are open (or eight); beyond that the board has more connections than room and
+  the guess is as good and cheaper. Numbers in `MILESTONES.md`.
 
 ### Negotiated routing
 
@@ -647,8 +662,66 @@ other nets that the moved pads now come too close to, and `relax` lets it give w
 relaxation wakes what that copper touches in turn. A step that leaves a clearance spot of a net
 pair that had none within reach, or a worse one (`is_new`), a courtyard that runs into another part or leaves the board, ends the move at the
 last clean step. Copper that stays asleep keeps its exact shape. `move_with_copper` runs this on
-the soft copper of a routed file (`gummiband move-part`, MCP `move_part`); `route_board` runs it
-for the shifts of `--move-parts`, with all routed copper awake, before it considers a new search.
+the soft copper of a routed file (`gummiband move-part`, MCP `move_part`).
+
+## Parts as floes
+
+Under `--move-parts` the parts that may move lie on the board like floes on water, and the routed
+copper moves them (`gummiband_core::floes`). A floe is one movable part, or a block (a KiCad
+group) that moves as a whole. Three forces act on it, all read from the copper as it lies:
+
+- **Press.** A clearance problem pushes the floes within 1 mm away from it, and so does the pin
+  of an open connection (its own part stays, the neighbours make room). A problem between two
+  pads of one part, or between a pad and the track on the pad next to it, moves with the part
+  and pushes nothing (`own_affair`).
+- **Wrap.** A track of another net that bends around a pad of the floe presses on it with the
+  turning vector of the bend (the unit vector out minus the unit vector in).
+- **Pull.** A track that ends on a pad of the floe pulls it along the direction in which it
+  leaves the pad.
+
+Wrap and pull together are the exact gradient of the track length by the offset of the part, so
+a floe that follows them makes the copper shorter. `targets` turns the forces into offsets: a
+step per round, limited to `--move-reach` (2 mm by default) from the place in the file, and a
+floe whose courtyard would run into a movable neighbour shoves it along, down a chain (`shove`);
+a fixed part ends the chain.
+
+`floes::drift` then takes the floes there in steps no longer than the smallest clearance (0.02
+to 0.1 mm). Per step `follow_parts` takes the track ends and vias on moved pads along and `relax`
+lets the rest give way, with the topology kept. A step is judged by the check: a clearance
+problem that was not there, one that got worse or fell into more pieces, or a net whose copper
+came apart (`legal::open_in_copper`), and the step is taken back. Then the floes next to the
+problem answer for it. The floe on the far side of the squeezed copper is shoved along through
+it, up to three floes in a row (it goes first for one step, the floe that came waits); only
+where nothing can be shoved does the floe that made the problem stop for good, and the others
+go on. A problem that no floe made alone stops the floes within 5 mm, the second time those
+within 15 mm. A courtyard that would run into a part or leave the board stops its own floe.
+Copper farther than 5 mm from every moving floe and every spot sleeps, so a step is not judged
+on what settles a few micrometres differently at the other end of the board.
+
+Two stages use this:
+
+1. **Drift, inside the search** (`drift_with_bands`, only with `--drift`). After the geometry
+   stage has chosen its winner and before the finishing steps, wrap and pull move the parts in
+   up to `GB_FLOE_ROUNDS` rounds (more with a reach of more than 3 mm); a round counts if it leaves no more findings and shorter
+   copper, and the rounds end when one gains less than 1 % (`GB_FLOE_GAIN`; with a reach of more than 2 mm less in proportion, 0.1 % at 20 mm, so that a long reach is used). The winner is then finished on the
+   board with the parts where they drifted. This has to come before the finishing steps: the
+   finished copper (arcs around pivots, fitted widths, tapers, closed up pairs) is no fixed
+   point of the relaxation, and relaxing it again without moving anything already makes new
+   findings (Duo: 6 to 12), so no step on it could be judged. The runners-up are finished on
+   the placement of the search and compared with the drifted winner as before. An open ended
+   run does without the drift: its alternatives have to lie on the same parts as its result.
+2. **Rounds for room, after the search** (`place_and_route`). The problems and open pins of the
+   finished result press, in up to `GB_PLACE_ROUNDS` rounds. A round that solves nothing may
+   route the board anew on the shifted parts (`GB_PLACE_SEARCHES` times, and only with at most
+   20 problems and 400 connections); after that the spots press twice as hard, once. After a
+   round the pairs of `--pairs pull` close up again (`pairs::zip`), because the relaxation of
+   the steps draws every track taut on its own.
+
+Measured on 2026-11-27 (`--runs 4 --generations 1 --geometry-generations 1 --seed 1`, 4 threads,
+Gummiband's own check; see `docs/MILESTONES.md` for the table): the drift makes the copper 4 to
+15 % shorter with the same or fewer problem spots, and at these small settings the route takes
+about three times as long, because every step relaxes and checks the copper around the moving
+parts.
 
 ## Differential pairs
 
@@ -908,6 +981,13 @@ part with a neighbour one pitch away along both axes of a square lattice, at lea
 way. Unlike the pad grids above this takes fields of short rows (a DDR package: two blocks of 3
 columns) and leaves out the pads off the lattice (support balls, a thermal pad).
 
+Whether a ball field can be left at all is arithmetic before any search
+(`patterns::escape_warnings`, a warning line in `info`, `route` and `load_board`): an inner ball
+leaves between two balls on its own layer (the gap must hold a track and two clearances), through
+a via between four balls (the diagonal room must hold a via and two clearances) or through a via
+in its pad. Where the rules of the narrowest class on the field allow neither of the first two,
+the line says so and names the clearance, track or via that would fit.
+
 A pattern is only a hint to the search, never fixed copper: what does not fit a board costs at
 most the run that tried it, and nothing is ever given up for it. `route --patterns` switches the
 hints on, all off by default (and then byte for byte the same as without them):
@@ -940,6 +1020,12 @@ the via in a pad experiments in `MILESTONES.md`).
 A user can look over the shoulder of the router: `gummiband route --watch`, the MCP tool
 `watch`. Three parts, each of which knows only the one before it.
 
+- Parts that move: a search that moves parts (`--move-parts`, `--drift`) tells the watch where
+  they lie (`Watch::set_moved`, the footprint offsets), and every view that follows carries
+  them (`View::offsets`) until the next call. The scene of the feed names the part of each
+  shape (`owner`, `refs`), the head of a frame has `moved` in full and not as a change, so a
+  frame that is left after the feed thinned out still knows where its parts lie, and the
+  viewer draws pads, courtyards and names there. No new scene per step.
 - `gummiband_core::watch` is the interface of the search. A front end gives the search a `Watch`
   (`SearchConfig::watch`), and the search shows it `View`s: tracks as polylines, vias, the open
   connections, where a search for a way looked, the clearance violations. A view has a `Stage`:

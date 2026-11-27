@@ -239,6 +239,86 @@ pub fn seg_seg_nearest(a: Point, b: Point, c: Point, d: Point) -> (Point, Point)
         .unwrap()
 }
 
+/// The area between closed contours as simple polygons without holes: a point belongs to it
+/// when it lies inside an odd number of the contours, which is an outline with its holes (and
+/// a second outline beside it, or an island in a hole). The area is cut at the x of every
+/// vertex into trapezoids between two edges, and a trapezoid goes on as far as the same two
+/// edges bound it, so a rectangle with a rectangular hole gives four pieces. The pieces touch
+/// along vertical lines and do not overlap. One contour without holes comes back as it is.
+/// Contours that cross each other are not what this is for.
+pub fn without_holes(contours: &[Vec<Point>]) -> Vec<Polygon> {
+    let contours: Vec<&Vec<Point>> = contours.iter().filter(|c| c.len() >= 3).collect();
+    if contours.len() < 2 {
+        return contours.into_iter().map(|c| Polygon::new(c.clone())).collect();
+    }
+    // the edges from left to right; a vertical one bounds no trapezoid from below or above
+    let mut edges: Vec<(Point, Point)> = Vec::new();
+    let mut xs: Vec<f64> = Vec::new();
+    for c in &contours {
+        for i in 0..c.len() {
+            let (a, b) = (c[i], c[(i + 1) % c.len()]);
+            xs.push(a.x);
+            if a.x < b.x {
+                edges.push((a, b));
+            } else if b.x < a.x {
+                edges.push((b, a));
+            }
+        }
+    }
+    xs.sort_by(f64::total_cmp);
+    xs.dedup();
+    let at = |e: usize, x: f64| {
+        let (a, b) = edges[e];
+        // the ends exactly, so that pieces that meet at a vertex share it to the bit
+        if x == a.x {
+            a
+        } else if x == b.x {
+            b
+        } else {
+            pt(x, a.y + (x - a.x) * (b.y - a.y) / (b.x - a.x))
+        }
+    };
+    let mut out = Vec::new();
+    let mut close = |lower: usize, upper: usize, from: f64, to: f64| {
+        let mut pts = vec![at(lower, from), at(lower, to), at(upper, to), at(upper, from)];
+        pts.dedup();
+        if pts.len() > 1 && pts[0] == pts[pts.len() - 1] {
+            pts.pop();
+        }
+        if pts.len() >= 3 {
+            out.push(Polygon::new(pts));
+        }
+    };
+    // the trapezoids that are open at the current x: lower edge, upper edge, where they began
+    let mut open: Vec<(usize, usize, f64)> = Vec::new();
+    for w in xs.windows(2) {
+        let mid = 0.5 * (w[0] + w[1]);
+        let mut active: Vec<usize> = (0..edges.len())
+            .filter(|&e| edges[e].0.x <= w[0] && edges[e].1.x >= w[1])
+            .collect();
+        active.sort_by(|&e, &f| at(e, mid).y.total_cmp(&at(f, mid).y).then(e.cmp(&f)));
+        let pairs: Vec<(usize, usize)> = active.chunks_exact(2).map(|p| (p[0], p[1])).collect();
+        open.retain(|&(lower, upper, from)| {
+            let goes_on = pairs.contains(&(lower, upper));
+            if !goes_on {
+                close(lower, upper, from, w[0]);
+            }
+            goes_on
+        });
+        for (lower, upper) in pairs {
+            if !open.iter().any(|o| (o.0, o.1) == (lower, upper)) {
+                open.push((lower, upper, w[0]));
+            }
+        }
+    }
+    if let Some(&last) = xs.last() {
+        for (lower, upper, from) in open {
+            close(lower, upper, from, last);
+        }
+    }
+    out
+}
+
 /// Closed polygon, vertices in either orientation, no repeated last vertex.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Polygon {
@@ -655,6 +735,45 @@ pub fn bow_bow_dist(a1: Point, b1: Point, c1: Point, r1: f64, a2: Point, b2: Poi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_outline_with_a_hole_becomes_pieces_around_the_hole() {
+        let p = pt;
+        let outer = vec![p(0.0, 0.0), p(10.0, 0.0), p(10.0, 6.0), p(0.0, 6.0)];
+        // one contour stays what it is
+        assert_eq!(
+            without_holes(std::slice::from_ref(&outer)),
+            vec![Polygon::new(outer.clone())]
+        );
+        // a ring: an L shaped hole, in the other orientation as well
+        let mut hole = vec![
+            p(2.0, 1.0),
+            p(8.0, 1.0),
+            p(8.0, 3.0),
+            p(5.0, 3.0),
+            p(5.0, 5.0),
+            p(2.0, 5.0),
+        ];
+        for _ in 0..2 {
+            let pieces = without_holes(&[outer.clone(), hole.clone()]);
+            assert!(pieces.len() <= 6, "{} pieces", pieces.len());
+            let area: f64 = pieces.iter().map(|q| q.signed_area().abs()).sum();
+            assert!((area - (60.0 - 18.0)).abs() < 1e-9, "area {area}");
+            let inside = |q: Point| pieces.iter().any(|piece| piece.contains(q));
+            for q in [p(1.0, 3.0), p(9.0, 3.0), p(5.0, 0.5), p(5.0, 5.5), p(6.0, 4.0)] {
+                assert!(inside(q), "{q:?} is in the ring");
+            }
+            for q in [p(3.0, 3.0), p(7.0, 2.0), p(3.0, 4.5)] {
+                assert!(!inside(q), "{q:?} is in the hole");
+            }
+            hole.reverse();
+        }
+        // an island in the hole is area again
+        let island = vec![p(3.0, 2.0), p(4.0, 2.0), p(4.0, 4.0), p(3.0, 4.0)];
+        let pieces = without_holes(&[outer, hole, island]);
+        assert!(pieces.iter().any(|piece| piece.contains(p(3.5, 3.0))));
+        assert!(!pieces.iter().any(|piece| piece.contains(p(2.5, 3.0))));
+    }
 
     #[test]
     fn a_bow_is_measured_as_the_arc_it_is() {

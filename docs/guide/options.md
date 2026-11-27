@@ -141,7 +141,7 @@ run adds no `--air`.
 | --- | --- | --- |
 | `--until-stop` (plugin: *Keep improving*), `--open-end-seconds S` (MCP: `open_end_seconds`) | Keeps improving after the search until you accept, or for S seconds. | The final run of a board. The window says when it has found its level. |
 | `--air MM` | Gives the copper a reserve over the clearance where there is room. 0.03 by default in an open ended run. | Bundles right at the limit, or a fab with tolerance worries. A result with new violations is dropped. |
-| `--move-parts` | Parts next to problems shift a little while the copper follows. On by default where the board is laid anew (scope `fresh` and `keep_locked`). | Almost always; switch it off for a board whose parts must not move at all. |
+| `--move-parts` | Parts next to problems shift a little while the copper follows. With `--drift` the routed tracks move the parts like floes also where nothing is wrong: they drift up to `--move-reach` (2 mm) to where the copper is shorter and shove each other along. On by default where the board is laid anew (scope `fresh` and `keep_locked`). | Almost always; switch it off for a board whose parts must not move at all. |
 | `--placements N` | Places the board N times, routes each and keeps the best. | Early in a design, when the placement is open. Costs N routes. |
 | `--negotiate N` | A negotiated search from the start. | Dense boards that leave connections open; the default takes it up on its own. |
 

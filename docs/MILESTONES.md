@@ -50,7 +50,8 @@ outer pours removed, routed completely by Gummiband (`bench/run-ledctl.sh`).
   round after a rejected new search started from a placement that did not match the copper.
   Since 2026-11-01 on by default (`--no-move-parts` switches it off), also in the plugin and in
   MCP `route`, and open connections ask for room as well: the neighbours of their pins step
-  aside. Open: rotation with following copper, parts that shove other parts along.
+  aside. Since 2026-11-27 parts shove other parts along and drift under the copper, see
+  "Parts as floes" below. Open: rotation with following copper.
 - Differential pairs: experimental option (`route --pairs`, see `docs/ARCHITECTURE.md`). Width and gap
   from net classes and custom rules per layer, skew tuning inside a pair, impedance estimate and
   `--pair-zdiff`. Measured on 2026-10-30: `diff_pairs` 99% coupled and clean in the KiCad DRC, Jetson
@@ -948,3 +949,203 @@ LED controller (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
   spelling, and give the files of the same options before the change (the Finish action byte
   for byte against the build before). The dialog itself was run only against a stand-in for
   wxPython, not in KiCad: this machine has neither.
+
+## A look at KiCadRoutingTools
+
+2026-11-27: [KiCadRoutingTools](https://github.com/drandyhaas/KiCadRoutingTools) (MIT) is a
+grid router: A* on a 0.1 mm raster in Rust, driven by a large Python engine, with fan-out,
+pairs, planes and a placer. Its substrate has nothing in common with ours, so nothing of its
+code fits, and the project rule (own design, no foreign code) stands; what carries over are
+ideas about the steps around the search, and its corpus of real boards. Read: its routing
+architecture, net ordering, rip-up and reroute, bus routing, differential pairs, length
+matching, plane routing, and the modules behind them.
+
+What it does that we took up:
+
+- **Rip-up by what is in the way, taken back when it loses.** Its rip-up ladder ranks the
+  routed nets by the blocked cells of the failed search, in one variant by a probe that
+  routes the failed net with the others as soft cost (`mincut`), rips one more per rung,
+  restores what a failed rung ripped, and an "improvement gate" reverts a run that ends with
+  fewer connected pads. Ours ripped up to six connections near the straight line and kept
+  whatever came of it. `Router::rip_cut` is the same idea in our terms (see ARCHITECTURE,
+  Topological routing). Measured in the cloud on 4 cores with the own clearance check, no
+  KiCad there, seed 1 (and 2 on the real boards), `--no-move-parts`:
+
+  | Boards | Preset | open | vias | mm | violating pieces |
+  | --- | --- | --- | --- | --- | --- |
+  | the 21 synthetic | draft | 1 / 1 | 870 / 915 | 15352 / 15416 | 25 / 2 |
+  | LED controller, Duo, injector and 6 of the corpus, 2 seeds | draft | 16 / 14 | 1941 / 1955 | 31663 / 31474 | 112 / 57 |
+  | LED controller, Duo, injector, Tigard, Watchy, 14 runs | quick | 12 / 12 | 2385 / 2379 | 22769 / 22785 | 78 / 69 |
+
+  (before / after). The LED controller closes its last connection with `draft` on both seeds;
+  `bga_dense` loses all 23 violating pieces; `parts_multi_feed` takes 130 vias instead of 99
+  and `four_signal_layers` 109 instead of 96, `bus` 18 instead of 26. So: fewer violations
+  and open connections, about as much length, a few percent more vias with the small search,
+  none with the full one. It stays behind `GB_RIPUP_CUT` until `bench/compare.py` has run with
+  the KiCad DRC; both hash lists are unchanged.
+- **Its corpus as a second set of real boards.** `bench/prepare-krt.sh` fetches nine of its
+  unrouted boards (ESP-Prog, a sonde, a split-flap driver, Tigard, Watchy, an interface board,
+  a ColdFire/Xilinx kit, Glasgow revC, ULX3S) into `bench/work/krt`, and `compare.py` takes
+  them along. First draft runs: seven of the nine route completely or but for a few
+  connections; see `bench/README.md`.
+- **A bug the corpus showed at once.** Glasgow has a keep-out for tracks and vias along the
+  board edge: a rectangle with the board as its hole. The reader took the first polygon of a
+  zone, the rectangle, so the whole board was shut: 0 via sites, 44 of 811 connections. Now
+  such a zone is cut into pieces around its holes (`geom::without_holes`): 743 of 811 with
+  `draft`, the rest is the BGA with the 0.2 mm rules of its project file.
+- `gummiband info board | head` no longer ends in a panic with a backtrace.
+
+What it does and we have in another form, so nothing to take: negotiated congestion with a
+history price; an order by crossings (MPS: nets whose straight lines cross wait for a later
+round; our portfolio and the generations search the order, and `groups` orders the members of
+a bus across its band); bus corridors with attraction (`groups`, layer directions, the pull of
+`pairs`); via-in-pad, shared fan-outs and dog-bone sites; neck-down of wide nets at fine pads;
+meanders with via barrels and pad-to-die lengths; a fill model checked against KiCad's; the
+check of the finished copper that takes back what does not hold.
+
+What it does and we do not, noted for later:
+
+- Pairs: a pair shorter than about 3 mm or five setbacks is not coupled at all (coupling buys
+  nothing there and tangles the pads); a pair whose polarity is crossed may swap the two pads
+  of one end where the part allows it (an FPGA input), with the schematic updated; a pair that
+  does not fit is tried narrower with the gap that holds its impedance.
+- Return vias: a ground via beside every signal via and every via pair. It places them only
+  where the ground has copper on two layers, which is what our try on the DDR5 testbed lacked
+  (one ground plane: they dangled).
+- Pin swaps of equivalent targets (Hungarian assignment) before routing.
+- A net whose own class asks for less clearance than the widest of the run gets a retry at
+  its own; a last retry at half the raster. Our capacities are per net pair already.
+- Rule conditions by layer and pad overrides resolved in KiCad's order; ours are still the
+  list in the guide.
+
+### Two findings from watching a route (2026-11-27)
+
+- Pairs that came apart at the very end, with `--move-parts --pairs pull`: the steps in which
+  parts give way relax the copper, and nothing closed the pairs up afterwards. Now `pairs::zip`
+  runs after the steps. LED controller, `standard`: 97 of 162 mm coupled before, 117 of 163 mm
+  after, the same as without moving parts.
+- Parts that hardly moved: one new spot of 3 µm far away from the parts stopped every step
+  after the first, in both rounds. Now only the copper around the parts and around the spots is
+  awake. Same run: 3 of 3 steps instead of 1, R110 and U5 shifted by 0.2 and 0.3 mm instead of
+  0.07 and 0.1 mm. The spot they were to free is a row of pads that leaves no legal track
+  (`tight_pads`), so the number of findings is the same.
+- What is left of the uncoupled length of the USB pair is at its layer changes: the two nets
+  of `pull` take their vias up to 2 mm apart. A price for the via of a pair net, more away
+  from where the partner changes layers (`GB_PAIR_VIA`, an idea from the doubled via cost of
+  KiCadRoutingTools), gave 76, 75 and 78 % coupled at 0, 1 and 2 over three seeds: no signal,
+  off by default. Pairs with their vias side by side are what `--pairs band` with
+  `--via-pairs` is for.
+
+### KiCadRoutingTools, the close look at ball fields and pairs (2026-11-27)
+
+Read in the source: `py_router/bga_fanout` (channel, under-pad and dog-bone engines, plane
+drops, the planned moves), `qfn_fanout`, `docs/differential-pairs.md`, `awx/joint_escape.py` and
+the recorded command chains of its corpus (`tests/stress/corpus_chains`).
+
+**How it gets a dense field out.** Not by a better search, by an order of steps a person would
+take, each fixed before the next: (1) the outer rings leave on the top layer from the outside
+in, so a deep ball never strands a shallow one; (2) every via site of the inner balls is
+reserved before any inner track is laid, deepest ball first, each in the gap towards its exit;
+(3) pairs leave coupled, deepest first; (4) the rest runs under the pads on the inner layers,
+deepest first; (5) every ball of a plane net gets its via right after, while the field is
+still open; (6) the planes, then the pairs, then the signals. And before all of that the chain
+of ulx3s lowers the rules until the field can be left at all: clearance 0.2 to 0.1 mm, via 0.6
+to 0.35 mm.
+
+**What that is worth with our router, measured on ulx3s** (20 x 20 balls at 0.8 mm, `draft`,
+seed 1, own check):
+
+| board and rules | routed | vias | findings | time |
+|---|---|---|---|---|
+| as in the file: 0.2 / 0.2 / 0.6 mm, no planes | 656 of 827 | 223 | 0 | 42 s |
+| 0.15 / 0.1 / 0.35 mm, GND and +3V3 as planes, two signal layers | 786 of 799 | 996 | 260 | 1053 s |
+| the same rules, the two zones as areas on four routed layers (`--areas fill`) | 827 of 827 | 569 | 28 | 269 s |
+
+So the search gets the field out once the rules allow it; what we lacked was saying so. Taken up:
+
+- `patterns::escape_warnings`: a line per ball field whose rules leave no track between two
+  balls or no via between four, with the clearance, track or via that would fit (its "escape
+  budget"). ulx3s and Glasgow get it, the synthetic BGA boards do not.
+
+Noted, not built:
+
+- The order of the field as fixed steps (rings outside in, sites reserved deepest first). Our
+  dog-bone sites exist, the order is left to the portfolio. Worth a pattern hint (`balls`) and a
+  measurement on ulx3s with two signal layers, where 13 stay open and the negotiation takes 17
+  minutes.
+- A via for every plane ball before the signals (`fanout_first` does this in every second run;
+  the joint plan of `awx` prices a drop in the lanes the bus leaves by).
+- Pairs: short pairs uncoupled, the pad swap, narrower with the gap that holds the impedance
+  (as noted above); for the two nets of `pull`, the vias side by side (see the findings from
+  watching a route).
+- One plan for all balls of a field at once (`awx/joint_escape.py`: a menu of moves per ball,
+  conflicts between moves, one CP-SAT solve, bus balls first). It answers the case its notes
+  name: a bus escape across three rows fences in twenty other balls. Our negotiation meets the
+  same case with prices; no board of ours shows it yet.
+
+## Parts as floes (2026-11-27)
+
+`--move-parts` used to move a part only where a clearance problem or an open pin sat next to it,
+by up to half a millimetre, and a part in the way of that move ended it. Now the movable parts
+and blocks are floes that the routed copper moves (`gummiband_core::floes`, see "Parts as floes"
+in `docs/ARCHITECTURE.md`):
+
+- Forces from the copper as it lies: problems and open pins press, a track of another net that
+  bends around a pad presses with the turning vector of the bend, a track that ends on a pad
+  pulls. The last two are the gradient of the track length by the offset of the part.
+- Floes shove each other: by courtyard when the targets are set, and through the copper while
+  they move (the floe behind the squeezed copper goes first, up to three in a row). Only the
+  floe that is really stuck stops; before, one stuck part ended the move of all.
+- The drift without a problem (`--drift`, off by default) runs inside the search, on the
+  relaxed copper of the winner and before the finishing steps. After them it cannot work:
+  relaxing finished copper again makes new findings without any move (Duo 6 to 12 findings,
+  Injector 1 to 19), so every step was refused or the round thrown away.
+- A part ends up at most `--move-reach` (2 mm) from its place in the file.
+- Width findings (a track too narrow for its current) are judged by net and not by place
+  (`follow::new_problems`): the check names the narrowest piece of a path, and that jumps along
+  the path with every relaxation. On Duo every first step was refused for it.
+- A problem inside one part (a pad row that leaves its own track too little room) presses on
+  nothing and its pieces are not counted while parts move.
+
+`--runs 4 --generations 1 --geometry-generations 1 --seed 1`, 4 threads, Gummiband's own check,
+this container (no KiCad DRC here). Length in mm, problem spots, seconds:
+
+| Board | `--no-move-parts` | moves for room only (default) | floes (`--drift`) |
+| --- | --- | --- | --- |
+| Duo (291 connections) | 2105, 4 spots, 12 s | 2077, 3 spots, 15 s | 1947, 3 spots, 34 s |
+| Lichtschnitzel (346) | 2273, 2 spots, 36 s | 2273, 2 spots, 30 s | 2173, 2 spots, 77 s |
+| Injector (183) | 787, clean, 12 s | 787, clean, 12 s | 736, clean, 44 s |
+| parts_xhard (166) | 1244, clean, 3 s | 1244, clean, 3 s | 1121, clean, 10 s |
+| parts_hard (75) | 1040, clean, 3 s | 1040, clean, 3 s | 937, clean, 12 s |
+| parts_medium (43) | 509, clean, 1 s | 509, clean, 1 s | 431, clean, 4 s |
+| parts_multi (113) | 1344, clean, 4 s | 1344, clean, 4 s | 1241, clean, 15 s |
+
+The copper gets 4 to 15 % shorter and no board gets a problem spot more. The price is time: at
+these small settings the route takes about three times as long, because every step of the parts
+relaxes and checks the copper around them, and a search that negotiates drifts twice (the
+negotiated and the plain search are compared finished). On Lichtschnitzel the two spots that
+are left are pad rows of R110 that leave their own tracks too little room; the check cuts them
+into 7 pieces instead of 4 after the drift, the spots are the same. Duo ends on another routing
+(220 instead of 195 vias, one part moved): the finished runner-up on the unmoved parts had fewer
+findings than the finished drifted winner and took its place.
+
+The owner chose the drift as an extra option, so it is off by default (`--drift`), and asked for
+a look at a reach of 2 mm and of 20 mm. With the first version both gave the same boards: no part
+went farther than 1.1 mm, because the rounds ended at a gain below 1 %. Now a reach beyond 2 mm
+lowers that bound in proportion and allows more rounds. Same settings, `--drift --move-reach`:
+
+| Board | 2 mm | 20 mm |
+| --- | --- | --- |
+| parts_xhard | 1121 mm, farthest part 1.1 mm, 3 rounds | 1047 mm, 4.5 mm, 11 rounds, clean |
+| Lichtschnitzel | 2173 mm, 0.9 mm, 4 rounds | 2153 mm, 1.9 mm, 10 rounds, 2 spots |
+| Duo | 1947 mm (runner-up, see above) | 1993 mm, 2.1 mm, 5 rounds, 3 spots |
+| Injector | 736 mm, 0.6 mm | 736 mm, 0.6 mm (the same board) |
+
+Even with 20 mm no part goes farther than 4.5 mm: the parts come up against each other and
+against copper that cannot give way, and the forces are the slope of the track length, which
+ends in the next hollow. Parts do not jump over each other or swap places; that is the work of
+`--placements`.
+
+Open: the drift in an open ended run (its alternatives lie on the placement of the search), a
+measurement with the KiCad DRC, rotation, and the time (a drift that relaxes only the copper of
+the moving floes, or steps on the GPU).

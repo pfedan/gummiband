@@ -43,6 +43,10 @@ pub struct RouterConfig {
     pub seed: u64,
     /// Rip-up and reroute passes for failed connections.
     pub ripup_passes: usize,
+    /// The rip-up takes out what the open connection runs into on its way through everything
+    /// and keeps the result only where no connection is lost ([`Router::rip_cut`]); without
+    /// it, what lies near the straight line of the connection goes, whatever comes of it.
+    pub ripup_cut: bool,
     /// Rounds of the negotiation phase before the rip-up passes (0 = off), see
     /// [`Router::negotiate`].
     pub negotiate: usize,
@@ -122,6 +126,7 @@ impl Default for RouterConfig {
             max_expansions: knobs::MAXEXP.num::<f64>() as usize,
             seed: 0,
             ripup_passes: knobs::RIPUP.num::<f64>() as usize,
+            ripup_cut: knobs::RIPUP_CUT.on(),
             negotiate: 0,
             sites_per_tri: 3,
             margin: knobs::SEARCH_MARGIN.num(),
@@ -180,6 +185,10 @@ fn area_pass_slack() -> f64 {
 /// for what is in its way ([`Router::area_blockers`]), in mm of way: the middle one of the prices
 /// the open end of a run draws from.
 const AREA_CROSSING: f64 = 1.5;
+
+/// How often a rip-up looks again for what stands in the way of its connection, see
+/// [`Router::rip_cut`].
+const CUT_ROUNDS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Goal {
@@ -2546,6 +2555,33 @@ impl<'a> Router<'a> {
         if let Some(p) = self.prices.as_ref().filter(|p| p.soft && p.via > 0.0) {
             via_cost = via_cost.max((p.via * p.crossing * self.via_factor(ci)).min(p.via_cap * via_cost));
         }
+        // a pair changes layers with two vias, and side by side: a via of a pair net costs
+        // more (GB_PAIR_VIA), and more again away from where its partner changes layers
+        let pair_via: f64 = if self.partner.contains_key(&net) {
+            knobs::PAIR_VIA.num()
+        } else {
+            0.0
+        };
+        let changes: Vec<Point> = guide
+            .filter(|_| pair_via > 0.0)
+            .map(|(g, _)| {
+                g.iter()
+                    .flat_map(|g| g.pts.windows(2).filter(|w| w[0].1 != w[1].1).map(|w| w[0].0))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let base_via = via_cost;
+        let pair_via_at = |q: Point| -> f64 {
+            if pair_via <= 0.0 {
+                return 0.0;
+            }
+            let away = if guide.is_some() {
+                changes.iter().map(|c| c.dist(q) / 2.0).fold(1.0, f64::min)
+            } else {
+                0.0
+            };
+            pair_via * base_via * (1.0 + away)
+        };
         let item = Item {
             net,
             w: cls.track_width,
@@ -3207,7 +3243,11 @@ impl<'a> Router<'a> {
                         let Some(existing) = ok else {
                             continue;
                         };
-                        let mut vc = if existing { 0.1 } else { via_cost };
+                        let mut vc = if existing {
+                            0.1
+                        } else {
+                            via_cost + pair_via_at(self.site_point(site))
+                        };
                         if let Some(s) = soft {
                             if let Some((ep, es)) = entry_pos {
                                 vc += s.crossing * self.chords_crossed(t, lu, net, ep, es, CPos::Vertex(i)) as f64;
@@ -3308,7 +3348,7 @@ impl<'a> Router<'a> {
                         if own_vias.iter().any(|v| v.dist(q) < hole_gap) {
                             continue;
                         }
-                        let mut vc = via_cost;
+                        let mut vc = via_cost + pair_via_at(q);
                         if let Some(s) = soft {
                             if let Some((ep, es)) = entry_pos {
                                 vc += s.crossing * self.half_chords_crossed(t, lu, net, q, ep, es) as f64;
@@ -4214,7 +4254,16 @@ impl<'a> Router<'a> {
                 break;
             }
             let mut still = Vec::new();
+            // the way through names what really stands in the way; with many connections open
+            // the board has more connections than room, and the guess is as good and cheaper
+            let cut = self.cfg.ripup_cut && (failed.len() <= 8 || failed.len() * 20 <= self.conns.len() * 3);
             for &ci in &failed {
+                if cut {
+                    if !self.conn_segs[ci].is_empty() || !self.rip_cut(ci) {
+                        still.push(ci);
+                    }
+                    continue;
+                }
                 let victims = self.blockers(ci);
                 for &v in &victims {
                     self.rip_up(v);
@@ -4229,6 +4278,9 @@ impl<'a> Router<'a> {
                     still.push(ci);
                 }
             }
+            if cut {
+                still.extend((0..self.conns.len()).filter(|&cj| self.conn_segs[cj].is_empty()));
+            }
             still.sort_unstable();
             still.dedup();
             failed = still;
@@ -4236,6 +4288,53 @@ impl<'a> Router<'a> {
         self.reduce_vias();
         self.area_wait = Vec::new();
         self.conn_segs.iter().filter(|s| !s.is_empty()).count()
+    }
+
+    /// One rip-up for open connection `ci` that cannot end worse than it began. What gives way
+    /// is what the connection runs into on its way through everything ([`Router::way_through`]),
+    /// not what lies near its straight line: the copper that shuts a pin in is often not on
+    /// that line, and most of what is near it is not in the way. If the connection still finds
+    /// no way with those gone, it looks again from where it stands now, up to
+    /// [`CUT_ROUNDS`] times; where there is no way even through everything, the guess of
+    /// [`Router::blockers`] goes once. Then the connection is laid, then what gave way, in the
+    /// order it went. The state before is kept, and it comes back when more connections are
+    /// open afterwards than before, or as many without `ci` being laid: giving way may move an
+    /// open connection to another place, where the next pass looks at it, and never adds one.
+    /// True if `ci` is laid.
+    fn rip_cut(&mut self, ci: usize) -> bool {
+        let open = |r: &Router| r.conn_segs.iter().filter(|s| s.is_empty()).count();
+        let before = open(self);
+        let kept = self.clone();
+        let mut victims: Vec<usize> = Vec::new();
+        let mut ok = false;
+        for round in 0..CUT_ROUNDS {
+            let mut more = match self.way_through(ci, AREA_CROSSING) {
+                Some((hit, _)) => hit,
+                None if round == 0 => self.blockers(ci),
+                None => Vec::new(),
+            };
+            more.retain(|&v| v != ci && !self.conn_segs[v].is_empty() && !victims.contains(&v));
+            if more.is_empty() && round > 0 {
+                break;
+            }
+            for &v in &more {
+                self.rip_up(v);
+            }
+            victims.extend(more);
+            ok = self.route_one(ci);
+            if ok {
+                break;
+            }
+        }
+        for &v in &victims {
+            self.route_one(v);
+        }
+        let after = open(self);
+        if after > before || (after == before && !ok) {
+            *self = kept;
+            return false;
+        }
+        ok
     }
 
     /// From now until the end of [`Router::run`] the pads of the nets left to the fill of their

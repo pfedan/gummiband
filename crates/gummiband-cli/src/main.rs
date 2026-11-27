@@ -265,6 +265,18 @@ struct RouteArgs {
     /// Parts stay where they are.
     #[arg(long)]
     no_move_parts: bool,
+    /// With --move-parts: how far a part may end up from its place in the file, in mm.
+    #[arg(long, value_name = "MM", default_value_t = defaults::MOVE_REACH)]
+    move_reach: f64,
+    /// With --move-parts: the tracks push and pull the parts wherever they bend around them or
+    /// end on them, like ice floes, and parts shove each other along; the copper gets shorter
+    /// and the route takes longer. Without this flag parts only step aside at clearance
+    /// problems and open connections.
+    #[arg(long, conflicts_with = "no_drift")]
+    drift: bool,
+    /// Parts only step aside at clearance problems and open connections (the default).
+    #[arg(long)]
+    no_drift: bool,
     /// References that never move under --move-parts, --placements and --clear-corridors,
     /// comma separated.
     #[arg(long, value_delimiter = ',')]
@@ -424,6 +436,8 @@ impl RouteArgs {
             shove: on_off(self.shove, self.no_shove),
             give: self.give,
             move_parts: on_off(self.move_parts, self.no_move_parts),
+            move_reach: self.move_reach,
+            drift: self.drift && !self.no_drift,
             fixed: self.fixed.clone(),
             plane_layers: plane_layers.to_vec(),
             areas: match &self.areas {
@@ -760,7 +774,27 @@ fn print_matching(rules: &[gummiband_core::matching::RuleMatch]) {
     }
 }
 
+/// A reader that has seen enough (`gummiband info board | head`) closes the pipe. Rust starts
+/// a program with SIGPIPE ignored, so the next `println!` fails and panics with a backtrace;
+/// with the default action back the program ends quietly there, like any other filter.
+#[cfg(unix)]
+fn end_on_closed_pipe() {
+    unsafe extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    // SAFETY: `signal` of the C library with the default action, before any thread starts.
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn end_on_closed_pipe() {}
+
 fn main() -> Result<()> {
+    end_on_closed_pipe();
     let cli = Cli::parse_from(old_pairs_switch(std::env::args_os()));
     if let Some(n) = cli.threads {
         rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global()?;
@@ -808,6 +842,9 @@ fn main() -> Result<()> {
                 conns
             );
             if let Some(w) = b.ground_warning() {
+                println!("warning: {w}");
+            }
+            for w in gummiband_core::patterns::escape_warnings(b) {
                 println!("warning: {w}");
             }
             println!("patterns:");
@@ -952,6 +989,9 @@ fn main() -> Result<()> {
             let r = &outcome.routed;
             let (b, sub, res) = (&r.board, &r.sub, &r.res);
             if let Some(w) = b.ground_warning() {
+                println!("warning: {w}");
+            }
+            for w in gummiband_core::patterns::escape_warnings(b) {
                 println!("warning: {w}");
             }
             if !outcome.skipped_nets.is_empty() {

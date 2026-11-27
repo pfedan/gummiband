@@ -375,6 +375,22 @@ fn scene(board: &Board) -> Vec<u8> {
             )),
         }
     }
+    // the part a shape moves with (`Board::with_offsets`): its footprint, or the block whose
+    // copper it is
+    let mut refs: Vec<&String> = board.footprint_obstacles.keys().collect();
+    refs.extend(board.blocks.iter().flat_map(|b| b.refs.first()));
+    refs.sort();
+    refs.dedup();
+    let index = |r: &String| refs.binary_search(&r).ok().map_or(-1, |i| i as i64);
+    let mut owner = vec![-1i64; board.obstacles.len()];
+    for b in &board.blocks {
+        if let Some(r) = b.refs.first() {
+            b.copper.iter().for_each(|&o| owner[o] = index(r));
+        }
+    }
+    for (r, obs) in &board.footprint_obstacles {
+        obs.iter().for_each(|&o| owner[o] = index(r));
+    }
     // the maps of the board have no order of their own
     courtyards.sort_by(|a, b| a.0.cmp(b.0).then(a.1.len().cmp(&b.1.len())));
     let planes: Vec<Value> = board
@@ -394,6 +410,8 @@ fn scene(board: &Board) -> Vec<u8> {
         "outline": board.outline.iter().map(flat).collect::<Vec<_>>(),
         "courtyards": courtyards.iter().map(|c| json!({"ref": c.0, "pts": c.1})).collect::<Vec<_>>(),
         "shapes": shapes,
+        "refs": refs,
+        "owner": owner,
         "planes": planes,
     });
     let mut out = serde_json::to_vec(&scene).unwrap();
@@ -409,6 +427,10 @@ fn scene(board: &Board) -> Vec<u8> {
 /// - per open connection `ax, ay, bx, by, connection`
 /// - per place the search looked at `x, y, layer`
 /// - per clearance violation `x, y`
+///
+/// The head has `moved` where parts lie other than in the scene: the offset `[x, y]` of every
+/// footprint that moved, by its reference. The scene names the part of each shape (`owner`, an
+/// index into `refs`, -1 for none), so the viewer draws pads, courtyards and names there.
 ///
 /// A connection or a site is -1 where the copper has none. The head says how many of each
 /// there are (`n`), with the number of floats of the tracks. A view of the stage `step` is a
@@ -451,6 +473,12 @@ fn frame(v: &View, t: Duration) -> Vec<u8> {
             "spots": v.spots.len(),
         },
     });
+    if let Some(offsets) = v.offsets {
+        // the maps of the search have no order of their own
+        let moved: std::collections::BTreeMap<&String, [f64; 2]> =
+            offsets.iter().map(|(r, d)| (r, [mm(d.x), mm(d.y)])).collect();
+        head["moved"] = json!(moved);
+    }
     if v.stage == Stage::Step {
         head["gone"] = json!(v.gone);
         head["gone_sites"] = json!(v.gone_sites);
