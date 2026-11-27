@@ -280,6 +280,103 @@ pub fn grids(board: &Board) -> Vec<PadGrid> {
     out
 }
 
+/// What the rules of a board leave of the ways out of a ball field, per field that has a problem.
+///
+/// An inner ball leaves on its own layer between two balls of the ring outside it, or through a
+/// via in the middle between four balls (a dog-bone), or through a via in its pad. Whether the
+/// first two fit is arithmetic on the pitch, the ball, and the track, clearance and via of the
+/// net classes: where neither fits, the search can only fail or use vias in pads, and no effort
+/// mends it. Measured on ulx3s (a 20 x 20 field at 0.8 mm, balls of 0.4 mm): with a class of
+/// 0.2 mm tracks, 0.2 mm clearance and 0.6 mm vias 656 of 827 connections are routed, with
+/// 0.15 / 0.1 / 0.35 mm all of them. The narrowest class among the nets of the field counts,
+/// with the neck a track may take at a pin.
+pub fn escape_warnings(board: &Board) -> Vec<String> {
+    let mut out = Vec::new();
+    for g in grids(board) {
+        let Some(ball) = g
+            .pins
+            .iter()
+            .map(|&p| board.pins[p].size.0.max(board.pins[p].size.1))
+            .max_by(f64::total_cmp)
+        else {
+            continue;
+        };
+        // per class of the routed nets on the field: (track, clearance, via)
+        let mut needs: Vec<(f64, f64, f64)> = g
+            .pins
+            .iter()
+            .map(|&p| board.pins[p].net)
+            .filter(|&n| board.nets[n as usize].pins.len() >= 2 && !has_plane(board, n))
+            .map(|n| {
+                let c = board.class_of(n);
+                let neck = c.min_width.unwrap_or(board.rules.min_track_width.max(0.0));
+                // near a pin a track may neck down to 0.25 mm
+                let w = c.track_width.min(0.25).max(neck).min(c.track_width);
+                (w, c.clearance.max(board.rules.min_clearance), c.via_diameter)
+            })
+            .collect();
+        needs.sort_by(|a, b| (a.0 + 2.0 * a.1).total_cmp(&(b.0 + 2.0 * b.1)));
+        let Some(&(w, c, via)) = needs.first() else {
+            continue;
+        };
+        let gap = g.pitch - ball;
+        let room = g.pitch * std::f64::consts::SQRT_2 - ball;
+        let track = gap + 1e-6 >= w + 2.0 * c;
+        let dog = room + 1e-6 >= via + 2.0 * c;
+        if track && dog {
+            continue;
+        }
+        let head = format!(
+            "{}: ball field {} x {} at {:.2} mm pitch, balls of {:.2} mm",
+            g.footprint, g.rows, g.cols, g.pitch, ball
+        );
+        let no_track = format!(
+            "no track passes between two balls (a gap of {:.2} mm; a track of {:.2} mm with {:.2} mm clearance needs {:.2} mm)",
+            gap,
+            w,
+            c,
+            w + 2.0 * c
+        );
+        let no_via = format!(
+            "no via fits between four balls (room for {:.2} mm; a via of {:.2} mm with {:.2} mm clearance needs {:.2} mm)",
+            room,
+            via,
+            c,
+            via + 2.0 * c
+        );
+        // what would fit: a smaller clearance, or a smaller track or via where the board allows one
+        let fit = |what: &str, have: f64, size: f64, least: f64| {
+            let c_fit = (have - size) / 2.0;
+            let s_fit = have - 2.0 * c;
+            match (c_fit > 0.0, s_fit >= least.max(0.05)) {
+                (true, true) => {
+                    format!("the {what} fits with a clearance of {c_fit:.3} mm, or as a {what} of {s_fit:.3} mm")
+                }
+                (true, false) => format!("the {what} fits with a clearance of {c_fit:.3} mm"),
+                (false, true) => format!("a {what} of {s_fit:.3} mm fits"),
+                (false, false) => format!("no {what} fits at any clearance"),
+            }
+        };
+        let (fit_track, fit_via) = (
+            fit("track", gap, w, board.rules.min_track_width),
+            fit("via", room, via, board.rules.min_via_diameter),
+        );
+        out.push(match (track, dog) {
+            (false, false) => format!(
+                "{head}: {no_track} and {no_via}, so the inner balls can only leave through a via in their pad; {}; {}",
+                fit_track, fit_via
+            ),
+            (false, true) => {
+                format!("{head}: {no_track}, so every inner ball needs a via between the balls; {fit_track}")
+            }
+            _ => format!(
+                "{head}: {no_via}, so the inner balls leave on their own layer or through a via in their pad; {fit_via}"
+            ),
+        });
+    }
+    out
+}
+
 fn has_plane(board: &Board, net: NetId) -> bool {
     board.planes.iter().any(|p| p.net == net)
 }
@@ -719,6 +816,54 @@ mod tests {
     use crate::board::{LayerSet, Net, NetClass, Pin};
     use crate::geom::pt;
     use crate::route::{GroupOrder, RouterConfig};
+
+    #[test]
+    fn a_ball_field_tells_what_its_rules_leave_no_way_for() {
+        let field = |track: f64, clearance: f64, via: f64| {
+            let mut b = board(50);
+            b.rules.min_clearance = 0.1;
+            b.rules.min_track_width = 0.1;
+            b.rules.min_via_diameter = 0.3;
+            b.classes[0] = NetClass {
+                track_width: track,
+                clearance,
+                via_diameter: via,
+                ..NetClass::default()
+            };
+            for i in 0..25 {
+                pin(&mut b, "U1", i, i as NetId, (i % 5) as f64 * 0.8, (i / 5) as f64 * 0.8);
+                b.pins[2 * i].size = (0.4, 0.4);
+                pin(&mut b, &format!("R{i}"), 1, i as NetId, 20.0 + i as f64, 20.0);
+            }
+            escape_warnings(&b)
+        };
+        // 0.4 mm between the balls, 0.73 mm between four
+        assert!(field(0.15, 0.1, 0.35).is_empty());
+        let w = field(0.2, 0.2, 0.6);
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].starts_with("U1: ball field 5 x 5 at 0.80 mm pitch, balls of 0.40 mm"),
+            "{}",
+            w[0]
+        );
+        assert!(
+            w[0].contains("no track passes") && w[0].contains("no via fits"),
+            "{}",
+            w[0]
+        );
+        assert!(
+            w[0].contains("the track fits with a clearance of 0.100 mm;"),
+            "{}",
+            w[0]
+        );
+        assert!(w[0].contains("or as a via of 0.331 mm"), "{}", w[0]);
+        let w = field(0.15, 0.1, 0.6);
+        assert!(
+            w.len() == 1 && w[0].contains("no via fits") && !w[0].contains("no track"),
+            "{}",
+            w[0]
+        );
+    }
 
     #[test]
     fn group_order_hints() {

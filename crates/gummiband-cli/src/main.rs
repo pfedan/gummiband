@@ -830,6 +830,9 @@ fn main() -> Result<()> {
             if let Some(w) = b.ground_warning() {
                 println!("warning: {w}");
             }
+            for w in gummiband_core::patterns::escape_warnings(b) {
+                println!("warning: {w}");
+            }
             println!("patterns:");
             for line in gummiband_core::patterns::find(b).summary(b) {
                 println!("  {line}");
@@ -972,6 +975,9 @@ fn main() -> Result<()> {
             let r = &outcome.routed;
             let (b, sub, res) = (&r.board, &r.sub, &r.res);
             if let Some(w) = b.ground_warning() {
+                println!("warning: {w}");
+            }
+            for w in gummiband_core::patterns::escape_warnings(b) {
                 println!("warning: {w}");
             }
             if !outcome.skipped_nets.is_empty() {
