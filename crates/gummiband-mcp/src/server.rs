@@ -40,6 +40,8 @@ power_copper pour by its gb: name), add_mounting_hole adds a hole, move_part sid
 set_rules adds .kicad_dru rules, place_silk moves the reference texts off pads and other silk, and \
 try_seeds compares place_parts + route over several seeds (results scatter widely on tight boards). \
 create_board parts_outside keeps the board empty for hand placement and copper drawn first. \
+When the user wants to see the router at work: watch returns a URL for their browser that shows \
+every route of the session while it runs. \
 The tool guide returns the documentation: guide without topic for \
 this workflow and the topic list, guide with a tool name for its full reference. \
 From a schematic only: create_board turns a KiCad netlist into a board (footprints, nets, outline, stackup, net classes). The automatic loop: load_board (gives a board id) -> list_nets -> optionally \
@@ -166,6 +168,9 @@ pub struct Gummiband {
     next_id: Arc<Mutex<usize>>,
     /// One route at a time: every route already uses all rayon threads.
     route_lock: Arc<tokio::sync::Mutex<()>>,
+    /// The viewer of the routes of this session, once the tool `watch` or `GUMMIBAND_WATCH`
+    /// switched it on: what it shows, and where.
+    watch: Arc<Mutex<Option<(gummiband_watch::Feed, String)>>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -417,6 +422,23 @@ pub struct MovePartIn {
     /// swapped); the tracks do not follow a flip. Use it to bring back a part that place_parts
     /// two_sided put on the back, or to put one there yourself.
     pub side: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WatchIn {
+    /// Where the viewer is served: a port (this machine only), or address:port ("0.0.0.0:7878"
+    /// lets other machines look). Default: port 7878 of this machine. Ignored while the viewer
+    /// is already served.
+    pub address: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WatchOut {
+    /// The page to open in a browser.
+    pub url: String,
+    /// False: the viewer was served already, at this URL.
+    pub started: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2620,7 +2642,8 @@ impl Gummiband {
             opts.clear_corridors = false;
         }
         let path = self.with_entry(&id, |e| Ok(e.path.clone()))?;
-        let (mut summary, mut out) = route_blocking(id, path, opts, &respelled, p)?;
+        let feed = self.watch.lock().unwrap().as_ref().map(|w| w.0.clone());
+        let (mut summary, mut out) = route_blocking(id, path, opts, &respelled, p, feed.as_ref())?;
         if !cleared.is_empty() {
             summary = format!(
                 "placed again out of the track corridors: {}\n{summary}",
@@ -3450,6 +3473,7 @@ fn route_blocking(
     opts: RouteOptions,
     respelled: &[Respelled],
     p: RouteIn,
+    feed: Option<&gummiband_watch::Feed>,
 ) -> Result<(String, RouteOut)> {
     let output = match &p.output {
         Some(o) => abs_path(o),
@@ -3458,7 +3482,20 @@ fn route_blocking(
             path.with_file_name(format!("{stem}.routed.kicad_pcb"))
         }
     };
-    let outcome = gummiband_app::route_file(&path, &output, &opts, &Default::default())?;
+    // a session with a viewer shows it the route
+    if let Some(feed) = feed {
+        feed.begin(&path.file_stem().unwrap_or_default().to_string_lossy());
+    }
+    let begin = |b: &gummiband_core::board::Board| feed.unwrap().watch(b);
+    let hooks = gummiband_app::Hooks {
+        watch: feed.map(|_| &begin as &dyn Fn(&gummiband_core::board::Board) -> gummiband_core::watch::Watch),
+        ..Default::default()
+    };
+    let outcome = gummiband_app::route_file(&path, &output, &opts, &hooks);
+    if let Some(feed) = feed {
+        feed.finish();
+    }
+    let outcome = outcome?;
     let routed = &outcome.routed;
     let seconds = routed.seconds;
     let (b, res, viol, pair_reports) = (&routed.board, &routed.res, &routed.violations, &routed.pairs);
@@ -3949,7 +3986,49 @@ impl Gummiband {
             boards: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(0)),
             route_lock: Arc::new(tokio::sync::Mutex::new(())),
+            watch: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Serves the viewer of the routes of this session (`address` as [`WatchIn::address`]) and
+    /// says where; a second call says where it is served already.
+    pub fn watch_on(&self, address: Option<&str>) -> Result<WatchOut> {
+        let mut watch = self.watch.lock().unwrap();
+        if let Some((_, url)) = &*watch {
+            return Ok(WatchOut {
+                url: url.clone(),
+                started: false,
+            });
+        }
+        let address = gummiband_watch::address(address);
+        let feed = gummiband_watch::Feed::new();
+        let server = gummiband_watch::Server::bind(&address, &feed).with_context(|| {
+            format!(
+                "cannot listen on {address} (is another gummiband-mcp serving its viewer there? pass another address)"
+            )
+        })?;
+        let url = server.url();
+        *watch = Some((feed, url.clone()));
+        Ok(WatchOut { url, started: true })
+    }
+
+    #[tool(
+        description = "Let the user watch the routes of this session in a browser while they run: starts a small web server on this machine and returns its URL for the user to open. From then on every route (and every seed of try_seeds) is shown live: one run of each generation as it lays its connections, a relaxation pulling the tracks taut, and the best candidate after every phase, with a time line to replay it. Watching does not change any result. Call it once, when the user asks to see the routing; tell them the URL. A second call returns the same URL.",
+        output_schema = schema_for_output::<WatchOut>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn watch(&self, Parameters(p): Parameters<WatchIn>) -> Result<CallToolResult, ErrorData> {
+        match self.watch_on(p.address.as_deref()) {
+            Ok(out) => ok(
+                if out.started {
+                    format!("The viewer is at {}: open it in a browser, then route.", out.url)
+                } else {
+                    format!("The viewer is already served at {}.", out.url)
+                },
+                &out,
+            ),
+            Err(e) => fail(format!("{e:#}")),
         }
     }
 

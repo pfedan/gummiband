@@ -318,6 +318,17 @@ struct RouteArgs {
     /// far, elapsed seconds), for the KiCad plugin and other front ends.
     #[arg(long)]
     progress: bool,
+    /// Watch the route in a browser while it runs: serves the viewer on this address (a port
+    /// alone means this machine only, 0.0.0.0:PORT lets other machines look) and prints its
+    /// URL. The viewer shows one run of every generation as it lays its connections, a
+    /// relaxation at work and the best candidate after every phase, and replays all of it.
+    /// The result is the same with and without.
+    #[arg(long, value_name = "ADDRESS", num_args = 0..=1, default_missing_value = gummiband_watch::DEFAULT_ADDRESS)]
+    watch: Option<String>,
+    /// Write what --watch shows into this file: one HTML page that replays the route
+    /// wherever it is opened, without a server.
+    #[arg(long, value_name = "FILE")]
+    watch_record: Option<PathBuf>,
     /// Keep improving after the normal search until a line arrives on stdin or stdin closes,
     /// then finish the best result. Mutants take a few connections around one spot out and
     /// lay them again, the rest of the result stays; when that stops helping, bolder side
@@ -881,6 +892,8 @@ fn main() -> Result<()> {
                 report,
                 progress,
                 until_stop,
+                watch,
+                watch_record,
                 ..
             } = *args;
             // the options against each other, before any work
@@ -923,12 +936,39 @@ fn main() -> Result<()> {
                     if open == 1 { "" } else { "s" }
                 ),
             };
+            // what a browser is shown of the route, live and as a recording
+            let feed = (watch.is_some() || watch_record.is_some()).then(gummiband_watch::Feed::new);
+            if let (Some(feed), Some(address)) = (&feed, &watch) {
+                let address = gummiband_watch::address(Some(address));
+                let server = gummiband_watch::Server::bind(&address, feed)
+                    .map_err(|e| anyhow::anyhow!("--watch: cannot listen on {address}: {e}"))?;
+                println!("watch: {}", server.url());
+            }
+            if let Some(feed) = &feed {
+                feed.begin(&board.file_stem().unwrap_or_default().to_string_lossy());
+            }
+            let begin = |b: &gummiband_core::board::Board| feed.as_ref().unwrap().watch(b);
             let hooks = Hooks {
                 stop: open_end.as_ref(),
                 progress: if progress { Some(&progress_fn) } else { None },
                 event: Some(&event),
+                watch: feed
+                    .as_ref()
+                    .map(|_| &begin as &dyn Fn(&gummiband_core::board::Board) -> gummiband_core::watch::Watch),
             };
-            let outcome = gummiband_app::route_file(&board, &output, &opts, &hooks)?;
+            let outcome = gummiband_app::route_file(&board, &output, &opts, &hooks);
+            if let Some(feed) = &feed {
+                feed.finish();
+                if let Some(file) = &watch_record {
+                    std::fs::write(file, feed.recording())
+                        .map_err(|e| anyhow::anyhow!("--watch-record: cannot write {}: {e}", file.display()))?;
+                    let (_, views) = feed.counts();
+                    println!("watch: {views} views recorded in {}", file.display());
+                }
+                // this process ends with the route: a browser that follows it gets the end first
+                feed.deliver(std::time::Duration::from_secs(3));
+            }
+            let outcome = outcome?;
             let r = &outcome.routed;
             let (b, sub, res) = (&r.board, &r.sub, &r.res);
             if let Some(w) = b.ground_warning() {
@@ -1714,7 +1754,17 @@ mod tests {
 
     /// Arguments of `route` that are the CLI's own: where the result and its reports go, and
     /// the stop line of the open end. Everything else has to be an option of the pipeline.
-    const OWN: &[&str] = &["board", "output", "svg", "svg-tris", "report", "progress", "until-stop"];
+    const OWN: &[&str] = &[
+        "board",
+        "output",
+        "svg",
+        "svg-tris",
+        "report",
+        "progress",
+        "until-stop",
+        "watch",
+        "watch-record",
+    ];
 
     /// Flags of earlier versions that `route` still takes and maps onto the options of today
     /// (`gummiband_app::old`). They are hidden: no help lists them.

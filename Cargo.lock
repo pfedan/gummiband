@@ -483,6 +483,7 @@ dependencies = [
  "gummiband-core",
  "gummiband-kicad",
  "gummiband-place",
+ "gummiband-watch",
  "rayon",
  "serde_json",
 ]
@@ -521,6 +522,7 @@ dependencies = [
  "gummiband-core",
  "gummiband-kicad",
  "gummiband-place",
+ "gummiband-watch",
  "rayon",
  "rmcp",
  "serde",
@@ -537,6 +539,14 @@ dependencies = [
  "gummiband-core",
  "gummiband-kicad",
  "rayon",
+]
+
+[[package]]
+name = "gummiband-watch"
+version = "0.1.0"
+dependencies = [
+ "gummiband-core",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,933 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gummiband watch</title>
+<style>
+  :root {
+    --bg: #0d1012; --panel: rgba(18, 23, 26, 0.88); --line: #2a3237; --text: #dfe6e9; --dim: #8a979e;
+    --accent: #ffd166; --live: #4cd97b; --warn: #ffcf40;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; }
+  #gl, #labels { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #gl { touch-action: none; cursor: grab; }
+  #gl.dragging { cursor: grabbing; }
+  #labels { pointer-events: none; }
+  .panel { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    backdrop-filter: blur(6px); }
+  #top { left: 10px; top: 10px; right: 10px; padding: 8px 12px; display: flex; gap: 14px; align-items: center;
+    flex-wrap: wrap; }
+  #title { font-weight: 600; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #state { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); white-space: nowrap; }
+  #state i { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); display: inline-block; }
+  #state.live i { background: var(--live); animation: pulse 1.2s infinite; }
+  #state.done i { background: var(--accent); }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+  #what { flex: 1 1 22ch; min-width: 0; }
+  #what b { font-weight: 600; }
+  #what small { display: block; color: var(--dim); font-size: 12px; }
+  #stats { display: flex; gap: 14px; font-variant-numeric: tabular-nums; flex-wrap: wrap; }
+  #stats span { white-space: nowrap; }
+  #stats em { font-style: normal; color: var(--dim); margin-right: 4px; }
+  #stats .bad { color: var(--warn); }
+  #side { right: 10px; top: 74px; padding: 8px 10px; min-width: 150px; max-height: calc(100% - 170px); overflow: auto; }
+  #side h4 { margin: 6px 0 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--dim); }
+  #side h4:first-child { margin-top: 0; }
+  #side label { display: flex; align-items: center; gap: 7px; padding: 2px 0; cursor: pointer; white-space: nowrap; }
+  #side input { margin: 0; accent-color: var(--accent); }
+  .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+  #bottom { left: 10px; right: 10px; bottom: 10px; padding: 8px 12px; display: flex; gap: 10px; align-items: center; }
+  #bottom button { background: #1d2529; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+    height: 30px; min-width: 34px; padding: 0 9px; font: inherit; cursor: pointer; }
+  #bottom button:hover { background: #263136; }
+  #bottom button.on { border-color: var(--live); color: var(--live); }
+  #scrub { flex: 1; min-width: 0; position: relative; height: 34px; }
+  #strip { position: absolute; left: 0; right: 0; top: 3px; height: 9px; width: 100%; border-radius: 3px; }
+  #time { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; margin: 0; accent-color: var(--accent); }
+  #clock { font-variant-numeric: tabular-nums; color: var(--dim); min-width: 11ch; text-align: right; white-space: nowrap; }
+  #tip { position: absolute; pointer-events: none; padding: 3px 7px; background: #000c; border: 1px solid var(--line);
+    border-radius: 5px; white-space: nowrap; display: none; }
+  #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dim);
+    text-align: center; padding: 20px; }
+  @media (max-width: 640px) { #side { top: auto; bottom: 70px; max-height: 40%; } #stats { gap: 9px; } }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="gl"></canvas>
+  <canvas id="labels"></canvas>
+  <div id="empty">Waiting for a route&hellip;</div>
+  <div id="top" class="panel">
+    <span id="title">Gummiband</span>
+    <span id="state"><i></i><span>connecting</span></span>
+    <span id="what"></span>
+    <span id="stats"></span>
+  </div>
+  <div id="side" class="panel">
+    <h4>Layers</h4>
+    <div id="layers"></div>
+    <h4>Show</h4>
+    <label><input type="checkbox" data-show="pads" checked>Board copper</label>
+    <label><input type="checkbox" data-show="open" checked>Open connections</label>
+    <label><input type="checkbox" data-show="explored" checked>Search</label>
+    <label><input type="checkbox" data-show="spots" checked>Violations</label>
+    <label><input type="checkbox" data-show="labels" checked>Part names</label>
+  </div>
+  <div id="bottom" class="panel">
+    <button id="play" title="Play or pause (space)">&#9654;</button>
+    <button id="speed" title="Replay speed">1&times;</button>
+    <div id="scrub"><canvas id="strip"></canvas><input id="time" type="range" min="0" max="0" value="0" step="1"></div>
+    <span id="clock"></span>
+    <button id="live" title="Follow the route as it runs (L)">Live</button>
+    <button id="fit" title="Fit the board (F)">Fit</button>
+  </div>
+  <div id="tip"></div>
+</div>
+<!--GB-RECORDING-->
+<script>
+"use strict";
+// The viewer of gummiband-watch: polls the feed (or reads the recording inside this page), keeps
+// every view it got, and draws the one the time line points at with WebGL 2. The formats are
+// described at `scene` and `frame` in the crate.
+
+const $ = (id) => document.getElementById(id);
+const canvas = $("gl");
+const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, powerPreference: "high-performance" });
+const labels = $("labels").getContext("2d");
+
+// ---------------------------------------------------------------- state
+
+const LAYER_COLORS = { "F.Cu": [0.92, 0.26, 0.22], "B.Cu": [0.25, 0.52, 0.96] };
+const INNER_COLORS = [[0.25, 0.78, 0.42], [0.93, 0.62, 0.2], [0.72, 0.42, 0.9], [0.2, 0.78, 0.8], [0.85, 0.8, 0.3], [0.9, 0.45, 0.65]];
+const STAGE_COLORS = { laying: "#3f86f0", step: "#3f86f0", relaxing: "#35b86b", best: "#ffd166" };
+const CLIENT_BYTES = 400 * (1 << 20);
+
+let session = 0, lastSeq = 0, finished = false, connected = false, recorded = false;
+let scenes = [];            // {json, mesh: static buffers, colors}
+let frames = [];            // {head, f32, scene, bytes}
+let frameBytes = 0;
+let cursor = -1;            // the frame shown
+let live = true, playing = false, speed = 1;
+let playClock = 0;          // ms of replay time the frame shown has had
+let view = { cx: 0, cy: 0, s: 10 }, fitted = false;
+let show = { pads: true, open: true, explored: true, spots: true, labels: true };
+let hidden = new Set();     // layer ids switched off
+let hoverNet = -1;
+let dirty = true;
+
+// ---------------------------------------------------------------- GL
+
+function program(vs, fs) {
+  const p = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    gl.attachShader(p, s);
+  }
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+
+// A line with round ends per instance: a, b, radius in mm, extra radius and least radius in
+// pixels, a ring instead of a disc, colour. One quad each; the fragment shader cuts the shape.
+const CAP_FLOATS = 12;
+const capProg = gl && program(`#version 300 es
+  layout(location=0) in vec2 corner;
+  layout(location=1) in vec4 ab;
+  layout(location=2) in vec4 shape;   // r mm, extra px, least px, ring width px (0: filled)
+  layout(location=3) in vec4 color;
+  uniform vec2 centre; uniform vec2 scale; uniform float px;
+  out vec2 at; out float len; out float rad; out float ring; out vec4 col;
+  void main() {
+    vec2 a = ab.xy, b = ab.zw;
+    float l = distance(a, b);
+    vec2 d = l > 1e-9 ? (b - a) / l : vec2(1.0, 0.0);
+    vec2 n = vec2(-d.y, d.x);
+    float r = max(shape.x, shape.z * px) + shape.y * px;
+    float grow = r + 1.5 * px + shape.w * px;
+    at = vec2(corner.x > 0.0 ? l + grow : -grow, corner.y * grow);
+    vec2 p = a + d * at.x + n * at.y;
+    len = l; rad = r; ring = shape.w * px; col = color;
+    gl_Position = vec4((p - centre) * scale, 0.0, 1.0);
+  }`, `#version 300 es
+  precision highp float;
+  in vec2 at; in float len; in float rad; in float ring; in vec4 col;
+  uniform float px;
+  out vec4 o;
+  void main() {
+    float d = length(vec2(at.x - clamp(at.x, 0.0, len), at.y)) - rad;
+    if (ring > 0.0) d = abs(d) - ring * 0.5;
+    float a = clamp(0.5 - d / px, 0.0, 1.0) * col.a;
+    if (a <= 0.0) discard;
+    o = vec4(col.rgb * a, a);
+  }`);
+const triProg = gl && program(`#version 300 es
+  layout(location=0) in vec2 p;
+  layout(location=1) in vec4 color;
+  uniform vec2 centre; uniform vec2 scale;
+  out vec4 col;
+  void main() { col = color; gl_Position = vec4((p - centre) * scale, 0.0, 1.0); }`, `#version 300 es
+  precision highp float;
+  in vec4 col; out vec4 o;
+  void main() { o = vec4(col.rgb * col.a, col.a); }`);
+
+let quad = null;
+function capBatch() {
+  const vao = gl.createVertexArray(), buf = gl.createBuffer();
+  gl.bindVertexArray(vao);
+  if (!quad) {
+    quad = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  for (let i = 0; i < 3; i++) {
+    gl.enableVertexAttribArray(1 + i);
+    gl.vertexAttribPointer(1 + i, 4, gl.FLOAT, false, CAP_FLOATS * 4, i * 16);
+    gl.vertexAttribDivisor(1 + i, 1);
+  }
+  gl.bindVertexArray(null);
+  return { vao, buf, n: 0 };
+}
+function triBatch() {
+  const vao = gl.createVertexArray(), buf = gl.createBuffer();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 24, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 24, 8);
+  gl.bindVertexArray(null);
+  return { vao, buf, n: 0 };
+}
+
+// Collects instances or vertices and hands them to a batch.
+class Floats {
+  constructor(stride) { this.a = new Float32Array(4096); this.n = 0; this.stride = stride; }
+  room(k) {
+    if (this.n + k > this.a.length) {
+      const b = new Float32Array(Math.max(this.a.length * 2, this.n + k));
+      b.set(this.a.subarray(0, this.n));
+      this.a = b;
+    }
+  }
+  cap(ax, ay, bx, by, r, extra, least, ring, c, alpha) {
+    this.room(12);
+    const a = this.a, n = this.n;
+    a[n] = ax; a[n + 1] = ay; a[n + 2] = bx; a[n + 3] = by;
+    a[n + 4] = r; a[n + 5] = extra; a[n + 6] = least; a[n + 7] = ring;
+    a[n + 8] = c[0]; a[n + 9] = c[1]; a[n + 10] = c[2]; a[n + 11] = alpha;
+    this.n = n + 12;
+  }
+  vert(x, y, c, alpha) {
+    this.room(6);
+    const a = this.a, n = this.n;
+    a[n] = x; a[n + 1] = y; a[n + 2] = c[0]; a[n + 3] = c[1]; a[n + 4] = c[2]; a[n + 5] = alpha;
+    this.n = n + 6;
+  }
+  into(batch, usage) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, batch.buf);
+    gl.bufferData(gl.ARRAY_BUFFER, this.a.subarray(0, this.n), usage);
+    batch.n = this.n / this.stride;
+  }
+}
+
+// ---------------------------------------------------------------- geometry helpers
+
+// Ear clipping of a simple polygon given as [x, y, ...]; calls tri(i, j, k) with point indices.
+function triangulate(pts, tri) {
+  const n = pts.length >> 1;
+  if (n < 3) return;
+  let area = 0;
+  for (let i = 0, j = n - 1; i < n; j = i++) area += pts[2 * j] * pts[2 * i + 1] - pts[2 * i] * pts[2 * j + 1];
+  const idx = [];
+  for (let i = 0; i < n; i++) idx.push(area > 0 ? i : n - 1 - i);
+  const cross = (a, b, c) =>
+    (pts[2 * b] - pts[2 * a]) * (pts[2 * c + 1] - pts[2 * a + 1]) - (pts[2 * b + 1] - pts[2 * a + 1]) * (pts[2 * c] - pts[2 * a]);
+  let guard = 3 * n;
+  while (idx.length > 3 && guard-- > 0) {
+    let cut = false;
+    for (let i = 0; i < idx.length; i++) {
+      const a = idx[(i + idx.length - 1) % idx.length], b = idx[i], c = idx[(i + 1) % idx.length];
+      if (cross(a, b, c) <= 0) continue;
+      let ear = true;
+      for (const p of idx) {
+        if (p === a || p === b || p === c) continue;
+        if (cross(a, b, p) >= 0 && cross(b, c, p) >= 0 && cross(c, a, p) >= 0) { ear = false; break; }
+      }
+      if (!ear) continue;
+      tri(a, b, c);
+      idx.splice(i, 1);
+      cut = true;
+      break;
+    }
+    if (!cut) idx.splice(0, 1);   // a polygon that is not simple: give up on this corner
+  }
+  if (idx.length === 3) tri(idx[0], idx[1], idx[2]);
+}
+
+function layerColor(scene, l) {
+  const name = scene.json.layers[l] ? scene.json.layers[l].name : "";
+  if (LAYER_COLORS[name]) return LAYER_COLORS[name];
+  let inner = 0;
+  for (let i = 0; i < l; i++) if (!LAYER_COLORS[scene.json.layers[i].name]) inner++;
+  return INNER_COLORS[inner % INNER_COLORS.length];
+}
+const scaled = (c, k) => [c[0] * k, c[1] * k, c[2] * k];
+const THROUGH = [0.74, 0.62, 0.24];
+
+// The colour of board copper on the layers of `mask` that are shown; null when none is.
+function maskColor(scene, mask, k) {
+  let first = -1, count = 0;
+  for (let l = 0; l < scene.json.layers.length; l++) {
+    if (Math.floor(mask / 2 ** l) % 2 && !hidden.has(l)) { if (first < 0) first = l; count++; }
+  }
+  if (first < 0) return null;
+  return scaled(count > 1 ? THROUGH : scene.colors[first], k);
+}
+
+// ---------------------------------------------------------------- the scene: the board under the route
+
+function buildScene(scene) {
+  const j = scene.json;
+  scene.colors = j.layers.map((_, l) => layerColor(scene, l));
+  if (!scene.mesh) scene.mesh = { fill: triBatch(), tris: triBatch(), caps: capBatch(), holes: capBatch() };
+  const fill = new Floats(6), tris = new Floats(6), caps = new Floats(CAP_FLOATS), holes = new Floats(CAP_FLOATS);
+  const BOARD = [0.075, 0.105, 0.09], EDGE = [0.55, 0.6, 0.58], HOLE = [0.03, 0.04, 0.04];
+  const loop = (pts, r, least, c, alpha) => {
+    const n = pts.length >> 1;
+    for (let i = 0, k = n - 1; i < n; k = i++) caps.cap(pts[2 * k], pts[2 * k + 1], pts[2 * i], pts[2 * i + 1], r, 0, least, 0, c, alpha);
+  };
+  for (const o of j.outline) {
+    triangulate(o, (a, b, c) => { for (const i of [a, b, c]) fill.vert(o[2 * i], o[2 * i + 1], BOARD, 1); });
+    loop(o, 0.03, 0.6, EDGE, 1);
+  }
+  if (show.labels) for (const c of j.courtyards) loop(c.pts, 0, 0.5, [0.3, 0.34, 0.36], 1);
+  if (show.pads) {
+    for (const p of j.planes) {
+      if (hidden.has(p[0])) continue;
+      loop(p.slice(2), 0, 0.5, scaled(scene.colors[p[0]], 0.45), 1);
+    }
+    for (const s of j.shapes) {
+      const kind = j.kinds[s[0]], form = s[3];
+      if (kind === "hole") {
+        if (form === 0) { holes.cap(s[4], s[5], s[4], s[5], s[6], 0, 0, 0, HOLE, 1); holes.cap(s[4], s[5], s[4], s[5], s[6], 0, 0, 1, EDGE, 0.7); }
+        continue;
+      }
+      const outline = kind === "keepout" || kind === "zone" || kind === "pour";
+      const c = kind === "keepout" ? [0.42, 0.42, 0.42] : maskColor(scene, s[1], kind === "pad" ? 0.62 : kind === "zone" || kind === "pour" ? 0.4 : 0.72);
+      if (!c) continue;
+      if (form === 0) {
+        if (outline) caps.cap(s[4], s[5], s[4], s[5], s[6], 0, 0, 1, c, 1);
+        else caps.cap(s[4], s[5], s[4], s[5], s[6], 0, 0, 0, c, 1);
+        if (s.length > 7) holes.cap(s[4], s[5], s[4], s[5], s[7], 0, 0, 0, HOLE, 1);
+      } else if (form === 1) {
+        caps.cap(s[4], s[5], s[6], s[7], s[8], 0, outline ? 0 : 0.4, outline ? 1 : 0, c, 1);
+      } else {
+        const pts = s.slice(4);
+        if (outline) loop(pts, 0, 0.5, c, 1);
+        else triangulate(pts, (a, b, d) => { for (const i of [a, b, d]) tris.vert(pts[2 * i], pts[2 * i + 1], c, 1); });
+      }
+    }
+  }
+  fill.into(scene.mesh.fill, gl.STATIC_DRAW);
+  tris.into(scene.mesh.tris, gl.STATIC_DRAW);
+  caps.into(scene.mesh.caps, gl.STATIC_DRAW);
+  holes.into(scene.mesh.holes, gl.STATIC_DRAW);
+}
+
+// ---------------------------------------------------------------- a frame: the copper of the route
+
+let dyn = null;   // {glow: capBatch, top: capBatch}, rebuilt for the picture shown
+let built = { frame: -1, hover: -2 };
+
+// The parts of a frame as views into its floats: lines [connection, floats], dots [site, floats],
+// open [connection, floats], explored, spots.
+function parts(f) {
+  const a = f.f32, n = f.head.n;
+  const lines = [], dots = [], open = [];
+  let p = 0;
+  for (let i = 0; i < n.lines; i++) {
+    const len = 5 + 2 * a[p];
+    lines.push([a[p + 4], a.subarray(p, p + len)]);
+    p += len;
+  }
+  for (let i = 0; i < n.dots; i++, p += 8) dots.push([a[p + 7], a.subarray(p, p + 8)]);
+  for (let i = 0; i < n.open; i++, p += 5) open.push([a[p + 4], a.subarray(p, p + 5)]);
+  const explored = a.subarray(p, p + 3 * n.explored);
+  p += 3 * n.explored;
+  return { lines, dots, open, explored, spots: a.subarray(p, p + 2 * n.spots) };
+}
+
+// The picture of the frame shown: the copper by connection and by via site (-1: none), the
+// open connections, and what belongs to this frame alone. A whole view gives it anew, a step
+// changes the one before it.
+let pic = { index: -1, lines: new Map(), dots: new Map(), open: new Map(), explored: new Float32Array(0), spots: new Float32Array(0) };
+
+function add(map, key, value) {
+  const list = map.get(key);
+  if (list) list.push(value); else map.set(key, [value]);
+}
+function apply(i) {
+  const f = frames[i], q = parts(f);
+  if (f.head.stage !== "step") {
+    pic.lines = new Map(); pic.dots = new Map(); pic.open = new Map();
+  } else {
+    for (const c of f.head.gone) { pic.lines.delete(c); pic.open.delete(c); }
+    for (const s of f.head.gone_sites) pic.dots.delete(s);
+  }
+  for (const [c, l] of q.lines) add(pic.lines, c, l);
+  for (const [s, d] of q.dots) add(pic.dots, s, d);
+  for (const [c, o] of q.open) add(pic.open, c, o);
+  pic.explored = q.explored;
+  pic.spots = q.spots;
+  pic.index = i;
+}
+function picture(i) {
+  if (pic.index === i) return pic;
+  let k = i;
+  while (k > 0 && frames[k].head.stage === "step") k--;
+  let from = pic.index >= k && pic.index < i ? pic.index + 1 : k;
+  for (let j = from; j <= i; j++) apply(j);
+  return pic;
+}
+
+function buildFrame(f, pic) {
+  const scene = scenes[f.scene];
+  if (!dyn) dyn = { glow: capBatch(), top: capBatch() };
+  const glow = new Floats(CAP_FLOATS), top = new Floats(CAP_FLOATS);
+  const color = (l) => scene.colors[l] || [0.7, 0.7, 0.7];
+  if (show.explored) {
+    const a = pic.explored;
+    for (let p = 0; p < a.length; p += 3) {
+      if (hidden.has(a[p + 2])) continue;
+      glow.cap(a[p], a[p + 1], a[p], a[p + 1], 0, 2.2, 0, 0, color(a[p + 2]), 0.6);
+    }
+  }
+  // what a step laid stands out until the next one
+  const fresh = new Set(f.head.stage === "step" ? f.head.gone : []);
+  const lit = (c) => [c[0] * 0.45 + 0.55, c[1] * 0.45 + 0.55, c[2] * 0.45 + 0.55];
+  for (const [conn, list] of pic.lines) {
+    for (const a of list) {
+      const pts = a[0], layer = a[1], net = a[2], r = a[3] / 2;
+      if (hidden.has(layer)) continue;
+      const c = net === hoverNet ? [1, 1, 1] : fresh.has(conn) ? lit(color(layer)) : color(layer);
+      for (let k = 1; k < pts; k++) {
+        const q = 5 + 2 * k;
+        glow.cap(a[q - 2], a[q - 1], a[q], a[q + 1], r, 0, 0.5, 0, c, 1);
+      }
+    }
+  }
+  if (show.open) {
+    const AIR = [0.82, 0.86, 0.9];
+    for (const list of pic.open.values()) {
+      for (const a of list) {
+        if (a[0] !== a[2] || a[1] !== a[3]) glow.cap(a[0], a[1], a[2], a[3], 0, 0.55, 0, 0, AIR, 0.7);
+        else glow.cap(a[0], a[1], a[0], a[1], 0, 3, 0, 1.2, AIR, 0.7);
+      }
+    }
+  }
+  const VIA = [0.84, 0.85, 0.82], HOLE = [0.03, 0.04, 0.04];
+  for (const list of pic.dots.values()) {
+    for (const a of list) {
+      const x = a[0], y = a[1], hx = a[4], hy = a[5], half = Math.hypot(hx, hy);
+      const c = a[6] === hoverNet ? [1, 1, 1] : VIA;
+      glow.cap(x - hx, y - hy, x + hx, y + hy, a[2] / 2 - half, 0, 1, 0, c, 1);
+      for (const sgn of half > 0 ? [-1, 1] : [1]) top.cap(x + sgn * hx, y + sgn * hy, x + sgn * hx, y + sgn * hy, a[3] / 2, 0, 0, 0, HOLE, 1);
+    }
+  }
+  if (show.spots) {
+    const a = pic.spots;
+    for (let p = 0; p < a.length; p += 2) top.cap(a[p], a[p + 1], a[p], a[p + 1], 0.2, 5, 0, 2, [1, 0.82, 0.2], 1);
+  }
+  glow.into(dyn.glow, gl.DYNAMIC_DRAW);
+  top.into(dyn.top, gl.DYNAMIC_DRAW);
+}
+
+// ---------------------------------------------------------------- drawing
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w; canvas.height = h;
+    $("labels").width = w; $("labels").height = h;
+    dirty = true;
+  }
+}
+
+function fit() {
+  const scene = scenes[cursor >= 0 ? frames[cursor].scene : scenes.length - 1];
+  if (!scene) return;
+  resize();
+  const [x0, y0, x1, y1] = scene.json.bbox;
+  const dpr = window.devicePixelRatio || 1;
+  // the panels at the top and the bottom cover part of the picture
+  const w = canvas.width, h = Math.max(canvas.height - 150 * dpr, canvas.height / 2);
+  if (!(x1 > x0) || w <= 0 || h <= 0) return;
+  view.s = Math.min(w / (x1 - x0), h / (y1 - y0)) * 0.94;
+  view.cx = (x0 + x1) / 2;
+  view.cy = (y0 + y1) / 2 + (8 * dpr) / view.s;
+  fitted = true;
+  dirty = true;
+}
+
+function drawCaps(batch) {
+  if (!batch.n) return;
+  gl.bindVertexArray(batch.vao);
+  gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, batch.n);
+}
+function drawTris(batch) {
+  if (!batch.n) return;
+  gl.bindVertexArray(batch.vao);
+  gl.drawArrays(gl.TRIANGLES, 0, batch.n);
+}
+
+function draw() {
+  resize();
+  if (!dirty) return;
+  dirty = false;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0.05, 0.062, 0.07, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  const f = frames[cursor];
+  const scene = f ? scenes[f.scene] : scenes[scenes.length - 1];
+  labels.clearRect(0, 0, canvas.width, canvas.height);
+  if (!scene) return;
+  if (!scene.mesh || scene.stale) { buildScene(scene); scene.stale = false; }
+  if (f && (built.frame !== cursor || built.hover !== hoverNet || built.stale)) {
+    buildFrame(f, picture(cursor));
+    built = { frame: cursor, hover: hoverNet, stale: false };
+  }
+  const sx = (2 * view.s) / canvas.width, sy = (-2 * view.s) / canvas.height, px = 1 / view.s;
+  const use = (prog) => {
+    gl.useProgram(prog);
+    gl.uniform2f(gl.getUniformLocation(prog, "centre"), view.cx, view.cy);
+    gl.uniform2f(gl.getUniformLocation(prog, "scale"), sx, sy);
+    const u = gl.getUniformLocation(prog, "px");
+    if (u) gl.uniform1f(u, px);
+  };
+  gl.enable(gl.BLEND);
+  const over = () => { gl.blendEquation(gl.FUNC_ADD); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); };
+  // copper lights up: where two layers lie over each other both show, and the joints of a
+  // track do not add up
+  const lit = () => { gl.blendEquation(gl.MAX); gl.blendFunc(gl.ONE, gl.ONE); };
+  over();
+  use(triProg); drawTris(scene.mesh.fill);
+  lit();
+  drawTris(scene.mesh.tris);
+  use(capProg); drawCaps(scene.mesh.caps);
+  if (f) drawCaps(dyn.glow);
+  over();
+  drawCaps(scene.mesh.holes);
+  if (f) drawCaps(dyn.top);
+  gl.bindVertexArray(null);
+  drawLabels(scene);
+}
+
+function toScreen(x, y) {
+  return [(x - view.cx) * view.s + canvas.width / 2, (y - view.cy) * view.s + canvas.height / 2];
+}
+function toWorld(px, py) {
+  const dpr = window.devicePixelRatio || 1;
+  return [(px * dpr - canvas.width / 2) / view.s + view.cx, (py * dpr - canvas.height / 2) / view.s + view.cy];
+}
+
+function drawLabels(scene) {
+  if (!show.labels) return;
+  const dpr = window.devicePixelRatio || 1;
+  labels.textAlign = "center";
+  labels.textBaseline = "middle";
+  labels.fillStyle = "rgba(190, 200, 205, 0.55)";
+  const seen = new Set();
+  for (const c of scene.json.courtyards) {
+    if (seen.has(c.ref)) continue;
+    seen.add(c.ref);
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < c.pts.length; i += 2) {
+      x0 = Math.min(x0, c.pts[i]); x1 = Math.max(x1, c.pts[i]);
+      y0 = Math.min(y0, c.pts[i + 1]); y1 = Math.max(y1, c.pts[i + 1]);
+    }
+    const w = (x1 - x0) * view.s, h = (y1 - y0) * view.s;
+    const size = Math.min(13 * dpr, h * 0.5, (w / Math.max(c.ref.length, 2)) * 1.3);
+    if (size < 7 * dpr) continue;
+    const [x, y] = toScreen((x0 + x1) / 2, (y0 + y1) / 2);
+    if (x < -50 || y < -50 || x > canvas.width + 50 || y > canvas.height + 50) continue;
+    labels.font = `${size}px system-ui, sans-serif`;
+    labels.fillText(c.ref, x, y);
+  }
+}
+
+// ---------------------------------------------------------------- the feed
+
+function parseAnswer(buf) {
+  const dv = new DataView(buf);
+  if (buf.byteLength < 16 || dv.getUint32(0, true) !== 0x31574247) throw new Error("not a gummiband feed");
+  const titleLen = dv.getUint32(12, true);
+  const title = new TextDecoder().decode(new Uint8Array(buf, 16, titleLen)).trimEnd();
+  let at = (16 + titleLen + 3) & ~3;
+  const items = [];
+  while (at + 12 <= buf.byteLength) {
+    const kind = dv.getUint32(at, true), seq = dv.getUint32(at + 4, true), len = dv.getUint32(at + 8, true);
+    items.push({ kind, seq, at: at + 12, len });
+    at += 12 + len;
+  }
+  return { session: dv.getUint32(4, true), finished: dv.getUint32(8, true) !== 0, title, items };
+}
+
+function reset() {
+  for (const s of scenes) {
+    if (!s.mesh) continue;
+    for (const b of Object.values(s.mesh)) { gl.deleteBuffer(b.buf); gl.deleteVertexArray(b.vao); }
+  }
+  scenes = []; frames = []; frameBytes = 0; cursor = -1; lastSeq = 0; fitted = false;
+  built = { frame: -1, hover: -2 };
+  pic.index = -1;
+  hoverNet = -1; live = !recorded; playing = false;
+}
+
+function ingest(buf) {
+  const ans = parseAnswer(buf);
+  if (ans.session !== session) { reset(); session = ans.session; }
+  finished = ans.finished;
+  $("title").textContent = ans.title || "Gummiband";
+  document.title = (ans.title ? ans.title + " · " : "") + "Gummiband watch";
+  const dv = new DataView(buf), text = new TextDecoder();
+  for (const it of ans.items) {
+    lastSeq = Math.max(lastSeq, it.seq);
+    if (it.kind === 1) {
+      scenes.push({ json: JSON.parse(text.decode(new Uint8Array(buf, it.at, it.len))) });
+      layerList();
+    } else if (it.kind === 2 && scenes.length) {
+      const headLen = dv.getUint32(it.at, true);
+      const head = JSON.parse(text.decode(new Uint8Array(buf, it.at + 4, headLen)));
+      const start = it.at + 4 + headLen, count = (it.len - 4 - headLen) >> 2;
+      // a copy: the answer may go once its views are thinned out
+      const f32 = new Float32Array(buf.slice(start, start + 4 * count));
+      frames.push({ head, f32, scene: scenes.length - 1 });
+      frameBytes += f32.byteLength;
+    }
+  }
+  while (frameBytes > CLIENT_BYTES && thin()) {}
+  if (!fitted && scenes.length) fit();
+  // a live viewer runs after the new frames in `tick`, so that a burst of steps is seen
+  if (cursor < 0 && frames.length) cursor = live ? frames.length - 1 : 0;
+  $("empty").style.display = scenes.length ? "none" : "";
+  dirty = true;
+  timeline();
+}
+
+// Forgets every second step and relaxation round of the older half, as the feed does.
+function thin() {
+  const half = frames.length >> 1, shown = frames[cursor];
+  let odd = false, gone = 0;
+  frames = frames.filter((f, i) => {
+    const stage = f.head.stage;
+    if (i >= half || stage === "best" || stage === "laying" || f === shown) return true;
+    odd = !odd;
+    if (odd) gone += f.f32.byteLength;
+    return !odd;
+  });
+  frameBytes -= gone;
+  cursor = frames.indexOf(shown);
+  built.frame = -1;
+  pic.index = -1;
+  return gone > 0;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function poll() {
+  for (;;) {
+    try {
+      const r = await fetch(`poll?s=${session}&after=${lastSeq}&f=${finished ? 1 : 0}`, { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      ingest(await r.arrayBuffer());
+      connected = true;
+    } catch (e) {
+      connected = false;
+      await sleep(1000);
+    }
+    hud();
+  }
+}
+
+// ---------------------------------------------------------------- the panels
+
+function layerList() {
+  const scene = scenes[scenes.length - 1], box = $("layers");
+  box.textContent = "";
+  scene.json.layers.forEach((l, i) => {
+    const c = layerColor(scene, i).map((x) => Math.round(x * 255));
+    const row = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = !hidden.has(i);
+    input.onchange = () => { input.checked ? hidden.delete(i) : hidden.add(i); restyle(); };
+    const sw = document.createElement("span");
+    sw.className = "swatch";
+    sw.style.background = `rgb(${c})`;
+    row.append(input, sw, l.name + (l.plane ? " (plane)" : ""));
+    box.append(row);
+  });
+}
+function restyle() {
+  for (const s of scenes) s.stale = true;
+  built.stale = true;
+  dirty = true;
+}
+for (const input of document.querySelectorAll("[data-show]")) {
+  input.onchange = () => { show[input.dataset.show] = input.checked; restyle(); };
+}
+
+const clock = (ms) => {
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
+
+function hud() {
+  const f = frames[cursor], state = $("state");
+  const running = !finished && !recorded;
+  state.className = running && connected && live ? "live" : finished || recorded ? "done" : "";
+  state.lastChild.textContent = recorded ? "recording" : !connected ? "not connected" : !running ? "finished"
+    : live ? "live" : "running, replay";
+  if (!f) { $("what").textContent = ""; $("stats").textContent = ""; return; }
+  const h = f.head, what = $("what");
+  const laying = h.stage === "laying" || h.stage === "step";
+  const text = laying ? [`Laying connections, ${h.phase}`, `one run of this generation, ${h.step[0]} of ${h.step[1]} connections laid; the others run unseen`]
+    : h.stage === "relaxing" ? [`Pulling the tracks taut, ${h.phase}`, `round ${h.step[0]} of ${h.step[1]} of one candidate`]
+    : h.phase === "finished" ? ["Finished", "the copper as it is written"]
+    : [`Best after ${h.phase}`, "the candidate the search goes on from"];
+  what.innerHTML = "<b></b><small></small>";
+  what.firstChild.textContent = text[0];
+  what.lastChild.textContent = text[1];
+  const stats = $("stats");
+  stats.textContent = "";
+  const stat = (name, value, bad) => {
+    const s = document.createElement("span"), e = document.createElement("em");
+    e.textContent = name;
+    s.append(e, value);
+    if (bad) s.className = "bad";
+    stats.append(s);
+  };
+  const p = picture(cursor);
+  if (h.routed) stat("routed", `${h.routed[0]}/${h.routed[1]}`, h.routed[0] < h.routed[1]);
+  else if (laying) stat("open", String(h.step[1] - h.step[0]), h.step[1] > h.step[0]);
+  let vias = 0;
+  for (const list of p.dots.values()) vias += list.length;
+  stat("vias", String(vias));
+  if (h.stage !== "step") stat("length", `${Math.round(h.length)} mm`);
+  if (h.violations !== null && h.violations !== undefined) stat("violations", String(h.violations), h.violations > 0);
+  $("clock").textContent = `${clock(h.t)} / ${clock(frames[frames.length - 1].head.t)}`;
+  $("live").className = live ? "on" : "";
+  $("live").style.display = recorded ? "none" : "";
+  $("play").innerHTML = playing ? "&#10073;&#10073;" : "&#9654;";
+}
+
+function timeline() {
+  const range = $("time");
+  range.max = Math.max(frames.length - 1, 0);
+  range.value = Math.max(cursor, 0);
+  const strip = $("strip"), w = strip.clientWidth, c = strip.getContext("2d");
+  if (strip.width !== w) strip.width = w;
+  strip.height = 9;
+  c.clearRect(0, 0, w, 9);
+  const n = frames.length;
+  if (n < 1) return;
+  // the range input keeps its thumb inside: its middle runs from 8 px to w - 8 px
+  const x = (i) => (n > 1 ? 8 + ((w - 16) * i) / (n - 1) : w / 2);
+  for (let i = 0; i < n; i++) {
+    const stage = frames[i].head.stage;
+    if (stage === "best") continue;
+    c.fillStyle = STAGE_COLORS[stage];
+    c.fillRect(x(i) - 0.5, 3, Math.max(x(i + 1) - x(i), 1) + 0.5, 4);
+  }
+  c.fillStyle = STAGE_COLORS.best;
+  for (let i = 0; i < n; i++) if (frames[i].head.stage === "best") c.fillRect(Math.round(x(i)) - 1, 0, 2, 9);
+  hud();
+}
+
+function go(i, follow) {
+  if (!frames.length) return;
+  cursor = Math.max(0, Math.min(frames.length - 1, i));
+  live = !!follow && !recorded;
+  playClock = 0;
+  $("time").value = cursor;
+  dirty = true;
+  hud();
+}
+
+$("time").oninput = (e) => { playing = false; go(+e.target.value, false); };
+$("play").onclick = () => {
+  if (!frames.length) return;
+  playing = !playing;
+  if (playing) {
+    if (cursor >= frames.length - 1) go(0, false);
+    live = false;
+    playClock = 0;
+  }
+  hud();
+};
+$("speed").onclick = () => {
+  speed = { 1: 4, 4: 16, 16: 0.25, 0.25: 1 }[speed];
+  $("speed").innerHTML = (speed < 1 ? "&frac14;" : speed) + "&times;";
+};
+$("live").onclick = () => { playing = false; go(frames.length - 1, true); };
+$("fit").onclick = fit;
+window.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" && e.target.type !== "range" && e.target.type !== "checkbox") return;
+  if (e.key === " ") { e.preventDefault(); $("play").click(); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); playing = false; go(cursor - 1, false); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); playing = false; go(cursor + 1, false); }
+  else if (e.key === "f" || e.key === "F") fit();
+  else if (e.key === "l" || e.key === "L") $("live").click();
+});
+
+// ---------------------------------------------------------------- pan, zoom, hover
+
+const pointers = new Map();
+let pinch = 0;
+function zoomAt(px, py, k) {
+  const [wx, wy] = toWorld(px, py);
+  view.s = Math.max(0.5, Math.min(20000, view.s * k));
+  const [nx, ny] = toWorld(px, py);
+  view.cx += wx - nx; view.cy += wy - ny;
+  dirty = true;
+}
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  zoomAt(e.offsetX, e.offsetY, Math.exp(-e.deltaY * (e.deltaMode ? 0.05 : 0.0015)));
+}, { passive: false });
+canvas.addEventListener("pointerdown", (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, [e.offsetX, e.offsetY]);
+  canvas.classList.add("dragging");
+  pinch = 0;
+});
+canvas.addEventListener("pointermove", (e) => {
+  const last = pointers.get(e.pointerId);
+  if (!last) { hover(e.offsetX, e.offsetY); return; }
+  const dpr = window.devicePixelRatio || 1;
+  if (pointers.size === 1) {
+    view.cx -= ((e.offsetX - last[0]) * dpr) / view.s;
+    view.cy -= ((e.offsetY - last[1]) * dpr) / view.s;
+    dirty = true;
+  }
+  pointers.set(e.pointerId, [e.offsetX, e.offsetY]);
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    if (pinch > 0 && d > 0) zoomAt((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, d / pinch);
+    pinch = d;
+  }
+});
+for (const type of ["pointerup", "pointercancel"]) {
+  canvas.addEventListener(type, (e) => {
+    pointers.delete(e.pointerId);
+    pinch = 0;
+    if (!pointers.size) canvas.classList.remove("dragging");
+  });
+}
+canvas.addEventListener("pointerleave", () => { $("tip").style.display = "none"; if (hoverNet !== -1) { hoverNet = -1; dirty = true; } });
+canvas.addEventListener("dblclick", fit);
+
+// The net of the track under the pointer: its name next to it, its copper in white.
+function hover(px, py) {
+  const f = frames[cursor], tip = $("tip");
+  let net = -1;
+  if (f) {
+    const [x, y] = toWorld(px, py), slack = 3 / view.s;
+    let best = Infinity;
+    for (const list of picture(cursor).lines.values()) {
+      for (const a of list) {
+        const pts = a[0], r = a[3] / 2 + slack;
+        if (hidden.has(a[1])) continue;
+        for (let k = 1; k < pts; k++) {
+          const q = 5 + 2 * k, ax = a[q - 2], ay = a[q - 1], bx = a[q], by = a[q + 1];
+          if (x < Math.min(ax, bx) - r || x > Math.max(ax, bx) + r || y < Math.min(ay, by) - r || y > Math.max(ay, by) + r) continue;
+          const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+          const t = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)) : 0;
+          const d = Math.hypot(x - ax - t * dx, y - ay - t * dy);
+          if (d < r && d < best) { best = d; net = a[2]; }
+        }
+      }
+    }
+  }
+  if (net !== hoverNet) { hoverNet = net; dirty = true; }
+  if (net < 0) { tip.style.display = "none"; return; }
+  tip.textContent = scenes[f.scene].json.nets[net] || `net ${net}`;
+  tip.style.display = "block";
+  tip.style.left = px + 14 + "px";
+  tip.style.top = py + 14 + "px";
+}
+
+// ---------------------------------------------------------------- the loop
+
+// A frame stays for at least this long in a replay at 1x: a run lays hundreds of connections a
+// second, and each of them is a frame worth seeing.
+const MIN_GAP = 16;
+// A pause of the route (a long step without views) is not sat through.
+const MAX_GAP = 400;
+// A live viewer is at most this far behind when a burst of frames comes in.
+const LIVE_LAG = 1500;
+
+let lastTick = performance.now(), owed = 0;
+function tick(now) {
+  const passed = now - lastTick, dt = Math.min(passed, 100);
+  lastTick = now;
+  const last = frames.length - 1;
+  let to = cursor;
+  if (live && cursor < last) {
+    // by the real time that passed: a slow display must not fall behind for good
+    owed += ((last - cursor) * Math.min(passed, LIVE_LAG)) / LIVE_LAG;
+    const n = Math.max(1, Math.floor(owed));
+    owed = Math.max(0, owed - n);
+    to = Math.min(last, cursor + n);
+  } else if (playing && cursor < last) {
+    playClock += dt * speed;
+    for (;;) {
+      const gap = Math.max(MIN_GAP, Math.min(MAX_GAP, frames[to + 1].head.t - frames[to].head.t));
+      if (playClock < gap) break;
+      playClock -= gap;
+      if (++to >= last) break;
+    }
+  } else if (playing) {
+    playing = false;
+    hud();
+  }
+  if (to !== cursor) { cursor = to; $("time").value = to; dirty = true; hud(); }
+  draw();
+  requestAnimationFrame(tick);
+}
+
+function start() {
+  if (!gl) { $("empty").textContent = "This browser has no WebGL 2."; return; }
+  new ResizeObserver(() => { dirty = true; timeline(); }).observe(canvas);
+  const rec = $("gb-recording");
+  if (rec) {
+    recorded = true; live = false;
+    const bin = atob(rec.textContent.trim()), bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    ingest(bytes.buffer);
+    go(0, false);
+    playing = frames.length > 1;
+    hud();
+  } else {
+    poll();
+  }
+  requestAnimationFrame(tick);
+}
+start();
+</script>
+</body>
+</html>

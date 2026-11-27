@@ -555,6 +555,7 @@ Not the router's own, and read where they are needed:
 | --- | --- | --- |
 | `RAYON_NUM_THREADS` | CLI, MCP server | Number of threads (CLI: the default of `--threads`; MCP server: 4 without it). The result does not depend on it. |
 | `GUMMIBAND_KICAD_CLI`, `GUMMIBAND_RSVG_CONVERT` | MCP server | Paths of `kicad-cli` and `rsvg-convert`, before `PATH` and the usual install places. |
+| `GUMMIBAND_WATCH` | MCP server | A port or an address: serve the viewer of the routes of the session there from the start (the tool `watch` does the same on request), see [MCP.md](MCP.md#watch). |
 | `KICAD10_FOOTPRINT_DIR` ... `KICAD7_FOOTPRINT_DIR`, `KICAD_FOOTPRINT_DIR` | kicad crate | Footprint libraries, when a board is created from a netlist. |
 | any `${NAME}` in an `fp-lib-table` | kicad crate | KiCad's path variables in library tables. |
 | `HOME`, `APPDATA` | kicad crate | KiCad's global library table and a Flatpak install. |

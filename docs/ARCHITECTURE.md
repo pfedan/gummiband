@@ -62,6 +62,7 @@ negotiated congestion), not any existing product's code.
 | `gummiband-kicad` | KiCad 9/10 s-expression reader and writer, net class and rule import from `.kicad_pro`. |
 | `gummiband-place` | placement: `auto` places any board from its netlist (`gummiband place`, MCP `place_parts`), a library without a program of its own. Its `variants` example (a benchmark tool, `bench/place`) makes the LED controller outline variants. |
 | `gummiband-app` | the pipelines behind the front ends: `RouteOptions` (every option of a route with its default, defined once, and the table `OPTIONS` of them), their checks, `NetOptions` per net, `route_board` and `route_file`, the writing of the result (see [Route pipeline](#route-pipeline)), the area report with its options `AreaOptions` and their table `AREA_OPTIONS` (see [Areas](#areas-pours-and-planes)), and the debug SVG. Prints nothing. |
+| `gummiband-watch` | watching a route while it runs: the feed of views, a small HTTP server for it and the viewer page (one HTML file, WebGL), see [Watching a route](#watching-a-route). Knows the core only; the front ends hand its watch to `gummiband-app`. |
 | `gummiband-cli` | `gummiband` binary: `info`, `place`, `route`, `angles45`, `move-part`, `lengths`, `areas`, `strip`. Maps its arguments to `gummiband-app`, prints the reports. The plugin calls this. |
 | `gummiband-mcp` | `gummiband-mcp` binary: the MCP server (stdio) for AI agents, see `docs/MCP.md`. Keeps the session (loaded boards, working copies, net options) and calls `gummiband-app` for `route`, `try_seeds` and `area_report`. |
 | `plugin/` | KiCad action plugin (Python, KiCad IPC API): exports the board, runs the CLI, imports the result. |
@@ -151,8 +152,9 @@ front end.
   the phase `open end`; `Hooks::stop` is the stop from outside (the CLI sets it on a line on
   stdin). Either makes the run open ended.
 - `Hooks` carry what differs between front ends while a route runs: that stop flag, the progress
-  callback of the search and the `Event`s of the steps before it (the CLI prints them). The
-  crate itself prints nothing.
+  callback of the search, the `Event`s of the steps before it (the CLI prints them) and the
+  watch of a viewer (see [Watching a route](#watching-a-route)). The crate itself prints
+  nothing.
 
 The MCP server keeps one thing of its own on this path: with `clear_corridors` it calls
 `gummiband_app::clear_corridors` itself and puts the placement into the working copy of the
@@ -947,6 +949,56 @@ hints on, all off by default (and then byte for byte the same as without them):
 Pockets (a pad that can only be left through a via in it) are not a pattern: the tracks of its
 neighbours close the pocket, not the fixed copper, so the empty board does not show them (see
 the via in a pad experiments in `MILESTONES.md`).
+
+## Watching a route
+
+A user can look over the shoulder of the router: `gummiband route --watch`, the MCP tool
+`watch`. Three parts, each of which knows only the one before it.
+
+- `gummiband_core::watch` is the interface of the search. A front end gives the search a `Watch`
+  (`SearchConfig::watch`), and the search shows it `View`s: tracks as polylines, vias, the open
+  connections, where a search for a way looked, the clearance violations. A view has a `Stage`:
+  - `Laying`: all the copper of one run as its topology gives it at the moment, with what is
+    still open. It is the geometry of `Router::geometry`, which costs milliseconds, so it is a
+    glimpse: built only when the last one is long enough ago (`Watch::glimpse`, at most a tenth
+    of the time of the run).
+  - `Step`: one connection laid or given up (`Router::route_one`), as a change of the views
+    before it: the connections and via sites that went, and the copper of the connections that
+    got other segments, each laid out on its own (`seg_tracks`). The neighbours that the new
+    track pushes aside are not laid out again for it; the next `Laying` view has them anew. A
+    step is cheap, so every one is shown, and a run can be followed connection by connection.
+  - `Relaxing`: the tracks of one candidate between the rounds of `relax_while`, a glimpse.
+  - `Best`: the best candidate after a phase, at every progress report
+    (`SearchConfig::report_stats`), and at the end the copper as it is written (`route_from`
+    of `gummiband-app`, phase `finished`).
+- The runs of a generation go side by side, and a viewer can follow one. So one of them is the
+  lead: run 0 of the portfolio and of each generation gets the watch in its `RouterConfig`,
+  the first finalist and candidate 0 of a geometry generation in their `RelaxConfig`. The
+  others never see it. A copy of a router that only tries something (`Router::trial`) has no
+  watch; a copy made to go back to keeps it, and the views go on after the state is put back,
+  since every view reads the state as it is.
+- Watching reads and never writes, and a view that fails on a state half way is dropped
+  (`catch_unwind`): a watched route gives the same board as an unwatched one
+  (`gummiband-app/tests/watch.rs` holds that, and that the steps turn each whole view into the
+  next).
+- `gummiband-watch` is the transport. A `Feed` turns the board into a scene (JSON: outline,
+  pads, kept copper, planes, courtyards) and every view into a frame (a JSON head and 32 bit
+  floats), keeps all of a route so that a browser that opens late sees it from the start, and
+  thins out old steps and relaxation rounds beyond 192 MB. A `Server` hands out the viewer
+  page and the feed over HTTP with nothing but the standard library: the page asks `/poll`
+  for what it lacks, and the request waits until there is something (long polling, binary
+  answers). `Feed::recording` is the page with the feed inside it, a file that replays the
+  route without a server.
+- The viewer (`viewer.html`) draws with WebGL 2: every piece of track, pad and via is one
+  instanced quad whose fragment shader cuts a line with round ends, so a board of a hundred
+  thousand pieces is two draw calls. Copper is blended with `MAX`, so the joints of a track do
+  not add up and two layers over each other both show. It keeps every frame, follows the
+  route live (a burst of steps is played within 1.5 s instead of being skipped), and replays
+  it from a time line with a step per connection.
+- The front ends: the CLI serves the feed for one route (`--watch [ADDRESS]`) and writes the
+  recording (`--watch-record FILE`); the MCP server serves one feed for its session (tool
+  `watch`, or `GUMMIBAND_WATCH` at its start) and every `route` begins a new route in it.
+  `gummiband-app` takes the watch through `Hooks::watch` and knows no server.
 
 ## Parallelism
 

@@ -14,6 +14,7 @@ gummiband-app.workspace = true
 gummiband-core.workspace = true
 gummiband-kicad.workspace = true
 gummiband-place.workspace = true
+gummiband-watch.workspace = true
 anyhow.workspace = true
 rayon.workspace = true
 serde.workspace = true

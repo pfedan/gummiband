@@ -40,7 +40,16 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let service = server::Gummiband::new()
+        let server = server::Gummiband::new();
+        // GUMMIBAND_WATCH: serve the viewer of the routes from the start, for a user who wants to
+        // look without the agent having to switch it on (the tool `watch` does the same)
+        if let Ok(address) = std::env::var("GUMMIBAND_WATCH") {
+            match server.watch_on(Some(&address)) {
+                Ok(w) => eprintln!("gummiband-mcp: watch the routes at {}", w.url),
+                Err(e) => eprintln!("gummiband-mcp: GUMMIBAND_WATCH: {e:#}"),
+            }
+        }
+        let service = server
             .serve(rmcp::transport::stdio())
             .await
             .map_err(|e| anyhow::anyhow!("MCP handshake failed: {e}"))?;

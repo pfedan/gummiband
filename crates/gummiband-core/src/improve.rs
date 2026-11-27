@@ -1654,7 +1654,7 @@ pub(crate) fn run(
         }
         search.report_at(
             &format!("generation {generation}"),
-            &best.cand.stats,
+            &best.cand,
             Search {
                 generation,
                 stale,
@@ -2389,6 +2389,7 @@ mod tests {
             generations: 2,
             geometry_generations: 1,
             frames: false,
+            watch: None,
             progress: Some(ProgressFn(Arc::new(move |p: &crate::Progress| {
                 if p.search.generation >= stop_at {
                     set.store(true, Ordering::Relaxed);
@@ -2799,6 +2800,7 @@ mod tests {
             generations: 0,
             geometry_generations: 0,
             frames: false,
+            watch: None,
             progress: None,
             seed: None,
             open_end: None,
@@ -2932,6 +2934,7 @@ mod tests {
             generations: 0,
             geometry_generations: 0,
             frames: false,
+            watch: None,
             progress: None,
             seed: None,
             open_end: None,
@@ -3129,6 +3132,7 @@ mod tests {
                 generations: 0,
                 geometry_generations: 0,
                 frames: false,
+                watch: None,
                 progress: None,
                 seed: None,
                 open_end: None,

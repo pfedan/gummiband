@@ -208,7 +208,47 @@ gummiband route stripped.kicad_pcb -o out.kicad_pcb --net-widths widths.json
 
 The JSON is plain `{"net name": width_mm}`; you can write it by hand for a few nets.
 
-## Watch the search
+## Watch the route in a browser
+
+```bash
+gummiband route board.kicad_pcb -o out.kicad_pcb --watch
+# watch: http://127.0.0.1:7878/
+```
+
+Open the URL while the route runs (or before the next one: the page waits for a route and
+starts over with each new one). It shows the board and, on top of it, what the router does:
+
+![The viewer while a run lays its connections](img/watch.png)
+
+- **Laying connections**: one run of each generation, connection by connection. The track
+  just laid is bright, the dots are the places its search looked at, the thin grey lines are
+  the connections still open. The other runs of the generation work at the same time, unseen.
+- **Pulling the tracks taut**: the relaxation of one candidate, round by round: the rubber
+  bands tighten and push each other to their clearances.
+- **Best after a phase**: the candidate the search goes on from, with its clearance violations
+  as yellow rings, and at the end the copper as it is written.
+
+A run lays hundreds of connections a second, so the live view plays a burst of them within a
+second and a half instead of skipping it. Everything is kept: drag the time line or press the
+arrow keys to go step by step, space to replay (a step takes at least a frame of the screen at
+1&times;), *Live* or `L` to follow the route again. Wheel and drag zoom and pan, `F` fits the board,
+the pointer over a track names its net, and the layers and the kinds of marks can be switched
+off at the right.
+
+Watching does not change the result, and costs a few percent of the time. The page keeps the
+route when the router has ended, as long as the tab stays open. To keep it for longer or to
+pass it on, record it:
+
+```bash
+gummiband route board.kicad_pcb -o out.kicad_pcb --watch-record route.html
+```
+
+`route.html` is the same viewer with the whole route inside it. It needs no server.
+
+With the MCP server, the tool `watch` (or `GUMMIBAND_WATCH=7878` in its environment) serves the
+same viewer for every route of the session, see [MCP.md](../MCP.md#watch).
+
+## Pictures of the search
 
 ```bash
 gummiband route board.kicad_pcb -o out.kicad_pcb --frames frames/

@@ -63,7 +63,8 @@ when starting `claude`).
       "env": {
         "RAYON_NUM_THREADS": "8",
         "GUMMIBAND_KICAD_CLI": "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
-        "GUMMIBAND_RSVG_CONVERT": "/opt/homebrew/bin/rsvg-convert"
+        "GUMMIBAND_RSVG_CONVERT": "/opt/homebrew/bin/rsvg-convert",
+        "GUMMIBAND_WATCH": "7878"
       }
     }
   }
@@ -71,6 +72,10 @@ when starting `claude`).
 ```
 
 Restart Claude Desktop after editing the file.
+
+`GUMMIBAND_WATCH` is optional: with it the server shows every route of the session at
+`http://127.0.0.1:7878/` while it runs (see [watch](#watch)); leave it out and the agent
+switches the viewer on with the tool `watch` when you ask to see the routing.
 
 ## Working with the tools: by hand, automatic, both
 
@@ -205,6 +210,7 @@ KiCad shows in the status bar. Optional arguments may be left out.
 | `area_report` | `path`, `nets?`, `pour?`, `zone_clearance?`, `zone_min_width?`, `thermal_gap?`, `thermal_spoke_width?`, `pad_connection?`, `plane_layers?`, `step?`, `doubtful?` | per net with a zone what its fill reaches, judged by the router's fill model: `summary`, pieces per layer, `unreached` pads with the reason, `islands` with the site of one via each, `site_distance`, `doubtful` pads |
 | `drc` | `path`, `max_items?` | KiCad DRC summary |
 | `render` | `path`, `layers?`, `region? {x0,y0,x1,y1}`, `width_px?`, `background?`, `output?`, `refill?` | PNG (image content) and its path, region, pixels per mm |
+| `watch` | `address?` | `url` of a page that shows every route of the session while it runs, `started` |
 | `guide` | `topic?` | how to use Gummiband: the workflow of manual and automatic steps (default), one section per tool, concepts, options, open points; without a known topic the list of topics |
 
 ### Manufacturer limits: JLCPCB as an example
@@ -1330,6 +1336,30 @@ in a temp copy first (`refill`, kicad-cli 9 or newer); the file itself is not ch
 ```json
 {"name": "render", "arguments": {"path": "/abs/path/ledctl.routed.kicad_pcb",
   "region": {"x0": 140, "y0": 120, "x1": 160, "y1": 140}, "width_px": 800}}
+```
+
+### watch
+
+Lets the user look over the shoulder of the router. The tool starts a small web server in the
+MCP server and returns its `url`; the user opens it in a browser. From then on every `route`
+of the session (and every seed of `try_seeds`) is shown there while it runs: one run of each
+generation as it lays its connections one by one, with the places each search looked at and
+the connections still open; the relaxation of a candidate as it pulls the tracks taut; and
+the best candidate after every phase with its clearance violations, at the end the copper as
+it is written. The page keeps the whole route and replays it from a time line, and it starts
+over with the next route. The user guide describes the page:
+[Watch the route in a browser](guide/workflows.md#watch-the-route-in-a-browser).
+
+Call it once, when the user asks to see the routing, and tell them the URL. A second call
+returns the same URL with `started` false. `address` is a port (this machine only) or
+`address:port` (`0.0.0.0:7878` lets other machines look; the page only reads), default
+`127.0.0.1:7878`. Watching does not change a result and costs a few percent of the time of a
+route. The person who sets up the server can switch it on from the start instead, with
+`GUMMIBAND_WATCH` (a port or an address) in the environment of the server; the URL is then on
+its standard error, and the tool returns it.
+
+```json
+{"name": "watch", "arguments": {}}
 ```
 
 ### guide

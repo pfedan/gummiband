@@ -72,6 +72,9 @@ target/release/gummiband place my_board.kicad_pcb -o my_board.placed.kicad_pcb
 # route it (or the placed file), keep locked tracks and vias, write a new file next to it
 target/release/gummiband route my_board.kicad_pcb -o my_board.routed.kicad_pcb --scope keep_locked
 
+# the same, and watch the router at work: open the URL it prints in a browser
+target/release/gummiband route my_board.kicad_pcb -o my_board.routed.kicad_pcb --scope keep_locked --watch
+
 # judge the result with KiCad
 kicad-cli pcb drc --refill-zones --format json -o drc.json my_board.routed.kicad_pcb
 ```
@@ -91,7 +94,7 @@ The user guide lives in [docs/guide](docs/guide/README.md):
 - [Working with an AI agent](docs/guide/ai-agents.md): setup of the MCP server and a session
   from netlist to DRC, with the power and reference plane checks.
 - [Workflows](docs/guide/workflows.md): locking power lanes, routing by priority, judging results,
-  placing parts, movable parts, placement variants, animations.
+  placing parts, movable parts, placement variants, watching the route in a browser.
 - [How Gummiband routes](docs/guide/concepts.md): what the router respects, how it decides, and
   what it does not do yet.
 - [Benchmarks](docs/guide/benchmarks.md): the synthetic suite and the real boards.

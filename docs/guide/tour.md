@@ -35,6 +35,17 @@ vias, length and violations over time.
 See [Placing and routing in KiCad](kicad-plugin.md#the-dialog) and
 [Spend more effort](workflows.md#spend-more-effort).
 
+## Look over the router's shoulder
+
+![The viewer in a browser while a run lays its connections: the track just laid is bright, the dots are where its search looked, the grey lines are still open](img/watch.png)
+
+`gummiband route --watch` (with an AI agent: the tool `watch`) shows the route in a browser while
+it runs: connection by connection as a run lays them, the rubber bands as the relaxation pulls
+them taut, and the best candidate after every phase. A time line replays all of it, and
+`--watch-record` saves the replay as one HTML file.
+
+See [Watch the route in a browser](workflows.md#watch-the-route-in-a-browser).
+
 ## Track width: necks, tapers, wider where there is room
 
 ![Necking at fine pitch pins inside the courtyard, and a short taper where a wide track passes a tight spot](img/necking.svg)
