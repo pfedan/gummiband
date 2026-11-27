@@ -171,6 +171,7 @@ fn initialize_list_load_route() {
             "set_rules",
             "track_corridors",
             "try_seeds",
+            "watch",
         ]
     );
     for t in tools["tools"].as_array().unwrap() {
@@ -189,6 +190,17 @@ fn initialize_list_load_route() {
     let nets = s.call("list_nets", json!({"board": "b1"}));
     assert_eq!(nets["count"], 2);
 
+    // the viewer of the session: served once, on a free port here, and the routes below feed it
+    let w = s.call("watch", json!({"address": "127.0.0.1:0"}));
+    assert_eq!(w["started"], true);
+    let url = w["url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+    let again = s.call("watch", json!({}));
+    assert_eq!(
+        (again["started"].clone(), again["url"].as_str()),
+        (json!(false), Some(url.as_str()))
+    );
+
     let o = s.call("set_net_options", json!({"board": "b1", "net": "B", "skip": true}));
     assert_eq!(o["options"]["skip"], true);
     // an unknown net is a tool error the model can recover from, not a protocol error
@@ -205,6 +217,21 @@ fn initialize_list_load_route() {
     let out = dir.join("tiny.routed.kicad_pcb");
     assert_eq!(r["output"], out.display().to_string());
     assert!(std::fs::read_to_string(&out).unwrap().contains("(segment"));
+    // the viewer got that route: its feed is at its first route, which is over, and holds views
+    {
+        use std::io::{Read, Write};
+        let mut http = std::net::TcpStream::connect(url.trim_start_matches("http://").trim_end_matches('/')).unwrap();
+        write!(http, "GET /poll?s=0&after=0 HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        http.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        http.read_to_end(&mut answer).unwrap();
+        let body = &answer[answer.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4..];
+        let word = |at: usize| u32::from_le_bytes(body[at..at + 4].try_into().unwrap());
+        assert_eq!(&body[..4], b"GBW1");
+        assert_eq!((word(4), word(8)), (1, 1), "route 1 of the session, finished");
+        assert_eq!(&body[16..20], b"tiny", "the route is called by its board");
+        assert!(body.len() > 2000, "a scene and views: {} bytes", body.len());
+    }
     // the knobs of the CLI the tool took in later: the open end with a time budget stops by
     // itself, the via pass can be switched off, the meander spacing is taken
     let t0 = std::time::Instant::now();

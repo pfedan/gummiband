@@ -13,6 +13,7 @@ gummiband-core = { path = "crates/gummiband-core" }
 gummiband-kicad = { path = "crates/gummiband-kicad" }
 gummiband-place = { path = "crates/gummiband-place" }
 gummiband-app = { path = "crates/gummiband-app" }
+gummiband-watch = { path = "crates/gummiband-watch" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 # The maths of gummiband_core::math, see there. Default features only: `arch` uses the hardware for

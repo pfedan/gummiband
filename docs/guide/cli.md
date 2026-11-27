@@ -207,6 +207,8 @@ and `gummiband strip --keep-locked` are options of those commands and stay.
 | `--progress` | Prints a `progress {json}` line after every phase: `phase`, `routed`, `conns`, `vias`, `length`, `violations` (null before the geometry step; in the open end these are spots, see `--until-stop`), `generation`, `seconds`, and in the open end `stale` (generations since the last noticeable gain), `level` (side branches that failed since then) `top` (how many have to fail) and `converged` (even bold changes do not help any more). The plugin's progress window reads these lines. |
 | `--svg out.svg` | Debug drawing of the result: obstacles, tracks, vias and the violations. |
 | `--svg-tris` | Also draw the triangulation into that SVG. |
+| `--watch [ADDRESS]` | Serves a viewer of the running route and prints its URL (`watch: http://127.0.0.1:7878/`): open it in a browser, see [Watch the route in a browser](workflows.md#watch-the-route-in-a-browser). `ADDRESS` is a port (this machine only) or `address:port` (`0.0.0.0:7878` lets other machines look; the viewer only reads); default `127.0.0.1:7878`. The result is the same with and without. |
+| `--watch-record FILE` | Writes what `--watch` shows into one HTML page that replays the route wherever it is opened, without a server. Works without `--watch`. |
 | `--frames DIR` | One SVG (and PNG, if `rsvg-convert` is available) of the best candidate per generation into `DIR`, and `DIR/evolution.gif` if ImageMagick's `magick` is available. |
 
 ### Reading the console output

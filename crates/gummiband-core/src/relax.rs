@@ -47,6 +47,9 @@ pub struct RelaxConfig {
     /// The shortcuts build the track from its pivots where they can ([`crate::pivot`]). Off in
     /// the relaxations of the search; [`pivot_pass`] does it once, on the finished copper.
     pub pivots: bool,
+    /// Shows the tracks while the rounds move them ([`crate::watch`]). The search sets it for
+    /// the lead candidate of a generation only.
+    pub watch: Option<crate::watch::Watch>,
 }
 
 impl Default for RelaxConfig {
@@ -62,6 +65,7 @@ impl Default for RelaxConfig {
             via_edge: false,
             taut: true,
             pivots: false,
+            watch: None,
         }
     }
 }
@@ -1161,6 +1165,28 @@ pub fn relax_while(
     for it in 0..rounds {
         if !go_on() {
             return false;
+        }
+        if let Some(w) = &cfg.watch {
+            w.glimpse(|show| {
+                let mut v = crate::watch::View::of(crate::watch::Stage::Relaxing, w.phase(), geo);
+                // the points of the rounds are far more than a picture needs
+                let drawn: Vec<Vec<Point>> = tracks.iter().map(|p| simplify(p, 0.002)).collect();
+                for (l, p) in v.lines.iter_mut().zip(&drawn) {
+                    l.pts = p;
+                }
+                let moved = geo
+                    .vias
+                    .iter()
+                    .zip(&vias)
+                    .zip(&halves)
+                    .filter(|((g, _), _)| g.drill > 0.0);
+                for (d, ((_, at), half)) in v.dots.iter_mut().zip(moved) {
+                    d.at = at.0;
+                    d.half = *half;
+                }
+                v.step = (it, rounds);
+                show(&v);
+            });
         }
         // at rest: the round before moved nothing that counts
         if it >= cfg.iterations && largest < REST {
