@@ -2557,7 +2557,11 @@ impl<'a> Router<'a> {
         }
         // a pair changes layers with two vias, and side by side: a via of a pair net costs
         // more (GB_PAIR_VIA), and more again away from where its partner changes layers
-        let pair_via: f64 = if self.partner.contains_key(&net) { knobs::PAIR_VIA.num() } else { 0.0 };
+        let pair_via: f64 = if self.partner.contains_key(&net) {
+            knobs::PAIR_VIA.num()
+        } else {
+            0.0
+        };
         let changes: Vec<Point> = guide
             .filter(|_| pair_via > 0.0)
             .map(|(g, _)| {
@@ -3239,7 +3243,11 @@ impl<'a> Router<'a> {
                         let Some(existing) = ok else {
                             continue;
                         };
-                        let mut vc = if existing { 0.1 } else { via_cost + pair_via_at(self.site_point(site)) };
+                        let mut vc = if existing {
+                            0.1
+                        } else {
+                            via_cost + pair_via_at(self.site_point(site))
+                        };
                         if let Some(s) = soft {
                             if let Some((ep, es)) = entry_pos {
                                 vc += s.crossing * self.chords_crossed(t, lu, net, ep, es, CPos::Vertex(i)) as f64;

@@ -984,7 +984,11 @@ fn place_reach(
         .keys()
         .chain(from.keys())
         .filter(|r| at(from, r).dist(at(to, r)) > 1e-9)
-        .filter_map(|r| cur.courtyards.get(r).map(|c| c.grow(PLACE_AWAKE + at(from, r).dist(at(to, r)))))
+        .filter_map(|r| {
+            cur.courtyards
+                .get(r)
+                .map(|c| c.grow(PLACE_AWAKE + at(from, r).dist(at(to, r))))
+        })
         .collect();
     let hot = hot.to_vec();
     move |a, b| {
