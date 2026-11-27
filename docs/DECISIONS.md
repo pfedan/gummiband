@@ -140,6 +140,12 @@ Standing decisions of the project owner, kept here so that they survive any sess
   last step (`--angles 45`, plugin and MCP alike) that never adds a clearance violation and
   leaves a piece at its angle where no 45 degree path fits.
 - Follow-me stays "route the selected nets" for now; no live completion while drawing a track.
+- Under `--move-parts` the parts are floes that the routed copper moves (2026-11-27, asked for
+  by the owner): the tracks press and pull, parts shove each other along, also where no problem
+  asks for room. This drift is on by default wherever parts may move, with a reach of 2 mm from
+  the place in the file (`--move-reach`), and `--no-drift` leaves only the moves for room. It
+  keeps the topology, no step may leave a new problem, and what is excluded from moving stays
+  excluded. It costs time and is taken for the shorter copper.
 
 ## Interfaces
 

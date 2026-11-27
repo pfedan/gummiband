@@ -373,6 +373,12 @@ class AdvancedCommandTest(unittest.TestCase):
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)
         self.assertIn("--no-move-parts", cmd)
         self.assertNotIn("--fixed", cmd)
+        self.assertNotIn("--no-drift", cmd)
+        # the tracks move the parts by default; without that only the moves for room are left
+        cmd = runner.build_command("gb", Path("b"), Path("o"), runner.RouteOptions())
+        self.assertNotIn("--no-drift", cmd)
+        cmd = runner.build_command("gb", Path("b"), Path("o"), runner.RouteOptions(drift=False))
+        self.assertIn("--no-drift", cmd)
         # finishing nets keeps the parts in place, the router's default there
         opts = runner.RouteOptions(scope="finish", nets=["A"], fixed=["U1"])
         cmd = runner.build_command("gb", Path("b"), Path("o"), opts)

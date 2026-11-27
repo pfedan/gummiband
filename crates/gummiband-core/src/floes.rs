@@ -127,6 +127,33 @@ pub struct Squeeze {
     pub nets: (u32, Option<u32>),
 }
 
+/// Whether a clearance problem at `at` between `nets` lies between two pads of one part, or
+/// between a pad and the track on the pad next to it. Such a problem moves with its part: no
+/// room that another part could make solves it, and into how many pieces the check cuts it
+/// says nothing about a move.
+pub fn own_affair(cur: &Board, at: Point, nets: (u32, Option<u32>)) -> bool {
+    let (a, Some(b)) = nets else {
+        return false;
+    };
+    if a == b {
+        return false;
+    }
+    let at_spot: Vec<(&String, u32)> = cur
+        .pins
+        .iter()
+        .filter(|p| p.net == a || p.net == b)
+        .filter(|p| {
+            p.obstacles
+                .iter()
+                .any(|&o| cur.obstacles[o].shape.dist_to_point(at) <= PRESS_REACH)
+        })
+        .map(|p| (&p.footprint, p.net))
+        .collect();
+    at_spot
+        .iter()
+        .any(|x| x.1 == a && at_spot.iter().any(|y| y.1 == b && y.0 == x.0))
+}
+
 /// The forces of the copper `geo` on the floes, on the board `cur` (the offsets applied).
 /// `spots` are the clearance problems, `open` the pins of open connections.
 pub fn forces(cur: &Board, floes: &[Floe], geo: &Geometry, spots: &[Squeeze], open: &[Point]) -> Forces {
@@ -152,24 +179,8 @@ pub fn forces(cur: &Board, floes: &[Floe], geo: &Geometry, spots: &[Squeeze], op
         seen.push(h);
         // a problem between two pads of one part, or between a pad and the track on the pad next
         // to it, moves with the part: no room to make
-        if let Some((a, Some(b))) = nets.filter(|n| n.1 != Some(n.0)) {
-            let at_spot: Vec<(&String, u32)> = cur
-                .pins
-                .iter()
-                .filter(|p| p.net == a || p.net == b)
-                .filter(|p| {
-                    p.obstacles
-                        .iter()
-                        .any(|&o| cur.obstacles[o].shape.dist_to_point(h) <= PRESS_REACH)
-                })
-                .map(|p| (&p.footprint, p.net))
-                .collect();
-            if at_spot
-                .iter()
-                .any(|x| x.1 == a && at_spot.iter().any(|y| y.1 == b && y.0 == x.0))
-            {
-                continue;
-            }
+        if nets.is_some_and(|n| own_affair(cur, h, n)) {
+            continue;
         }
         for (i, fl) in floes.iter().enumerate() {
             if !boxes[i].grow(PRESS_REACH).contains(h) {
@@ -296,7 +307,11 @@ impl Push {
     pub fn of(board: &Board) -> Push {
         Push {
             press_step: 0.3,
-            band_step: if board.drift { crate::knobs::FLOE_BAND.num() } else { 0.0 },
+            band_step: if board.drift {
+                crate::knobs::FLOE_BAND.num()
+            } else {
+                0.0
+            },
             band_min: 0.5,
             max_step: 0.5,
             reach: board.move_reach,
@@ -332,7 +347,11 @@ pub fn targets(
         // not farther than the reach from the place in the file
         let at = fl.offset(offsets);
         let to = at + d;
-        let to = if to.len() > push.reach { to.norm() * push.reach } else { to };
+        let to = if to.len() > push.reach {
+            to.norm() * push.reach
+        } else {
+            to
+        };
         let d = to - at;
         if d.len() > 0.01 {
             wishes.push((i, d));
@@ -419,7 +438,9 @@ pub(crate) fn shove(
         if done.contains(&other) {
             continue;
         }
-        if depth >= 4 || !board.movable.contains(&other) || !shove(board, &other, d, courtyards, offsets, done, depth + 1)
+        if depth >= 4
+            || !board.movable.contains(&other)
+            || !shove(board, &other, d, courtyards, offsets, done, depth + 1)
         {
             return false;
         }
@@ -493,7 +514,12 @@ pub fn drift(
     let step = board.rules.min_clearance.clamp(0.02, 0.1);
     let planned = (longest / step).ceil() as usize;
     let mut cur = board.with_offsets(from);
-    let base_viol = check::check(&cur, geo);
+    // on the pads as the judge of the round sees them (`exit::release_unused`)
+    let judged = |b: &Board, g: &Geometry| {
+        let free = crate::exit::release_unused(b, g);
+        check::check(free.as_ref().unwrap_or(b), g)
+    };
+    let base_viol = judged(&cur, geo);
     let base_open: Vec<u32> = {
         let mut nets: Vec<u32> = geo.tracks.iter().map(|t| t.net).collect();
         nets.sort_unstable();
@@ -516,10 +542,7 @@ pub fn drift(
     let track_rest: Vec<bool> = geo.tracks.iter().map(|t| t.resting).collect();
     let via_rest: Vec<bool> = geo.vias.iter().map(|v| v.resting).collect();
     // far from the floes and the spots the copper sleeps
-    let near_spots: Vec<Rect> = spots
-        .iter()
-        .map(|&s| Rect { min: s, max: s }.grow(AWAKE))
-        .collect();
+    let near_spots: Vec<Rect> = spots.iter().map(|&s| Rect { min: s, max: s }.grow(AWAKE)).collect();
     for t in out.geo.tracks.iter_mut() {
         t.resting = t.resting || !t.pts.iter().any(|&p| near_spots.iter().any(|b| b.contains(p)));
     }
@@ -618,12 +641,8 @@ pub fn drift(
                 *e = *e + d[i];
             }
         }
-        let dbg = std::env::var("GB_FLOE_DEBUG").is_ok();
-        let t0 = std::time::Instant::now();
         let next = board.with_offsets(&next_off);
-        let t1 = t0.elapsed().as_secs_f64();
         let mut g = crate::follow_parts(&cur, &next, &out.geo);
-        let t2 = t0.elapsed().as_secs_f64();
         // what the step touches wakes up: the copper around the floes that move
         let boxes: Vec<Rect> = moving.iter().map(|&i| floes[i].bbox(&next).grow(AWAKE)).collect();
         for (k, t) in g.tracks.iter_mut().enumerate() {
@@ -641,27 +660,31 @@ pub fn drift(
                 v.resting = false;
             }
         }
-        let t3 = t0.elapsed().as_secs_f64();
         let sub = Substrate::build(&next, sub_cfg);
-        let t4 = t0.elapsed().as_secs_f64();
         relax::relax(&next, &sub, &mut g, cfg);
-        let t5 = t0.elapsed().as_secs_f64();
-        let viol = check::check(&next, &g);
-        if dbg {
-            eprintln!(
-                "step: offsets {:.3} follow {:.3} wake {:.3} substrate {:.3} relax {:.3} check {:.3}, awake {} of {}",
-                t1,
-                t2 - t1,
-                t3 - t2,
-                t4 - t3,
-                t5 - t4,
-                t0.elapsed().as_secs_f64() - t5,
-                g.tracks.iter().filter(|t| !t.resting).count(),
-                g.tracks.len()
+        let viol = judged(&next, &g);
+        let longest_move = moving.iter().map(|&i| d[i].len()).fold(0.0, f64::max);
+        let mut fresh = crate::follow::new_problems_at(&base_viol, &viol, total + longest_move, 0.0);
+        // the round is judged on the number of findings: a spot that only falls into more
+        // pieces counts as well
+        if fresh.is_empty() && viol.len() > base_viol.len() {
+            let key = |n: (u32, Option<u32>)| {
+                let b = n.1.unwrap_or(u32::MAX);
+                (n.0.min(b), n.0.max(b))
+            };
+            let reach = 2.0 + total + longest_move;
+            let pieces = |of: &[check::Violation], s: &check::Spot, r: f64| {
+                of.iter()
+                    .filter(|v| key(v.nets) == key(s.nets) && v.at.dist(s.at) < r)
+                    .count()
+            };
+            fresh.extend(
+                check::spots(&viol)
+                    .into_iter()
+                    .filter(|s| !own_affair(&next, s.at, s.nets))
+                    .filter(|s| pieces(&viol, s, 2.0) > pieces(&base_viol, s, reach)),
             );
         }
-        let longest_move = moving.iter().map(|&i| d[i].len()).fold(0.0, f64::max);
-        let mut fresh = crate::follow::new_problems(&base_viol, &viol, total + longest_move);
         // copper that came apart: a track end that lost its pad, a via that left its track
         let mut nets: Vec<u32> = g.tracks.iter().filter(|t| !t.resting).map(|t| t.net).collect();
         nets.sort_unstable();
@@ -669,32 +692,6 @@ pub fn drift(
         for (net, pins) in crate::legal::open_in_copper(&next, &g, &nets) {
             if base_open.contains(&net) {
                 continue;
-            }
-            if std::env::var("GB_FLOE_DEBUG").is_ok() {
-                eprintln!(
-                    "apart: {} pins {:?}",
-                    board.nets[net as usize].name,
-                    pins.iter().map(|&p| &next.pins[p].name).collect::<Vec<_>>()
-                );
-                for (k, t) in g.tracks.iter().enumerate().filter(|(_, t)| t.net == net) {
-                    let o = &out.geo.tracks[k];
-                    eprintln!(
-                        "  track {k} layer {} w {} {:?}..{:?} was {:?}..{:?} tap {:?}",
-                        t.layer,
-                        t.width,
-                        t.pts[0],
-                        t.pts[t.pts.len() - 1],
-                        o.pts[0],
-                        o.pts[o.pts.len() - 1],
-                        t.tap
-                    );
-                }
-                for (k, v) in g.vias.iter().enumerate().filter(|(_, v)| v.net == net) {
-                    eprintln!("  via {k} {:?} was {:?} d {} half {:?}", v.at, out.geo.vias[k].at, v.diameter, v.half);
-                }
-                for pn in next.pins.iter().filter(|p| p.net == net) {
-                    eprintln!("  pin {} {:?}", pn.name, pn.pos);
-                }
             }
             fresh.push(check::Spot {
                 at: pins.first().map_or(Point::default(), |&p| next.pins[p].pos),
@@ -720,34 +717,15 @@ pub fn drift(
         // a floe answers once per step, however many spots it made
         let mut answered = vec![false; n];
         for s in &fresh {
-            let mut blamed: Vec<usize> = moving
+            let blamed: Vec<usize> = moving
                 .iter()
                 .copied()
                 .filter(|&i| floes[i].nearest(&next, s.at, BLAME).is_some())
                 .collect();
             if blamed.is_empty() {
-                // pushed copper made it farther away: the floe nearest to it answers once. A
-                // spot that comes again is nobody's in particular, and the drift ends there
-                if orphans.iter().any(|o| o.dist(s.at) < 1.0) {
-                    for &i in &moving {
-                        if !frozen[i] {
-                            frozen[i] = true;
-                            left[i] = Point::default();
-                        }
-                    }
-                    out.stuck.push((
-                        "all parts".into(),
-                        format!(
-                            "a problem far from every part that moves, at ({:.2}, {:.2}): {} and {}",
-                            s.at.x,
-                            s.at.y,
-                            net_name(Some(s.nets.0)),
-                            net_name(s.nets.1)
-                        ),
-                    ));
-                    break;
-                }
-                orphans.push(s.at);
+                // pushed copper made it farther away: the floes around it answer together.
+                // A spot with no moving floe around is nobody's in particular, and the drift
+                // ends there
                 let dist = |i: usize| {
                     let b = floes[i].bbox(&next);
                     pt(
@@ -756,7 +734,37 @@ pub fn drift(
                     )
                     .len()
                 };
-                blamed.extend(moving.iter().copied().min_by(|&a, &b| dist(a).total_cmp(&dist(b))));
+                let again = orphans.iter().any(|o| o.dist(s.at) < 1.0);
+                orphans.push(s.at);
+                let why = format!(
+                    "a problem that no part made alone, at ({:.2}, {:.2}): {} and {}",
+                    s.at.x,
+                    s.at.y,
+                    net_name(Some(s.nets.0)),
+                    net_name(s.nets.1)
+                );
+                // the second time the circle is three times as wide
+                let circle = if again { 3.0 * AWAKE } else { AWAKE };
+                let around: Vec<usize> = moving
+                    .iter()
+                    .copied()
+                    .filter(|&i| !frozen[i] && dist(i) < circle)
+                    .collect();
+                let all = around.is_empty();
+                for &i in if all { &moving } else { &around } {
+                    if !frozen[i] {
+                        frozen[i] = true;
+                        left[i] = Point::default();
+                        if !all {
+                            out.stuck.push((floes[i].refs[0].clone(), why.clone()));
+                        }
+                    }
+                }
+                if all {
+                    out.stuck.push(("all parts".into(), why));
+                    break;
+                }
+                continue;
             }
             for u in blamed {
                 if frozen[u] || left[u].len() < 1e-9 || answered[u] {
@@ -825,7 +833,7 @@ pub fn drift(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::board::*;
     use crate::geom::{Polygon, Shape, roundrect_polygon};
@@ -880,7 +888,7 @@ mod tests {
     /// The board of the tests of [`crate::follow`]: net A as a track from the pad P0 at (2, 5)
     /// to P1 at (8, 5), part Q (net B, one 0.6 mm pad) above it at (5, 3.5). Here the track is
     /// awake, and Q and P1 may move.
-    fn board() -> (Board, Geometry) {
+    pub(crate) fn board() -> (Board, Geometry) {
         let mut b = crate::follow::tests::board();
         b.soften(&[]);
         b.movable = vec!["Q".into(), "P1".into()];
@@ -1084,7 +1092,11 @@ mod tests {
         let q = d.offsets["Q"];
         assert!(q.y > 0.3 && q.y < 1.4, "{q:?}");
         assert_eq!(d.stuck.len(), 1, "{:?}", d.stuck);
-        assert!(d.stuck[0].0 == "Q" && d.stuck[0].1.contains("no more room"), "{:?}", d.stuck);
+        assert!(
+            d.stuck[0].0 == "Q" && d.stuck[0].1.contains("no more room"),
+            "{:?}",
+            d.stuck
+        );
         assert!(check::check(&b.with_offsets(&d.offsets), &d.geo).is_empty());
         // the track end went along with P1
         assert!(d.geo.tracks[0].pts.last().unwrap().dist(pt(8.6, 5.0)) < 1e-9);
@@ -1101,7 +1113,12 @@ mod tests {
         assert!(fixed.shoved.is_empty() && fixed.stuck.len() == 1);
         b.movable.push("W".into());
         let d = go(&b, &geo, &[("Q", pt(0.0, 1.5))]);
-        assert!(d.offsets["Q"].dist(pt(0.0, 1.5)) < 1e-9, "{:?} {:?}", d.offsets, d.stuck);
+        assert!(
+            d.offsets["Q"].dist(pt(0.0, 1.5)) < 1e-9,
+            "{:?} {:?}",
+            d.offsets,
+            d.stuck
+        );
         assert_eq!(d.shoved, vec!["W".to_string()]);
         let w = d.offsets["W"];
         assert!(w.x.abs() < 1e-9 && w.y > 0.15 && w.y < 0.5, "{w:?}");
@@ -1109,7 +1126,11 @@ mod tests {
         // not beyond its reach
         b.move_reach = 0.1;
         let d = go(&b, &geo, &[("Q", pt(0.0, 1.5))]);
-        assert!(!d.offsets.contains_key("W") && d.offsets["Q"].y < 1.35, "{:?}", d.offsets);
+        assert!(
+            !d.offsets.contains_key("W") && d.offsets["Q"].y < 1.35,
+            "{:?}",
+            d.offsets
+        );
     }
 
     #[test]
@@ -1119,6 +1140,10 @@ mod tests {
         let d = go(&b, &geo, &[("Q", pt(-3.0, 1.2)), ("P1", pt(0.6, 0.0))]);
         assert!(d.offsets["P1"].dist(pt(0.6, 0.0)) < 1e-9);
         assert!(d.offsets["Q"].x > -3.0 && d.offsets["Q"].x < -1.5, "{:?}", d.offsets);
-        assert!(d.stuck.iter().any(|s| s.0 == "Q" && s.1.contains("P0")), "{:?}", d.stuck);
+        assert!(
+            d.stuck.iter().any(|s| s.0 == "Q" && s.1.contains("P0")),
+            "{:?}",
+            d.stuck
+        );
     }
 }

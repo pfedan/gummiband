@@ -662,16 +662,66 @@ other nets that the moved pads now come too close to, and `relax` lets it give w
 relaxation wakes what that copper touches in turn. A step that leaves a clearance spot of a net
 pair that had none within reach, or a worse one (`is_new`), a courtyard that runs into another part or leaves the board, ends the move at the
 last clean step. Copper that stays asleep keeps its exact shape. `move_with_copper` runs this on
-the soft copper of a routed file (`gummiband move-part`, MCP `move_part`); `route_board` runs it
-for the shifts of `--move-parts` before it considers a new search. There the routed copper within
-5 mm of a shifted part or of a place that asks for room is awake (`place_reach` in `lib.rs`), so
-the steps can also settle the spots they are meant to free; the rest sleeps and moves only where
-it is pushed. With the whole board awake the copper settled a few micrometres differently
-somewhere far away, and that new spot ended the move after its first step (the LED controller:
-1 of 3 steps, stopped by 3 µm at the other end of the board). After the steps the pairs of
-`--pairs pull` close up again (`pairs::zip`): the relaxation of the steps draws every track taut
-on its own, and the pairs that the end of the search had closed up stood apart again (60 %
-coupled instead of 72 % on the LED controller).
+the soft copper of a routed file (`gummiband move-part`, MCP `move_part`).
+
+## Parts as floes
+
+Under `--move-parts` the parts that may move lie on the board like floes on water, and the routed
+copper moves them (`gummiband_core::floes`). A floe is one movable part, or a block (a KiCad
+group) that moves as a whole. Three forces act on it, all read from the copper as it lies:
+
+- **Press.** A clearance problem pushes the floes within 1 mm away from it, and so does the pin
+  of an open connection (its own part stays, the neighbours make room). A problem between two
+  pads of one part, or between a pad and the track on the pad next to it, moves with the part
+  and pushes nothing (`own_affair`).
+- **Wrap.** A track of another net that bends around a pad of the floe presses on it with the
+  turning vector of the bend (the unit vector out minus the unit vector in).
+- **Pull.** A track that ends on a pad of the floe pulls it along the direction in which it
+  leaves the pad.
+
+Wrap and pull together are the exact gradient of the track length by the offset of the part, so
+a floe that follows them makes the copper shorter. `targets` turns the forces into offsets: a
+step per round, limited to `--move-reach` (2 mm by default) from the place in the file, and a
+floe whose courtyard would run into a movable neighbour shoves it along, down a chain (`shove`);
+a fixed part ends the chain.
+
+`floes::drift` then takes the floes there in steps no longer than the smallest clearance (0.02
+to 0.1 mm). Per step `follow_parts` takes the track ends and vias on moved pads along and `relax`
+lets the rest give way, with the topology kept. A step is judged by the check: a clearance
+problem that was not there, one that got worse or fell into more pieces, or a net whose copper
+came apart (`legal::open_in_copper`), and the step is taken back. Then the floes next to the
+problem answer for it. The floe on the far side of the squeezed copper is shoved along through
+it, up to three floes in a row (it goes first for one step, the floe that came waits); only
+where nothing can be shoved does the floe that made the problem stop for good, and the others
+go on. A problem that no floe made alone stops the floes within 5 mm, the second time those
+within 15 mm. A courtyard that would run into a part or leave the board stops its own floe.
+Copper farther than 5 mm from every moving floe and every spot sleeps, so a step is not judged
+on what settles a few micrometres differently at the other end of the board.
+
+Two stages use this:
+
+1. **Drift, inside the search** (`drift_with_bands`, off with `--no-drift`). After the geometry
+   stage has chosen its winner and before the finishing steps, wrap and pull move the parts in
+   up to `GB_FLOE_ROUNDS` rounds; a round counts if it leaves no more findings and shorter
+   copper, and the rounds end when one gains less than 1 %. The winner is then finished on the
+   board with the parts where they drifted. This has to come before the finishing steps: the
+   finished copper (arcs around pivots, fitted widths, tapers, closed up pairs) is no fixed
+   point of the relaxation, and relaxing it again without moving anything already makes new
+   findings (Duo: 6 to 12), so no step on it could be judged. The runners-up are finished on
+   the placement of the search and compared with the drifted winner as before. An open ended
+   run does without the drift: its alternatives have to lie on the same parts as its result.
+2. **Rounds for room, after the search** (`place_and_route`). The problems and open pins of the
+   finished result press, in up to `GB_PLACE_ROUNDS` rounds. A round that solves nothing may
+   route the board anew on the shifted parts (`GB_PLACE_SEARCHES` times, and only with at most
+   20 problems and 400 connections); after that the spots press twice as hard, once. After a
+   round the pairs of `--pairs pull` close up again (`pairs::zip`), because the relaxation of
+   the steps draws every track taut on its own.
+
+Measured on 2026-11-27 (`--runs 4 --generations 1 --geometry-generations 1 --seed 1`, 4 threads,
+Gummiband's own check; see `docs/MILESTONES.md` for the table): the drift makes the copper 4 to
+15 % shorter with the same or fewer problem spots, and at these small settings the route takes
+about three times as long, because every step relaxes and checks the copper around the moving
+parts.
 
 ## Differential pairs
 

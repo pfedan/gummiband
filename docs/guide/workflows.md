@@ -184,6 +184,14 @@ board is routed; `--no-move-parts` keeps every part where it is). The routed cop
 the parts move in small steps, the tracks give way within their clearances, and a shift stops
 where nothing can give way any more. Only if that does not solve the problems is the search run
 again on the shifted board.
+
+The parts also drift where nothing is wrong. They lie on the board like floes, and the routed
+tracks are the rubber bands that move them: a track that bends around a part presses on it, a
+track that ends on a part pulls at it, and a part that comes up against its neighbour shoves it
+along, also through the copper between them. A part ends up at most `--move-reach` (2 mm) from
+its place in the file, the topology of the routing stays, and no step may leave a clearance
+problem that was not there. The copper gets a few percent shorter by it. `--no-drift` switches
+this off and leaves only the moves that make room.
 Connectors, modules, mounting holes, switches, jumpers and test points never move, nor do locked
 footprints or the references in `--fixed`. The console lists every move
 (`moved R8 by 0.30, 0.00 mm`) and the output file has the footprints at the new positions. This

@@ -50,7 +50,8 @@ outer pours removed, routed completely by Gummiband (`bench/run-ledctl.sh`).
   round after a rejected new search started from a placement that did not match the copper.
   Since 2026-11-01 on by default (`--no-move-parts` switches it off), also in the plugin and in
   MCP `route`, and open connections ask for room as well: the neighbours of their pins step
-  aside. Open: rotation with following copper, parts that shove other parts along.
+  aside. Since 2026-11-27 parts shove other parts along and drift under the copper, see
+  "Parts as floes" below. Open: rotation with following copper.
 - Differential pairs: experimental option (`route --pairs`, see `docs/ARCHITECTURE.md`). Width and gap
   from net classes and custom rules per layer, skew tuning inside a pair, impedance estimate and
   `--pair-zdiff`. Measured on 2026-10-30: `diff_pairs` 99% coupled and clean in the KiCad DRC, Jetson
@@ -1035,3 +1036,52 @@ What it does and we do not, noted for later:
   off by default. Pairs with their vias side by side are what `--pairs band` with
   `--via-pairs` is for.
 
+## Parts as floes (2026-11-27)
+
+`--move-parts` used to move a part only where a clearance problem or an open pin sat next to it,
+by up to half a millimetre, and a part in the way of that move ended it. Now the movable parts
+and blocks are floes that the routed copper moves (`gummiband_core::floes`, see "Parts as floes"
+in `docs/ARCHITECTURE.md`):
+
+- Forces from the copper as it lies: problems and open pins press, a track of another net that
+  bends around a pad presses with the turning vector of the bend, a track that ends on a pad
+  pulls. The last two are the gradient of the track length by the offset of the part.
+- Floes shove each other: by courtyard when the targets are set, and through the copper while
+  they move (the floe behind the squeezed copper goes first, up to three in a row). Only the
+  floe that is really stuck stops; before, one stuck part ended the move of all.
+- The drift without a problem (`--no-drift` switches it off) runs inside the search, on the
+  relaxed copper of the winner and before the finishing steps. After them it cannot work:
+  relaxing finished copper again makes new findings without any move (Duo 6 to 12 findings,
+  Injector 1 to 19), so every step was refused or the round thrown away.
+- A part ends up at most `--move-reach` (2 mm) from its place in the file.
+- Width findings (a track too narrow for its current) are judged by net and not by place
+  (`follow::new_problems`): the check names the narrowest piece of a path, and that jumps along
+  the path with every relaxation. On Duo every first step was refused for it.
+- A problem inside one part (a pad row that leaves its own track too little room) presses on
+  nothing and its pieces are not counted while parts move.
+
+`--runs 4 --generations 1 --geometry-generations 1 --seed 1`, 4 threads, Gummiband's own check,
+this container (no KiCad DRC here). Length in mm, problem spots, seconds:
+
+| Board | no moves | moves for room only (`--no-drift`) | floes (default) |
+| --- | --- | --- | --- |
+| Duo (291 connections) | 2105, 4 spots, 12 s | 2077, 3 spots, 15 s | 1947, 3 spots, 34 s |
+| Lichtschnitzel (346) | 2273, 2 spots, 36 s | 2273, 2 spots, 30 s | 2173, 2 spots, 77 s |
+| Injector (183) | 787, clean, 12 s | 787, clean, 12 s | 736, clean, 44 s |
+| parts_xhard (166) | 1244, clean, 3 s | 1244, clean, 3 s | 1121, clean, 10 s |
+| parts_hard (75) | 1040, clean, 3 s | 1040, clean, 3 s | 937, clean, 12 s |
+| parts_medium (43) | 509, clean, 1 s | 509, clean, 1 s | 431, clean, 4 s |
+| parts_multi (113) | 1344, clean, 4 s | 1344, clean, 4 s | 1241, clean, 15 s |
+
+The copper gets 4 to 15 % shorter and no board gets a problem spot more. The price is time: at
+these small settings the route takes about three times as long, because every step of the parts
+relaxes and checks the copper around them, and a search that negotiates drifts twice (the
+negotiated and the plain search are compared finished). On Lichtschnitzel the two spots that
+are left are pad rows of R110 that leave their own tracks too little room; the check cuts them
+into 7 pieces instead of 4 after the drift, the spots are the same. Duo ends with 220 instead of
+195 vias: there a round for room routed the board anew on the drifted parts and that result won
+on cost.
+
+Open: the drift in an open ended run (its alternatives lie on the placement of the search), a
+measurement with the KiCad DRC, rotation, and the time (a drift that relaxes only the copper of
+the moving floes, or steps on the GPU).

@@ -30,6 +30,7 @@ Output for the developer; the routed board stays the same.
 | `GB_MUTANT_LOG` | value | unset | A file path: the open end writes one line of JSON per mutant (why it ended, what it changed). |
 | `GB_NEAR` | value | unset | CLI `route`: `x,y[,radius]` in mm lists the tracks with a vertex near this point. |
 | `GB_VIOL` | set to anything | off | CLI `route`: histograms of how much clearance the violations miss, and a sample of the severe ones. |
+| `GB_FLOE_LOG` | set to anything | off | Print why each part stopped short in a round of `--move-parts`. |
 
 ### Topics of `GB_LOG`
 
@@ -112,7 +113,12 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_RIVALS` | number | 2 | How many runners-up of the geometry stage are finished next to the winner; the best finished result is the route (0: the winner alone). |
 | `GB_DIRS_ALL` | set to anything | off | Every run of the portfolio uses the preferred layer directions, not every third. |
 | `GB_PAIR_VIA` | number | 0 | With `--pairs pull`: a via of a pair net costs this many vias more, and as much again 2 mm or more from where its partner changes layers (0: off). |
-| `GB_PLACE_ROUNDS` | number | 2 | Rounds in which parts give way at hot spots (`--move-parts`). |
+| `GB_PLACE_ROUNDS` | number | 6 | Rounds in which the spots that ask for room push the movable parts (`--move-parts`). |
+| `GB_PLACE_SEARCHES` | number | 2 | How many of those rounds may route the board anew on the shifted parts. |
+| `GB_FLOE_IT` | number | 400 | Relaxation rounds after each step of the parts in a placement round (`--move-parts`). |
+| `GB_FLOE_BAND_IT` | number | 120 | Relaxation rounds after each step of the parts while they drift in the search (`--move-parts` with drift). |
+| `GB_FLOE_ROUNDS` | number | 6 | Rounds in which the tracks push and pull the movable parts before the copper is finished (`--move-parts` with drift). |
+| `GB_FLOE_BAND` | number | 0.25 | mm a part drifts per round for the force of one track wrapped around it or pulling at it (`--move-parts` with drift). |
 | `GB_PLACE_AFTER_STOP` | set to anything | off | An open end that was stopped still gets the placement rounds. |
 | `GB_NEG_ONLY` | set to anything | off | With `--negotiate`: only the negotiated search, without the plain one to compare with. |
 | `GB_NEG_GROWTH` | number | 1.5 | Negotiated routing: factor by which the prices of overflow and crossing grow per round. |

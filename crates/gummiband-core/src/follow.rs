@@ -247,19 +247,29 @@ pub fn follow_steps(
 /// the minimum width) by its net and wherever it is: the check names the narrowest place of a
 /// way, and that place jumps along the way when the copper settles a little differently.
 pub(crate) fn new_problems(before: &[check::Violation], after: &[check::Violation], moved: f64) -> Vec<check::Spot> {
-    let clearances = |v: &[check::Violation]| -> Vec<check::Violation> {
-        v.iter().filter(|x| !x.is_width()).cloned().collect()
-    };
+    new_problems_at(before, after, moved, 0.001)
+}
+
+/// [`new_problems`] with the amount of missing clearance below which a spot is rounding and not
+/// a problem. 0 where the result is counted by the check itself, which knows no rounding.
+pub(crate) fn new_problems_at(
+    before: &[check::Violation],
+    after: &[check::Violation],
+    moved: f64,
+    rounding: f64,
+) -> Vec<check::Spot> {
+    let clearances =
+        |v: &[check::Violation]| -> Vec<check::Violation> { v.iter().filter(|x| !x.is_width()).cloned().collect() };
     let base = check::spots(&clearances(before));
     let mut out: Vec<check::Spot> = check::spots(&clearances(after))
         .into_iter()
-        .filter(|s| is_new(s, &base, moved))
+        .filter(|s| is_new(s, &base, moved, rounding))
         .collect();
     let missing = |v: &check::Violation| v.required - v.actual;
     for v in after.iter().filter(|v| v.is_width()) {
-        let known = before
-            .iter()
-            .any(|b| b.is_width() && b.is_current() == v.is_current() && b.nets.0 == v.nets.0 && missing(b) >= missing(v) - 0.001);
+        let known = before.iter().any(|b| {
+            b.is_width() && b.is_current() == v.is_current() && b.nets.0 == v.nets.0 && missing(b) >= missing(v) - 0.001
+        });
         if !known && missing(v) >= 0.001 {
             out.push(check::Spot {
                 at: v.at,
@@ -276,9 +286,9 @@ pub(crate) fn new_problems(before: &[check::Violation], after: &[check::Violatio
 /// nets within reach (the moved distance plus the size of a spot), or one with less missing. A
 /// problem that only moves from one pair of nets to another counts as new, one that only splits
 /// into pieces does not.
-fn is_new(s: &check::Spot, before: &[check::Spot], moved: f64) -> bool {
+fn is_new(s: &check::Spot, before: &[check::Spot], moved: f64, rounding: f64) -> bool {
     // a micrometre is rounding, not a problem
-    if s.missing < 0.001 && !s.short {
+    if s.missing < rounding && !s.short {
         return false;
     }
     let key = |n: (u32, Option<u32>)| {
@@ -288,7 +298,7 @@ fn is_new(s: &check::Spot, before: &[check::Spot], moved: f64) -> bool {
     !before.iter().any(|b| {
         key(b.nets) == key(s.nets)
             && b.at.dist(s.at) < 2.0 + moved
-            && s.missing <= b.missing + 0.001
+            && s.missing <= b.missing + rounding
             && (b.short || !s.short)
     })
 }
@@ -562,11 +572,11 @@ pub(crate) mod tests {
         };
         let before = [spot(0.0, (1, Some(2)), 0.02)];
         // the same pair close by, in two pieces, no worse
-        assert!(!is_new(&spot(0.5, (2, Some(1)), 0.02), &before, 0.1));
-        assert!(!is_new(&spot(1.5, (1, Some(2)), 0.01), &before, 0.1));
+        assert!(!is_new(&spot(0.5, (2, Some(1)), 0.02), &before, 0.1, 0.001));
+        assert!(!is_new(&spot(1.5, (1, Some(2)), 0.01), &before, 0.1, 0.001));
         // worse, far away, or another pair
-        assert!(is_new(&spot(0.5, (1, Some(2)), 0.03), &before, 0.1));
-        assert!(is_new(&spot(5.0, (1, Some(2)), 0.01), &before, 0.1));
-        assert!(is_new(&spot(0.5, (1, Some(3)), 0.01), &before, 0.1));
+        assert!(is_new(&spot(0.5, (1, Some(2)), 0.03), &before, 0.1, 0.001));
+        assert!(is_new(&spot(5.0, (1, Some(2)), 0.01), &before, 0.1, 0.001));
+        assert!(is_new(&spot(0.5, (1, Some(3)), 0.01), &before, 0.1, 0.001));
     }
 }

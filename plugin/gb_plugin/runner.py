@@ -54,6 +54,8 @@ class RouteOptions:
     # let the geometry generations shift parts (the router's default); the plugin takes the
     # moves over
     move_parts: bool = True
+    # with move_parts: the tracks also push and pull the parts where nothing is wrong
+    drift: bool = True
     fixed: Optional[List[str]] = None  # references that never move
     # try this many placements from the netlist, each routed; the best one is kept
     placements: int = 0
@@ -142,7 +144,7 @@ class PlaceOptions:
 
 # Options the dialogs remember in settings.json. What only makes sense on one board (references,
 # layer names, net files) starts empty every time.
-ROUTE_SAVED = ("scope", "runs", "via_cost", "geometry_generations", "animate", "move_parts", "placements",
+ROUTE_SAVED = ("scope", "runs", "via_cost", "geometry_generations", "animate", "move_parts", "drift", "placements",
                "teardrops", "generations", "via_pitch", "layer_dirs", "via_pass", "negotiate", "threads", "pairs", "pair_pull",
                "pair_skew", "pair_zdiff", "until_stop", "open_via_cost", "prefer_width", "gpu",
                "angles_45", "seed", "placement_seed", "hint_groups", "group_order", "hint_pairs",
@@ -401,6 +403,8 @@ def build_command(binary: str, board: Path, output: Path, opts: RouteOptions) ->
     # parts move by default where the board is laid anew; where its copper stays they stay
     if not opts.move_parts and not keeps_all(opts):
         cmd.append("--no-move-parts")
+    elif not opts.drift and not keeps_all(opts):
+        cmd.append("--no-drift")
     if ((opts.move_parts and not keeps_all(opts)) or placements) and opts.fixed:
         cmd += ["--fixed", ",".join(opts.fixed)]
     if opts.pairs != "off":

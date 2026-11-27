@@ -163,6 +163,14 @@ ROUTE_TABS: Tuple = (
               "holes, switches, jumpers and test points stay. The moves arrive in the same undo "
               "step. Not where all copper stays: there the parts stay too.",
               "check", requires=LAID_ANEW),
+        Field("drift", "Let the tracks move the parts",
+              "With the box above: the parts lie on the board like floes and the routed tracks "
+              "move them also where nothing is wrong. A track that bends around a part presses "
+              "on it, a track that ends on a part pulls at it, and a part that comes up against "
+              "its neighbour shoves it along. A part ends up at most 2 mm from its place, the "
+              "routing keeps its topology and no step may leave a new clearance problem. The "
+              "copper gets a few percent shorter; the route takes longer. On by default.",
+              "check", requires="move_parts"),
         int_field("placements", "Placements to try:",
                   "Places the parts that are not locked or mechanical from the netlist this many "
                   "times, routes each result with these settings and keeps the best. Each one "

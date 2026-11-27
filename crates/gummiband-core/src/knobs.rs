@@ -410,12 +410,18 @@ knobs! {
         "Every run of the portfolio uses the preferred layer directions, not every third.";
     PAIR_VIA = "GB_PAIR_VIA", Experiment, Num, "0",
         "With `--pairs pull`: a via of a pair net costs this many vias more, and as much again 2 mm or more from where its partner changes layers (0: off).";
-    PLACE_ROUNDS = "GB_PLACE_ROUNDS", Experiment, Num, "8",
-        "Rounds in which the copper pushes the movable parts (`--move-parts`).";
+    PLACE_ROUNDS = "GB_PLACE_ROUNDS", Experiment, Num, "6",
+        "Rounds in which the spots that ask for room push the movable parts (`--move-parts`).";
     PLACE_SEARCHES = "GB_PLACE_SEARCHES", Experiment, Num, "2",
         "How many of those rounds may route the board anew on the shifted parts.";
     FLOE_IT = "GB_FLOE_IT", Experiment, Num, "400",
-        "Relaxation rounds after each step of the parts (`--move-parts`).";
+        "Relaxation rounds after each step of the parts in a placement round (`--move-parts`).";
+    FLOE_BAND_IT = "GB_FLOE_BAND_IT", Experiment, Num, "120",
+        "Relaxation rounds after each step of the parts while they drift in the search (`--move-parts` with drift).";
+    FLOE_ROUNDS = "GB_FLOE_ROUNDS", Experiment, Num, "6",
+        "Rounds in which the tracks push and pull the movable parts before the copper is finished (`--move-parts` with drift).";
+    FLOE_LOG = "GB_FLOE_LOG", Log, Set, "off",
+        "Print why each part stopped short in a round of `--move-parts`.";
     FLOE_BAND = "GB_FLOE_BAND", Experiment, Num, "0.25",
         "mm a part drifts per round for the force of one track wrapped around it or pulling at it (`--move-parts` with drift).";
     PLACE_AFTER_STOP = "GB_PLACE_AFTER_STOP", Experiment, Set, "off",

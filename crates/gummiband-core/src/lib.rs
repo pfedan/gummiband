@@ -997,7 +997,10 @@ impl PlaceScore {
             .iter()
             .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
             .sum();
-        let cost = r.stats.cost() + (length - r.stats.length) * LENGTH_WEIGHT + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0;
+        let cost = r.stats.cost()
+            + (length - r.stats.length) * LENGTH_WEIGHT
+            + v.len() as f64 * 1000.0
+            + shorts as f64 * 5000.0;
         PlaceScore {
             routed: r.stats.routed,
             cost,
@@ -1028,17 +1031,199 @@ impl PlaceScore {
 
 /// A placement round in which only the bands push is worth another one when it made the copper
 /// shorter by this share.
-const BAND_GAIN: f64 = 0.0025;
+const BAND_GAIN: f64 = 0.01;
+
+/// One placement round for room with the topology kept ([`floes`]): the clearance spots and
+/// open pins of `best` push the parts as `push` says, from the placement `offsets`, and they
+/// drift in small steps while the copper follows. Returns where the parts were meant to go, the result as far as they got, and
+/// its score. None if no part has a reason to move.
+#[allow(clippy::too_many_arguments)]
+fn drift_round(
+    board: &Board,
+    sub_cfg: &SubstrateConfig,
+    base: &RouterConfig,
+    fl: &[floes::Floe],
+    push: &floes::Push,
+    offsets: &HashMap<String, geom::Point>,
+    best: &RouteResult,
+    score: &PlaceScore,
+    name: &str,
+) -> Option<(HashMap<String, geom::Point>, RouteResult, PlaceScore)> {
+    let cur = board.with_offsets(offsets);
+    let forces = floes::forces(&cur, fl, &best.geometry, &score.squeezed, &score.open);
+    let next = floes::targets(board, &cur, fl, offsets, &forces, push)?;
+    let t0 = std::time::Instant::now();
+    let d = floes::drift(
+        board,
+        fl,
+        offsets,
+        &next,
+        &best.geometry,
+        &score.hot(),
+        push.reach,
+        sub_cfg,
+        &relax::RelaxConfig {
+            // a spot that asks for room needs the copper settled to go away
+            iterations: knobs::FLOE_IT.num(),
+            // as the search relaxed it, but for the vias on planes: with `via_edge` the tracks
+            // would leave the pads another way than they do, and the first step would be
+            // judged on that
+            via_planes: true,
+            ..Default::default()
+        },
+    );
+    let moved = board.with_offsets(&d.offsets);
+    let mut geometry = d.geo;
+    // the relaxation of the steps drew every track taut on its own again: the pairs close up
+    // once more, as at the end of the search
+    if base.pair_pull > 0.0 && knobs::ZIP.on() && d.steps > 0 {
+        pairs::zip(&moved, &mut geometry);
+    }
+    let mut quick = RouteResult {
+        geometry,
+        stats: best.stats.clone(),
+        portfolio: Vec::new(),
+        frames: Vec::new(),
+        offsets: d.offsets.clone(),
+        alternatives: Vec::new(),
+    };
+    let qs = PlaceScore::of(&moved, &quick);
+    quick.stats.length = qs.length;
+    eprintln!(
+        "{name}: {} parts drifted up to {:.2} mm in {} of {} steps ({} shoved through copper, {} stopped short), {} problems (best {}), {:.0} mm (best {:.0}), {:.1} s",
+        d.moved,
+        d.longest,
+        d.steps,
+        d.planned,
+        d.shoved.len(),
+        d.stuck.len(),
+        qs.problems,
+        score.problems,
+        qs.length,
+        score.length,
+        t0.elapsed().as_secs_f64()
+    );
+    if knobs::FLOE_LOG.on() {
+        eprintln!(
+            "  cost {:.2} (best {:.2}), {} findings (best {})",
+            qs.cost,
+            score.cost,
+            qs.spots.len(),
+            score.spots.len()
+        );
+        for (part, why) in &d.stuck {
+            eprintln!("  {part} stopped: {why}");
+        }
+    }
+    Some((next, quick, qs))
+}
+
+/// What [`drift_with_bands`] reached: the offsets of the parts, the board and substrate with
+/// them, and the copper there.
+struct BandDrift {
+    offsets: HashMap<String, geom::Point>,
+    board: Board,
+    sub: Substrate,
+    geo: Geometry,
+}
+
+/// The parts of `board` drift on the relaxed copper `geo` of a search ([`floes`]): the tracks
+/// that bend around a part and those that pull at it move it, in rounds, until a round makes
+/// the copper less than [`BAND_GAIN`] shorter. The topology is kept and no round may leave more
+/// findings than the copper came with. This runs before the finishing steps of the search: the
+/// finished copper is no fixed point of the relaxation, and a step on it could not be judged.
+/// None if nothing moved.
+fn drift_with_bands(board: &Board, sub_cfg: &SubstrateConfig, geo: &Geometry) -> Option<BandDrift> {
+    let fl = floes::floes(board);
+    let push = floes::Push::of(board);
+    if push.band_step <= 0.0 || fl.is_empty() {
+        return None;
+    }
+    let cfg = relax::RelaxConfig {
+        iterations: knobs::FLOE_BAND_IT.num(),
+        via_planes: true,
+        ..Default::default()
+    };
+    let count = |b: &Board, g: &Geometry| {
+        let free = exit::release_unused(b, g);
+        let v = check::check(free.as_ref().unwrap_or(b), g);
+        // a problem inside one part moves with it, and its pieces are no measure
+        let n = v.iter().filter(|x| !floes::own_affair(b, x.at, x.nets)).count();
+        (n, v.iter().filter(|x| x.actual <= 0.0).count())
+    };
+    let length = |g: &Geometry| -> f64 {
+        g.tracks
+            .iter()
+            .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
+            .sum()
+    };
+    let before = count(board, geo);
+    let mut len = length(geo);
+    let mut offsets: HashMap<String, geom::Point> = HashMap::new();
+    let mut g = geo.clone();
+    for round in 1..=knobs::FLOE_ROUNDS.num::<usize>() {
+        let t0 = std::time::Instant::now();
+        let cur = board.with_offsets(&offsets);
+        let forces = floes::forces(&cur, &fl, &g, &[], &[]);
+        let Some(next) = floes::targets(board, &cur, &fl, &offsets, &forces, &push) else {
+            break;
+        };
+        let d = floes::drift(board, &fl, &offsets, &next, &g, &[], push.reach, sub_cfg, &cfg);
+        let moved = board.with_offsets(&d.offsets);
+        let (l, c) = (length(&d.geo), count(&moved, &d.geo));
+        eprintln!(
+            "drift round {round}: {} parts drifted up to {:.2} mm in {} of {} steps ({} shoved through copper, {} stopped short), {} findings (before {}), {:.0} mm (before {:.0}), {:.1} s",
+            d.moved,
+            d.longest,
+            d.steps,
+            d.planned,
+            d.shoved.len(),
+            d.stuck.len(),
+            c.0,
+            before.0,
+            l,
+            len,
+            t0.elapsed().as_secs_f64()
+        );
+        if knobs::FLOE_LOG.on() {
+            for (part, why) in &d.stuck {
+                eprintln!("  {part} stopped: {why}");
+            }
+        }
+        if d.steps == 0 || c.0 > before.0 || c.1 > before.1 || l >= len {
+            break;
+        }
+        let gained = 1.0 - l / len.max(1e-9);
+        offsets = d.offsets;
+        g = d.geo;
+        len = l;
+        if gained < BAND_GAIN {
+            break;
+        }
+    }
+    if offsets.values().all(|o| o.len() < 1e-9) {
+        return None;
+    }
+    let moved = board.with_offsets(&offsets);
+    let sub = Substrate::build(&moved, sub_cfg);
+    Some(BandDrift {
+        offsets,
+        board: moved,
+        sub,
+        geo: g,
+    })
+}
 
 /// [`route_board`] up to the vias of the current paths.
 ///
-/// The placement rounds ([`floes`]): the copper of the best routing pushes the movable parts,
-/// away from the places that ask for room and, with `GB_FLOE_BAND`, out of the way of the tracks
-/// that bend around them and towards the tracks that pull at them. The parts drift there in
-/// small steps with the topology kept, shoving each other along. A round that makes the board
-/// better is kept and the next one starts from it. One that does not may route the board anew
-/// on the shifted parts (`GB_PLACE_SEARCHES` times, and only for a handful of problems on a
-/// board where a search is cheap); after that the parts are pushed twice as hard, once.
+/// With movable parts the copper pushes them ([`floes`]). Where the board lets its parts drift
+/// (`Board::drift`), the search itself has moved them on its relaxed copper already
+/// ([`drift_with_bands`]). Here the rounds for room follow, on the finished copper and with
+/// the topology kept: the places with a clearance problem and the pins of open connections
+/// push the parts around them away, the parts drift in small steps and shove each other along,
+/// and a round that makes the board better is kept. A round that solves nothing may route the
+/// board anew on the shifted parts (`GB_PLACE_SEARCHES` times, and only for a handful of
+/// problems on a board where a search is cheap); after that the spots push twice as hard, once.
 fn place_and_route(
     board: &Board,
     sub_cfg: &SubstrateConfig,
@@ -1049,155 +1234,92 @@ fn place_and_route(
     if board.movable.is_empty() || search.geometry_generations == 0 {
         return (sub, res);
     }
-    let rounds: i32 = knobs::PLACE_ROUNDS.num();
+    let rounds: usize = knobs::PLACE_ROUNDS.num();
     let mut searches: i32 = knobs::PLACE_SEARCHES.num();
     let fl = floes::floes(board);
     let push = floes::Push::of(board);
-    let mut best_score = PlaceScore::of(board, &res);
+    // the search may have let the parts drift already (`drift_with_bands`)
+    let mut offsets: HashMap<String, geom::Point> = res.offsets.clone();
+    let mut best_score = PlaceScore::of(&board.with_offsets(&offsets), &res);
     let mut best = (sub, res);
-    let mut offsets: HashMap<String, geom::Point> = HashMap::new();
+    // GB_PLACE_AFTER_STOP: an open end that was stopped still gets the rounds that keep the
+    // topology
+    let after_stop = search.open_end.is_some() && knobs::PLACE_AFTER_STOP.on();
+    let halted = || search.stopped() && !after_stop;
+    let report = |name: &str, best: &(Substrate, RouteResult), score: &PlaceScore| {
+        let mut st = best.1.stats.clone();
+        st.violations = Some(score.spots.len());
+        search.report_stats(name, &st, &best.1.geometry, &score.hot(), Search::default());
+    };
     // how hard the spots push: doubled after a round that reached nothing
     let mut gain = 1.0;
-    for round in 1..=rounds {
-        // GB_PLACE_AFTER_STOP: an open end that was stopped still gets the fast rounds below
-        let after_stop = search.open_end.is_some() && knobs::PLACE_AFTER_STOP.on();
-        let hot = best_score.hot();
-        if (hot.is_empty() && push.band_step <= 0.0) || (search.stopped() && !after_stop) {
-            break;
-        }
-        let cur = board.with_offsets(&offsets);
-        let forces = floes::forces(&cur, &fl, &best.1.geometry, &best_score.squeezed, &best_score.open);
-        let harder = floes::Push {
+    let mut round = 0;
+    while round < rounds && !best_score.hot().is_empty() && !halted() {
+        round += 1;
+        let name = format!("placement round {round}");
+        let room = floes::Push {
             press_step: push.press_step * gain,
+            band_step: 0.0,
             ..push.clone()
         };
-        let Some(next) = floes::targets(board, &cur, &fl, &offsets, &forces, &harder) else {
+        let Some((next, quick, qs)) =
+            drift_round(board, sub_cfg, base, &fl, &room, &offsets, &best.1, &best_score, &name)
+        else {
             break;
-        };
-        // the rubber band way: keep the topology of the best routing and let the parts drift in
-        // small steps; after each the pads take their track ends along, and the tracks they
-        // press against give way within their clearances. A part stops where the copper cannot
-        // give way any more, so the drift may end short of `next`.
-        let t0 = std::time::Instant::now();
-        let d = floes::drift(
-            board,
-            &fl,
-            &offsets,
-            &next,
-            &best.1.geometry,
-            &hot,
-            push.reach,
-            sub_cfg,
-            // as the search relaxed it: with `via_edge` the tracks would leave the pads another
-            // way than they do, and the first step would be judged on that
-            &relax::RelaxConfig {
-                iterations: knobs::FLOE_IT.num(),
-                via_planes: true,
-                ..Default::default()
-            },
-        );
-        let moved = board.with_offsets(&d.offsets);
-        let mut geometry = d.geo;
-        // the relaxation of the steps drew every track taut on its own again: the pairs close
-        // up once more, as at the end of the search
-        if base.pair_pull > 0.0 && knobs::ZIP.on() && d.steps > 0 {
-            pairs::zip(&moved, &mut geometry);
-        }
-        let quick = RouteResult {
-            geometry,
-            stats: best.1.stats.clone(),
-            portfolio: Vec::new(),
-            frames: Vec::new(),
-            offsets: d.offsets.clone(),
-            alternatives: Vec::new(),
-        };
-        let qs = PlaceScore::of(&moved, &quick);
-        eprintln!(
-            "placement round {round}: {} parts drifted up to {:.2} mm in {} of {} steps ({} shoved through copper, {} stuck), kept topology: cost {:.2} (best {:.2}), {:.1} s",
-            d.moved,
-            d.longest,
-            d.steps,
-            d.planned,
-            d.shoved.len(),
-            d.stuck.len(),
-            qs.cost,
-            best_score.cost,
-            t0.elapsed().as_secs_f64()
-        );
-        for (part, why) in &d.stuck {
-            eprintln!("  {part} stopped: {why}");
-        }
-        let report = |best: &(Substrate, RouteResult), score: &PlaceScore| {
-            let mut st = best.1.stats.clone();
-            st.violations = Some(score.spots.len());
-            search.report_stats(
-                &format!("placement round {round}"),
-                &st,
-                &best.1.geometry,
-                &score.hot(),
-                Search::default(),
-            );
         };
         if qs.better_than(&best_score) {
             // a round that solved nothing only made the copper a little shorter: it is kept,
             // and the spots that are left push harder next time
-            // (with the bands at work: one that made the copper a quarter of a percent shorter)
-            let solved = qs.problems < best_score.problems
-                || (push.band_step > 0.0 && qs.length < best_score.length * (1.0 - BAND_GAIN));
+            let solved = qs.problems < best_score.problems;
+            offsets = quick.offsets.clone();
+            best = (Substrate::build(&board.with_offsets(&offsets), sub_cfg), quick);
             best_score = qs;
-            best = (Substrate::build(&moved, sub_cfg), quick);
-            best.1.stats.length = best_score.length;
-            offsets = d.offsets;
-            report(&best, &best_score);
+            report(&name, &best, &best_score);
             if solved {
                 gain = 1.0;
                 continue;
             }
         }
-        // nothing asks for room and the bands have no more to gain
-        if hot.is_empty() {
-            break;
-        }
         // a full new search pays off only for a handful of local problems, and only on boards
         // where a search is not expensive; otherwise the drift above is all there is.
         // By board size and not by the clock: the result must not depend on the machine.
-        if searches <= 0 || hot.is_empty() || best_score.problems > 20 || best.1.stats.conns > 400 || search.stopped()
-        {
-            if gain >= 2.0 {
-                break;
-            }
-            gain *= 2.0;
-            continue;
-        }
-        searches -= 1;
-        let moved = board.with_offsets(&next);
-        // where the search took up a negotiation on its own, the rounds negotiate right away
-        let (sub, mut res) = if base.negotiate == 0 && best.1.stats.negotiate > 0 {
-            let cfg = RouterConfig {
-                negotiate: best.1.stats.negotiate,
-                ..base.clone()
+        if searches > 0 && best_score.problems <= 20 && best.1.stats.conns <= 400 && !search.stopped() {
+            searches -= 1;
+            // the parts stay where the round put them: a drift in that search would start
+            // from there and not from the file
+            let mut moved = board.with_offsets(&next);
+            moved.drift = false;
+            // where the search took up a negotiation on its own, the rounds negotiate right away
+            let (sub, mut res) = if base.negotiate == 0 && best.1.stats.negotiate > 0 {
+                let cfg = RouterConfig {
+                    negotiate: best.1.stats.negotiate,
+                    ..base.clone()
+                };
+                search_fixed(&moved, sub_cfg, &cfg, search)
+            } else {
+                route_search(&moved, sub_cfg, base, search)
             };
-            search_fixed(&moved, sub_cfg, &cfg, search)
-        } else {
-            route_search(&moved, sub_cfg, base, search)
-        };
-        res.offsets = next.clone();
-        let sc = PlaceScore::of(&moved, &res);
-        eprintln!(
-            "placement round {round}: routed anew on the shifted parts, {}/{} routed, cost {:.2} (best {:.2})",
-            res.stats.routed, res.stats.conns, sc.cost, best_score.cost
-        );
-        // the next round starts from the best result, with its placement: the drift moves the
-        // copper of that result and needs the offsets it was routed with
-        if sc.better_than(&best_score) {
-            offsets = next;
-            best_score = sc;
-            best = (sub, res);
-            gain = 1.0;
-        } else {
-            gain *= 2.0;
+            res.offsets = next.clone();
+            let sc = PlaceScore::of(&moved, &res);
+            eprintln!(
+                "{name}: routed anew on the shifted parts, {}/{} routed, {} problems (best {})",
+                res.stats.routed, res.stats.conns, sc.problems, best_score.problems
+            );
+            // the next round starts from the best result, with its placement: the drift moves
+            // the copper of that result and needs the offsets it was routed with
+            if sc.better_than(&best_score) {
+                offsets = next;
+                best_score = sc;
+                best = (sub, res);
+                gain = 1.0;
+                report(&name, &best, &best_score);
+                continue;
+            }
         }
-        report(&best, &best_score);
+        if gain >= 2.0 {
+            break;
+        }
+        gain *= 2.0;
     }
     best
 }
@@ -1241,7 +1363,10 @@ fn better_search(
     plain: (Substrate, RouteResult),
 ) -> (Substrate, RouteResult) {
     let key = |r: &RouteResult| {
-        // each result on the pads as its last steps saw them (`exit::release_unused`)
+        // each result on the parts as its search left them, and on the pads as its last steps
+        // saw them (`exit::release_unused`)
+        let moved = (!r.offsets.is_empty()).then(|| board.with_offsets(&r.offsets));
+        let board = moved.as_ref().unwrap_or(board);
         let free = exit::release_unused(board, &r.geometry);
         let v = check::check(free.as_ref().unwrap_or(board), &r.geometry);
         let shorts = v.iter().filter(|x| x.actual <= 0.0).count();
@@ -1848,6 +1973,31 @@ fn search_fixed(
     // those spots get the rounds without tension of the polish to use the room, while the rest
     // of the board sleeps and moves only where they push. The alternatives of the open end keep
     // the board of the search.
+    // Before that the parts drift on the relaxed copper of the winner (`drift_with_bands`), and
+    // the winner goes on with the board as the drift left it. The runners-up and the
+    // alternatives stay on the placement of the search; the open end, whose alternatives must
+    // lie on the same parts as its result, does without the drift.
+    let whole = board;
+    let drifted = (!open && board.drift && !board.movable.is_empty() && search.geometry_generations > 0)
+        .then(|| drift_with_bands(board, sub_cfg, &best.geo))
+        .flatten();
+    if let Some(d) = &drifted {
+        best.geo = d.geo.clone();
+        let free = exit::release_unused(&d.board, &best.geo);
+        let v = check::check(free.as_ref().unwrap_or(&d.board), &best.geo);
+        best.stats.violations = Some(v.len());
+        best.stats.shorts = Some(v.iter().filter(|x| x.actual <= 0.0).count());
+        best.stats.length = best
+            .geo
+            .tracks
+            .iter()
+            .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
+            .sum();
+        best.hot = v.iter().map(|x| x.at).collect();
+        search.report("drift", &best);
+    }
+    let mut on_drift = drifted.is_some();
+    let (board, win_sub) = drifted.as_ref().map_or((whole, &sub), |d| (&d.board, &d.sub));
     let released = exit::release_unused(board, &best.geo).map(|free| {
         let sub = Substrate::build(&free, sub_cfg);
         (free, sub)
@@ -1889,9 +2039,8 @@ fn search_fixed(
             }
         }
     }
-    let whole = board;
-    let board = released.as_ref().map_or(whole, |r| &r.0);
-    let free_sub = released.as_ref().map_or(&sub, |r| &r.1);
+    let board = released.as_ref().map_or(board, |r| &r.0);
+    let free_sub = released.as_ref().map_or(win_sub, |r| &r.1);
     let kept = KEEP_WINNERS
         .load(std::sync::atomic::Ordering::Relaxed)
         .then(|| (best.order.clone(), best.cfg.clone(), best.geo.clone()));
@@ -2003,6 +2152,7 @@ fn search_fixed(
             if key < best_key {
                 best = c;
                 best_key = key;
+                on_drift = false;
                 search.report("runner-up", &best);
             }
         }
@@ -2022,6 +2172,10 @@ fn search_fixed(
             (c.stats, c.geo)
         })
         .collect();
+    let (sub, offsets) = match drifted {
+        Some(d) if on_drift => (d.sub, d.offsets),
+        _ => (sub, HashMap::new()),
+    };
     (
         sub,
         RouteResult {
@@ -2029,7 +2183,7 @@ fn search_fixed(
             stats: best.stats,
             portfolio,
             frames,
-            offsets: HashMap::new(),
+            offsets,
             alternatives,
         },
     )
@@ -2171,14 +2325,27 @@ mod tests {
         count_apart(&b, &r, &joined, &mut st);
         assert_eq!((st.routed, st.unrouted.len()), (1, 0), "{:?}", st.unrouted);
     }
-    use crate::board::Block;
-    use crate::geom::{Polygon, Rect, pt};
+    use crate::geom::pt;
 
-    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
-        Rect {
-            min: pt(x, y),
-            max: pt(x + w, y + h),
-        }
+    /// The track that ends on P1 pulls it towards its other end: the part drifts within its
+    /// reach, the copper gets shorter and stays clean. Without drift nothing moves.
+    #[test]
+    fn the_bands_let_a_part_drift() {
+        let (mut b, geo) = floes::tests::board();
+        let cfg = SubstrateConfig::default();
+        assert!(drift_with_bands(&b, &cfg, &geo).is_none());
+        b.drift = true;
+        let length = |g: &Geometry| -> f64 {
+            g.tracks
+                .iter()
+                .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
+                .sum()
+        };
+        let d = drift_with_bands(&b, &cfg, &geo).expect("the part drifts");
+        let p1 = d.offsets["P1"];
+        assert!(p1.x < -0.2 && p1.len() <= b.move_reach + 1e-9, "{p1:?}");
+        assert!(length(&d.geo) < length(&geo) - 0.2);
+        assert!(check::check(&d.board, &d.geo).len() <= check::check(&b, &geo).len());
     }
 
     /// A part moves sideways: the piece of its track on the pad goes along as a whole and stays
