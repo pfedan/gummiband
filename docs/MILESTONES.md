@@ -1017,3 +1017,21 @@ What it does and we do not, noted for later:
 - Rule conditions by layer and pad overrides resolved in KiCad's order; ours are still the
   list in the guide.
 
+### Two findings from watching a route (2026-11-27)
+
+- Pairs that came apart at the very end, with `--move-parts --pairs pull`: the steps in which
+  parts give way relax the copper, and nothing closed the pairs up afterwards. Now `pairs::zip`
+  runs after the steps. LED controller, `standard`: 97 of 162 mm coupled before, 117 of 163 mm
+  after, the same as without moving parts.
+- Parts that hardly moved: one new spot of 3 µm far away from the parts stopped every step
+  after the first, in both rounds. Now only the copper around the parts and around the spots is
+  awake. Same run: 3 of 3 steps instead of 1, R110 and U5 shifted by 0.2 and 0.3 mm instead of
+  0.07 and 0.1 mm. The spot they were to free is a row of pads that leaves no legal track
+  (`tight_pads`), so the number of findings is the same.
+- What is left of the uncoupled length of the USB pair is at its layer changes: the two nets
+  of `pull` take their vias up to 2 mm apart. A price for the via of a pair net, more away
+  from where the partner changes layers (`GB_PAIR_VIA`, an idea from the doubled via cost of
+  KiCadRoutingTools), gave 76, 75 and 78 % coupled at 0, 1 and 2 over three seeds: no signal,
+  off by default. Pairs with their vias side by side are what `--pairs band` with
+  `--via-pairs` is for.
+

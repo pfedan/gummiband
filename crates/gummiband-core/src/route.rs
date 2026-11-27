@@ -2555,6 +2555,29 @@ impl<'a> Router<'a> {
         if let Some(p) = self.prices.as_ref().filter(|p| p.soft && p.via > 0.0) {
             via_cost = via_cost.max((p.via * p.crossing * self.via_factor(ci)).min(p.via_cap * via_cost));
         }
+        // a pair changes layers with two vias, and side by side: a via of a pair net costs
+        // more (GB_PAIR_VIA), and more again away from where its partner changes layers
+        let pair_via: f64 = if self.partner.contains_key(&net) { knobs::PAIR_VIA.num() } else { 0.0 };
+        let changes: Vec<Point> = guide
+            .filter(|_| pair_via > 0.0)
+            .map(|(g, _)| {
+                g.iter()
+                    .flat_map(|g| g.pts.windows(2).filter(|w| w[0].1 != w[1].1).map(|w| w[0].0))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let base_via = via_cost;
+        let pair_via_at = |q: Point| -> f64 {
+            if pair_via <= 0.0 {
+                return 0.0;
+            }
+            let away = if guide.is_some() {
+                changes.iter().map(|c| c.dist(q) / 2.0).fold(1.0, f64::min)
+            } else {
+                0.0
+            };
+            pair_via * base_via * (1.0 + away)
+        };
         let item = Item {
             net,
             w: cls.track_width,
@@ -3216,7 +3239,7 @@ impl<'a> Router<'a> {
                         let Some(existing) = ok else {
                             continue;
                         };
-                        let mut vc = if existing { 0.1 } else { via_cost };
+                        let mut vc = if existing { 0.1 } else { via_cost + pair_via_at(self.site_point(site)) };
                         if let Some(s) = soft {
                             if let Some((ep, es)) = entry_pos {
                                 vc += s.crossing * self.chords_crossed(t, lu, net, ep, es, CPos::Vertex(i)) as f64;
@@ -3317,7 +3340,7 @@ impl<'a> Router<'a> {
                         if own_vias.iter().any(|v| v.dist(q) < hole_gap) {
                             continue;
                         }
-                        let mut vc = via_cost;
+                        let mut vc = via_cost + pair_via_at(q);
                         if let Some(s) = soft {
                             if let Some((ep, es)) = entry_pos {
                                 vc += s.crossing * self.half_chords_crossed(t, lu, net, q, ep, es) as f64;

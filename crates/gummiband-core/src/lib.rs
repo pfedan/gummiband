@@ -967,6 +967,36 @@ pub fn route_board(
     (sub, res)
 }
 
+/// How far around a shifted part and around a place that asks for room the copper is awake
+/// while the parts move, in mm.
+const PLACE_AWAKE: f64 = 5.0;
+
+/// True for a segment within [`PLACE_AWAKE`] of a part that moves from `from` to `to`, or of a
+/// place that asks for room.
+fn place_reach(
+    cur: &Board,
+    from: &HashMap<String, geom::Point>,
+    to: &HashMap<String, geom::Point>,
+    hot: &[geom::Point],
+) -> impl Fn(geom::Point, geom::Point) -> bool {
+    let at = |m: &HashMap<String, geom::Point>, r: &str| m.get(r).copied().unwrap_or_default();
+    let boxes: Vec<geom::Rect> = to
+        .keys()
+        .chain(from.keys())
+        .filter(|r| at(from, r).dist(at(to, r)) > 1e-9)
+        .filter_map(|r| cur.courtyards.get(r).map(|c| c.grow(PLACE_AWAKE + at(from, r).dist(at(to, r)))))
+        .collect();
+    let hot = hot.to_vec();
+    move |a, b| {
+        hot.iter().any(|&h| geom::point_seg_dist(h, a, b) < PLACE_AWAKE)
+            || boxes.iter().any(|r| {
+                let mut seg = geom::Rect { min: a, max: a };
+                seg.add(b);
+                r.overlaps(&seg)
+            })
+    }
+}
+
 /// [`route_board`] up to the vias of the current paths.
 fn place_and_route(
     board: &Board,
@@ -1014,17 +1044,32 @@ fn place_and_route(
         // they press against give way within their clearances. The parts stop where the copper
         // cannot give way any more, so the shift may end short of `next`.
         let quick = {
-            // the routed copper stays awake: the relaxation of each step may also settle the
-            // spots the shift is meant to free
-            let f = follow::follow_steps(
-                board,
-                &offsets,
-                &next,
-                &best.1.geometry,
-                sub_cfg,
-                &relax::RelaxConfig::default(),
-            );
-            let geometry = f.geo;
+            // the routed copper near the parts and near the spots stays awake: the relaxation
+            // of each step may also settle the spots the shift is meant to free. The rest of
+            // the board sleeps and moves only where it is pushed: awake, it settled a few
+            // micrometres differently somewhere far away, and that new spot stopped the parts
+            // after their first step
+            let mut start = best.1.geometry.clone();
+            let near = place_reach(&cur, &offsets, &next, &hot);
+            for t in &mut start.tracks {
+                t.resting |= !t.pts.windows(2).any(|w| near(w[0], w[1]));
+            }
+            for v in &mut start.vias {
+                v.resting |= !near(v.at, v.at);
+            }
+            let mut f = follow::follow_steps(board, &offsets, &next, &start, sub_cfg, &relax::RelaxConfig::default());
+            for (t, o) in f.geo.tracks.iter_mut().zip(&best.1.geometry.tracks) {
+                t.resting = o.resting;
+            }
+            for (v, o) in f.geo.vias.iter_mut().zip(&best.1.geometry.vias) {
+                v.resting = o.resting;
+            }
+            let mut geometry = f.geo;
+            // the relaxation of the steps drew every track taut on its own again: the pairs
+            // close up once more, as at the end of the search
+            if base.pair_pull > 0.0 && knobs::ZIP.on() && f.stats.steps > 0 {
+                pairs::zip(&board.with_offsets(&f.offsets), &mut geometry);
+            }
             eprintln!(
                 "placement round {round}: followed {} of {} steps{}",
                 f.stats.steps,

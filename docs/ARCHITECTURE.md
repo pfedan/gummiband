@@ -663,7 +663,15 @@ relaxation wakes what that copper touches in turn. A step that leaves a clearanc
 pair that had none within reach, or a worse one (`is_new`), a courtyard that runs into another part or leaves the board, ends the move at the
 last clean step. Copper that stays asleep keeps its exact shape. `move_with_copper` runs this on
 the soft copper of a routed file (`gummiband move-part`, MCP `move_part`); `route_board` runs it
-for the shifts of `--move-parts`, with all routed copper awake, before it considers a new search.
+for the shifts of `--move-parts` before it considers a new search. There the routed copper within
+5 mm of a shifted part or of a place that asks for room is awake (`place_reach` in `lib.rs`), so
+the steps can also settle the spots they are meant to free; the rest sleeps and moves only where
+it is pushed. With the whole board awake the copper settled a few micrometres differently
+somewhere far away, and that new spot ended the move after its first step (the LED controller:
+1 of 3 steps, stopped by 3 µm at the other end of the board). After the steps the pairs of
+`--pairs pull` close up again (`pairs::zip`): the relaxation of the steps draws every track taut
+on its own, and the pairs that the end of the search had closed up stood apart again (60 %
+coupled instead of 72 % on the LED controller).
 
 ## Differential pairs
 
