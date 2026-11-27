@@ -2576,6 +2576,69 @@ mod tests {
     }
 
     #[test]
+    fn the_rip_up_of_a_run_takes_out_what_is_in_the_way() {
+        let b = tunnel_board();
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let run = |passes: usize| {
+            let cfg = RouterConfig {
+                ripup_passes: passes,
+                ripup_cut: true,
+                ..Default::default()
+            };
+            let mut r = Router::new(&b, &sub, cfg);
+            r.plan();
+            r.reorder(|c| if c.net == 0 { 0.0 } else { 1.0 });
+            let routed = r.run();
+            assert!(r.validate().is_empty(), "{:?}", r.validate());
+            (routed, r)
+        };
+        assert_eq!(run(0).0, 1, "B must find the tunnel taken");
+        let (routed, r) = run(1);
+        assert_eq!(routed, 2);
+        // A gave way and went around the tunnel
+        let a = (0..2).find(|&ci| r.conns[ci].net == 0).unwrap();
+        assert!(r.conn_points(a).iter().any(|p| p.y > 16.0), "{:?}", r.conn_points(a));
+    }
+
+    #[test]
+    fn a_rip_up_never_costs_a_connection() {
+        // the tunnel takes one track and there is no way around it: one of the two stays open
+        // whatever gives way, and the topology stays sound
+        let mut b = tunnel_board();
+        let wall = |lo: Point, hi: Point| Obstacle {
+            shape: Shape::Polygon(Polygon::new(vec![lo, pt(hi.x, lo.y), hi, pt(lo.x, hi.y)])),
+            layers: LayerSet::single(0),
+            net: None,
+            kind: ObstacleKind::Keepout {
+                vias: true,
+                tracks: true,
+                mask: false,
+            },
+            hole: None,
+            clearance: 0.0,
+            pin: None,
+            locked: false,
+        };
+        b.obstacles.push(wall(pt(19.0, 16.0), pt(21.0, 25.0)));
+        let sub = Substrate::build(&b, &SubstrateConfig::default());
+        let run = |passes: usize| {
+            let cfg = RouterConfig {
+                ripup_passes: passes,
+                ripup_cut: true,
+                ..Default::default()
+            };
+            let mut r = Router::new(&b, &sub, cfg);
+            r.plan();
+            r.reorder(|c| if c.net == 0 { 0.0 } else { 1.0 });
+            let routed = r.run();
+            assert!(r.validate().is_empty(), "{:?}", r.validate());
+            routed
+        };
+        assert_eq!(run(0), 1);
+        assert_eq!(run(3), 1);
+    }
+
+    #[test]
     fn an_aimed_move_gets_the_open_connection_through() {
         let b = tunnel_board();
         let sub = Substrate::build(&b, &SubstrateConfig::default());

@@ -5,7 +5,8 @@ Usage: bench/compare.py OLD_BIN NEW_BIN [--boards a,b,...] [--args "route args"]
        (the same binary twice: one run per board, a status table)
 
 Boards: the synthetic suite (bench/boards), the prepared external boards (bench/work/ext:
-arty, corne, ulx3s) and the LED controller benchmark (bench/work/ledctl). Every board is
+arty, corne, ulx3s), the LED controller benchmark (bench/work/ledctl) and the corpus of
+KiCadRoutingTools (bench/work/krt, see prepare-krt.sh). Every board is
 routed by each binary in turn, alone on the machine, then checked with
 `kicad-cli pcb drc --refill-zones`. Violations that the unrouted board already has (courtyards,
 padstacks, ...) are subtracted per type. The table shows completion, routing caused DRC errors
@@ -39,6 +40,12 @@ def boards():
     p = os.path.join(BENCH, "work", "ledctl", "ledctl.kicad_pcb")
     if os.path.exists(p):
         out.append(("ledctl", p))
+    # the corpus of KiCadRoutingTools, see prepare-krt.sh; its ulx3s is `krt-ulx3s`
+    krt = os.path.join(BENCH, "work", "krt")
+    for n in sorted(os.listdir(krt)) if os.path.isdir(krt) else []:
+        p = os.path.join(krt, n, n + ".kicad_pcb")
+        if os.path.exists(p):
+            out.append(("krt-ulx3s" if n == "ulx3s" else n, p))
     return out
 
 

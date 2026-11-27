@@ -1100,20 +1100,25 @@ impl Reader {
             let na = |h: &str| k.child_str(h) == Some("not_allowed");
             let (tracks, vias) = (na("tracks"), na("vias"));
             if tracks || vias {
-                self.push_obstacle(Obstacle {
-                    shape: Shape::Polygon(Polygon::new(outline)),
-                    layers,
-                    net: None,
-                    kind: ObstacleKind::Keepout {
-                        vias,
-                        tracks,
-                        mask: false,
-                    },
-                    hole: None,
-                    clearance: 0.0,
-                    pin: None,
-                    locked: true,
-                });
+                // KiCad writes the outline first and every hole in it as a polygon of its own:
+                // a keep-out along the board edge is a rectangle with the board as its hole
+                let contours: Vec<Vec<Point>> = z.children("polygon").map(pts).collect();
+                for piece in gummiband_core::geom::without_holes(&contours) {
+                    self.push_obstacle(Obstacle {
+                        shape: Shape::Polygon(piece),
+                        layers,
+                        net: None,
+                        kind: ObstacleKind::Keepout {
+                            vias,
+                            tracks,
+                            mask: false,
+                        },
+                        hole: None,
+                        clearance: 0.0,
+                        pin: None,
+                        locked: true,
+                    });
+                }
             }
             return;
         }
@@ -1595,6 +1600,45 @@ mod tests {
     fn openings(b: &Board) -> Vec<&Obstacle> {
         let mask = |o: &&Obstacle| matches!(o.kind, ObstacleKind::Keepout { mask: true, .. }) && !o.layers.is_empty();
         b.obstacles.iter().filter(mask).collect()
+    }
+
+    /// A keep-out along the board edge is a rectangle with the board as its hole: the board
+    /// inside the hole stays free.
+    #[test]
+    fn a_keepout_with_a_hole_leaves_the_hole_free() {
+        let text = r#"(kicad_pcb (version 20240108)
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "")
+  (gr_rect (start 0 0) (end 60 40) (layer "Edge.Cuts"))
+  (zone (layers "F.Cu" "B.Cu")
+    (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour allowed) (footprints allowed))
+    (polygon (pts (xy 0 0) (xy 60 0) (xy 60 40) (xy 0 40)))
+    (polygon (pts (xy 2 2) (xy 2 38) (xy 58 38) (xy 58 2))))
+)"#;
+        let kb = parse_board(text.to_string(), None, &ReadOptions::default()).unwrap();
+        let shut = |p: Point| {
+            kb.board.obstacles.iter().any(|o| {
+                matches!(
+                    o.kind,
+                    ObstacleKind::Keepout {
+                        tracks: true,
+                        vias: true,
+                        ..
+                    }
+                ) && matches!(&o.shape, Shape::Polygon(poly) if poly.contains(p))
+            })
+        };
+        assert!(!shut(pt(30.0, 20.0)), "the middle of the board is in the hole");
+        assert!(!shut(pt(3.0, 3.0)));
+        for p in [
+            pt(1.0, 20.0),
+            pt(59.0, 20.0),
+            pt(30.0, 1.0),
+            pt(30.0, 39.0),
+            pt(1.0, 1.0),
+        ] {
+            assert!(shut(p), "{p:?} is in the keep-out");
+        }
     }
 
     const PAD: &str = r#"(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") (net 1 "A"))"#;
