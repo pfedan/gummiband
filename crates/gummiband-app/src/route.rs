@@ -1002,8 +1002,11 @@ pub fn route_board(board: &Board, opts: &RouteOptions, hooks: &Hooks) -> Result<
 }
 
 fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) -> Result<Routed> {
+    let (wide, rings) = wide_rings(board);
+    let board = wide.as_ref().unwrap_or(board);
     let first = route_with(t0, board, opts, hooks, true)?;
-    let routed = area_fallback(t0, board, opts, hooks, first)?;
+    let mut routed = area_fallback(t0, board, opts, hooks, first)?;
+    narrow_rings(&mut routed, &rings);
     if let Some(begin) = hooks.watch {
         use gummiband_core::watch::{Stage, View};
         let spots: Vec<gummiband_core::geom::Point> = routed.violations.iter().map(|v| v.at).collect();
@@ -1014,6 +1017,69 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
         begin(&routed.board).show(&v);
     }
     Ok(routed)
+}
+
+/// The classes whose via has a ring so narrow that the hole clearance asks for more room around
+/// the via than the copper clearance does: (class, diameter of the class, diameter that holds the
+/// hole clearance), and the board with those classes at the wider diameter.
+///
+/// KiCad keeps copper of other nets `hole_clearance` away from a drill. With the usual rings the
+/// copper clearance around the via covers that. A fine via does not: with a drill of 0.2 mm in a
+/// via of 0.35 mm, 0.1 mm clearance and 0.25 mm hole clearance a track may come to 0.175 mm of
+/// the drill by its copper and must stay 0.25 mm away by its hole. The search and the relaxation
+/// know one size of a via, so they route such a class with a via as wide as its drill and the
+/// difference of the two clearances, and [`narrow_rings`] gives the vias their size back.
+/// Measured on Glasgow with fine vias: 2544 hole findings without this.
+fn wide_rings(board: &Board) -> (Option<Board>, Vec<(usize, f64, f64)>) {
+    let rings: Vec<(usize, f64, f64)> = board
+        .classes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let clearance = c.clearance.max(board.rules.min_clearance);
+            let need = c.via_drill + 2.0 * (board.rules.hole_clearance - clearance);
+            (c.via_drill > 0.0 && need > c.via_diameter + 1e-9).then_some((i, c.via_diameter, need))
+        })
+        .collect();
+    if rings.is_empty() {
+        return (None, rings);
+    }
+    let mut wide = board.clone();
+    for &(i, _, need) in &rings {
+        wide.classes[i].via_diameter = need;
+    }
+    (Some(wide), rings)
+}
+
+/// The vias of the classes of [`wide_rings`] at the diameter of their class again, with the
+/// findings of the check on that copper.
+fn narrow_rings(routed: &mut Routed, rings: &[(usize, f64, f64)]) {
+    if rings.is_empty() {
+        return;
+    }
+    let class: Vec<usize> = routed.board.nets.iter().map(|n| n.class as usize).collect();
+    let narrow = |geo: &mut gummiband_core::realize::Geometry| {
+        for v in &mut geo.vias {
+            let c = class[v.net as usize];
+            if let Some(&(_, real, wide)) = rings.iter().find(|r| r.0 == c)
+                && !v.is_pair()
+                && (v.diameter - wide).abs() < 1e-9
+            {
+                v.diameter = real;
+            }
+        }
+    };
+    narrow(&mut routed.res.geometry);
+    for (_, geo) in &mut routed.res.alternatives {
+        narrow(geo);
+    }
+    for (_, geo, _) in &mut routed.res.frames {
+        narrow(geo);
+    }
+    for &(i, real, _) in rings {
+        routed.board.classes[i].via_diameter = real;
+    }
+    routed.violations = gummiband_core::check::check(&routed.board, &routed.res.geometry);
 }
 
 /// `areas` fill never ends with fewer connections than `areas` tracks.
@@ -2064,6 +2130,28 @@ pub fn route_file(board: &Path, output: &Path, opts: &RouteOptions, hooks: &Hook
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fine_via_is_routed_with_the_room_of_its_hole_clearance() {
+        let mut b = Board::default();
+        b.rules.min_clearance = 0.1;
+        b.rules.hole_clearance = 0.25;
+        let class = |clearance: f64, via: f64, drill: f64| gummiband_core::board::NetClass {
+            clearance,
+            via_diameter: via,
+            via_drill: drill,
+            ..Default::default()
+        };
+        b.classes = vec![class(0.2, 0.6, 0.3), class(0.1, 0.35, 0.2)];
+        let (wide, rings) = wide_rings(&b);
+        // 0.2 + 2 (0.25 - 0.1) = 0.5 mm; the usual via covers its hole clearance by its ring
+        assert_eq!(rings.len(), 1);
+        assert!(rings[0].0 == 1 && rings[0].1 == 0.35 && (rings[0].2 - 0.5).abs() < 1e-9);
+        let wide = wide.unwrap();
+        assert!((wide.classes[1].via_diameter - 0.5).abs() < 1e-9 && wide.classes[0].via_diameter == 0.6);
+        b.classes.pop();
+        assert!(wide_rings(&b).0.is_none());
+    }
 
     /// A route with `areas fill` whose last check finds a pad of the area net open: here as if
     /// it had taken back the copper that joined the pads of VBUS to the area on the back. The

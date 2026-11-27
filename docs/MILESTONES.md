@@ -1101,10 +1101,14 @@ any board, ball fields and the steps before the search come first.
 - Glasgow with the rules its warning names (0.1 mm clearance, vias of 0.35 mm): 811 of 811
   with 2 findings in 59 s, where the rules of the file give 743 of 811 in 400 s. With ulx3s
   that is the second real field the search gets out once the rules allow it.
-- Found on the way, open: with a via ring narrower than the hole clearance minus the copper
+- Found on the way and mended: with a via ring narrower than the hole clearance minus the copper
   clearance (0.075 mm ring, 0.25 mm hole clearance, 0.1 mm clearance) the search and the
-  relaxation keep tracks at the copper clearance from the via and the check then counts the
+  relaxation kept tracks at the copper clearance from the via and the check then counted the
   drill: 2544 hole findings on that Glasgow variant. Boards with the usual rings never show it.
+  Now such a class is routed with a via as wide as its drill and the room of the hole clearance,
+  and the vias get their size back at the end (`wide_rings`, `narrow_rings` in
+  `gummiband-app/src/route.rs`): 33 findings (22 of them holes short by 4 to 7 µm), 810 of
+  811, the vias written at 0.35 mm.
 - `GB_RIPUP_CUT` over five seeds with KiCad's DRC (`quick`): esp_prog clean in all five
   without it and 30 findings in all five with it; corne worse (a median of 29 for 20);
   kit-dev twice as fast but with exactly 385 vias on every seed against 151 to 207. A result

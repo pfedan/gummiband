@@ -305,6 +305,11 @@ each layer stays planar by construction.
   controller short on three of four seeds: the USB pair lay around the via by then.
   `GB_NO_VIA_ROOM` switches the kept room off, `GB_LOG=current` tells what became of each such
   via.
+- Fine vias: a class whose via ring is narrower than the hole clearance minus its copper
+  clearance is routed with a wider via, its drill and that room (`wide_rings` in
+  `gummiband-app/src/route.rs`), because search and relaxation know one size of a via and KiCad
+  keeps foreign copper `hole_clearance` away from the drill. The finished vias have the diameter
+  of their class again (`narrow_rings`), and the findings are those of the check on that copper.
 - A chain whose new vias split triangles is checked before it is committed: consecutive
   triangles must still be neighbours, and a via must still be a corner of the triangles the
   chain arrives from and leaves through, since another via of the same chain may have split one
