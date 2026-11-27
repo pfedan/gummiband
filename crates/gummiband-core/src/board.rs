@@ -302,6 +302,13 @@ pub struct Board {
     /// Footprints the router may shift a little (empty: placement is fixed).
     #[serde(default)]
     pub movable: Vec<String>,
+    /// How far a movable footprint may end up from its place in the file, in mm.
+    #[serde(default)]
+    pub move_reach: f64,
+    /// The tracks push and pull the movable footprints even where nothing asks for room
+    /// (see [`crate::floes`]).
+    #[serde(default)]
+    pub drift: bool,
     /// Groups of parts with their pre-routed copper that move only as a whole.
     #[serde(default)]
     pub blocks: Vec<Block>,

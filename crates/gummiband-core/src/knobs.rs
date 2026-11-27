@@ -414,8 +414,22 @@ knobs! {
         "The connections of the balls of a ball field go before the other signal connections, ring by ring: 1 the innermost ring first, 2 the outermost first (0: off).";
     PAIR_VIA = "GB_PAIR_VIA", Experiment, Num, "0",
         "With `--pairs pull`: a via of a pair net costs this many vias more, and as much again 2 mm or more from where its partner changes layers (0: off).";
-    PLACE_ROUNDS = "GB_PLACE_ROUNDS", Experiment, Num, "2",
-        "Rounds in which parts give way at hot spots (`--move-parts`).";
+    PLACE_ROUNDS = "GB_PLACE_ROUNDS", Experiment, Num, "6",
+        "Rounds in which the spots that ask for room push the movable parts (`--move-parts`).";
+    PLACE_SEARCHES = "GB_PLACE_SEARCHES", Experiment, Num, "2",
+        "How many of those rounds may route the board anew on the shifted parts.";
+    FLOE_IT = "GB_FLOE_IT", Experiment, Num, "400",
+        "Relaxation rounds after each step of the parts in a placement round (`--move-parts`).";
+    FLOE_BAND_IT = "GB_FLOE_BAND_IT", Experiment, Num, "120",
+        "Relaxation rounds after each step of the parts while they drift in the search (`--move-parts` with drift).";
+    FLOE_ROUNDS = "GB_FLOE_ROUNDS", Experiment, Num, "6",
+        "Rounds in which the tracks push and pull the movable parts before the copper is finished (`--move-parts` with drift).";
+    FLOE_GAIN = "GB_FLOE_GAIN", Experiment, Num, "0.01",
+        "A round of the drift is worth another one when it made the copper shorter by this share (less with a reach of more than 2 mm, in proportion).";
+    FLOE_LOG = "GB_FLOE_LOG", Log, Set, "off",
+        "Print why each part stopped short in a round of `--move-parts`.";
+    FLOE_BAND = "GB_FLOE_BAND", Experiment, Num, "0.25",
+        "mm a part drifts per round for the force of one track wrapped around it or pulling at it (`--move-parts` with drift).";
     PLACE_AFTER_STOP = "GB_PLACE_AFTER_STOP", Experiment, Set, "off",
         "An open end that was stopped still gets the placement rounds.";
     NEG_ONLY = "GB_NEG_ONLY", Experiment, Set, "off",

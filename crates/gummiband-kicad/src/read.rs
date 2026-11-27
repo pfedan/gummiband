@@ -43,6 +43,10 @@ pub struct ReadOptions {
     pub move_parts: bool,
     /// References that never move.
     pub fixed: Vec<String>,
+    /// With `move_parts`: how far a part may end up from its place in the file, in mm.
+    pub move_reach: f64,
+    /// With `move_parts`: the tracks push and pull the parts even where nothing asks for room.
+    pub drift: bool,
     /// Do not keep the unlocked tracks and vias of these nets.
     pub ignore_nets: Vec<String>,
 }
@@ -55,6 +59,8 @@ impl Default for ReadOptions {
             plane_layers: Vec::new(),
             move_parts: false,
             fixed: Vec::new(),
+            move_reach: 2.0,
+            drift: false,
             ignore_nets: Vec::new(),
         }
     }
@@ -179,6 +185,8 @@ pub fn parse_board(text: String, pro: Option<&serde_json::Value>, opts: &ReadOpt
         r.b.add_island_pins();
     }
     if opts.move_parts {
+        r.b.move_reach = opts.move_reach.max(0.0);
+        r.b.drift = opts.drift;
         r.b.movable = std::mem::take(&mut r.movable)
             .into_iter()
             .filter(|f| !opts.fixed.contains(f) && r.b.courtyards.contains_key(f))
@@ -775,9 +783,7 @@ impl Reader {
                     keep: KeepCopper::None,
                     zones_as_obstacles: false,
                     plane_layers: vec![],
-                    move_parts: false,
-                    fixed: vec![],
-                    ignore_nets: vec![],
+                    ..Default::default()
                 },
             );
         }

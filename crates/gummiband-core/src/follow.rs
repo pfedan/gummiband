@@ -146,8 +146,8 @@ pub fn follow_steps(
     refs.dedup();
     let longest = refs.iter().map(|r| at(from, r).dist(at(to, r))).fold(0.0, f64::max);
     let start = board.with_offsets(from);
-    let base_spots = check::spots(&check::check(&start, geo));
-    let base = base_spots.len();
+    let base_viol = check::check(&start, geo);
+    let base = check::spots(&base_viol).len();
     // never farther per step than the smallest clearance: a pad cannot pass a track in one step
     let step = board.rules.min_clearance.clamp(0.02, 0.1);
     let n = (longest / step).ceil() as usize;
@@ -215,8 +215,9 @@ pub fn follow_steps(
         wake_near(&next, &refs, &mut g, &geo);
         let sub = Substrate::build(&next, sub_cfg);
         relax::relax(&next, &sub, &mut g, cfg);
-        let spots = check::spots(&check::check(&next, &g));
-        if let Some(s) = spots.iter().find(|s| is_new(s, &base_spots, longest)) {
+        let viol = check::check(&next, &g);
+        let spots = check::spots(&viol);
+        if let Some(s) = new_problems(&base_viol, &viol, longest).first() {
             let name = |n: Option<u32>| n.map_or("fixed copper".to_string(), |n| board.nets[n as usize].name.clone());
             st.stopped = Some(format!(
                 "no more room at ({:.2}, {:.2}): {} and {}, {:.3} mm missing",
@@ -241,13 +242,53 @@ pub fn follow_steps(
     }
 }
 
+/// The problems of `after` that were not there `before` a move of `moved` mm, or got worse.
+/// Clearances by their spots (see [`is_new`]). A track too narrow (for its current, or below
+/// the minimum width) by its net and wherever it is: the check names the narrowest place of a
+/// way, and that place jumps along the way when the copper settles a little differently.
+pub(crate) fn new_problems(before: &[check::Violation], after: &[check::Violation], moved: f64) -> Vec<check::Spot> {
+    new_problems_at(before, after, moved, 0.001)
+}
+
+/// [`new_problems`] with the amount of missing clearance below which a spot is rounding and not
+/// a problem. 0 where the result is counted by the check itself, which knows no rounding.
+pub(crate) fn new_problems_at(
+    before: &[check::Violation],
+    after: &[check::Violation],
+    moved: f64,
+    rounding: f64,
+) -> Vec<check::Spot> {
+    let clearances =
+        |v: &[check::Violation]| -> Vec<check::Violation> { v.iter().filter(|x| !x.is_width()).cloned().collect() };
+    let base = check::spots(&clearances(before));
+    let mut out: Vec<check::Spot> = check::spots(&clearances(after))
+        .into_iter()
+        .filter(|s| is_new(s, &base, moved, rounding))
+        .collect();
+    let missing = |v: &check::Violation| v.required - v.actual;
+    for v in after.iter().filter(|v| v.is_width()) {
+        let known = before.iter().any(|b| {
+            b.is_width() && b.is_current() == v.is_current() && b.nets.0 == v.nets.0 && missing(b) >= missing(v) - 0.001
+        });
+        if !known && missing(v) >= 0.001 {
+            out.push(check::Spot {
+                at: v.at,
+                nets: v.nets,
+                missing: missing(v),
+                short: false,
+            });
+        }
+    }
+    out
+}
+
 /// A clearance spot that was not there before the move, or got worse: no spot of the same two
 /// nets within reach (the moved distance plus the size of a spot), or one with less missing. A
 /// problem that only moves from one pair of nets to another counts as new, one that only splits
 /// into pieces does not.
-fn is_new(s: &check::Spot, before: &[check::Spot], moved: f64) -> bool {
+fn is_new(s: &check::Spot, before: &[check::Spot], moved: f64, rounding: f64) -> bool {
     // a micrometre is rounding, not a problem
-    if s.missing < 0.001 && !s.short {
+    if s.missing < rounding && !s.short {
         return false;
     }
     let key = |n: (u32, Option<u32>)| {
@@ -257,7 +298,7 @@ fn is_new(s: &check::Spot, before: &[check::Spot], moved: f64) -> bool {
     !before.iter().any(|b| {
         key(b.nets) == key(s.nets)
             && b.at.dist(s.at) < 2.0 + moved
-            && s.missing <= b.missing + 0.001
+            && s.missing <= b.missing + rounding
             && (b.short || !s.short)
     })
 }
@@ -346,14 +387,14 @@ fn wake_near(next: &Board, refs: &[String], g: &mut Geometry, before: &Geometry)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::board::*;
     use crate::geom::{Polygon, Shape, pt, roundrect_polygon};
 
     /// Net A runs as an unlocked track from the pad P0 at (2, 5) to P1 at (8, 5). Part Q (net B,
     /// one 0.6 mm pad) sits above it at (5, 3.5). `min_clearance` 0.1 gives steps of 0.1 mm.
-    fn board() -> Board {
+    pub(crate) fn board() -> Board {
         let mut b = crate::topo::tests::two_pad_board();
         b.layers.truncate(1);
         b.rules.min_clearance = 0.1;
@@ -504,6 +545,23 @@ mod tests {
         assert!(reached.x > -3.0 && reached.x < -1.5, "{reached:?}");
     }
 
+    /// The narrowest place of a current path is named somewhere along the path: the same
+    /// finding at another place is not a new problem, a narrower one is.
+    #[test]
+    fn a_narrow_way_that_is_named_elsewhere_is_not_new() {
+        let narrow = |x: f64, actual: f64| check::Violation {
+            what: "current A".into(),
+            nets: (0, None),
+            at: pt(x, 0.0),
+            actual,
+            required: 0.69,
+        };
+        let before = [narrow(0.0, 0.4)];
+        assert!(new_problems(&before, &[narrow(4.0, 0.4)], 0.1).is_empty());
+        assert_eq!(new_problems(&before, &[narrow(4.0, 0.3)], 0.1).len(), 1);
+        assert_eq!(new_problems(&[], &[narrow(4.0, 0.4)], 0.1).len(), 1);
+    }
+
     #[test]
     fn a_problem_that_moves_to_other_nets_is_new_one_that_splits_is_not() {
         let spot = |x: f64, nets: (u32, Option<u32>), missing: f64| check::Spot {
@@ -514,11 +572,11 @@ mod tests {
         };
         let before = [spot(0.0, (1, Some(2)), 0.02)];
         // the same pair close by, in two pieces, no worse
-        assert!(!is_new(&spot(0.5, (2, Some(1)), 0.02), &before, 0.1));
-        assert!(!is_new(&spot(1.5, (1, Some(2)), 0.01), &before, 0.1));
+        assert!(!is_new(&spot(0.5, (2, Some(1)), 0.02), &before, 0.1, 0.001));
+        assert!(!is_new(&spot(1.5, (1, Some(2)), 0.01), &before, 0.1, 0.001));
         // worse, far away, or another pair
-        assert!(is_new(&spot(0.5, (1, Some(2)), 0.03), &before, 0.1));
-        assert!(is_new(&spot(5.0, (1, Some(2)), 0.01), &before, 0.1));
-        assert!(is_new(&spot(0.5, (1, Some(3)), 0.01), &before, 0.1));
+        assert!(is_new(&spot(0.5, (1, Some(2)), 0.03), &before, 0.1, 0.001));
+        assert!(is_new(&spot(5.0, (1, Some(2)), 0.01), &before, 0.1, 0.001));
+        assert!(is_new(&spot(0.5, (1, Some(3)), 0.01), &before, 0.1, 0.001));
     }
 }

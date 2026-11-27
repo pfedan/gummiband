@@ -301,6 +301,9 @@ function maskColor(scene, mask, k) {
 
 function buildScene(scene) {
   const j = scene.json;
+  // where the parts lie in the frame that is shown: [x, y] by reference
+  const moved = scene.moved || {};
+  const shift = (pts, d) => { if (!d) return pts; const q = pts.slice(); for (let i = 0; i < q.length; i += 2) { q[i] += d[0]; q[i + 1] += d[1]; } return q; };
   scene.colors = j.layers.map((_, l) => layerColor(scene, l));
   if (!scene.mesh) scene.mesh = { fill: triBatch(), tris: triBatch(), caps: capBatch(), holes: capBatch() };
   const fill = new Floats(6), tris = new Floats(6), caps = new Floats(CAP_FLOATS), holes = new Floats(CAP_FLOATS);
@@ -313,14 +316,22 @@ function buildScene(scene) {
     triangulate(o, (a, b, c) => { for (const i of [a, b, c]) fill.vert(o[2 * i], o[2 * i + 1], BOARD, 1); });
     loop(o, 0.03, 0.6, EDGE, 1);
   }
-  if (show.labels) for (const c of j.courtyards) loop(c.pts, 0, 0.5, [0.3, 0.34, 0.36], 1);
+  if (show.labels) for (const c of j.courtyards) loop(shift(c.pts, moved[c.ref]), 0, 0.5, [0.3, 0.34, 0.36], 1);
   if (show.pads) {
     for (const p of j.planes) {
       if (hidden.has(p[0])) continue;
       loop(p.slice(2), 0, 0.5, scaled(scene.colors[p[0]], 0.45), 1);
     }
-    for (const s of j.shapes) {
+    for (let si = 0; si < j.shapes.length; si++) {
+      let s = j.shapes[si];
       const kind = j.kinds[s[0]], form = s[3];
+      const d = j.owner && j.owner[si] >= 0 ? moved[j.refs[j.owner[si]]] : null;
+      if (d) {
+        // circle: x, y, r; capsule: ax, ay, bx, by, r; polygon: points
+        s = s.slice();
+        const end = form === 0 ? 6 : form === 1 ? 8 : s.length;
+        for (let i = 4; i < end; i += 2) { s[i] += d[0]; s[i + 1] += d[1]; }
+      }
       if (kind === "hole") {
         if (form === 0) { holes.cap(s[4], s[5], s[4], s[5], s[6], 0, 0, 0, HOLE, 1); holes.cap(s[4], s[5], s[4], s[5], s[6], 0, 0, 1, EDGE, 0.7); }
         continue;
@@ -505,6 +516,8 @@ function draw() {
   const scene = f ? scenes[f.scene] : scenes[scenes.length - 1];
   labels.clearRect(0, 0, canvas.width, canvas.height);
   if (!scene) return;
+  const movedKey = f && f.movedKey || "";
+  if (scene.movedKey !== movedKey) { scene.movedKey = movedKey; scene.moved = f && f.head.moved; scene.stale = true; }
   if (!scene.mesh || scene.stale) { buildScene(scene); scene.stale = false; }
   if (f && (built.frame !== cursor || built.hover !== hoverNet || built.stale)) {
     buildFrame(f, picture(cursor));
@@ -554,6 +567,7 @@ function drawLabels(scene) {
   for (const c of scene.json.courtyards) {
     if (seen.has(c.ref)) continue;
     seen.add(c.ref);
+    const d = scene.moved && scene.moved[c.ref];
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (let i = 0; i < c.pts.length; i += 2) {
       x0 = Math.min(x0, c.pts[i]); x1 = Math.max(x1, c.pts[i]);
@@ -562,7 +576,7 @@ function drawLabels(scene) {
     const w = (x1 - x0) * view.s, h = (y1 - y0) * view.s;
     const size = Math.min(13 * dpr, h * 0.5, (w / Math.max(c.ref.length, 2)) * 1.3);
     if (size < 7 * dpr) continue;
-    const [x, y] = toScreen((x0 + x1) / 2, (y0 + y1) / 2);
+    const [x, y] = toScreen((x0 + x1) / 2 + (d ? d[0] : 0), (y0 + y1) / 2 + (d ? d[1] : 0));
     if (x < -50 || y < -50 || x > canvas.width + 50 || y > canvas.height + 50) continue;
     labels.font = `${size}px system-ui, sans-serif`;
     labels.fillText(c.ref, x, y);
@@ -615,7 +629,7 @@ function ingest(buf) {
       const start = it.at + 4 + headLen, count = (it.len - 4 - headLen) >> 2;
       // a copy: the answer may go once its views are thinned out
       const f32 = new Float32Array(buf.slice(start, start + 4 * count));
-      frames.push({ head, f32, scene: scenes.length - 1 });
+      frames.push({ head, f32, scene: scenes.length - 1, movedKey: head.moved ? JSON.stringify(head.moved) : "" });
       frameBytes += f32.byteLength;
     }
   }

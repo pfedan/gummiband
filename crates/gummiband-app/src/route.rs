@@ -30,6 +30,8 @@ use crate::nets::{NetOptions, apply_net_options, read_net_options, read_net_prio
 pub mod defaults {
     /// Portfolio size.
     pub const RUNS: usize = gummiband_core::DEFAULT_RUNS;
+    /// How far a movable part may end up from its place in the file, in mm.
+    pub const MOVE_REACH: f64 = 2.0;
     /// Via site grid pitch in mm.
     pub const VIA_PITCH: f64 = 0.5;
     /// Via cost in mm of track.
@@ -307,6 +309,10 @@ pub struct RouteOptions {
     /// Let the geometry generations shift parts. None: on with the scopes that lay the board
     /// anew, off with those that keep its copper, see [`RouteOptions::move_parts`].
     pub move_parts: Option<bool>,
+    /// With `move_parts`: how far a part may end up from its place in the file, in mm.
+    pub move_reach: f64,
+    /// With `move_parts`: the tracks push and pull the parts even where nothing asks for room.
+    pub drift: bool,
     /// References that never move under `move_parts`, `placements` and `clear_corridors`.
     pub fixed: Vec<String>,
     /// Copper layers treated as planes besides those of KiCad type "power".
@@ -400,6 +406,8 @@ impl Default for RouteOptions {
             shove: None,
             give: None,
             move_parts: None,
+            move_reach: defaults::MOVE_REACH,
+            drift: false,
             fixed: Vec::new(),
             plane_layers: Vec::new(),
             areas: Areas::Tracks,
@@ -667,6 +675,8 @@ impl RouteOptions {
             plane_layers: self.plane_layers.clone(),
             move_parts: self.move_parts(),
             fixed: self.fixed.clone(),
+            move_reach: self.move_reach,
+            drift: self.drift,
             ignore_nets: self.reroute_nets(),
             ..Default::default()
         }

@@ -49,9 +49,23 @@
     {
       "choices": [],
       "default": "on with scope fresh and keep_locked, off with finish and reroute",
-      "help": "Let parts next to clearance problems and open connections shift a little while the copper follows.",
+      "help": "Let the copper push the parts that are not locked: away from clearance problems and open connections, and with drift also wherever a track bends around them or pulls at them, while the copper follows.",
       "kind": "on_off",
       "name": "move_parts"
+    },
+    {
+      "choices": [],
+      "default": "2",
+      "help": "With move_parts: how far a part may end up from its place in the file, in mm; with drift a longer reach also lets the parts go on for smaller gains.",
+      "kind": "number",
+      "name": "move_reach"
+    },
+    {
+      "choices": [],
+      "default": "off",
+      "help": "With move_parts: the tracks push and pull the parts even where nothing is squeezed, like ice floes, and parts shove each other along, so the copper gets shorter and the route takes longer; off: parts only step aside at clearance problems and open connections.",
+      "kind": "on_off",
+      "name": "drift"
     },
     {
       "choices": [],

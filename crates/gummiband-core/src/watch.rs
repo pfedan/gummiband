@@ -10,8 +10,9 @@
 //!
 //! Watching reads and never writes: a watched search gives the same board as an unwatched one.
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::board::{LayerId, NetId};
@@ -87,6 +88,10 @@ pub struct View<'a> {
     /// Connections routed of all, where the stage knows ([`Stage::Best`]).
     pub routed: Option<(usize, usize)>,
     pub violations: Option<usize>,
+    /// Where the parts of the board lie other than in the scene: the offsets of the footprints
+    /// that moved (as [`crate::RouteResult::offsets`]). None: where the scene has them. A
+    /// [`Watch`] fills this in from [`Watch::set_moved`] where a view leaves it open.
+    pub offsets: Option<&'a HashMap<String, Point>>,
 }
 
 impl<'a> View<'a> {
@@ -105,6 +110,7 @@ impl<'a> View<'a> {
             step: (0, 0),
             routed: None,
             violations: None,
+            offsets: None,
         }
     }
 
@@ -150,6 +156,8 @@ struct Inner {
     /// built.
     next: AtomicU64,
     every: Duration,
+    /// Where the parts lie now, see [`Watch::set_moved`].
+    moved: Mutex<Option<Arc<HashMap<String, Point>>>>,
 }
 
 /// Receives the views of a search. Cheap to clone; the clones share the sink and the clock of
@@ -181,6 +189,7 @@ impl Watch {
                 t0: Instant::now(),
                 next: AtomicU64::new(0),
                 every,
+                moved: Mutex::new(None),
             }),
             phase: Arc::from(""),
         }
@@ -200,6 +209,35 @@ impl Watch {
 
     fn now(&self) -> u64 {
         self.inner.t0.elapsed().as_micros() as u64
+    }
+
+    /// Tells the viewer where the parts lie from here on: every view that follows, from this
+    /// watch and its clones, carries these footprint offsets, until the next call. An empty map
+    /// puts the parts back where the scene has them. For a search that moves parts.
+    pub fn set_moved(&self, offsets: &HashMap<String, Point>) {
+        let moved: HashMap<String, Point> = offsets
+            .iter()
+            .filter(|(_, d)| d.len() > 1e-9)
+            .map(|(r, d)| (r.clone(), *d))
+            .collect();
+        *self.inner.moved.lock().unwrap() = (!moved.is_empty()).then(|| Arc::new(moved));
+    }
+
+    /// The offsets of [`Watch::set_moved`] as they are now.
+    pub fn moved(&self) -> HashMap<String, Point> {
+        self.inner.moved.lock().unwrap().as_deref().cloned().unwrap_or_default()
+    }
+
+    fn emit(&self, v: &View) {
+        let moved = self.inner.moved.lock().unwrap().clone();
+        match moved {
+            Some(m) if v.offsets.is_none() => {
+                let mut v = v.clone();
+                v.offsets = Some(&m);
+                (self.inner.sink)(&v);
+            }
+            _ => (self.inner.sink)(v),
+        }
     }
 
     /// Is a glimpse due? For work that only a glimpse needs and that has to start before it.
@@ -222,7 +260,7 @@ impl Watch {
         {
             return;
         }
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&|v| (inner.sink)(v))));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&|v| self.emit(v))));
         let after = self.now();
         let pause = (inner.every.as_micros() as u64).max((after - now) * GLIMPSE_SHARE as u64);
         inner.next.store(after + pause, Ordering::Relaxed);
@@ -230,21 +268,47 @@ impl Watch {
 
     /// A view that is always shown.
     pub fn show(&self, v: &View) {
-        (self.inner.sink)(v);
+        self.emit(v);
     }
 
     /// A view that is always shown, from a state that may be half way: a `build` that panics
     /// shows nothing and costs the caller nothing.
     pub fn attempt(&self, build: impl FnOnce(&dyn Fn(&View))) {
-        let inner = &*self.inner;
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&|v| (inner.sink)(v))));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&|v| self.emit(v))));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+
+    /// Every view carries where the parts lie, from the call that says so until the next one,
+    /// through every clone of the watch; a part that did not move is left out.
+    #[test]
+    fn views_carry_where_the_parts_lie() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let w = Watch::new(Duration::from_secs(3600), move |v: &View| {
+            s.lock().unwrap().push(v.offsets.cloned())
+        });
+        let geo = Geometry::default();
+        let lead = w.at("drift");
+        lead.show(&View::of(Stage::Best, "a", &geo));
+        let at: HashMap<String, Point> = [
+            ("R1".to_string(), Point { x: 0.5, y: 0.0 }),
+            ("R2".to_string(), Point::default()),
+        ]
+        .into();
+        w.set_moved(&at);
+        lead.show(&View::of(Stage::Best, "b", &geo));
+        assert_eq!(w.moved().len(), 1);
+        w.set_moved(&HashMap::new());
+        lead.show(&View::of(Stage::Best, "c", &geo));
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].is_none() && seen[2].is_none());
+        let moved = seen[1].as_ref().unwrap();
+        assert!(moved.len() == 1 && moved["R1"].x == 0.5);
+    }
 
     #[test]
     fn glimpses_keep_their_distance_and_a_show_always_comes() {

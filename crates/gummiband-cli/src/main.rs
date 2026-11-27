@@ -265,6 +265,18 @@ struct RouteArgs {
     /// Parts stay where they are.
     #[arg(long)]
     no_move_parts: bool,
+    /// With --move-parts: how far a part may end up from its place in the file, in mm.
+    #[arg(long, value_name = "MM", default_value_t = defaults::MOVE_REACH)]
+    move_reach: f64,
+    /// With --move-parts: the tracks push and pull the parts wherever they bend around them or
+    /// end on them, like ice floes, and parts shove each other along; the copper gets shorter
+    /// and the route takes longer. Without this flag parts only step aside at clearance
+    /// problems and open connections.
+    #[arg(long, conflicts_with = "no_drift")]
+    drift: bool,
+    /// Parts only step aside at clearance problems and open connections (the default).
+    #[arg(long)]
+    no_drift: bool,
     /// References that never move under --move-parts, --placements and --clear-corridors,
     /// comma separated.
     #[arg(long, value_delimiter = ',')]
@@ -426,6 +438,8 @@ impl RouteArgs {
             shove: on_off(self.shove, self.no_shove),
             give: self.give,
             move_parts: on_off(self.move_parts, self.no_move_parts),
+            move_reach: self.move_reach,
+            drift: self.drift && !self.no_drift,
             fixed: self.fixed.clone(),
             plane_layers: plane_layers.to_vec(),
             areas: match &self.areas {
