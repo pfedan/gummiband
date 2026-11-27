@@ -1178,6 +1178,7 @@ pub fn relax_while(
     let gpu_end = 0;
     // during a batch the tracks do not answer, so a via moves once per batch, but a batch far
     let via_gain = 10.0;
+    let via_walls = knobs::VIA_WALLS.on();
     let starts_batch = |it: usize| it == 0 || it % 10 == 9;
     // the largest move of a point or via in the last round that only resolved clearances
     let mut largest = f64::INFINITY;
@@ -1347,6 +1348,8 @@ pub fn relax_while(
                 // the radius of the copper around the centre (a pair: around its line)
                 let cr = if pair { pair_r[vi] } else { vr };
                 let mut push = pt(0.0, 0.0);
+                // the fixed things within a step of their clearance: (obstacle, least distance)
+                let mut walls: Vec<(u32, f64)> = Vec::new();
                 for oi in sub.shared.obs_index.query_point(vc, vr + 1.0) {
                     let o = &board.obstacles[oi as usize];
                     let keeps_vias = matches!(o.kind, ObstacleKind::Keepout { vias: true, .. });
@@ -1388,6 +1391,9 @@ pub fn relax_while(
                         (vc, d, q, inside)
                     };
                     let d = if inside { -d } else { d };
+                    if via_walls && !pair && d < need + 2.0 * cfg.max_step {
+                        walls.push((oi, need - cfg.margin + crate::check::MARGIN));
+                    }
                     if d < need {
                         let dir = if inside { (q - p).norm() } else { (p - q).norm() };
                         push = push + dir * (need - d);
@@ -1550,6 +1556,41 @@ pub fn relax_while(
                     let l = step.len();
                     if l > cfg.max_step {
                         to = vc + step * (cfg.max_step / l);
+                    }
+                }
+                // Fixed things are walls too. A track that bends around the via pushes with
+                // every piece near it, and the sum holds the via a few micrometres inside the
+                // clearance of the pad on its other side, where the forces balance. So the
+                // via is put out of the clearance of every fixed thing near it, and the tracks
+                // answer in the next rounds. Between two fixed things that leave it no room
+                // it stays where the pushes put it.
+                if !walls.is_empty() {
+                    let off = |at: Point, &(oi, need): &(u32, f64)| {
+                        let poly = &sub.shared.obs_polys[oi as usize];
+                        let inside = poly.contains(at);
+                        let (d, q) = nearest_on_poly(poly, at);
+                        let d = if inside { -d } else { d };
+                        let dir = if inside { (q - at).norm() } else { (at - q).norm() };
+                        (need - d, dir)
+                    };
+                    let mut out = to;
+                    for _ in 0..3 {
+                        for w in &walls {
+                            let (short, dir) = off(out, w);
+                            if short > 0.0 {
+                                out = out + dir * short;
+                            }
+                        }
+                    }
+                    let step = out - vc;
+                    if step.len() > cfg.max_step {
+                        out = vc + step * (cfg.max_step / step.len());
+                    }
+                    let worst = |at: Point| walls.iter().map(|w| off(at, w).0).fold(0.0, f64::max);
+                    if worst(out) < worst(to) - 1e-9
+                        && walls.iter().all(|w| off(out, w).0 <= off(to, w).0.max(0.0) + 1e-9)
+                    {
+                        to = out;
                     }
                 }
                 // the plane copper, cut by the higher zones of other nets

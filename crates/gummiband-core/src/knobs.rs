@@ -334,6 +334,8 @@ knobs! {
         "Where the own check finds tracks too near to something and the passage has room for them, the tracks through it are laid again as one group (`spread::spread`): from one side outwards with the clearance and 2 um, lines and arcs, taken only if the check then finds nothing new.";
     LOCAL_RULES = "GB_LOCAL_RULES", Switch, NotZero, "on",
         "Clearance and via rules of a courtyard hold for the search and the geometry steps, not only for the check.";
+    VIA_WALLS = "GB_VIA_WALLS", Switch, Set, "off",
+        "Experiment. In the relaxation a via never comes to rest inside the clearance of a fixed thing (a pad, a hole, kept copper, a keepout): the pushes of the tracks on its other side add up over their pieces and would hold it a few micrometres inside. Where two fixed things leave it no room, it rests between them as before.";
     ZIP = "GB_ZIP", Switch, NotZero, "on",
         "Pairs the search pulled together close up to their gap at the end (`pairs::zip`).";
     GOAL_CHECK = "GB_GOAL_CHECK", Switch, NotZero, "on",
