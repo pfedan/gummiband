@@ -111,6 +111,7 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_FULL` | number | 6 | How many finalists get the full relaxation after the short one. |
 | `GB_RIVALS` | number | 2 | How many runners-up of the geometry stage are finished next to the winner; the best finished result is the route (0: the winner alone). |
 | `GB_DIRS_ALL` | set to anything | off | Every run of the portfolio uses the preferred layer directions, not every third. |
+| `GB_BALLS` | number | 0 | The connections of the balls of a ball field go before the other signal connections, ring by ring: 1 the innermost ring first, 2 the outermost first (0: off). |
 | `GB_PAIR_VIA` | number | 0 | With `--pairs pull`: a via of a pair net costs this many vias more, and as much again 2 mm or more from where its partner changes layers (0: off). |
 | `GB_PLACE_ROUNDS` | number | 2 | Rounds in which parts give way at hot spots (`--move-parts`). |
 | `GB_PLACE_AFTER_STOP` | set to anything | off | An open end that was stopped still gets the placement rounds. |

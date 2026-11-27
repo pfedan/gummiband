@@ -4063,6 +4063,42 @@ impl<'a> Router<'a> {
                 }
             }
         }
+        // ball fields (GB_BALLS): the connections of the balls go before the rest, by the ring
+        // of the ball, the innermost first (1) or the outermost first (2)
+        let balls: f64 = knobs::BALLS.num();
+        if balls > 0.0 {
+            let mut ring: HashMap<usize, f64> = HashMap::new();
+            for g in crate::patterns::grids(b) {
+                let (u, v) = (g.dir, g.dir.perp());
+                let span = |n: Point| {
+                    let at = g.pins.iter().map(|&p| b.pins[p].pos.dot(n));
+                    at.fold((f64::MAX, f64::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)))
+                };
+                let (su, sv) = (span(u), span(v));
+                for &p in &g.pins {
+                    let (x, y) = (b.pins[p].pos.dot(u), b.pins[p].pos.dot(v));
+                    let d = (x - su.0).min(su.1 - x).min(y - sv.0).min(sv.1 - y);
+                    ring.insert(p, (d / g.pitch).round());
+                }
+            }
+            for (i, (_, d, c)) in conns.iter().enumerate() {
+                if !signal(c) || keys[i].tier == 0 {
+                    continue;
+                }
+                let Goal::Pins(tree) = &c.goal else { continue };
+                let deep = std::iter::once(&c.from)
+                    .chain(tree.iter())
+                    .filter_map(|p| ring.get(p))
+                    .copied()
+                    .max_by(f64::total_cmp);
+                if let Some(r) = deep {
+                    keys[i].tier = 1;
+                    let r = if balls < 1.5 { -r } else { r };
+                    // within a ring the plain order
+                    keys[i].block = r * 1e6 + jitter(seed, c.from as u64) * d;
+                }
+            }
+        }
         if self.cfg.groups == GroupOrder::Off {
             return keys;
         }

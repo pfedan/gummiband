@@ -408,6 +408,8 @@ knobs! {
         "How many runners-up of the geometry stage are finished next to the winner; the best finished result is the route (0: the winner alone).";
     DIRS_ALL = "GB_DIRS_ALL", Experiment, Set, "off",
         "Every run of the portfolio uses the preferred layer directions, not every third.";
+    BALLS = "GB_BALLS", Experiment, Num, "0",
+        "The connections of the balls of a ball field go before the other signal connections, ring by ring: 1 the innermost ring first, 2 the outermost first (0: off).";
     PAIR_VIA = "GB_PAIR_VIA", Experiment, Num, "0",
         "With `--pairs pull`: a via of a pair net costs this many vias more, and as much again 2 mm or more from where its partner changes layers (0: off).";
     PLACE_ROUNDS = "GB_PLACE_ROUNDS", Experiment, Num, "2",
