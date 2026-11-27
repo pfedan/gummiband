@@ -280,6 +280,10 @@ mod tests {
         std::panic::set_hook(Box::new(|_| {}));
         w.glimpse(|_| panic!("a topology half way"));
         std::panic::set_hook(hook);
+        // the glimpse that failed took its time too, and the next keeps its distance from it
+        while !w.due() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         w.glimpse(|show| show(&View::of(Stage::Laying, "", &geo)));
         assert_eq!(*seen.lock().unwrap(), 1);
     }
