@@ -791,7 +791,7 @@ What hangs on the scope when a call does not say otherwise:
 - `move_parts`: default true with `"fresh"` and `"keep_locked"`, false with `"finish"` and
   `"reroute"`. The geometry generations may shift parts next to clearance problems and open
   connections, while the routed copper follows like rubber bands (as `--move-parts` of the
-  CLI). With `drift` (default true) the tracks also push and pull the parts where nothing is
+  CLI). With `drift` (default false) the tracks also push and pull the parts where nothing is
   wrong, like rubber bands on floes, so that the copper gets shorter; parts shove each other
   along. `move_reach` (default 2) is how many mm a part may end up from its place in the file.
   Locked footprints, connectors, modules, mounting holes, buttons and test points stay,

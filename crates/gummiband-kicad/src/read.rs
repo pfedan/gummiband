@@ -60,7 +60,7 @@ impl Default for ReadOptions {
             move_parts: false,
             fixed: Vec::new(),
             move_reach: 2.0,
-            drift: true,
+            drift: false,
             ignore_nets: Vec::new(),
         }
     }

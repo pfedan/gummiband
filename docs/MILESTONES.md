@@ -1096,7 +1096,7 @@ in `docs/ARCHITECTURE.md`):
 - Floes shove each other: by courtyard when the targets are set, and through the copper while
   they move (the floe behind the squeezed copper goes first, up to three in a row). Only the
   floe that is really stuck stops; before, one stuck part ended the move of all.
-- The drift without a problem (`--no-drift` switches it off) runs inside the search, on the
+- The drift without a problem (`--drift`, off by default) runs inside the search, on the
   relaxed copper of the winner and before the finishing steps. After them it cannot work:
   relaxing finished copper again makes new findings without any move (Duo 6 to 12 findings,
   Injector 1 to 19), so every step was refused or the round thrown away.
@@ -1110,7 +1110,7 @@ in `docs/ARCHITECTURE.md`):
 `--runs 4 --generations 1 --geometry-generations 1 --seed 1`, 4 threads, Gummiband's own check,
 this container (no KiCad DRC here). Length in mm, problem spots, seconds:
 
-| Board | no moves | moves for room only (`--no-drift`) | floes (default) |
+| Board | `--no-move-parts` | moves for room only (default) | floes (`--drift`) |
 | --- | --- | --- | --- |
 | Duo (291 connections) | 2105, 4 spots, 12 s | 2077, 3 spots, 15 s | 1947, 3 spots, 34 s |
 | Lichtschnitzel (346) | 2273, 2 spots, 36 s | 2273, 2 spots, 30 s | 2173, 2 spots, 77 s |
@@ -1125,9 +1125,26 @@ these small settings the route takes about three times as long, because every st
 relaxes and checks the copper around them, and a search that negotiates drifts twice (the
 negotiated and the plain search are compared finished). On Lichtschnitzel the two spots that
 are left are pad rows of R110 that leave their own tracks too little room; the check cuts them
-into 7 pieces instead of 4 after the drift, the spots are the same. Duo ends with 220 instead of
-195 vias: there a round for room routed the board anew on the drifted parts and that result won
-on cost.
+into 7 pieces instead of 4 after the drift, the spots are the same. Duo ends on another routing
+(220 instead of 195 vias, one part moved): the finished runner-up on the unmoved parts had fewer
+findings than the finished drifted winner and took its place.
+
+The owner chose the drift as an extra option, so it is off by default (`--drift`), and asked for
+a look at a reach of 2 mm and of 20 mm. With the first version both gave the same boards: no part
+went farther than 1.1 mm, because the rounds ended at a gain below 1 %. Now a reach beyond 2 mm
+lowers that bound in proportion and allows more rounds. Same settings, `--drift --move-reach`:
+
+| Board | 2 mm | 20 mm |
+| --- | --- | --- |
+| parts_xhard | 1121 mm, farthest part 1.1 mm, 3 rounds | 1047 mm, 4.5 mm, 11 rounds, clean |
+| Lichtschnitzel | 2173 mm, 0.9 mm, 4 rounds | 2153 mm, 1.9 mm, 10 rounds, 2 spots |
+| Duo | 1947 mm (runner-up, see above) | 1993 mm, 2.1 mm, 5 rounds, 3 spots |
+| Injector | 736 mm, 0.6 mm | 736 mm, 0.6 mm (the same board) |
+
+Even with 20 mm no part goes farther than 4.5 mm: the parts come up against each other and
+against copper that cannot give way, and the forces are the slope of the track length, which
+ends in the next hollow. Parts do not jump over each other or swap places; that is the work of
+`--placements`.
 
 Open: the drift in an open ended run (its alternatives lie on the placement of the search), a
 measurement with the KiCad DRC, rotation, and the time (a drift that relaxes only the copper of

@@ -700,10 +700,10 @@ on what settles a few micrometres differently at the other end of the board.
 
 Two stages use this:
 
-1. **Drift, inside the search** (`drift_with_bands`, off with `--no-drift`). After the geometry
+1. **Drift, inside the search** (`drift_with_bands`, only with `--drift`). After the geometry
    stage has chosen its winner and before the finishing steps, wrap and pull move the parts in
-   up to `GB_FLOE_ROUNDS` rounds; a round counts if it leaves no more findings and shorter
-   copper, and the rounds end when one gains less than 1 %. The winner is then finished on the
+   up to `GB_FLOE_ROUNDS` rounds (more with a reach of more than 3 mm); a round counts if it leaves no more findings and shorter
+   copper, and the rounds end when one gains less than 1 % (`GB_FLOE_GAIN`; with a reach of more than 2 mm less in proportion, 0.1 % at 20 mm, so that a long reach is used). The winner is then finished on the
    board with the parts where they drifted. This has to come before the finishing steps: the
    finished copper (arcs around pivots, fitted widths, tapers, closed up pairs) is no fixed
    point of the relaxation, and relaxing it again without moving anything already makes new

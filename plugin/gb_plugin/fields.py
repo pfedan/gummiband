@@ -169,7 +169,7 @@ ROUTE_TABS: Tuple = (
               "on it, a track that ends on a part pulls at it, and a part that comes up against "
               "its neighbour shoves it along. A part ends up at most 2 mm from its place, the "
               "routing keeps its topology and no step may leave a new clearance problem. The "
-              "copper gets a few percent shorter; the route takes longer. On by default.",
+              "copper gets a few percent shorter; the route takes about three times as long. Off by default.",
               "check", requires="move_parts"),
         int_field("placements", "Placements to try:",
                   "Places the parts that are not locked or mechanical from the netlist this many "

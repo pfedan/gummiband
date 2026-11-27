@@ -1029,10 +1029,6 @@ impl PlaceScore {
     }
 }
 
-/// A placement round in which only the bands push is worth another one when it made the copper
-/// shorter by this share.
-const BAND_GAIN: f64 = 0.01;
-
 /// One placement round for room with the topology kept ([`floes`]): the clearance spots and
 /// open pins of `best` push the parts as `push` says, from the placement `offsets`, and they
 /// drift in small steps while the copper follows. Returns where the parts were meant to go, the result as far as they got, and
@@ -1129,7 +1125,7 @@ struct BandDrift {
 
 /// The parts of `board` drift on the relaxed copper `geo` of a search ([`floes`]): the tracks
 /// that bend around a part and those that pull at it move it, in rounds, until a round makes
-/// the copper less than [`BAND_GAIN`] shorter. The topology is kept and no round may leave more
+/// the copper less than 1 % shorter (`GB_FLOE_GAIN`). The topology is kept and no round may leave more
 /// findings than the copper came with. This runs before the finishing steps of the search: the
 /// finished copper is no fixed point of the relaxation, and a step on it could not be judged.
 /// None if nothing moved.
@@ -1161,7 +1157,15 @@ fn drift_with_bands(board: &Board, sub_cfg: &SubstrateConfig, geo: &Geometry) ->
     let mut len = length(geo);
     let mut offsets: HashMap<String, geom::Point> = HashMap::new();
     let mut g = geo.clone();
-    for round in 1..=knobs::FLOE_ROUNDS.num::<usize>() {
+    // a part goes `max_step` per round at most: a long reach gets the rounds to use it, and
+    // the rounds end anyway when one gains little
+    let rounds = knobs::FLOE_ROUNDS
+        .num::<usize>()
+        .max((push.reach / push.max_step.max(1e-9)).ceil() as usize);
+    // and whoever gives the parts a long way wants them to take it: the gain that is worth
+    // another round shrinks with the reach beyond 2 mm
+    let worth = knobs::FLOE_GAIN.num::<f64>() * (2.0 / push.reach.max(1e-9)).min(1.0);
+    for round in 1..=rounds {
         let t0 = std::time::Instant::now();
         let cur = board.with_offsets(&offsets);
         let forces = floes::forces(&cur, &fl, &g, &[], &[]);
@@ -1197,7 +1201,7 @@ fn drift_with_bands(board: &Board, sub_cfg: &SubstrateConfig, geo: &Geometry) ->
         offsets = d.offsets;
         g = d.geo;
         len = l;
-        if gained < BAND_GAIN {
+        if gained < worth {
             break;
         }
     }

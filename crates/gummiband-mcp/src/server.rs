@@ -1066,8 +1066,9 @@ pub struct RouteIn {
     /// With move_parts: how far a part may end up from its place in the file, in mm (default 2).
     pub move_reach: Option<f64>,
     /// With move_parts: the tracks push and pull the parts even where nothing is squeezed, and
-    /// the copper gets shorter (default true). False: parts only step aside at clearance
-    /// problems and open connections, and a placement that is aligned stays aligned elsewhere.
+    /// parts shove each other along, so the copper gets shorter and the route takes longer
+    /// (default false: parts only step aside at clearance problems and open connections, and
+    /// a placement that is aligned stays aligned elsewhere).
     pub drift: Option<bool>,
     /// References that never move under move_parts and clear_corridors.
     #[serde(default)]

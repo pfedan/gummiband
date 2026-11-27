@@ -420,6 +420,8 @@ knobs! {
         "Relaxation rounds after each step of the parts while they drift in the search (`--move-parts` with drift).";
     FLOE_ROUNDS = "GB_FLOE_ROUNDS", Experiment, Num, "6",
         "Rounds in which the tracks push and pull the movable parts before the copper is finished (`--move-parts` with drift).";
+    FLOE_GAIN = "GB_FLOE_GAIN", Experiment, Num, "0.01",
+        "A round of the drift is worth another one when it made the copper shorter by this share (less with a reach of more than 2 mm, in proportion).";
     FLOE_LOG = "GB_FLOE_LOG", Log, Set, "off",
         "Print why each part stopped short in a round of `--move-parts`.";
     FLOE_BAND = "GB_FLOE_BAND", Experiment, Num, "0.25",

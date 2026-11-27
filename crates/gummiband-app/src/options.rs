@@ -170,19 +170,19 @@ pub const OPTIONS: &[OptionDoc] = &[
         "move_parts",
         Kind::OnOff,
         "on with scope fresh and keep_locked, off with finish and reroute",
-        "Let the copper push the parts that are not locked: away from clearance problems and open connections, and with drift wherever a track bends around them or pulls at them, while the copper follows.",
+        "Let the copper push the parts that are not locked: away from clearance problems and open connections, and with drift also wherever a track bends around them or pulls at them, while the copper follows.",
     ),
     opt(
         "move_reach",
         Kind::Number,
         "2",
-        "With move_parts: how far a part may end up from its place in the file, in mm.",
+        "With move_parts: how far a part may end up from its place in the file, in mm; with drift a longer reach also lets the parts go on for smaller gains.",
     ),
     opt(
         "drift",
         Kind::OnOff,
-        "on",
-        "With move_parts: the tracks push and pull the parts even where nothing is squeezed, like ice floes, and the copper gets shorter; off: parts only step aside at clearance problems and open connections.",
+        "off",
+        "With move_parts: the tracks push and pull the parts even where nothing is squeezed, like ice floes, and parts shove each other along, so the copper gets shorter and the route takes longer; off: parts only step aside at clearance problems and open connections.",
     ),
     opt(
         "fixed",

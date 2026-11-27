@@ -404,7 +404,7 @@ impl Default for RouteOptions {
             give: None,
             move_parts: None,
             move_reach: defaults::MOVE_REACH,
-            drift: true,
+            drift: false,
             fixed: Vec::new(),
             plane_layers: Vec::new(),
             areas: Areas::Tracks,

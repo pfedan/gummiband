@@ -118,6 +118,7 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_FLOE_IT` | number | 400 | Relaxation rounds after each step of the parts in a placement round (`--move-parts`). |
 | `GB_FLOE_BAND_IT` | number | 120 | Relaxation rounds after each step of the parts while they drift in the search (`--move-parts` with drift). |
 | `GB_FLOE_ROUNDS` | number | 6 | Rounds in which the tracks push and pull the movable parts before the copper is finished (`--move-parts` with drift). |
+| `GB_FLOE_GAIN` | number | 0.01 | A round of the drift is worth another one when it made the copper shorter by this share (less with a reach of more than 2 mm, in proportion). |
 | `GB_FLOE_BAND` | number | 0.25 | mm a part drifts per round for the force of one track wrapped around it or pulling at it (`--move-parts` with drift). |
 | `GB_PLACE_AFTER_STOP` | set to anything | off | An open end that was stopped still gets the placement rounds. |
 | `GB_NEG_ONLY` | set to anything | off | With `--negotiate`: only the negotiated search, without the plain one to compare with. |
