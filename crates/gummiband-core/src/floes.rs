@@ -494,7 +494,8 @@ const CHAIN: usize = 3;
 /// to account: the floes on the other side of the squeezed copper are shoved along (within
 /// `reach` of their place in the file), and a floe that still makes the spot stops for good. So
 /// does a floe whose courtyard would run into another part or leave the board. The others go on.
-/// `spots` are places whose copper should be awake as well.
+/// `spots` are places whose copper should be awake as well. `seen` gets the copper after every
+/// step that was taken, for a front end that shows the drift.
 #[allow(clippy::too_many_arguments)]
 pub fn drift(
     board: &Board,
@@ -506,6 +507,7 @@ pub fn drift(
     reach: f64,
     sub_cfg: &SubstrateConfig,
     cfg: &RelaxConfig,
+    seen: &mut dyn FnMut(&Geometry),
 ) -> Drifted {
     let n = floes.len();
     // what is left of the way of each floe
@@ -711,6 +713,7 @@ pub fn drift(
             out.offsets = next_off;
             out.geo = g;
             cur = next;
+            seen(&out.geo);
             continue;
         }
         // the step is not taken; who made the spots answers for them
@@ -951,6 +954,7 @@ pub(crate) mod tests {
             b.move_reach,
             &SubstrateConfig::default(),
             &RelaxConfig::default(),
+            &mut |_| {},
         )
     }
 

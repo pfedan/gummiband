@@ -1067,6 +1067,7 @@ fn drift_round(
             via_planes: true,
             ..Default::default()
         },
+        &mut |_| {},
     );
     let moved = board.with_offsets(&d.offsets);
     let mut geometry = d.geo;
@@ -1128,8 +1129,13 @@ struct BandDrift {
 /// the copper less than 1 % shorter (`GB_FLOE_GAIN`). The topology is kept and no round may leave more
 /// findings than the copper came with. This runs before the finishing steps of the search: the
 /// finished copper is no fixed point of the relaxation, and a step on it could not be judged.
-/// None if nothing moved.
-fn drift_with_bands(board: &Board, sub_cfg: &SubstrateConfig, geo: &Geometry) -> Option<BandDrift> {
+/// `seen` gets the round and the copper after every step. None if nothing moved.
+fn drift_with_bands(
+    board: &Board,
+    sub_cfg: &SubstrateConfig,
+    geo: &Geometry,
+    seen: &mut dyn FnMut(usize, &Geometry),
+) -> Option<BandDrift> {
     let fl = floes::floes(board);
     let push = floes::Push::of(board);
     if push.band_step <= 0.0 || fl.is_empty() {
@@ -1172,7 +1178,18 @@ fn drift_with_bands(board: &Board, sub_cfg: &SubstrateConfig, geo: &Geometry) ->
         let Some(next) = floes::targets(board, &cur, &fl, &offsets, &forces, &push) else {
             break;
         };
-        let d = floes::drift(board, &fl, &offsets, &next, &g, &[], push.reach, sub_cfg, &cfg);
+        let d = floes::drift(
+            board,
+            &fl,
+            &offsets,
+            &next,
+            &g,
+            &[],
+            push.reach,
+            sub_cfg,
+            &cfg,
+            &mut |g| seen(round, g),
+        );
         let moved = board.with_offsets(&d.offsets);
         let (l, c) = (length(&d.geo), count(&moved, &d.geo));
         eprintln!(
@@ -1983,7 +2000,16 @@ fn search_fixed(
     // lie on the same parts as its result, does without the drift.
     let whole = board;
     let drifted = (!open && board.drift && !board.movable.is_empty() && search.geometry_generations > 0)
-        .then(|| drift_with_bands(board, sub_cfg, &best.geo))
+        .then(|| {
+            // every step of the parts to the watch
+            let mut shown = best.clone();
+            drift_with_bands(board, sub_cfg, &best.geo, &mut |round, g| {
+                if search.watch.is_some() {
+                    shown.geo = g.clone();
+                    search.report(&format!("drift round {round}"), &shown);
+                }
+            })
+        })
         .flatten();
     if let Some(d) = &drifted {
         best.geo = d.geo.clone();
@@ -2337,7 +2363,7 @@ mod tests {
     fn the_bands_let_a_part_drift() {
         let (mut b, geo) = floes::tests::board();
         let cfg = SubstrateConfig::default();
-        assert!(drift_with_bands(&b, &cfg, &geo).is_none());
+        assert!(drift_with_bands(&b, &cfg, &geo, &mut |_, _| {}).is_none());
         b.drift = true;
         let length = |g: &Geometry| -> f64 {
             g.tracks
@@ -2345,7 +2371,7 @@ mod tests {
                 .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
                 .sum()
         };
-        let d = drift_with_bands(&b, &cfg, &geo).expect("the part drifts");
+        let d = drift_with_bands(&b, &cfg, &geo, &mut |_, _| {}).expect("the part drifts");
         let p1 = d.offsets["P1"];
         assert!(p1.x < -0.2 && p1.len() <= b.move_reach + 1e-9, "{p1:?}");
         assert!(length(&d.geo) < length(&geo) - 0.2);
