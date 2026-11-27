@@ -1081,8 +1081,14 @@ fn place_and_route(
             },
         );
         let moved = board.with_offsets(&d.offsets);
+        let mut geometry = d.geo;
+        // the relaxation of the steps drew every track taut on its own again: the pairs close
+        // up once more, as at the end of the search
+        if base.pair_pull > 0.0 && knobs::ZIP.on() && d.steps > 0 {
+            pairs::zip(&moved, &mut geometry);
+        }
         let quick = RouteResult {
-            geometry: d.geo,
+            geometry,
             stats: best.1.stats.clone(),
             portfolio: Vec::new(),
             frames: Vec::new(),
