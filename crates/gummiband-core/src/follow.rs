@@ -377,14 +377,14 @@ fn wake_near(next: &Board, refs: &[String], g: &mut Geometry, before: &Geometry)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::board::*;
     use crate::geom::{Polygon, Shape, pt, roundrect_polygon};
 
     /// Net A runs as an unlocked track from the pad P0 at (2, 5) to P1 at (8, 5). Part Q (net B,
     /// one 0.6 mm pad) sits above it at (5, 3.5). `min_clearance` 0.1 gives steps of 0.1 mm.
-    fn board() -> Board {
+    pub(crate) fn board() -> Board {
         let mut b = crate::topo::tests::two_pad_board();
         b.layers.truncate(1);
         b.rules.min_clearance = 0.1;

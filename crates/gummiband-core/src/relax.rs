@@ -41,6 +41,10 @@ pub struct RelaxConfig {
     /// near the place the router gave them; passes that push hard can shove a via over the edge
     /// rule, or out of the zone it hangs on.
     pub via_edge: bool,
+    /// A via stays in the plane it reaches, and nothing else of `via_edge`: for steps that push
+    /// hard on copper that the search relaxed without `via_edge`, and that are judged on what
+    /// they change.
+    pub via_planes: bool,
     /// Finish with the shortcuts of [`taut`]. Off, the tracks stay chains of short pieces where
     /// the rounds left them, and a clearance check can say where it hurts.
     pub taut: bool,
@@ -63,6 +67,7 @@ impl Default for RelaxConfig {
             max_step: 0.03,
             gpu: knobs::GPU.on(),
             via_edge: false,
+            via_planes: false,
             taut: true,
             pivots: false,
             watch: None,
@@ -1047,7 +1052,7 @@ pub fn relax_while(
             board
                 .planes
                 .iter()
-                .filter(|p| cfg.via_edge && p.net == v.net && p.covers(v.at))
+                .filter(|p| (cfg.via_edge || cfg.via_planes) && p.net == v.net && p.covers(v.at))
                 .map(|p| (p, p.edge_dist(v.at).min(v.diameter / 2.0)))
                 .collect()
         })

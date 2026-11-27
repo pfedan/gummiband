@@ -1055,13 +1055,20 @@ pub struct RouteIn {
     /// `preset` says, 3 with "standard", as the CLI and the plugin; 0 is about three times
     /// faster and leaves many more violations).
     pub geometry_generations: Option<usize>,
-    /// Let parts next to clearance problems and open connections shift a little while the
-    /// routed copper follows like rubber bands (default true with scope "fresh" and
-    /// "keep_locked", false with "finish" and "reroute", where the kept copper would not follow).
+    /// Let the routed copper push the parts like ice floes while it follows like rubber bands
+    /// (default true with scope "fresh" and "keep_locked", false with "finish" and "reroute",
+    /// where the kept copper would not follow): away from clearance problems and open
+    /// connections, and with `drift` wherever a track bends around them or pulls at them.
     /// Locked footprints, connectors, modules, mounting holes, buttons and test points stay, as
     /// do the references in `fixed`. The output has the footprints at their new positions, and
     /// `moved` lists them.
     pub move_parts: Option<bool>,
+    /// With move_parts: how far a part may end up from its place in the file, in mm (default 2).
+    pub move_reach: Option<f64>,
+    /// With move_parts: the tracks push and pull the parts even where nothing is squeezed, and
+    /// the copper gets shorter (default true). False: parts only step aside at clearance
+    /// problems and open connections, and a placement that is aligned stays aligned elsewhere.
+    pub drift: Option<bool>,
     /// References that never move under move_parts and clear_corridors.
     #[serde(default)]
     pub fixed: Vec<String>,
@@ -3411,6 +3418,8 @@ fn route_options(p: &RouteIn, loaded_keep: bool) -> Result<(RouteOptions, Vec<Re
         shove: p.shove,
         give: p.give,
         move_parts: p.move_parts,
+        move_reach: p.move_reach.unwrap_or(d.move_reach),
+        drift: p.drift.unwrap_or(d.drift),
         fixed: p.fixed.clone(),
         plane_layers: p.plane_layers.clone(),
         areas: match p.areas.as_deref() {

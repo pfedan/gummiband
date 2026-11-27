@@ -1052,7 +1052,7 @@ fn place_and_route(
     let rounds: i32 = knobs::PLACE_ROUNDS.num();
     let mut searches: i32 = knobs::PLACE_SEARCHES.num();
     let fl = floes::floes(board);
-    let push = floes::Push::default();
+    let push = floes::Push::of(board);
     let mut best_score = PlaceScore::of(board, &res);
     let mut best = (sub, res);
     let mut offsets: HashMap<String, geom::Point> = HashMap::new();
@@ -1092,6 +1092,7 @@ fn place_and_route(
             // way than they do, and the first step would be judged on that
             &relax::RelaxConfig {
                 iterations: knobs::FLOE_IT.num(),
+                via_planes: true,
                 ..Default::default()
             },
         );

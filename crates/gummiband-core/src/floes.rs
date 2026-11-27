@@ -291,14 +291,15 @@ pub struct Push {
     pub reach: f64,
 }
 
-impl Default for Push {
-    fn default() -> Self {
+impl Push {
+    /// As the board asks: its reach, and the bands at work where its parts may drift.
+    pub fn of(board: &Board) -> Push {
         Push {
             press_step: 0.3,
-            band_step: crate::knobs::FLOE_BAND.num(),
+            band_step: if board.drift { crate::knobs::FLOE_BAND.num() } else { 0.0 },
             band_min: 0.5,
             max_step: 0.5,
-            reach: crate::knobs::FLOE_REACH.num(),
+            reach: board.move_reach,
         }
     }
 }
@@ -528,6 +529,9 @@ pub fn drift(
     let mut frozen = vec![false; n];
     let mut depth = vec![0usize; n];
     let mut tried: Vec<(usize, usize)> = Vec::new();
+    let mut orphans: Vec<Point> = Vec::new();
+    // floes that wait a step for the floe they shoved
+    let mut hold = vec![false; n];
     let mut way = vec![0.0f64; n];
     let mut total = 0.0;
     let owner: HashMap<&String, usize> = floes
@@ -539,16 +543,26 @@ pub fn drift(
     // every failed step shoves one floe more or stops one, so this ends; the bound is a net
     for _ in 0..planned * 2 + n * (CHAIN + 2) + 8 {
         let far = (0..n)
-            .filter(|&i| !frozen[i])
+            .filter(|&i| !frozen[i] && !hold[i])
             .map(|i| left[i].len())
             .fold(0.0, f64::max);
         if far < 1e-9 {
+            if hold.iter().any(|&h| h) {
+                hold.fill(false);
+                continue;
+            }
             break;
         }
         // all floes arrive together: each takes the same share of what is left of its way
         let share = (step / far).min(1.0);
         let mut d: Vec<Point> = (0..n)
-            .map(|i| if frozen[i] { Point::default() } else { left[i] * share })
+            .map(|i| {
+                if frozen[i] || hold[i] {
+                    Point::default()
+                } else {
+                    left[i] * share.min(step / left[i].len().max(1e-12))
+                }
+            })
             .collect();
         // courtyards: no more overlap than there is, and inside the board
         loop {
@@ -695,6 +709,7 @@ pub fn drift(
                 way[i] += d[i].len();
             }
             total += longest_move;
+            hold.fill(false);
             out.steps += 1;
             out.offsets = next_off;
             out.geo = g;
@@ -702,6 +717,8 @@ pub fn drift(
             continue;
         }
         // the step is not taken; who made the spots answers for them
+        // a floe answers once per step, however many spots it made
+        let mut answered = vec![false; n];
         for s in &fresh {
             let mut blamed: Vec<usize> = moving
                 .iter()
@@ -709,7 +726,28 @@ pub fn drift(
                 .filter(|&i| floes[i].nearest(&next, s.at, BLAME).is_some())
                 .collect();
             if blamed.is_empty() {
-                // pushed copper made it farther away: the floe nearest to it
+                // pushed copper made it farther away: the floe nearest to it answers once. A
+                // spot that comes again is nobody's in particular, and the drift ends there
+                if orphans.iter().any(|o| o.dist(s.at) < 1.0) {
+                    for &i in &moving {
+                        if !frozen[i] {
+                            frozen[i] = true;
+                            left[i] = Point::default();
+                        }
+                    }
+                    out.stuck.push((
+                        "all parts".into(),
+                        format!(
+                            "a problem far from every part that moves, at ({:.2}, {:.2}): {} and {}",
+                            s.at.x,
+                            s.at.y,
+                            net_name(Some(s.nets.0)),
+                            net_name(s.nets.1)
+                        ),
+                    ));
+                    break;
+                }
+                orphans.push(s.at);
                 let dist = |i: usize| {
                     let b = floes[i].bbox(&next);
                     pt(
@@ -721,9 +759,10 @@ pub fn drift(
                 blamed.extend(moving.iter().copied().min_by(|&a, &b| dist(a).total_cmp(&dist(b))));
             }
             for u in blamed {
-                if frozen[u] || left[u].len() < 1e-9 {
+                if frozen[u] || left[u].len() < 1e-9 || answered[u] {
                     continue;
                 }
+                answered[u] = true;
                 let dir = left[u].norm();
                 let cu = floes[u].centre(&next);
                 let mut shoved = false;
@@ -738,8 +777,9 @@ pub fn drift(
                             continue;
                         }
                         tried.push((u, w));
-                        // as far along as the floe that comes still wants to go
-                        let need = left[u].len() - left[w].dot(dir).max(0.0);
+                        // as far along as the floe that comes still wants to go, and a step
+                        // more: the copper between the two needs a little room to move in
+                        let need = left[u].len() + step - left[w].dot(dir).max(0.0);
                         let to = floes[w].offset(&out.offsets) + left[w] + dir * need;
                         if need < 1e-6 || to.len() > reach {
                             continue;
@@ -752,6 +792,8 @@ pub fn drift(
                         shoved = true;
                     }
                 }
+                // the floe that was shoved goes first, for one step
+                hold[u] = shoved;
                 if !shoved {
                     frozen[u] = true;
                     left[u] = Point::default();
@@ -780,4 +822,303 @@ pub fn drift(
     out.moved = way.iter().filter(|w| **w > 1e-9).count();
     out.longest = way.iter().copied().fold(0.0, f64::max);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::*;
+    use crate::geom::{Polygon, Shape, roundrect_polygon};
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect {
+            min: pt(x, y),
+            max: pt(x + w, y + h),
+        }
+    }
+
+    fn yards() -> Board {
+        let mut b = Board::default();
+        b.outline.push(Polygon::new(vec![
+            pt(0.0, 0.0),
+            pt(50.0, 0.0),
+            pt(50.0, 50.0),
+            pt(0.0, 50.0),
+        ]));
+        b.courtyards.insert("A".into(), rect(10.0, 10.0, 2.0, 2.0));
+        b.courtyards.insert("B".into(), rect(13.0, 10.0, 2.0, 2.0));
+        b.courtyards.insert("C".into(), rect(20.0, 20.0, 2.0, 2.0));
+        b.movable = vec!["A".into(), "B".into(), "C".into()];
+        b
+    }
+
+    #[test]
+    fn a_block_moves_as_a_whole() {
+        let mut b = yards();
+        b.blocks.push(Block {
+            refs: vec!["A".into(), "C".into()],
+            ..Default::default()
+        });
+        let (mut cy, mut off) = (b.courtyards.clone(), HashMap::new());
+        assert!(shove(&b, "A", pt(0.5, 0.0), &mut cy, &mut off, &mut Vec::new(), 0));
+        assert_eq!(off.len(), 2);
+        assert_eq!(off["C"].x, 0.5);
+        assert_eq!(cy["C"].min.x, 20.5);
+    }
+
+    #[test]
+    fn shoving_pushes_movable_neighbours_and_stops_at_fixed_ones() {
+        let mut b = yards();
+        let (mut cy, mut off) = (b.courtyards.clone(), HashMap::new());
+        assert!(shove(&b, "A", pt(1.5, 0.0), &mut cy, &mut off, &mut Vec::new(), 0));
+        assert_eq!(off["B"].x, 1.5);
+        b.movable.retain(|f| f != "B");
+        let (mut cy, mut off) = (b.courtyards.clone(), HashMap::new());
+        assert!(!shove(&b, "A", pt(1.5, 0.0), &mut cy, &mut off, &mut Vec::new(), 0));
+    }
+
+    /// The board of the tests of [`crate::follow`]: net A as a track from the pad P0 at (2, 5)
+    /// to P1 at (8, 5), part Q (net B, one 0.6 mm pad) above it at (5, 3.5). Here the track is
+    /// awake, and Q and P1 may move.
+    fn board() -> (Board, Geometry) {
+        let mut b = crate::follow::tests::board();
+        b.soften(&[]);
+        b.movable = vec!["Q".into(), "P1".into()];
+        b.move_reach = 2.0;
+        let mut geo = crate::follow::soft_geometry(&b);
+        for t in &mut geo.tracks {
+            t.resting = false;
+        }
+        (b, geo)
+    }
+
+    /// One more part with one 0.6 mm pad of a net of its own at `at`.
+    fn add_part(b: &mut Board, name: &str, at: Point) {
+        let net = b.nets.len() as u32;
+        let pin = b.pins.len();
+        b.nets.push(Net {
+            name: name.into(),
+            class: 0,
+            pins: vec![pin],
+            planes: LayerSet::default(),
+            priority: 0,
+        });
+        let o = b.obstacles.len();
+        b.obstacles.push(Obstacle {
+            shape: Shape::Polygon(roundrect_polygon(at, 0.6, 0.6, 0.0, 0.0, 0.005)),
+            layers: LayerSet::single(0),
+            net: Some(net),
+            kind: ObstacleKind::Pad,
+            hole: None,
+            clearance: 0.2,
+            pin: Some(pin),
+            locked: true,
+        });
+        b.pins.push(Pin {
+            name: format!("{name}.1"),
+            footprint: name.into(),
+            net,
+            pos: at,
+            layers: LayerSet::single(0),
+            obstacles: vec![o],
+            size: (0.6, 0.6),
+        });
+        b.footprint_obstacles.insert(name.into(), vec![o]);
+        b.courtyards.insert(name.into(), rect(at.x - 0.4, at.y - 0.4, 0.8, 0.8));
+    }
+
+    fn index(fl: &[Floe], name: &str) -> usize {
+        fl.iter().position(|f| f.refs[0] == name).unwrap()
+    }
+
+    fn go(b: &Board, geo: &Geometry, to: &[(&str, Point)]) -> Drifted {
+        let to: HashMap<String, Point> = to.iter().map(|(r, d)| (r.to_string(), *d)).collect();
+        drift(
+            b,
+            &floes(b),
+            &HashMap::new(),
+            &to,
+            geo,
+            &[],
+            b.move_reach,
+            &SubstrateConfig::default(),
+            &RelaxConfig::default(),
+        )
+    }
+
+    #[test]
+    fn a_track_pulls_at_the_part_it_ends_on() {
+        let (b, geo) = board();
+        let fl = floes(&b);
+        let f = forces(&b, &fl, &geo, &[], &[]);
+        // P1 carries the right end: the track leaves it to the left
+        let p1 = f.pull[index(&fl, "P1")];
+        assert!(p1.dist(pt(-1.0, 0.0)) < 1e-9, "{p1:?}");
+        let q = index(&fl, "Q");
+        assert!(f.pull[q].len() + f.wrap[q].len() + f.press[q].len() < 1e-12);
+    }
+
+    #[test]
+    fn a_track_that_bends_around_a_pad_presses_on_it() {
+        let (mut b, mut geo) = board();
+        // Q sits on the line between the pads, the track runs around below it: pad bottom
+        // 5.3, clearance 0.2, half the track 0.1
+        let down = HashMap::from([("Q".to_string(), pt(0.0, 1.5))]);
+        b = b.with_offsets(&down);
+        geo.tracks[0].pts = vec![pt(2.0, 5.0), pt(4.6, 5.6), pt(5.4, 5.6), pt(8.0, 5.0)];
+        let fl = floes(&b);
+        let f = forces(&b, &fl, &geo, &[], &[]);
+        let w = f.wrap[index(&fl, "Q")];
+        // away from the track, as hard as the track turns: twice the sine of its slope
+        assert!(w.x.abs() < 1e-9 && w.y < -0.4 && w.y > -0.5, "{w:?}");
+        // and that is how the length of the track changes with the place of Q
+        let len = |y: f64| pt(2.0, 5.0).dist(pt(4.6, y)) * 2.0 + 0.8;
+        let slope = (len(5.6) - len(5.599)) / 0.001;
+        assert!((slope + w.y).abs() < 0.01, "{slope} against {w:?}");
+    }
+
+    #[test]
+    fn a_spot_pushes_the_parts_around_it_but_not_a_part_against_itself() {
+        let (b, geo) = board();
+        let fl = floes(&b);
+        let q = index(&fl, "Q");
+        // a problem between the track of A and the pad of Q, just below the pad
+        let spot = Squeeze {
+            at: pt(5.0, 4.0),
+            nets: (0, Some(1)),
+        };
+        let f = forces(&b, &fl, &geo, &[spot], &[]);
+        assert!(f.press[q].dist(pt(0.0, -1.0)) < 1e-9, "{:?}", f.press[q]);
+        // the open pin of Q itself: Q stays, it is its neighbours that make room
+        let f = forces(&b, &fl, &geo, &[], &[pt(5.0, 3.5)]);
+        assert!(f.press[q].len() < 1e-12);
+        // a problem between two pads of one part goes along with the part
+        let mut two = b.clone();
+        let pin = two.pins.len();
+        let o = two.obstacles.len();
+        let mut pad = two.obstacles[two.pins[2].obstacles[0]].clone();
+        pad.shape = pad.shape.translated(pt(0.7, 0.0));
+        pad.net = Some(0);
+        pad.pin = Some(pin);
+        two.obstacles.push(pad);
+        let mut p = two.pins[2].clone();
+        p.net = 0;
+        p.pos = p.pos + pt(0.7, 0.0);
+        p.obstacles = vec![o];
+        two.pins.push(p);
+        two.footprint_obstacles.get_mut("Q").unwrap().push(o);
+        let inner = Squeeze {
+            at: pt(5.35, 3.5),
+            nets: (0, Some(1)),
+        };
+        let fl = floes(&two);
+        let f = forces(&two, &fl, &geo, &[inner], &[]);
+        assert!(f.press.iter().all(|p| p.len() < 1e-12), "{:?}", f.press);
+    }
+
+    #[test]
+    fn the_forces_become_moves_within_the_reach() {
+        let (mut b, _) = board();
+        let fl = floes(&b);
+        let q = index(&fl, "Q");
+        let mut f = Forces {
+            press: vec![Point::default(); fl.len()],
+            wrap: vec![Point::default(); fl.len()],
+            pull: vec![Point::default(); fl.len()],
+        };
+        f.press[q] = pt(0.0, -2.0);
+        let push = Push::of(&b);
+        let to = targets(&b, &b, &fl, &HashMap::new(), &f, &push).unwrap();
+        assert!(to["Q"].dist(pt(0.0, -push.press_step)) < 1e-9, "{to:?}");
+        // a band force below the threshold moves nothing, one above it does, and no farther
+        // than the reach
+        b.drift = true;
+        let push = Push::of(&b);
+        f.press[q] = Point::default();
+        f.pull[q] = pt(push.band_min * 0.9, 0.0);
+        assert!(targets(&b, &b, &fl, &HashMap::new(), &f, &push).is_none());
+        f.pull[q] = pt(1.0, 0.0);
+        let to = targets(&b, &b, &fl, &HashMap::new(), &f, &push).unwrap();
+        assert!(to["Q"].dist(pt(push.band_step, 0.0)) < 1e-9, "{to:?}");
+        let at = HashMap::from([("Q".to_string(), pt(b.move_reach - 0.1, 0.0))]);
+        let to = targets(&b, &b.with_offsets(&at), &fl, &at, &f, &push).unwrap();
+        assert!((to["Q"].x - b.move_reach).abs() < 1e-9, "{to:?}");
+        // without drift the bands move nothing
+        b.drift = false;
+        assert!(targets(&b, &b, &fl, &HashMap::new(), &f, &Push::of(&b)).is_none());
+    }
+
+    #[test]
+    fn the_copper_gives_way_to_a_drifting_part() {
+        let (b, geo) = board();
+        let d = go(&b, &geo, &[("Q", pt(0.0, 1.5))]);
+        assert!(d.stuck.is_empty(), "{:?}", d.stuck);
+        assert!(d.offsets["Q"].dist(pt(0.0, 1.5)) < 1e-9);
+        assert_eq!((d.steps, d.moved), (d.planned, 1));
+        assert!(check::check(&b.with_offsets(&d.offsets), &d.geo).is_empty());
+        assert!(!d.geo.tracks[0].resting, "as awake as it came");
+    }
+
+    /// Fixed copper right below the track: Q runs out of room and stops. P1, which moves at the
+    /// same time, goes all its way.
+    #[test]
+    fn only_the_part_that_is_stuck_stops() {
+        let (mut b, geo) = board();
+        b.obstacles.push(Obstacle {
+            shape: Shape::Polygon(Polygon::new(vec![
+                pt(3.0, 5.35),
+                pt(7.0, 5.35),
+                pt(7.0, 6.0),
+                pt(3.0, 6.0),
+            ])),
+            layers: LayerSet::single(0),
+            net: None,
+            kind: ObstacleKind::Graphic,
+            hole: None,
+            clearance: 0.2,
+            pin: None,
+            locked: true,
+        });
+        let d = go(&b, &geo, &[("Q", pt(0.0, 1.5)), ("P1", pt(0.6, 0.0))]);
+        assert!(d.offsets["P1"].dist(pt(0.6, 0.0)) < 1e-9, "{:?}", d.offsets);
+        let q = d.offsets["Q"];
+        assert!(q.y > 0.3 && q.y < 1.4, "{q:?}");
+        assert_eq!(d.stuck.len(), 1, "{:?}", d.stuck);
+        assert!(d.stuck[0].0 == "Q" && d.stuck[0].1.contains("no more room"), "{:?}", d.stuck);
+        assert!(check::check(&b.with_offsets(&d.offsets), &d.geo).is_empty());
+        // the track end went along with P1
+        assert!(d.geo.tracks[0].pts.last().unwrap().dist(pt(8.6, 5.0)) < 1e-9);
+    }
+
+    /// Part W below the track: where Q comes down, the track is squeezed between the two. A W
+    /// that may move is shoved along through the track; a fixed one stops Q.
+    #[test]
+    fn a_part_shoves_the_part_behind_the_copper() {
+        let (mut b, geo) = board();
+        add_part(&mut b, "W", pt(5.0, 6.0));
+        let fixed = go(&b, &geo, &[("Q", pt(0.0, 1.5))]);
+        assert!(fixed.offsets["Q"].y < 1.35, "{:?}", fixed.offsets);
+        assert!(fixed.shoved.is_empty() && fixed.stuck.len() == 1);
+        b.movable.push("W".into());
+        let d = go(&b, &geo, &[("Q", pt(0.0, 1.5))]);
+        assert!(d.offsets["Q"].dist(pt(0.0, 1.5)) < 1e-9, "{:?} {:?}", d.offsets, d.stuck);
+        assert_eq!(d.shoved, vec!["W".to_string()]);
+        let w = d.offsets["W"];
+        assert!(w.x.abs() < 1e-9 && w.y > 0.15 && w.y < 0.5, "{w:?}");
+        assert!(check::check(&b.with_offsets(&d.offsets), &d.geo).is_empty());
+        // not beyond its reach
+        b.move_reach = 0.1;
+        let d = go(&b, &geo, &[("Q", pt(0.0, 1.5))]);
+        assert!(!d.offsets.contains_key("W") && d.offsets["Q"].y < 1.35, "{:?}", d.offsets);
+    }
+
+    #[test]
+    fn a_courtyard_stops_its_part_alone() {
+        let (b, geo) = board();
+        // Q down and left onto P0, whose courtyard is in the way; P1 goes on
+        let d = go(&b, &geo, &[("Q", pt(-3.0, 1.2)), ("P1", pt(0.6, 0.0))]);
+        assert!(d.offsets["P1"].dist(pt(0.6, 0.0)) < 1e-9);
+        assert!(d.offsets["Q"].x > -3.0 && d.offsets["Q"].x < -1.5, "{:?}", d.offsets);
+        assert!(d.stuck.iter().any(|s| s.0 == "Q" && s.1.contains("P0")), "{:?}", d.stuck);
+    }
 }
