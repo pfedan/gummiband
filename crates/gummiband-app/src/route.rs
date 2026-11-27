@@ -1021,6 +1021,7 @@ fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) ->
     let first = route_with(t0, board, opts, hooks, true)?;
     let mut routed = area_fallback(t0, board, opts, hooks, first)?;
     narrow_rings(&mut routed, &rings);
+    vias_home(&mut routed);
     if let Some(begin) = hooks.watch {
         use gummiband_core::watch::{Stage, View};
         let spots: Vec<gummiband_core::geom::Point> = routed.violations.iter().map(|v| v.at).collect();
@@ -1094,6 +1095,42 @@ fn narrow_rings(routed: &mut Routed, rings: &[(usize, f64, f64)]) {
         routed.board.classes[i].via_diameter = real;
     }
     routed.violations = gummiband_core::check::check(&routed.board, &routed.res.geometry);
+}
+
+/// A via with the size of a rule area that a geometry step has shifted out of its area gets
+/// the size of its class: out there the rules of the board hold, and the check then says what
+/// the larger via comes too close to.
+fn vias_home(routed: &mut Routed) {
+    let board = &routed.board;
+    if !board.local_vias() {
+        return;
+    }
+    let home = |geo: &mut gummiband_core::realize::Geometry| {
+        let mut moved = 0;
+        for v in &mut geo.vias {
+            let c = board.class_of(v.net);
+            if v.drill > 0.0
+                && !v.is_pair()
+                && v.diameter < c.via_diameter - 1e-9
+                && board.via_rule_at(v.at, 0.0).is_none_or(|(d, _)| d > v.diameter + 1e-9)
+                && board
+                    .rule_areas
+                    .iter()
+                    .any(|a| a.via.is_some_and(|(d, _)| (d - v.diameter).abs() < 1e-9))
+            {
+                (v.diameter, v.drill) = (c.via_diameter, c.via_drill);
+                moved += 1;
+            }
+        }
+        moved
+    };
+    let mut moved = home(&mut routed.res.geometry);
+    for (_, geo) in &mut routed.res.alternatives {
+        moved += home(geo);
+    }
+    if moved > 0 {
+        routed.violations = gummiband_core::check::check(&routed.board, &routed.res.geometry);
+    }
 }
 
 /// `areas` fill never ends with fewer connections than `areas` tracks.

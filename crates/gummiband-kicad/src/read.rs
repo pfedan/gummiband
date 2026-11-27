@@ -99,8 +99,8 @@ pub fn read_board(path: &Path, opts: &ReadOptions) -> Result<KicadBoard> {
         kb.board.rule_areas = std::mem::take(&mut kb.board.rule_areas)
             .into_iter()
             .filter_map(|mut a| {
-                let (_, clearance, via) = rules.iter().find(|r| r.0 == a.name)?;
-                (a.clearance, a.via) = (*clearance, *via);
+                let (_, clearance, via, hole) = rules.iter().find(|r| r.0 == a.name)?;
+                (a.clearance, a.via, a.hole) = (*clearance, *via, *hole);
                 Some(a)
             })
             .collect();
@@ -1140,6 +1140,7 @@ impl Reader {
                         rect,
                         clearance: None,
                         via: None,
+                        hole: None,
                         why: String::new(),
                     });
                 }

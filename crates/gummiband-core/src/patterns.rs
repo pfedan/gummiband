@@ -372,6 +372,9 @@ pub struct FabStep {
     pub drill: f64,
 }
 
+/// What copper keeps from a drill at any fab step, in mm, where the board asks more.
+pub const STEP_HOLE: f64 = 0.2;
+
 impl FabStep {
     pub fn words(&self) -> String {
         format!(
@@ -437,7 +440,7 @@ impl TightField {
         let via = s.via.min(self.via);
         self.gap + 1e-6 >= self.w + 2.0 * c
             && self.room + 1e-6 >= via + 2.0 * c
-            && self.room + 1e-6 >= s.drill + 2.0 * board.rules.hole_clearance
+            && self.room + 1e-6 >= s.drill + 2.0 * board.rules.hole_clearance.min(STEP_HOLE)
     }
 
     /// The mildest step the field can be left at.
@@ -533,6 +536,7 @@ pub fn field_rules(board: &Board, choice: &str) -> Result<Vec<crate::board::Rule
             rect: rect.grow(f.grid.pitch),
             clearance: (s.clearance < f.c).then_some(s.clearance),
             via: (s.via < f.via).then_some((s.via, s.drill)),
+            hole: (s.via < f.via && STEP_HOLE < board.rules.hole_clearance).then_some(STEP_HOLE),
             why: format!(
                 "ball field {} ({} x {} at {:.2} mm pitch) is routed at the fab step {}: {} inside the area, where the board asks {} mm clearance and vias of {} mm",
                 f.grid.footprint,

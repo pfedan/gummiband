@@ -145,6 +145,9 @@ pub struct Obstacle {
     pub locked: bool,
 }
 
+/// A via with the size of an area is set at least this far inside it, in mm.
+pub const VIA_HOME: f64 = 0.3;
+
 /// A named rectangle with a clearance and a via of its own, below those of the net classes
 /// and of the board: the field of a ball grid that is routed at a finer step than the rest
 /// (`patterns::field_rules`). Written as a rule area with a custom rule
@@ -158,6 +161,10 @@ pub struct RuleArea {
     pub clearance: Option<f64>,
     /// Diameter and drill.
     pub via: Option<(f64, f64)>,
+    /// What copper of another net keeps from a drill in the area, below the hole clearance of
+    /// the board.
+    #[serde(default)]
+    pub hole: Option<f64>,
     /// What the area is for, in words for the report.
     pub why: String,
 }
@@ -1136,14 +1143,22 @@ impl Board {
 
     /// Diameter and drill of the smallest via a courtyard rule allows at p (None: no such rule
     /// there).
+    ///
+    /// A via is set only [`VIA_HOME`] inside an area, so that a geometry step that shifts it
+    /// leaves it in the area whose rule allows its size.
     pub fn courtyard_via_at(&self, p: Point) -> Option<(f64, f64)> {
+        self.via_rule_at(p, VIA_HOME)
+    }
+
+    /// [`Board::courtyard_via_at`] for a via that keeps `margin` from the border of an area.
+    pub fn via_rule_at(&self, p: Point, margin: f64) -> Option<(f64, f64)> {
         if !self.local_vias() {
             return None;
         }
         let areas = self
             .rule_areas
             .iter()
-            .filter(|a| a.rect.contains(p))
+            .filter(|a| a.rect.grow(-margin).contains(p))
             .filter_map(|a| a.via);
         self.courtyard_via
             .iter()
@@ -1151,6 +1166,20 @@ impl Board {
             .map(|&(_, d, drill)| (d, drill))
             .chain(areas)
             .min_by(|a, b| a.0.total_cmp(&b.0))
+    }
+
+    /// What copper of another net keeps from the drill of a via of `net` at p: the hole
+    /// clearance of the board and the rules ([`Board::hole_gap`]), or less where an area says so.
+    pub fn hole_gap_at(&self, net: NetId, p: Point) -> f64 {
+        let gap = self.hole_gap(net);
+        if !self.local_vias() {
+            return gap;
+        }
+        self.rule_areas
+            .iter()
+            .filter(|a| a.rect.contains(p))
+            .filter_map(|a| a.hole)
+            .fold(gap, f64::min)
     }
 
     /// Diameter and drill of a via of `net` at p: those of its class, or the smaller ones of a

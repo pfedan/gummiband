@@ -1011,8 +1011,10 @@ pub fn relax_while(
     let mut vias: Vec<(Point, f64, u32, f64)> = geo
         .vias
         .iter()
-        .map(|v| (v.at, v.diameter / 2.0, v.net, clr(v.net)))
+        .map(|v| (v.at, v.diameter / 2.0, v.net, board.clearance_at(v.at, clr(v.net))))
         .collect();
+    // (where a place has a clearance of its own, copper there asks only that: `Board::clearance_at`)
+    let local = board.local_clearances();
     let max_vr = vias.iter().map(|v| v.1).fold(0.0, f64::max);
     // a via pair is a capsule: its line turns with the tracks that end on it, its vias are as
     // wide as the circle around it less the line (round vias: no line, the circle)
@@ -1473,7 +1475,11 @@ pub fn relax_while(
                     let need = cr
                         + o.piece_width(pc.a, pc.b) / 2.0
                         + vclr
-                            .max(clr(o.net))
+                            .max(if local {
+                                board.clearance_on(pc.a, pc.b, clr(o.net))
+                            } else {
+                                clr(o.net)
+                            })
                             .max(board.item_gap(vn, Some(o.net)))
                             .max(board.via_track_gap(o.net, vn, cr))
                         + cfg.margin;
@@ -1590,6 +1596,8 @@ pub fn relax_while(
                         if dirty.as_ref().is_some_and(|d| !d[cell]) {
                             return p;
                         }
+                        // (`c` stays the bound the lists of near things are built with)
+                        let cp = if local { board.clearance_at(p, c) } else { c };
                         let w = t.width_at(p);
                         // tension
                         let mid = (pts[i - 1] + pts[i + 1]) * 0.5;
@@ -1602,7 +1610,7 @@ pub fn relax_while(
                                 continue;
                             }
                             let need = if o.floor {
-                                max_of(max_of(o.clr, c), board.item_gap(net, Some(o.own_net)))
+                                max_of(max_of(o.clr, cp), board.item_gap(net, Some(o.own_net)))
                             } else if o.hole {
                                 board.hole_gap(net)
                             } else {
@@ -1713,7 +1721,7 @@ pub fn relax_while(
                             };
                             let need =
                                 vr + max_of(
-                                    max_of(max_of(vclr, c), board.item_gap(net, Some(vn))),
+                                    max_of(max_of(vclr, cp), board.item_gap(net, Some(vn))),
                                     board.via_track_gap(net, vn, vr),
                                 ) + w / 2.0
                                     + cfg.margin;
@@ -1784,10 +1792,13 @@ pub fn relax_while(
                         for &key in near.iter() {
                             let pc = &pieces[key as u32 as usize];
                             let o = &geo.tracks[pc.track as usize];
-                            let need = w / 2.0
-                                + o.piece_width(pc.a, pc.b) / 2.0
-                                + board.track_clearance(net, o.net)
-                                + cfg.margin;
+                            let tc = board.track_clearance(net, o.net);
+                            let tc = if local {
+                                board.clearance_at(p, tc).max(board.clearance_on(pc.a, pc.b, tc))
+                            } else {
+                                tc
+                            };
+                            let need = w / 2.0 + o.piece_width(pc.a, pc.b) / 2.0 + tc + cfg.margin;
                             let ab = pc.b - pc.a;
                             let l2 = ab.len2();
                             let tt = if l2 > 0.0 {

@@ -1987,7 +1987,7 @@ impl<'a> Router<'a> {
         }
         let (d, drill) = self.board.via_at(net, p);
         // (other copper keeps the hole clearance from the drill, whatever the ring is)
-        let c = c.max(self.board.hole_gap(net) - (d - drill) / 2.0);
+        let c = c.max(self.board.hole_gap_at(net, p) - (d - drill) / 2.0);
         (r.min(d / 2.0), drill, c)
     }
 

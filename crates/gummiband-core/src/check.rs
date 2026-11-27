@@ -680,7 +680,7 @@ impl<'a> Copper<'a> {
                 && *drill > 0.0
             {
                 let hole = d + reach - sr - drill / 2.0;
-                let gap = board.hole_gap(net).max(board.hole_gap(qnet));
+                let gap = board.hole_gap_at(net, at).max(board.hole_gap_at(qnet, at));
                 if hole < gap + extra - tol && d >= need + extra - tol {
                     out.push(Violation {
                         what: format!(

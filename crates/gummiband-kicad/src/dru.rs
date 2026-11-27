@@ -175,7 +175,9 @@ pub fn courtyard_vias(text: &str) -> Vec<(String, f64, f64)> {
 
 /// Clearance and via (diameter, drill) of the rules that hold in a named rule area: a condition
 /// that is `A.intersectsArea('NAME')` and nothing else. Returns them per area name.
-pub fn area_rules(text: &str) -> Vec<(String, Option<f64>, Option<(f64, f64)>)> {
+pub type AreaRule = (String, Option<f64>, Option<(f64, f64)>, Option<f64>);
+
+pub fn area_rules(text: &str) -> Vec<AreaRule> {
     let mut out = Vec::new();
     for (names, r) in scoped_rules(text, "intersectsArea") {
         let of = |name: &str| {
@@ -190,8 +192,9 @@ pub fn area_rules(text: &str) -> Vec<(String, Option<f64>, Option<(f64, f64)>)> 
             (Some(d), Some(drill)) if drill < d => Some((d, drill)),
             _ => None,
         };
+        let hole = of("hole_clearance").and_then(constraint_min);
         if clearance.is_some() || via.is_some() {
-            out.extend(names.iter().map(|n| (n.clone(), clearance, via)));
+            out.extend(names.iter().map(|n| (n.clone(), clearance, via, hole)));
         }
     }
     out
@@ -250,6 +253,9 @@ pub fn with_area_rules(text: &str, areas: &[gummiband_core::board::RuleArea]) ->
                 "  (constraint annular_width (min {}mm))\n",
                 ((d - drill) / 2.0 * 1e4).round() / 1e4
             ));
+        }
+        if let Some(h) = a.hole {
+            out.push_str(&format!("  (constraint hole_clearance (min {h}mm))\n"));
         }
         out.pop();
         out.push_str(")\n");
@@ -920,6 +926,7 @@ mod tests {
             },
             clearance: Some(clearance),
             via: Some((0.45, 0.2)),
+            hole: Some(0.2),
             why: String::new(),
         };
         let own = "(version 1)\n(rule \"mine\"\n  (condition \"A.NetClass == 'Power'\")\n  (constraint clearance (min 0.3mm)))\n";
@@ -929,10 +936,15 @@ mod tests {
             once.contains("(condition \"A.intersectsArea('gummiband field U1')\")"),
             "{once}"
         );
-        assert!(once.contains("(constraint annular_width (min 0.125mm)))"), "{once}");
+        assert!(once.contains("(constraint hole_clearance (min 0.2mm)))"), "{once}");
         assert_eq!(
             area_rules(&once),
-            vec![("gummiband field U1".to_string(), Some(0.1), Some((0.45, 0.2)))]
+            vec![(
+                "gummiband field U1".to_string(),
+                Some(0.1),
+                Some((0.45, 0.2)),
+                Some(0.2)
+            )]
         );
         // a second route replaces what the first wrote; without areas the file is the user's again
         let twice = with_area_rules(&once, &[area(0.09)]);
