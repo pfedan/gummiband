@@ -749,7 +749,27 @@ fn print_matching(rules: &[gummiband_core::matching::RuleMatch]) {
     }
 }
 
+/// A reader that has seen enough (`gummiband info board | head`) closes the pipe. Rust starts
+/// a program with SIGPIPE ignored, so the next `println!` fails and panics with a backtrace;
+/// with the default action back the program ends quietly there, like any other filter.
+#[cfg(unix)]
+fn end_on_closed_pipe() {
+    unsafe extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    // SAFETY: `signal` of the C library with the default action, before any thread starts.
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn end_on_closed_pipe() {}
+
 fn main() -> Result<()> {
+    end_on_closed_pipe();
     let cli = Cli::parse_from(old_pairs_switch(std::env::args_os()));
     if let Some(n) = cli.threads {
         rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global()?;

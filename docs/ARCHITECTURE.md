@@ -174,6 +174,11 @@ the environment that belong to the pipeline are read there (`GB_SHIFT`, `GB_NO_T
 - Locked tracks and vias are obstacles of their net; their endpoints join the net's pin set, so a
   pre-routed lane counts as connected copper the router may attach to.
 - Unlocked tracks and vias are removed (or kept with `--keep-unlocked`).
+- A keep-out zone with holes (KiCad writes the outline first and each hole as a polygon of its
+  own; the usual case is a keep-out along the board edge, a rectangle with the board as its
+  hole) is cut into pieces without holes that touch along vertical lines
+  (`geom::without_holes`), each an obstacle. Planes and other zones still take the outline
+  alone.
 
 ## Routing substrate
 
@@ -309,7 +314,17 @@ each layer stays planar by construction.
   minimum (`Board::narrow_pin`) join last, so that each ends a branch and the current between
   two other pins never passes a neck.
 - Rip-up and reroute of connections near a failed one, via-in-pad as a last resort for
-  fan-outs.
+  fan-outs. What gives way is a guess: the connections that pass within a millimetre or so of
+  the straight line of the failed one (`Router::blockers`), up to six, whatever comes of it.
+  Experimental (`RouterConfig::ripup_cut`, `GB_RIPUP_CUT`, off by default): the failed
+  connection looks for its way through everything at the price of a crossing
+  (`Router::way_through`, as the open end and the area pass do), and what it runs into gives
+  way, nothing else; if it still finds no way, it looks again from there, up to three times.
+  The state before is kept and comes back when more connections are open afterwards, or as
+  many with the failed one still open (`Router::rip_cut`): a rip-up may move an open
+  connection to another place and never adds one. It applies while at most 15 % of the
+  connections are open (or eight); beyond that the board has more connections than room and
+  the guess is as good and cheaper. Numbers in `MILESTONES.md`.
 
 ### Negotiated routing
 

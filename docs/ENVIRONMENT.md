@@ -125,6 +125,7 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_BACK_COST` | number | 0 | Extra cost per mm of track on the back layer of a board with more than one routing layer (0: off). |
 | `GB_MAXEXP` | number | 400000 | Most expansions of one search for a connection. |
 | `GB_RIPUP` | number | 3 | Rip-up passes of a router run. |
+| `GB_RIPUP_CUT` | set to anything | off | The rip-up of a router run takes out what the open connection runs into on its way through everything, and takes the state back where that costs a connection. |
 | `GB_ESCAPE` | number | 0 | Extra cost in mm for passing right next to a pad of another net that still waits for its route. |
 | `GB_SEARCH_MARGIN` | number | 0.01 | Search: room a track or via asks for beyond its clearance, in mm. |
 | `GB_AREA_ESCAPE` | number | 2 | `areas fill`: extra cost in mm for passing right next to a pad of a net left to the fill of its area, while the other nets are laid. |

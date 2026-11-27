@@ -948,3 +948,72 @@ LED controller (KiCad DRC on the Mac, seeds 1 to 3, `--no-move-parts`, 2026-11-0
   spelling, and give the files of the same options before the change (the Finish action byte
   for byte against the build before). The dialog itself was run only against a stand-in for
   wxPython, not in KiCad: this machine has neither.
+
+## A look at KiCadRoutingTools
+
+2026-11-27: [KiCadRoutingTools](https://github.com/drandyhaas/KiCadRoutingTools) (MIT) is a
+grid router: A* on a 0.1 mm raster in Rust, driven by a large Python engine, with fan-out,
+pairs, planes and a placer. Its substrate has nothing in common with ours, so nothing of its
+code fits, and the project rule (own design, no foreign code) stands; what carries over are
+ideas about the steps around the search, and its corpus of real boards. Read: its routing
+architecture, net ordering, rip-up and reroute, bus routing, differential pairs, length
+matching, plane routing, and the modules behind them.
+
+What it does that we took up:
+
+- **Rip-up by what is in the way, taken back when it loses.** Its rip-up ladder ranks the
+  routed nets by the blocked cells of the failed search, in one variant by a probe that
+  routes the failed net with the others as soft cost (`mincut`), rips one more per rung,
+  restores what a failed rung ripped, and an "improvement gate" reverts a run that ends with
+  fewer connected pads. Ours ripped up to six connections near the straight line and kept
+  whatever came of it. `Router::rip_cut` is the same idea in our terms (see ARCHITECTURE,
+  Topological routing). Measured in the cloud on 4 cores with the own clearance check, no
+  KiCad there, seed 1 (and 2 on the real boards), `--no-move-parts`:
+
+  | Boards | Preset | open | vias | mm | violating pieces |
+  | --- | --- | --- | --- | --- | --- |
+  | the 21 synthetic | draft | 1 / 1 | 870 / 915 | 15352 / 15416 | 25 / 2 |
+  | LED controller, Duo, injector and 6 of the corpus, 2 seeds | draft | 16 / 14 | 1941 / 1955 | 31663 / 31474 | 112 / 57 |
+  | LED controller, Duo, injector, Tigard, Watchy, 14 runs | quick | 12 / 12 | 2385 / 2379 | 22769 / 22785 | 78 / 69 |
+
+  (before / after). The LED controller closes its last connection with `draft` on both seeds;
+  `bga_dense` loses all 23 violating pieces; `parts_multi_feed` takes 130 vias instead of 99
+  and `four_signal_layers` 109 instead of 96, `bus` 18 instead of 26. So: fewer violations
+  and open connections, about as much length, a few percent more vias with the small search,
+  none with the full one. It stays behind `GB_RIPUP_CUT` until `bench/compare.py` has run with
+  the KiCad DRC; both hash lists are unchanged.
+- **Its corpus as a second set of real boards.** `bench/prepare-krt.sh` fetches nine of its
+  unrouted boards (ESP-Prog, a sonde, a split-flap driver, Tigard, Watchy, an interface board,
+  a ColdFire/Xilinx kit, Glasgow revC, ULX3S) into `bench/work/krt`, and `compare.py` takes
+  them along. First draft runs: seven of the nine route completely or but for a few
+  connections; see `bench/README.md`.
+- **A bug the corpus showed at once.** Glasgow has a keep-out for tracks and vias along the
+  board edge: a rectangle with the board as its hole. The reader took the first polygon of a
+  zone, the rectangle, so the whole board was shut: 0 via sites, 44 of 811 connections. Now
+  such a zone is cut into pieces around its holes (`geom::without_holes`): 743 of 811 with
+  `draft`, the rest is the BGA with the 0.2 mm rules of its project file.
+- `gummiband info board | head` no longer ends in a panic with a backtrace.
+
+What it does and we have in another form, so nothing to take: negotiated congestion with a
+history price; an order by crossings (MPS: nets whose straight lines cross wait for a later
+round; our portfolio and the generations search the order, and `groups` orders the members of
+a bus across its band); bus corridors with attraction (`groups`, layer directions, the pull of
+`pairs`); via-in-pad, shared fan-outs and dog-bone sites; neck-down of wide nets at fine pads;
+meanders with via barrels and pad-to-die lengths; a fill model checked against KiCad's; the
+check of the finished copper that takes back what does not hold.
+
+What it does and we do not, noted for later:
+
+- Pairs: a pair shorter than about 3 mm or five setbacks is not coupled at all (coupling buys
+  nothing there and tangles the pads); a pair whose polarity is crossed may swap the two pads
+  of one end where the part allows it (an FPGA input), with the schematic updated; a pair that
+  does not fit is tried narrower with the gap that holds its impedance.
+- Return vias: a ground via beside every signal via and every via pair. It places them only
+  where the ground has copper on two layers, which is what our try on the DDR5 testbed lacked
+  (one ground plane: they dangled).
+- Pin swaps of equivalent targets (Hungarian assignment) before routing.
+- A net whose own class asks for less clearance than the widest of the run gets a retry at
+  its own; a last retry at half the raster. Our capacities are per net pair already.
+- Rule conditions by layer and pad overrides resolved in KiCad's order; ours are still the
+  list in the guide.
+

@@ -445,6 +445,30 @@ First results (2026-10-29, `--runs 14 --generations 1`, no geometry generations)
 | `corne` | 471/482 | 453 | 136 s | the two RP2040 fan-outs (0.4 mm pitch) |
 | `ulx3s` | 651/796 | 377 | 304 s | BGA escape on two signal layers, bundles along the board edge |
 
+### The corpus of KiCadRoutingTools
+
+`prepare-krt.sh [clone]` fetches <https://github.com/drandyhaas/KiCadRoutingTools> (MIT; its
+`kicad_files/` holds unrouted open hardware boards with licenses of their own, so they are
+fetched and not kept here) and copies nine boards with their project files into
+`work/krt/<name>/`. `compare.py` routes them with the rest; its ULX3S is `krt-ulx3s` there.
+Boards without a `.kicad_pro` are routed with KiCad's default rules (0.2 mm tracks and
+clearance, 0.6 mm vias), which is why two boards with fine BGAs are left out.
+
+First runs (2026-11-27, `--preset draft --no-move-parts`, seed 1, 4 cores in the cloud, the own
+clearance check, no KiCad DRC):
+
+| Name | Board | Routing layers | Routed | Vias | Time | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| `esp_prog` | ESP-Prog | F, B | 45/46 | 15 | 3 s | one pin of the regulator stays open |
+| `sonde_u` | a sonde | F, B | 66/66 | 1 | 1 s | |
+| `splitflap_driver` | split-flap driver, 198 x 30 mm | F, B | 201/201 | 80 | 11 s | |
+| `tigard` | Tigard | F, In1, In2, B (no planes declared) | 290/290 | 107 | 4 s | 11 violating pieces |
+| `watchy` | Watchy | F, In1, In2, B | 186/192 | 91 | 13 s | antenna and two pins of the ESP32 and the accelerometer open |
+| `interf_u_unrouted` | an interface board | F, B | 200/200 | 42 | 17 s | |
+| `kit-dev-coldfire-xilinx_5213` | ColdFire and Xilinx kit | F, B | 534/534 | 238 | 108 s | |
+| `glasgow_revC` | Glasgow revC (BGA 121, 0.8 mm) | F, In1, In2, B | 743/811 | 235 | 837 s | with the keep-out fix and `GB_RIPUP_CUT`; before the fix 44/811 |
+| `ulx3s` | ULX3S, unrouted, no planes declared | F, In1, In2, B | 656/827 | 223 | 42 s | |
+
 ## DDR5 testbed (length matching)
 
 `prepare-ddr5.sh` fetches Antmicro's DDR5 testbed (Apache-2.0, pinned to one commit) into

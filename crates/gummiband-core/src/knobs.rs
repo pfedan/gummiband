@@ -436,6 +436,8 @@ knobs! {
         "Most expansions of one search for a connection.";
     RIPUP = "GB_RIPUP", Experiment, Num, "3",
         "Rip-up passes of a router run.";
+    RIPUP_CUT = "GB_RIPUP_CUT", Experiment, Set, "off",
+        "The rip-up of a router run takes out what the open connection runs into on its way through everything, and takes the state back where that costs a connection.";
     ESCAPE = "GB_ESCAPE", Experiment, Num, "0",
         "Extra cost in mm for passing right next to a pad of another net that still waits for its route.";
     SEARCH_MARGIN = "GB_SEARCH_MARGIN", Experiment, Num, "0.01",
