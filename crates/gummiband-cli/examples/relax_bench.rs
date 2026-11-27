@@ -53,6 +53,7 @@ fn main() -> anyhow::Result<()> {
         generations: 1,
         geometry_generations: 0,
         frames: false,
+        watch: None,
         progress: None,
         seed: None,
         open_end: None,

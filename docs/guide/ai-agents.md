@@ -208,6 +208,10 @@ nothing.
   them again.
 - **Keep the project files together.** `drc` needs the `.kicad_pro` next to the board; `route`
   copies it (and the `.kicad_dru`) next to its output when it is missing.
+- **Watch the routes.** Ask the agent to show you the routing: the tool `watch` gives a URL for
+  your browser, and every route of the session plays there while it runs, see
+  [Watch the route in a browser](workflows.md#watch-the-route-in-a-browser). With
+  `GUMMIBAND_WATCH=7878` in the environment of the server the page is there from the start.
 - **Open the result in KiCad.** Refill the zones (B) and run the DRC there before you send the
   board to the fab; the tuning patterns, zones and locked items are ordinary KiCad items.
 

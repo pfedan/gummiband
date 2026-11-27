@@ -28,6 +28,7 @@ pub mod route;
 pub mod spread;
 pub mod topo;
 pub mod tune;
+pub mod watch;
 
 use std::collections::HashMap;
 
@@ -340,6 +341,9 @@ pub struct SearchConfig {
     /// What a via is worth in mm of track when the open end judges its results
     /// ([`DEFAULT_OPEN_VIA_COST`]). Lower gives more vias and shorter tracks.
     pub open_via_cost: f64,
+    /// Shown the search while it runs: one run of every generation as it lays its copper, one
+    /// relaxation, and the best candidate after every phase ([`watch`]).
+    pub watch: Option<watch::Watch>,
 }
 
 /// The via price of the open end in mm of track: half of what a via weighs in the search
@@ -359,11 +363,17 @@ impl SearchConfig {
             .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
     }
 
-    fn report(&self, phase: &str, s: &RunStats) {
-        self.report_at(phase, s, Search::default());
+    fn report(&self, phase: &str, c: &Candidate) {
+        self.report_at(phase, c, Search::default());
     }
 
-    fn report_at(&self, phase: &str, s: &RunStats, search: Search) {
+    fn report_at(&self, phase: &str, c: &Candidate, search: Search) {
+        self.report_stats(phase, &c.stats, &c.geo, &c.hot, search);
+    }
+
+    /// Tells the front end the best candidate after `phase`: its numbers to the progress
+    /// callback, its copper to the watch.
+    fn report_stats(&self, phase: &str, s: &RunStats, geo: &Geometry, spots: &[geom::Point], search: Search) {
         if let Some(p) = &self.progress {
             (p.0)(&Progress {
                 phase: phase.to_string(),
@@ -375,6 +385,18 @@ impl SearchConfig {
                 search,
             });
         }
+        if let Some(w) = &self.watch {
+            let mut v = watch::View::of(watch::Stage::Best, phase, geo);
+            v.spots = spots;
+            v.routed = Some((s.routed, s.conns));
+            v.violations = s.violations;
+            w.show(&v);
+        }
+    }
+
+    /// The watch for the glimpses of `phase`, for the lead of its runs.
+    fn lead(&self, phase: &str) -> Option<watch::Watch> {
+        self.watch.as_ref().map(|w| w.at(phase))
     }
 }
 
@@ -530,6 +552,8 @@ fn evaluate_inner<'a>(
     }
     debug_hooks(board, &mut r);
     let geo = r.geometry();
+    // the run is over: what is done with its router later is not watched as this run
+    r.cfg.watch = None;
     (candidate(board, &r, geo, routed, cfg_used, generation), r)
 }
 
@@ -645,7 +669,8 @@ fn candidate(
         bad_nets: Vec::new(),
         hot: Vec::new(),
         flaw: 0.0,
-        cfg,
+        // what is made from the configuration of a candidate later is not its lead again
+        cfg: RouterConfig { watch: None, ..cfg },
     }
 }
 
@@ -1036,7 +1061,13 @@ fn place_and_route(
             offsets = reached;
             let mut st = best.1.stats.clone();
             st.violations = Some(best_score.2.len());
-            search.report(&format!("placement round {round}"), &st);
+            search.report_stats(
+                &format!("placement round {round}"),
+                &st,
+                &best.1.geometry,
+                &hot,
+                Search::default(),
+            );
             continue;
         }
         // a full new search pays off only for a handful of local problems, and only on boards
@@ -1076,7 +1107,13 @@ fn place_and_route(
         }
         let mut st = best.1.stats.clone();
         st.violations = Some(best_score.2.len());
-        search.report(&format!("placement round {round}"), &st);
+        search.report_stats(
+            &format!("placement round {round}"),
+            &st,
+            &best.1.geometry,
+            &hot,
+            Search::default(),
+        );
     }
     best
 }
@@ -1216,6 +1253,7 @@ fn search_fixed(
             } else {
                 0.0
             },
+            watch: if i == 0 { search.lead("portfolio") } else { None },
             ..base.clone()
         })
         .collect();
@@ -1253,7 +1291,7 @@ fn search_fixed(
     for c in rest {
         offer(&mut finalists, c);
     }
-    search.report("portfolio", &best.stats);
+    search.report("portfolio", &best);
     if search.frames {
         frames.push((label(&best, "portfolio"), best.geo.clone(), false));
     }
@@ -1272,9 +1310,17 @@ fn search_fixed(
             via_pass: best.stats.via_pass,
             ..base.clone()
         };
+        let lead = search.lead(&format!("generation {generation}"));
         let next: Vec<Candidate> = genomes
             .par_iter()
-            .map(|g| evaluate(board, &sub, cfg.clone(), Some(g), generation))
+            .enumerate()
+            .map(|(i, g)| {
+                let cfg = RouterConfig {
+                    watch: lead.clone().filter(|_| i == 0),
+                    ..cfg.clone()
+                };
+                evaluate(board, &sub, cfg, Some(g), generation)
+            })
             .collect();
         portfolio.extend(next.iter().map(|c| c.stats.clone()));
         for cand in next {
@@ -1285,7 +1331,7 @@ fn search_fixed(
                 offer(&mut finalists, cand);
             }
         }
-        search.report(&format!("generation {generation}"), &best.stats);
+        search.report(&format!("generation {generation}"), &best);
         if search.frames {
             frames.push((
                 label(&best, &format!("generation {generation}")),
@@ -1342,9 +1388,13 @@ fn search_fixed(
     let geo_eval = |c: Candidate| geo_eval_with(c, &full_relax);
     // the same, as long as `go_on` says so before each round; a candidate whose relaxation
     // was stopped keeps its unrelaxed geometry and no violation numbers
-    let geo_eval_while = |mut c: Candidate, go_on: &dyn Fn() -> bool| -> Candidate {
+    let geo_eval_while = |mut c: Candidate, lead: Option<watch::Watch>, go_on: &dyn Fn() -> bool| -> Candidate {
         let mut geo = c.geo.clone();
-        if !relax::relax_while(board, &sub, &mut geo, &full_relax, go_on) {
+        let cfg = relax::RelaxConfig {
+            watch: lead,
+            ..full_relax.clone()
+        };
+        if !relax::relax_while(board, &sub, &mut geo, &cfg, go_on) {
             return c;
         }
         let v = judge(&mut c, &geo);
@@ -1387,7 +1437,18 @@ fn search_fixed(
     } else {
         pool
     };
-    let judged: Vec<Candidate> = pool.into_par_iter().map(geo_eval).collect();
+    let lead = search.lead("geometry");
+    let judged: Vec<Candidate> = pool
+        .into_par_iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let cfg = relax::RelaxConfig {
+                watch: lead.clone().filter(|_| i == 0),
+                ..full_relax.clone()
+            };
+            geo_eval_with(c, &cfg)
+        })
+        .collect();
     for c in &judged {
         portfolio.push(c.stats.clone());
     }
@@ -1400,7 +1461,7 @@ fn search_fixed(
     let mut rivals: Vec<Candidate> = judged.split_off(1);
     rivals.truncate(n_rivals);
     let mut best = judged.pop().unwrap();
-    search.report("geometry", &best.stats);
+    search.report("geometry", &best);
     if search.frames {
         frames.push((label(&best, "geometry"), best.geo.clone(), true));
     }
@@ -1446,8 +1507,10 @@ fn search_fixed(
                 }
             })
             .collect();
-        let route_variant = |(g, scale): &(Genome, f64)| {
+        let lead = search.lead(&format!("geometry generation {generation}"));
+        let route_variant = |(g, scale): &(Genome, f64), lead: Option<watch::Watch>| {
             let cfg = RouterConfig {
+                watch: lead,
                 seed: 0,
                 fanout_first: best.stats.fanout_first,
                 via_cost: best.stats.via_cost,
@@ -1470,7 +1533,7 @@ fn search_fixed(
                     iterations: (full_relax.iterations / 4).max(40),
                     ..full_relax.clone()
                 };
-                let routed: Vec<Candidate> = variants.par_iter().map(|v| route_variant(v).0).collect();
+                let routed: Vec<Candidate> = variants.par_iter().map(|v| route_variant(v, None).0).collect();
                 let top = routed
                     .iter()
                     .map(|c| c.stats.routed)
@@ -1498,13 +1561,15 @@ fn search_fixed(
             }
             None => variants
                 .par_iter()
-                .map(|v| {
-                    let (c, router) = route_variant(v);
+                .enumerate()
+                .map(|(i, v)| {
+                    let lead = lead.clone().filter(|_| i == 0);
+                    let (c, router) = route_variant(v, lead.clone());
                     let r = c.stats.routed;
                     if floor.fetch_max(r, relaxed) > r {
                         return (c, None);
                     }
-                    (geo_eval_while(c, &|| floor.load(relaxed) <= r), router)
+                    (geo_eval_while(c, lead, &|| floor.load(relaxed) <= r), router)
                 })
                 .collect(),
         };
@@ -1534,7 +1599,7 @@ fn search_fixed(
         rivals.truncate(n_rivals);
         search.report_at(
             &format!("geometry generation {generation}"),
-            &best.stats,
+            &best,
             Search {
                 generation,
                 ..Default::default()
@@ -1558,6 +1623,7 @@ fn search_fixed(
             do_polish.then(|| {
                 let polish = relax::RelaxConfig {
                     tension: 0.0,
+                    watch: search.lead("polish"),
                     ..full_relax.clone()
                 };
                 geo_eval_with(best.clone(), &polish)
@@ -1581,7 +1647,7 @@ fn search_fixed(
         if full_cost(&c) < full_cost(&best) {
             best = c;
         }
-        search.report("polish", &best.stats);
+        search.report("polish", &best);
     }
     // the winner again with the via pass: it stays only if nothing else gets worse
     if let Some(c) = via_passed {
@@ -1591,14 +1657,14 @@ fn search_fixed(
             && c.stats.vias < best.stats.vias;
         if fewer {
             best = c;
-            search.report("via pass", &best.stats);
+            search.report("via pass", &best);
         }
     }
     // the open end: from here on the result only changes where a mutant makes it better
     let mut others = Vec::new();
     if open {
         // tells a front end that the normal search is over (a time budget starts here)
-        search.report(OPEN_END_PHASE, &best.stats);
+        search.report(OPEN_END_PHASE, &best);
         (best, others) = improve::run(board, &sub, search, best, done, &mut rng, &mut |c, generation| {
             if search.frames {
                 frames.push((label(c, &format!("generation {generation}")), c.geo.clone(), true));
@@ -1616,7 +1682,7 @@ fn search_fixed(
             if let Some(c) = improve::give_air(board, sub, &best, search.air) {
                 best = c;
                 if report {
-                    search.report("air", &best.stats);
+                    search.report("air", &best);
                 }
             }
         }
@@ -1624,7 +1690,7 @@ fn search_fixed(
             if let Some(c) = improve::make_room(board, sub, &best, target, search.air / 2.0) {
                 best = c;
                 if report {
-                    search.report("room", &best.stats);
+                    search.report("room", &best);
                 }
             }
         }
@@ -1735,7 +1801,7 @@ fn search_fixed(
             if after < before.len() {
                 best.geo = g;
                 best.stats.violations = Some(after);
-                search.report("exits given back", &best.stats);
+                search.report("exits given back", &best);
             }
         }
     }
@@ -1853,7 +1919,7 @@ fn search_fixed(
             if key < best_key {
                 best = c;
                 best_key = key;
-                search.report("runner-up", &best.stats);
+                search.report("runner-up", &best);
             }
         }
     }

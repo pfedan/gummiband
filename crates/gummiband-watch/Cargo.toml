@@ -1,0 +1,10 @@
+[package]
+name = "gummiband-watch"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Watch a Gummiband route while it runs: the feed of views, a small HTTP server for it and the viewer page"
+
+[dependencies]
+gummiband-core.workspace = true
+serde_json.workspace = true

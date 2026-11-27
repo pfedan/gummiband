@@ -18,6 +18,7 @@ use gummiband_core::prof;
 use gummiband_core::realize::{Elem, Geometry};
 use gummiband_core::route::RouterConfig;
 use gummiband_core::topo::{Substrate, SubstrateConfig};
+use gummiband_core::watch::Watch;
 use gummiband_core::{GiveTry, ProgressFn, RouteResult, SearchConfig};
 use gummiband_kicad::{KeepCopper, KicadBoard, ReadOptions, read_board, write};
 use gummiband_place::auto::{PlaceOptions, PlaceReport};
@@ -717,6 +718,7 @@ impl RouteOptions {
             generations: self.generations(),
             geometry_generations: self.geometry_generations(),
             frames: self.frames.is_some(),
+            watch: None,
             seed: self.seed,
             open_end: stop,
             air: self.air(open_end),
@@ -771,7 +773,15 @@ pub struct Hooks<'a> {
     pub progress: Option<&'a dyn Fn(&str) -> ProgressFn>,
     /// Called for the steps before the search, as they happen.
     pub event: Option<&'a dyn Fn(Event<'_>)>,
+    /// For a front end that shows the route while it runs: called with a board when its route
+    /// begins, and gives the watch for its search ([`gummiband_core::watch`]). When the
+    /// route is done it is called once more, with the board as it is written, and that watch
+    /// is shown the finished copper ([`FINISHED_PHASE`]).
+    pub watch: Option<&'a dyn Fn(&Board) -> Watch>,
 }
+
+/// The phase of the last view of a watched route: the copper as it is written.
+pub const FINISHED_PHASE: &str = "finished";
 
 impl Hooks<'_> {
     fn emit(&self, e: Event<'_>) {
@@ -993,7 +1003,17 @@ pub fn route_board(board: &Board, opts: &RouteOptions, hooks: &Hooks) -> Result<
 
 fn route_from(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks) -> Result<Routed> {
     let first = route_with(t0, board, opts, hooks, true)?;
-    area_fallback(t0, board, opts, hooks, first)
+    let routed = area_fallback(t0, board, opts, hooks, first)?;
+    if let Some(begin) = hooks.watch {
+        use gummiband_core::watch::{Stage, View};
+        let spots: Vec<gummiband_core::geom::Point> = routed.violations.iter().map(|v| v.at).collect();
+        let mut v = View::of(Stage::Best, FINISHED_PHASE, &routed.res.geometry);
+        v.spots = &spots;
+        v.routed = Some((routed.res.stats.routed, routed.res.stats.conns));
+        v.violations = Some(spots.len());
+        begin(&routed.board).show(&v);
+    }
+    Ok(routed)
 }
 
 /// `areas` fill never ends with fewer connections than `areas` tracks.
@@ -1055,7 +1075,7 @@ fn route_with(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks, re
     let model_before = (prof::value(prof::Slot::AreaModel), prof::value(prof::Slot::AreaModels));
     let sub_cfg = opts.substrate_config();
     let router_cfg = opts.router_config()?;
-    let search_cfg = opts.search_config(hooks, "");
+    let mut search_cfg = opts.search_config(hooks, "");
     let seed = search_cfg.seed_used();
     let with_zdiff;
     let band = opts.pairs == Pairs::Band;
@@ -1087,6 +1107,7 @@ fn route_with(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks, re
         }
         None => board,
     };
+    search_cfg.watch = hooks.watch.map(|begin| begin(b));
     if opts.move_parts() {
         hooks.emit(Event::MovableParts { count: b.movable.len() });
     }
@@ -2001,6 +2022,7 @@ pub fn route_file(board: &Path, output: &Path, opts: &RouteOptions, hooks: &Hook
             let kb = load_board(path, opts, hooks)?;
             let search = SearchConfig {
                 frames: false,
+                watch: None,
                 // only the winner runs open ended
                 open_end: None,
                 progress: hooks.progress.map(|p| p(&format!("placement {i}/{count}: "))),

@@ -18,6 +18,7 @@ use crate::knobs;
 use crate::topo::{Mesh, NONE, OUTSIDE, PAD_SITE, STEINER, Substrate};
 
 mod shut;
+mod view;
 
 #[derive(Debug, Clone)]
 pub struct RouterConfig {
@@ -92,6 +93,9 @@ pub struct RouterConfig {
     /// Connections between the same two parts (a bus, SPI, I2C, a connector) go as one block, in pin order
     /// across the block, see [`GroupOrder`].
     pub groups: GroupOrder,
+    /// Shows the copper of this run while it is laid ([`crate::watch`]). The search sets it for
+    /// the lead run of a generation only.
+    pub watch: Option<crate::watch::Watch>,
 }
 
 /// Where the block of a part to part group goes in the routing order.
@@ -135,6 +139,7 @@ impl Default for RouterConfig {
             row_moves: 0.0,
             pairs_first: false,
             groups: GroupOrder::Off,
+            watch: None,
         }
     }
 }
@@ -371,6 +376,8 @@ pub struct Router<'a> {
     search_buf: SearchBuf,
     /// Debugging: positions expanded by the last search of a traced connection.
     pub trace: std::sync::Arc<std::sync::Mutex<Option<Vec<(Point, u8)>>>>,
+    /// What a watched run showed its viewer last (none before its first step).
+    shown: Option<view::Shown>,
     /// Per pin the distance to the nearest pin of its part on another net, see
     /// [`Board::pin_room`]: every search asks for it at its pins.
     pin_pitch: std::sync::Arc<Vec<f64>>,
@@ -737,6 +744,7 @@ impl<'a> Router<'a> {
             conn_vias: Vec::new(),
             search_buf: Default::default(),
             trace: Default::default(),
+            shown: None,
             pin_pitch: std::sync::Arc::new(Self::pin_pitches(board)),
             area_goals: Default::default(),
             area_wait: Vec::new(),
@@ -4328,7 +4336,7 @@ impl<'a> Router<'a> {
             return self.blockers(ci);
         }
         let found = self.way_through(ci, AREA_CROSSING).or_else(|| {
-            let mut r = self.clone();
+            let mut r = self.trial();
             r.cfg.via_in_pad = true;
             r.way_through(ci, AREA_CROSSING)
         });
@@ -4695,6 +4703,42 @@ impl<'a> Router<'a> {
     }
 
     pub fn route_one(&mut self, ci: usize) -> bool {
+        let Some(w) = self.cfg.watch.clone() else {
+            return self.route_one_unseen(ci);
+        };
+        // the copper of the file as soft copper has no segments to lay out one by one: such a
+        // run shows its glimpses only
+        let steps = !self.soft_on;
+        if steps && self.shown.is_none() {
+            self.shown = Some(Default::default());
+            w.attempt(|show| self.view_all(&w, show));
+        }
+        // a watched run shows where its searches looked
+        let traced = {
+            let mut t = self.trace.lock().unwrap();
+            t.is_none() && {
+                *t = Some(Vec::new());
+                true
+            }
+        };
+        let ok = self.route_one_unseen(ci);
+        // the trace has the layers as the router counts them, a viewer wants those of the board
+        let explored: Vec<(Point, u8)> = if traced {
+            let seen = self.trace.lock().unwrap().take().unwrap_or_default();
+            seen.into_iter()
+                .map(|(p, li)| (p, self.sub.layers[li as usize]))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if steps {
+            self.view_step(&w, &explored);
+        }
+        w.glimpse(|show| self.view_all(&w, show));
+        ok
+    }
+
+    fn route_one_unseen(&mut self, ci: usize) -> bool {
         for _ in 0..3 {
             let mut buf = std::mem::take(&mut self.search_buf);
             let found = self.search(ci, &mut buf);
@@ -4801,7 +4845,7 @@ impl<'a> Router<'a> {
 
     /// [`Router::way_through`], and how many vias the way takes.
     pub(crate) fn way_through_vias(&self, ci: usize, crossing: f64) -> Option<(Vec<usize>, Vec<Point>, usize)> {
-        let mut r = self.clone();
+        let mut r = self.trial();
         r.prices = Some(Prices {
             soft: true,
             overflow: 2.0 * crossing,

@@ -193,6 +193,7 @@ mod tests {
             "good_practice",
             "drc",
             "render",
+            "watch",
             "guide",
             "open_points",
             "concepts",
