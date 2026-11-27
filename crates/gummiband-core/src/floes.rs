@@ -120,9 +120,16 @@ const WRAP_SLACK: f64 = 0.12;
 /// The direction of a track at its pad is taken over this length of it.
 const PULL_LENGTH: f64 = 1.0;
 
+/// A clearance problem: where, and between which nets (None: copper without a net).
+#[derive(Debug, Clone, Copy)]
+pub struct Squeeze {
+    pub at: Point,
+    pub nets: (u32, Option<u32>),
+}
+
 /// The forces of the copper `geo` on the floes, on the board `cur` (the offsets applied).
-/// `spots` are the places of the clearance problems, `open` the pins of open connections.
-pub fn forces(cur: &Board, floes: &[Floe], geo: &Geometry, spots: &[Point], open: &[Point]) -> Forces {
+/// `spots` are the clearance problems, `open` the pins of open connections.
+pub fn forces(cur: &Board, floes: &[Floe], geo: &Geometry, spots: &[Squeeze], open: &[Point]) -> Forces {
     let n = floes.len();
     let mut f = Forces {
         press: vec![Point::default(); n],
@@ -133,15 +140,37 @@ pub fn forces(cur: &Board, floes: &[Floe], geo: &Geometry, spots: &[Point], open
     // pressure: the floes around a spot step away from it; the floe whose pin is the spot (an
     // open connection) stays, its neighbours make the room
     let mut seen: Vec<Point> = Vec::new();
-    for (&h, is_pin) in spots
+    for (h, nets) in spots
         .iter()
-        .map(|h| (h, false))
-        .chain(open.iter().map(|h| (h, true)))
+        .map(|s| (s.at, Some(s.nets)))
+        .chain(open.iter().map(|&h| (h, None)))
     {
+        let is_pin = nets.is_none();
         if seen.iter().any(|s| s.dist(h) < 1.0) {
             continue;
         }
         seen.push(h);
+        // a problem between two pads of one part, or between a pad and the track on the pad next
+        // to it, moves with the part: no room to make
+        if let Some((a, Some(b))) = nets.filter(|n| n.1 != Some(n.0)) {
+            let at_spot: Vec<(&String, u32)> = cur
+                .pins
+                .iter()
+                .filter(|p| p.net == a || p.net == b)
+                .filter(|p| {
+                    p.obstacles
+                        .iter()
+                        .any(|&o| cur.obstacles[o].shape.dist_to_point(h) <= PRESS_REACH)
+                })
+                .map(|p| (&p.footprint, p.net))
+                .collect();
+            if at_spot
+                .iter()
+                .any(|x| x.1 == a && at_spot.iter().any(|y| y.1 == b && y.0 == x.0))
+            {
+                continue;
+            }
+        }
         for (i, fl) in floes.iter().enumerate() {
             if !boxes[i].grow(PRESS_REACH).contains(h) {
                 continue;

@@ -977,6 +977,10 @@ struct PlaceScore {
     spots: Vec<geom::Point>,
     open: Vec<geom::Point>,
     problems: usize,
+    /// The clearance problems with their nets, for [`floes::forces`].
+    squeezed: Vec<floes::Squeeze>,
+    /// The length of the copper as it lies.
+    length: f64,
 }
 
 impl PlaceScore {
@@ -1001,6 +1005,13 @@ impl PlaceScore {
             problems: check::spots(&v).len() + r.stats.unrouted.len(),
             spots: v.iter().map(|x| x.at).collect(),
             open: open_pins(b, &r.stats.unrouted),
+            // a track too narrow for its current is no question of room between parts
+            squeezed: v
+                .iter()
+                .filter(|x| !x.is_width())
+                .map(|x| floes::Squeeze { at: x.at, nets: x.nets })
+                .collect(),
+            length,
         }
     }
 
@@ -1014,6 +1025,10 @@ impl PlaceScore {
         self.routed > o.routed || (self.routed == o.routed && self.cost < o.cost - 1e-6)
     }
 }
+
+/// A placement round in which only the bands push is worth another one when it made the copper
+/// shorter by this share.
+const BAND_GAIN: f64 = 0.0025;
 
 /// [`route_board`] up to the vias of the current paths.
 ///
@@ -1051,7 +1066,7 @@ fn place_and_route(
             break;
         }
         let cur = board.with_offsets(&offsets);
-        let forces = floes::forces(&cur, &fl, &best.1.geometry, &best_score.spots, &best_score.open);
+        let forces = floes::forces(&cur, &fl, &best.1.geometry, &best_score.squeezed, &best_score.open);
         let harder = floes::Push {
             press_step: push.press_step * gain,
             ..push.clone()
@@ -1125,15 +1140,22 @@ fn place_and_route(
         if qs.better_than(&best_score) {
             // a round that solved nothing only made the copper a little shorter: it is kept,
             // and the spots that are left push harder next time
-            let solved = qs.problems < best_score.problems || (push.band_step > 0.0 && qs.cost < best_score.cost - 0.05);
+            // (with the bands at work: one that made the copper a quarter of a percent shorter)
+            let solved = qs.problems < best_score.problems
+                || (push.band_step > 0.0 && qs.length < best_score.length * (1.0 - BAND_GAIN));
             best_score = qs;
             best = (Substrate::build(&moved, sub_cfg), quick);
+            best.1.stats.length = best_score.length;
             offsets = d.offsets;
             report(&best, &best_score);
             if solved {
                 gain = 1.0;
                 continue;
             }
+        }
+        // nothing asks for room and the bands have no more to gain
+        if hot.is_empty() {
+            break;
         }
         // a full new search pays off only for a handful of local problems, and only on boards
         // where a search is not expensive; otherwise the drift above is all there is.
