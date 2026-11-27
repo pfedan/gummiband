@@ -1044,6 +1044,7 @@ fn drift_round(
     best: &RouteResult,
     score: &PlaceScore,
     name: &str,
+    watch: Option<&watch::Watch>,
 ) -> Option<(HashMap<String, geom::Point>, RouteResult, PlaceScore)> {
     let cur = board.with_offsets(offsets);
     let forces = floes::forces(&cur, fl, &best.geometry, &score.squeezed, &score.open);
@@ -1067,7 +1068,12 @@ fn drift_round(
             via_planes: true,
             ..Default::default()
         },
-        &mut |_| {},
+        &mut |g, at| {
+            if let Some(w) = watch {
+                w.set_moved(at);
+                w.show(&watch::View::of(watch::Stage::Best, name, g));
+            }
+        },
     );
     let moved = board.with_offsets(&d.offsets);
     let mut geometry = d.geo;
@@ -1134,7 +1140,7 @@ fn drift_with_bands(
     board: &Board,
     sub_cfg: &SubstrateConfig,
     geo: &Geometry,
-    seen: &mut dyn FnMut(usize, &Geometry),
+    seen: &mut dyn FnMut(usize, &Geometry, &HashMap<String, geom::Point>),
 ) -> Option<BandDrift> {
     let fl = floes::floes(board);
     let push = floes::Push::of(board);
@@ -1188,7 +1194,7 @@ fn drift_with_bands(
             push.reach,
             sub_cfg,
             &cfg,
-            &mut |g| seen(round, g),
+            &mut |g, at| seen(round, g, at),
         );
         let moved = board.with_offsets(&d.offsets);
         let (l, c) = (length(&d.geo), count(&moved, &d.geo));
@@ -1267,7 +1273,19 @@ fn place_and_route(
     // topology
     let after_stop = search.open_end.is_some() && knobs::PLACE_AFTER_STOP.on();
     let halted = || search.stopped() && !after_stop;
+    // the watch draws the parts where the copper of its views lies
+    let show_parts = |at: &HashMap<String, geom::Point>| {
+        if let Some(w) = &search.watch {
+            w.set_moved(at);
+        }
+    };
+    show_parts(&offsets);
+    if let Some(w) = &search.watch {
+        // of two searches the one that counts is not always the one shown last
+        w.show(&watch::View::of(watch::Stage::Best, "search", &best.1.geometry));
+    }
     let report = |name: &str, best: &(Substrate, RouteResult), score: &PlaceScore| {
+        show_parts(&best.1.offsets);
         let mut st = best.1.stats.clone();
         st.violations = Some(score.spots.len());
         search.report_stats(name, &st, &best.1.geometry, &score.hot(), Search::default());
@@ -1283,11 +1301,22 @@ fn place_and_route(
             band_step: 0.0,
             ..push.clone()
         };
-        let Some((next, quick, qs)) =
-            drift_round(board, sub_cfg, base, &fl, &room, &offsets, &best.1, &best_score, &name)
-        else {
+        let Some((next, quick, qs)) = drift_round(
+            board,
+            sub_cfg,
+            base,
+            &fl,
+            &room,
+            &offsets,
+            &best.1,
+            &best_score,
+            &name,
+            search.watch.as_ref(),
+        ) else {
             break;
         };
+        // the steps showed the parts on their way: back to where the best result has them
+        show_parts(&offsets);
         if qs.better_than(&best_score) {
             // a round that solved nothing only made the copper a little shorter: it is kept,
             // and the spots that are left push harder next time
@@ -1310,6 +1339,7 @@ fn place_and_route(
             // from there and not from the file
             let mut moved = board.with_offsets(&next);
             moved.drift = false;
+            show_parts(&next);
             // where the search took up a negotiation on its own, the rounds negotiate right away
             let (sub, mut res) = if base.negotiate == 0 && best.1.stats.negotiate > 0 {
                 let cfg = RouterConfig {
@@ -1321,6 +1351,7 @@ fn place_and_route(
                 route_search(&moved, sub_cfg, base, search)
             };
             res.offsets = next.clone();
+            show_parts(&offsets);
             let sc = PlaceScore::of(&moved, &res);
             eprintln!(
                 "{name}: routed anew on the shifted parts, {}/{} routed, {} problems (best {})",
@@ -1999,18 +2030,33 @@ fn search_fixed(
     // alternatives stay on the placement of the search; the open end, whose alternatives must
     // lie on the same parts as its result, does without the drift.
     let whole = board;
+    // the watch draws the parts where the copper of its views lies: where they lay when this
+    // search began, and from there by what the drift adds
+    let entry = search.watch.as_ref().map(|w| w.moved());
+    let show_parts = |at: Option<&HashMap<String, geom::Point>>| {
+        if let (Some(w), Some(entry)) = (&search.watch, &entry) {
+            let mut all = entry.clone();
+            for (r, d) in at.into_iter().flatten() {
+                let e = all.entry(r.clone()).or_default();
+                *e = *e + *d;
+            }
+            w.set_moved(&all);
+        }
+    };
     let drifted = (!open && board.drift && !board.movable.is_empty() && search.geometry_generations > 0)
         .then(|| {
             // every step of the parts to the watch
             let mut shown = best.clone();
-            drift_with_bands(board, sub_cfg, &best.geo, &mut |round, g| {
+            drift_with_bands(board, sub_cfg, &best.geo, &mut |round, g, at| {
                 if search.watch.is_some() {
+                    show_parts(Some(at));
                     shown.geo = g.clone();
                     search.report(&format!("drift round {round}"), &shown);
                 }
             })
         })
         .flatten();
+    show_parts(drifted.as_ref().map(|d| &d.offsets));
     if let Some(d) = &drifted {
         best.geo = d.geo.clone();
         let free = exit::release_unused(&d.board, &best.geo);
@@ -2183,6 +2229,7 @@ fn search_fixed(
                 best = c;
                 best_key = key;
                 on_drift = false;
+                show_parts(None);
                 search.report("runner-up", &best);
             }
         }
@@ -2202,6 +2249,8 @@ fn search_fixed(
             (c.stats, c.geo)
         })
         .collect();
+    // the next search starts with the parts where this one found them
+    show_parts(None);
     let (sub, offsets) = match drifted {
         Some(d) if on_drift => (d.sub, d.offsets),
         _ => (sub, HashMap::new()),
@@ -2363,7 +2412,7 @@ mod tests {
     fn the_bands_let_a_part_drift() {
         let (mut b, geo) = floes::tests::board();
         let cfg = SubstrateConfig::default();
-        assert!(drift_with_bands(&b, &cfg, &geo, &mut |_, _| {}).is_none());
+        assert!(drift_with_bands(&b, &cfg, &geo, &mut |_, _, _| {}).is_none());
         b.drift = true;
         let length = |g: &Geometry| -> f64 {
             g.tracks
@@ -2371,7 +2420,7 @@ mod tests {
                 .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
                 .sum()
         };
-        let d = drift_with_bands(&b, &cfg, &geo, &mut |_, _| {}).expect("the part drifts");
+        let d = drift_with_bands(&b, &cfg, &geo, &mut |_, _, _| {}).expect("the part drifts");
         let p1 = d.offsets["P1"];
         assert!(p1.x < -0.2 && p1.len() <= b.move_reach + 1e-9, "{p1:?}");
         assert!(length(&d.geo) < length(&geo) - 0.2);

@@ -1020,6 +1020,12 @@ the via in a pad experiments in `MILESTONES.md`).
 A user can look over the shoulder of the router: `gummiband route --watch`, the MCP tool
 `watch`. Three parts, each of which knows only the one before it.
 
+- Parts that move: a search that moves parts (`--move-parts`, `--drift`) tells the watch where
+  they lie (`Watch::set_moved`, the footprint offsets), and every view that follows carries
+  them (`View::offsets`) until the next call. The scene of the feed names the part of each
+  shape (`owner`, `refs`), the head of a frame has `moved` in full and not as a change, so a
+  frame that is left after the feed thinned out still knows where its parts lie, and the
+  viewer draws pads, courtyards and names there. No new scene per step.
 - `gummiband_core::watch` is the interface of the search. A front end gives the search a `Watch`
   (`SearchConfig::watch`), and the search shows it `View`s: tracks as polylines, vias, the open
   connections, where a search for a way looked, the clearance violations. A view has a `Stage`:
