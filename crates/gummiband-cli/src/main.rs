@@ -271,6 +271,8 @@ struct RouteArgs {
     fixed: Vec<String>,
     #[arg(long, value_name = "HOW", value_parser = words("areas"), help = table_help("areas"))]
     areas: Option<String>,
+    #[arg(long, value_name = "STEP", value_parser = words("field_rules"), help = table_help("field_rules"))]
+    field_rules: Option<String>,
     /// With --areas fill: a net that gets a pour after the route, as NET or NET:LAYER,LAYER
     /// (the outer layers where none is given). The route takes the pour as an area of the
     /// net; it does not write the zone. Give the flag once per net.
@@ -432,6 +434,7 @@ impl RouteArgs {
             },
             pour: self.pour.clone(),
             area_stitch: on_off(self.area_stitch, self.no_area_stitch),
+            field_rules: self.field_rules.clone().unwrap_or_else(|| "off".to_string()),
             preset: match &self.preset {
                 Some(word) => Preset::parse(word).expect("a word of the table"),
                 None => Preset::default(),
@@ -879,6 +882,22 @@ fn main() -> Result<()> {
             }
             println!("rules: {:?}", b.rules);
             println!("custom track clearances: {} net pairs", b.pair_clearance.len());
+            for (r, c) in &b.courtyard_clearance {
+                let court = if b.courtyards.contains_key(r) {
+                    ""
+                } else {
+                    " (no such courtyard)"
+                };
+                println!("courtyard rule: clearance {c} mm in {r}{court}");
+            }
+            for (r, d, drill) in &b.courtyard_via {
+                let court = if b.courtyards.contains_key(r) {
+                    ""
+                } else {
+                    " (no such courtyard)"
+                };
+                println!("courtyard rule: vias of {d}/{drill} mm in {r}{court}");
+            }
         }
         Cmd::Route(args) => {
             use gummiband_app::Event;
@@ -982,6 +1001,9 @@ fn main() -> Result<()> {
             }
             if !outcome.skipped_nets.is_empty() {
                 println!("nets left out: {}", outcome.skipped_nets.len());
+            }
+            for a in b.rule_areas.iter().filter(|a| !a.why.is_empty()) {
+                println!("field rules: {}", a.why);
             }
             for a in &r.areas {
                 println!("areas: {}", gummiband_app::areas::route_line(a));
@@ -1281,6 +1303,7 @@ fn main() -> Result<()> {
                     "cleared_corridors": outcome.cleared_corridors,
                     "pours": r.legal.pours,
                     "areas": r.areas,
+                    "field_rules": outcome.kb.board.rule_areas.iter().filter(|a| a.clearance.is_some() || a.via.is_some()).collect::<Vec<_>>(),
                     "area_vias": r.area_vias,
                     "area_repair": r.area_repair,
                     "area_fallback": r.area_fallback,
@@ -1708,6 +1731,7 @@ fn main() -> Result<()> {
                 zone_layers,
                 nets: Vec::new(),
                 items: Vec::new(),
+                area_names: Vec::new(),
             };
             let ranges = write::strip_ranges(&kb, &opts);
             let text = write::patch(&kb, &ranges, &[]);

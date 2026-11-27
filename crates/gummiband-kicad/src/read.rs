@@ -87,6 +87,20 @@ pub fn read_board(path: &Path, opts: &ReadOptions) -> Result<KicadBoard> {
         crate::dru::apply_pair_rules(&mut kb.board, &dru);
         kb.board.match_rules = crate::dru::match_rules(&kb.board, &dru);
         kb.board.courtyard_clearance = crate::dru::courtyard_clearances(&dru);
+        kb.board.courtyard_via = crate::dru::courtyard_vias(&dru);
+        // the named rule areas of the file that a rule gives a clearance or a via
+        let rules = crate::dru::area_rules(&dru);
+        kb.board.rule_areas = std::mem::take(&mut kb.board.rule_areas)
+            .into_iter()
+            .filter_map(|mut a| {
+                let (_, clearance, via) = rules.iter().find(|r| r.0 == a.name)?;
+                (a.clearance, a.via) = (*clearance, *via);
+                Some(a)
+            })
+            .collect();
+        kb.board.settle_courtyard_rules();
+    } else {
+        kb.board.rule_areas.clear();
     }
     Ok(kb)
 }
@@ -1099,6 +1113,31 @@ impl Reader {
         if let Some(k) = z.child("keepout") {
             let na = |h: &str| k.child_str(h) == Some("not_allowed");
             let (tracks, vias) = (na("tracks"), na("vias"));
+            // a named rectangle may be the place of a custom rule (`read_board` keeps those
+            // a rule names)
+            if let Some(name) = z.child_str("name").filter(|n| !n.is_empty()) {
+                let mut rect = Rect::empty();
+                for &p in &outline {
+                    rect.add(p);
+                }
+                let on = |v: f64, a: f64, b: f64| (v - a).abs() < 1e-6 || (v - b).abs() < 1e-6;
+                if outline.len() == 4
+                    && outline
+                        .iter()
+                        .all(|p| on(p.x, rect.min.x, rect.max.x) && on(p.y, rect.min.y, rect.max.y))
+                {
+                    self.b.rule_areas.push(gummiband_core::board::RuleArea {
+                        name: name.to_string(),
+                        part: name
+                            .strip_prefix(gummiband_core::patterns::FIELD_AREA)
+                            .map(str::to_string),
+                        rect,
+                        clearance: None,
+                        via: None,
+                        why: String::new(),
+                    });
+                }
+            }
             if tracks || vias {
                 // KiCad writes the outline first and every hole in it as a polygon of its own:
                 // a keep-out along the board edge is a rectangle with the board as its hole

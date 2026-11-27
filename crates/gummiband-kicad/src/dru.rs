@@ -139,6 +139,139 @@ pub fn apply_width_rules(board: &mut Board, text: &str) {
 /// `A.intersectsCourtyard('REF')` (or `B.`) joined by `||`, with a clearance minimum. Returns
 /// (reference, minimum) per courtyard.
 pub fn courtyard_clearances(text: &str) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    for (refs, r) in courtyard_rules(text) {
+        for c in r.children("constraint") {
+            if c.args().first().and_then(|x| x.as_str()) != Some("clearance") {
+                continue;
+            }
+            if let Some(min) = constraint_min(c) {
+                out.extend(refs.iter().map(|x| (x.clone(), min)));
+            }
+        }
+    }
+    out
+}
+
+/// Vias of rules that hold only in courtyards: a condition as for [`courtyard_clearances`], with
+/// a `via_diameter` and a `hole_size` constraint (the preferred value, else the minimum). Returns
+/// (reference, diameter, drill) per courtyard.
+pub fn courtyard_vias(text: &str) -> Vec<(String, f64, f64)> {
+    let mut out = Vec::new();
+    for (refs, r) in courtyard_rules(text) {
+        let of = |name: &str| {
+            r.children("constraint")
+                .find(|c| c.args().first().and_then(|x| x.as_str()) == Some(name))
+                .and_then(constraint_opt)
+        };
+        if let (Some(d), Some(drill)) = (of("via_diameter"), of("hole_size"))
+            && drill < d
+        {
+            out.extend(refs.iter().map(|x| (x.clone(), d, drill)));
+        }
+    }
+    out
+}
+
+/// Clearance and via (diameter, drill) of the rules that hold in a named rule area: a condition
+/// that is `A.intersectsArea('NAME')` and nothing else. Returns them per area name.
+pub fn area_rules(text: &str) -> Vec<(String, Option<f64>, Option<(f64, f64)>)> {
+    let mut out = Vec::new();
+    for (names, r) in scoped_rules(text, "intersectsArea") {
+        let of = |name: &str| {
+            r.children("constraint")
+                .find(|c| c.args().first().and_then(|x| x.as_str()) == Some(name))
+        };
+        let clearance = of("clearance").and_then(constraint_min);
+        let via = match (
+            of("via_diameter").and_then(constraint_opt),
+            of("hole_size").and_then(constraint_opt),
+        ) {
+            (Some(d), Some(drill)) if drill < d => Some((d, drill)),
+            _ => None,
+        };
+        if clearance.is_some() || via.is_some() {
+            out.extend(names.iter().map(|n| (n.clone(), clearance, via)));
+        }
+    }
+    out
+}
+
+/// The line that starts and the line that ends the rules [`with_area_rules`] writes.
+const AREA_RULES: (&str, &str) = (
+    "# gummiband field rules: written by the router, replaced on every route with field rules",
+    "# end of gummiband field rules",
+);
+
+/// The text of a rule file with the custom rules of `areas` at its end (and without those an
+/// earlier route wrote): per area its clearance, the smallest via and drill, and the hole
+/// clearance that goes with the ring of that via.
+pub fn with_area_rules(text: &str, areas: &[gummiband_core::board::RuleArea]) -> String {
+    let mut out = String::new();
+    let (mut skip, mut cut) = (false, false);
+    for line in text.lines() {
+        if line.trim() == AREA_RULES.0 {
+            (skip, cut) = (true, true);
+            // (the empty line in front of the block is part of it)
+            while out.ends_with("\n\n") {
+                out.pop();
+            }
+        }
+        if !skip {
+            out.push_str(line);
+            out.push('\n');
+        }
+        if line.trim() == AREA_RULES.1 {
+            skip = false;
+        }
+    }
+    if areas.is_empty() {
+        return if cut { out } else { text.to_string() };
+    }
+    if out.trim().is_empty() {
+        out = "(version 1)\n".to_string();
+    }
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
+    out.push('\n');
+    out.push_str(AREA_RULES.0);
+    out.push('\n');
+    for a in areas {
+        out.push_str(&format!("(rule {}\n", quote(&a.name)));
+        out.push_str(&format!("  (condition \"A.intersectsArea('{}')\")\n", a.name));
+        if let Some(c) = a.clearance {
+            out.push_str(&format!("  (constraint clearance (min {c}mm))\n"));
+        }
+        if let Some((d, drill)) = a.via {
+            out.push_str(&format!("  (constraint via_diameter (min {d}mm))\n"));
+            out.push_str(&format!("  (constraint hole_size (min {drill}mm))\n"));
+            out.push_str(&format!(
+                "  (constraint annular_width (min {}mm))\n",
+                ((d - drill) / 2.0 * 1e4).round() / 1e4
+            ));
+        }
+        out.pop();
+        out.push_str(")\n");
+    }
+    out.push_str(AREA_RULES.1);
+    out.push('\n');
+    out
+}
+
+fn quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "'"))
+}
+
+/// The rules whose condition is made of nothing but `A.intersectsCourtyard('REF')` (or `B.`)
+/// joined by `||`, with the references they name.
+fn courtyard_rules(text: &str) -> Vec<(Vec<String>, Node)> {
+    scoped_rules(text, "intersectsCourtyard")
+}
+
+/// The rules whose condition is made of nothing but calls of `A.<call>('X')` (or `B.`) joined
+/// by `||`, with the names they are called with.
+fn scoped_rules(text: &str, call: &str) -> Vec<(Vec<String>, Node)> {
     let text: String = text
         .lines()
         .filter(|l| !l.trim_start().starts_with('#'))
@@ -151,8 +284,8 @@ pub fn courtyard_clearances(text: &str) -> Vec<(String, f64)> {
     let mut out = Vec::new();
     for r in root.children("rule") {
         let Some(cond) = r.child_str("condition") else { continue };
-        let mut refs = quoted_after(cond, "A.intersectsCourtyard(");
-        refs.extend(quoted_after(cond, "B.intersectsCourtyard("));
+        let mut refs = quoted_after(cond, &format!("A.{call}("));
+        refs.extend(quoted_after(cond, &format!("B.{call}(")));
         if refs.is_empty() {
             continue;
         }
@@ -161,21 +294,14 @@ pub fn courtyard_clearances(text: &str) -> Vec<(String, f64)> {
         for side in ["A", "B"] {
             for q in ['\'', '"'] {
                 for x in &refs {
-                    rest = rest.replace(&format!("{side}.intersectsCourtyard({q}{x}{q})"), "");
+                    rest = rest.replace(&format!("{side}.{call}({q}{x}{q})"), "");
                 }
             }
         }
         if !rest.chars().all(|c| c.is_whitespace() || "|()".contains(c)) {
             continue;
         }
-        for c in r.children("constraint") {
-            if c.args().first().and_then(|x| x.as_str()) != Some("clearance") {
-                continue;
-            }
-            if let Some(min) = constraint_min(c) {
-                out.extend(refs.iter().map(|x| (x.clone(), min)));
-            }
-        }
+        out.push((refs, r.clone()));
     }
     out
 }
@@ -779,6 +905,42 @@ mod tests {
         assert_eq!(p.neck_refs, vec!["U1".to_string()]);
         // the width of a pair rule is no target of the class
         assert_eq!((u.min_width, u.target_width), (None, None));
+    }
+
+    #[test]
+    fn the_rules_of_areas_are_written_once_and_read_back() {
+        use gummiband_core::board::RuleArea;
+        use gummiband_core::geom::{Rect, pt};
+        let area = |clearance| RuleArea {
+            name: "gummiband field U1".into(),
+            part: Some("U1".into()),
+            rect: Rect {
+                min: pt(0.0, 0.0),
+                max: pt(4.0, 4.0),
+            },
+            clearance: Some(clearance),
+            via: Some((0.45, 0.2)),
+            why: String::new(),
+        };
+        let own = "(version 1)\n(rule \"mine\"\n  (condition \"A.NetClass == 'Power'\")\n  (constraint clearance (min 0.3mm)))\n";
+        let once = with_area_rules(own, &[area(0.1)]);
+        assert!(once.starts_with(own), "{once}");
+        assert!(
+            once.contains("(condition \"A.intersectsArea('gummiband field U1')\")"),
+            "{once}"
+        );
+        assert!(once.contains("(constraint annular_width (min 0.125mm)))"), "{once}");
+        assert_eq!(
+            area_rules(&once),
+            vec![("gummiband field U1".to_string(), Some(0.1), Some((0.45, 0.2)))]
+        );
+        // a second route replaces what the first wrote; without areas the file is the user's again
+        let twice = with_area_rules(&once, &[area(0.09)]);
+        assert_eq!(area_rules(&twice).len(), 1);
+        assert_eq!(area_rules(&twice)[0].1, Some(0.09));
+        assert_eq!(with_area_rules(&twice, &[]), own);
+        // a board without a rule file gets one
+        assert!(with_area_rules("", &[area(0.1)]).starts_with("(version 1)\n"));
     }
 
     #[test]

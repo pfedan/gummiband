@@ -145,6 +145,23 @@ pub struct Obstacle {
     pub locked: bool,
 }
 
+/// A named rectangle with a clearance and a via of its own, below those of the net classes
+/// and of the board: the field of a ball grid that is routed at a finer step than the rest
+/// (`patterns::field_rules`). Written as a rule area with a custom rule
+/// (`A.intersectsArea('name')`), so that KiCad's DRC counts as the router does.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RuleArea {
+    pub name: String,
+    /// The part the area belongs to and moves with.
+    pub part: Option<String>,
+    pub rect: Rect,
+    pub clearance: Option<f64>,
+    /// Diameter and drill.
+    pub via: Option<(f64, f64)>,
+    /// What the area is for, in words for the report.
+    pub why: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Pin {
     /// "R8.1"
@@ -318,6 +335,13 @@ pub struct Board {
     /// (`A.intersectsCourtyard('U4')`): reference and minimum, below the net class clearance.
     #[serde(default)]
     pub courtyard_clearance: Vec<(String, f64)>,
+    /// Vias of rules that hold in the courtyard of a footprint: reference, diameter and drill,
+    /// below those of the net classes. A via whose centre lies in the courtyard has this size.
+    #[serde(default)]
+    pub courtyard_via: Vec<(String, f64, f64)>,
+    /// Areas with rules of their own, see [`RuleArea`].
+    #[serde(default)]
+    pub rule_areas: Vec<RuleArea>,
     /// The exits of tracks from pads in tight rows, sorted by pin ([`Board::set_exits`]).
     #[serde(default)]
     pub exits: Vec<Exit>,
@@ -488,6 +512,12 @@ impl Board {
                 *r = Rect {
                     min: r.min + d,
                     max: r.max + d,
+                };
+            }
+            for a in b.rule_areas.iter_mut().filter(|a| a.part.as_ref() == Some(fp)) {
+                a.rect = Rect {
+                    min: a.rect.min + d,
+                    max: a.rect.max + d,
                 };
             }
             if let Some(polys) = b.courtyard_shapes.get_mut(fp) {
@@ -1057,14 +1087,110 @@ impl Board {
         self.item_clearance.get(&(a.min(b), a.max(b))).copied().unwrap_or(0.0)
     }
 
+    /// The clearance of copper at p whose class asks `c`: less where a courtyard rule holds at p.
+    /// Between two pieces of copper the larger of both holds, so the rule counts where both lie
+    /// in the courtyard: KiCad lets it count where one does, which is never stricter.
+    pub fn clearance_at(&self, p: Point, c: f64) -> f64 {
+        if !self.local_clearances() {
+            return c;
+        }
+        let areas = self
+            .rule_areas
+            .iter()
+            .filter(|a| a.rect.contains(p))
+            .filter_map(|a| a.clearance);
+        self.courtyard_clearance
+            .iter()
+            .filter(|(r, m)| *m < c && self.in_courtyard(r, p, 0.0))
+            .map(|(_, m)| *m)
+            .chain(areas)
+            .fold(c, f64::min)
+    }
+
+    /// Whether any courtyard or area has a clearance of its own that the router goes by.
+    pub fn local_clearances(&self) -> bool {
+        (!self.courtyard_clearance.is_empty() || self.rule_areas.iter().any(|a| a.clearance.is_some()))
+            && crate::knobs::LOCAL_RULES.on()
+    }
+
+    /// Whether any courtyard or area has a via of its own.
+    pub fn local_vias(&self) -> bool {
+        (!self.courtyard_via.is_empty() || self.rule_areas.iter().any(|a| a.via.is_some()))
+            && crate::knobs::LOCAL_RULES.on()
+    }
+
+    /// [`Board::clearance_at`] of a piece from a to b: of the end where it asks more.
+    pub fn clearance_on(&self, a: Point, b: Point, c: f64) -> f64 {
+        if !self.local_clearances() {
+            return c;
+        }
+        self.clearance_at(a, c).max(self.clearance_at(b, c))
+    }
+
+    /// Diameter and drill of the smallest via a courtyard rule allows at p (None: no such rule
+    /// there).
+    pub fn courtyard_via_at(&self, p: Point) -> Option<(f64, f64)> {
+        if !self.local_vias() {
+            return None;
+        }
+        let areas = self
+            .rule_areas
+            .iter()
+            .filter(|a| a.rect.contains(p))
+            .filter_map(|a| a.via);
+        self.courtyard_via
+            .iter()
+            .filter(|(r, _, _)| self.in_courtyard(r, p, 0.0))
+            .map(|&(_, d, drill)| (d, drill))
+            .chain(areas)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+    }
+
+    /// Diameter and drill of a via of `net` at p: those of its class, or the smaller ones of a
+    /// courtyard rule that holds there.
+    pub fn via_at(&self, net: NetId, p: Point) -> (f64, f64) {
+        let c = self.class_of(net);
+        match self.courtyard_via_at(p) {
+            Some((d, drill)) if d < c.via_diameter => (d, drill.min(c.via_drill)),
+            _ => (c.via_diameter, c.via_drill),
+        }
+    }
+
+    /// Pads take the clearance of their class when the board is read. Where a courtyard rule
+    /// asks less, the pads in that courtyard ask only that (a pad with a clearance of its own,
+    /// or one its mask opening widens, keeps it).
+    pub fn settle_courtyard_rules(&mut self) {
+        if !self.local_clearances() {
+            return;
+        }
+        for i in 0..self.obstacles.len() {
+            let o = &self.obstacles[i];
+            let (ObstacleKind::Pad, Some(net)) = (o.kind, o.net) else {
+                continue;
+            };
+            let class = self.clearance(Some(net), None);
+            if o.clearance > class + 1e-9 {
+                continue;
+            }
+            let c = self.clearance_at(o.shape.bbox().center(), o.clearance);
+            self.obstacles[i].clearance = c;
+        }
+    }
+
     /// The smallest clearance a custom courtyard rule allows at p (None: no such rule there).
     /// KiCad applies such a rule when either item touches the courtyard; `reach` grows the
     /// courtyards by the distance to the other item.
     pub fn courtyard_clearance_at(&self, p: crate::geom::Point, reach: f64) -> Option<f64> {
+        let areas = self
+            .rule_areas
+            .iter()
+            .filter(|a| a.rect.grow(reach).contains(p))
+            .filter_map(|a| a.clearance);
         self.courtyard_clearance
             .iter()
             .filter(|(r, _)| self.courtyards.get(r).is_some_and(|c| c.grow(reach).contains(p)))
             .map(|(_, m)| *m)
+            .chain(areas)
             .reduce(f64::min)
     }
 

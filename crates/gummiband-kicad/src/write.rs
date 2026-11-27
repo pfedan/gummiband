@@ -36,6 +36,12 @@ pub enum Item {
     /// A KiCad length tuning pattern (`generated` group of type `tuning_pattern`) over items of
     /// the same list, by their index.
     Pattern(Box<PatternItem>),
+    /// A rule area on all copper layers that forbids nothing: the place a custom rule names
+    /// (`A.intersectsArea('name')`, `gummiband_core::board::RuleArea`).
+    RuleArea {
+        name: String,
+        rect: gummiband_core::geom::Rect,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +75,8 @@ pub struct StripOptions {
     pub nets: Vec<String>,
     /// Remove these items, by their place in the file.
     pub items: Vec<u32>,
+    /// Remove the rule areas (zones with a `keepout` entry) of these names.
+    pub area_names: Vec<String>,
 }
 
 /// Byte ranges of root items removed by `opts`.
@@ -94,6 +102,13 @@ pub fn strip_ranges(kb: &KicadBoard, opts: &StripOptions) -> Vec<Range<usize>> {
                 {
                     out.push(n.span());
                 }
+            }
+            Some("zone")
+                if n.child("keepout").is_some()
+                    && n.child_str("name")
+                        .is_some_and(|x| opts.area_names.iter().any(|a| a == x)) =>
+            {
+                out.push(n.span());
             }
             Some("zone") if !opts.zone_layers.is_empty() && n.child("keepout").is_none() => {
                 let mut layers: Vec<&str> = Vec::new();
@@ -258,6 +273,25 @@ fn f(v: f64) -> String {
 
 fn write_item(kb: &KicadBoard, it: &Item, id: &str, out: &mut String) {
     let layer = |l: LayerId| quote(&kb.layer_names[l as usize]);
+    if let Item::RuleArea { name, rect } = it {
+        let layers: Vec<String> = kb.layer_names.iter().map(|l| quote(l)).collect();
+        let (a, b) = (rect.min, rect.max);
+        let _ = writeln!(
+            out,
+            "\t(zone\n\t\t(net 0)\n\t\t(net_name \"\")\n\t\t(layers {})\n\t\t(uuid \"{id}\")\n\t\t(name {})\n\t\t(hatch edge 0.5)\n\t\t(connect_pads\n\t\t\t(clearance 0)\n\t\t)\n\t\t(min_thickness 0.25)\n\t\t(filled_areas_thickness no)\n\t\t(keepout\n\t\t\t(tracks allowed)\n\t\t\t(vias allowed)\n\t\t\t(pads allowed)\n\t\t\t(copperpour allowed)\n\t\t\t(footprints allowed)\n\t\t)\n\t\t(fill\n\t\t\t(thermal_gap 0.5)\n\t\t\t(thermal_bridge_width 0.5)\n\t\t)\n\t\t(polygon\n\t\t\t(pts\n\t\t\t\t(xy {} {}) (xy {} {}) (xy {} {}) (xy {} {})\n\t\t\t)\n\t\t)\n\t)",
+            layers.join(" "),
+            quote(name),
+            f(a.x),
+            f(a.y),
+            f(b.x),
+            f(a.y),
+            f(b.x),
+            f(b.y),
+            f(a.x),
+            f(b.y),
+        );
+        return;
+    }
     match *it {
         Item::Track {
             a,
@@ -302,7 +336,7 @@ fn write_item(kb: &KicadBoard, it: &Item, id: &str, out: &mut String) {
                 id
             );
         }
-        Item::Pattern(_) => {}
+        Item::Pattern(_) | Item::RuleArea { .. } => {}
         Item::Via {
             at,
             diameter,

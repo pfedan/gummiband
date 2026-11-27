@@ -727,7 +727,7 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
         .flat_map_iter(|(i, p)| copper.violations(p, Some(i), PLAIN))
         .collect();
     // a custom rule may lower the clearance in a courtyard (fine pitch power ICs)
-    if !board.courtyard_clearance.is_empty() {
+    if !board.courtyard_clearance.is_empty() || !board.rule_areas.is_empty() {
         out.retain_mut(|v| match board.courtyard_clearance_at(v.at, v.required) {
             Some(min) if v.actual >= min - TOL => false,
             Some(min) => {

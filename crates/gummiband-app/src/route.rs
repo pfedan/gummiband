@@ -319,6 +319,9 @@ pub struct RouteOptions {
     /// With `areas` fill: an island of fill with pads gets one via where it joins the area,
     /// set on the finished copper.
     pub area_stitch: Option<bool>,
+    /// Finer rules inside ball fields that cannot be left at the rules of the board: `off`,
+    /// `auto` or the name of a fab step (`gummiband_core::patterns::field_rules`).
+    pub field_rules: String,
     /// How much search the route gets: the values of `runs`, `generations`,
     /// `geometry_generations` and `open_end_seconds` where those are None.
     pub preset: Preset,
@@ -402,6 +405,7 @@ impl Default for RouteOptions {
             areas: Areas::Tracks,
             pour: Vec::new(),
             area_stitch: None,
+            field_rules: "off".to_string(),
             preset: Preset::Standard,
             runs: None,
             via_pitch: defaults::VIA_PITCH,
@@ -1617,7 +1621,24 @@ impl Routed {
             zone_layers: vec![],
             nets,
             items: changes.strip.clone(),
+            area_names: b.rule_areas.iter().map(|a| a.name.clone()).collect(),
         };
+        // the areas with rules of their own, where their parts are now
+        for a in b.rule_areas.iter().filter(|a| a.clearance.is_some() || a.via.is_some()) {
+            let d = a
+                .part
+                .as_ref()
+                .and_then(|p| self.res.offsets.get(p))
+                .copied()
+                .unwrap_or_default();
+            items.push(write::Item::RuleArea {
+                name: a.name.clone(),
+                rect: gummiband_core::geom::Rect {
+                    min: a.rect.min + d,
+                    max: a.rect.max + d,
+                },
+            });
+        }
         let ranges = write::strip_ranges(kb, &opts);
         let text = write::patch(kb, &ranges, &items);
         let text = if self.res.offsets.is_empty() {
@@ -1639,6 +1660,21 @@ impl Routed {
     pub fn write(&self, kb: &KicadBoard, geometry: &Geometry, input: &Path, path: &Path) -> Result<usize> {
         let (text, items) = self.board_text(kb, geometry)?;
         std::fs::write(path, text)?;
+        // the rules of the areas go into the rule file next to the board
+        let areas: Vec<_> = kb
+            .board
+            .rule_areas
+            .iter()
+            .filter(|a| a.name.starts_with(gummiband_core::patterns::FIELD_AREA))
+            .filter(|a| a.clearance.is_some() || a.via.is_some())
+            .cloned()
+            .collect();
+        let dru = path.with_extension("kicad_dru");
+        let old = std::fs::read_to_string(&dru).unwrap_or_default();
+        let new = gummiband_kicad::dru::with_area_rules(&old, &areas);
+        if new != old && (!areas.is_empty() || !old.is_empty()) {
+            std::fs::write(&dru, new)?;
+        }
         if self.write.teardrops {
             track_end_teardrops(input, path)?;
         }
@@ -1815,6 +1851,11 @@ fn load(path: &Path, opts: &RouteOptions, hooks: &Hooks) -> Result<(KicadBoard, 
     }
     add(&opts.net_options);
     let applied = apply_net_options(&mut kb.board, &per_net, &opts.nets)?;
+    if opts.field_rules != "off" {
+        let areas = gummiband_core::patterns::field_rules(&kb.board, &opts.field_rules).map_err(anyhow::Error::msg)?;
+        kb.board.rule_areas.extend(areas);
+        kb.board.settle_courtyard_rules();
+    }
     if opts.areas == Areas::Fill {
         let planned = crate::areas::route_plan(&kb, &opts.pour, &opts.nets, opts.area_stitch())?;
         for note in &planned.notes {
