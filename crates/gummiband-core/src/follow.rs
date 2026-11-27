@@ -146,8 +146,8 @@ pub fn follow_steps(
     refs.dedup();
     let longest = refs.iter().map(|r| at(from, r).dist(at(to, r))).fold(0.0, f64::max);
     let start = board.with_offsets(from);
-    let base_spots = check::spots(&check::check(&start, geo));
-    let base = base_spots.len();
+    let base_viol = check::check(&start, geo);
+    let base = check::spots(&base_viol).len();
     // never farther per step than the smallest clearance: a pad cannot pass a track in one step
     let step = board.rules.min_clearance.clamp(0.02, 0.1);
     let n = (longest / step).ceil() as usize;
@@ -215,8 +215,9 @@ pub fn follow_steps(
         wake_near(&next, &refs, &mut g, &geo);
         let sub = Substrate::build(&next, sub_cfg);
         relax::relax(&next, &sub, &mut g, cfg);
-        let spots = check::spots(&check::check(&next, &g));
-        if let Some(s) = spots.iter().find(|s| is_new(s, &base_spots, longest)) {
+        let viol = check::check(&next, &g);
+        let spots = check::spots(&viol);
+        if let Some(s) = new_problems(&base_viol, &viol, longest).first() {
             let name = |n: Option<u32>| n.map_or("fixed copper".to_string(), |n| board.nets[n as usize].name.clone());
             st.stopped = Some(format!(
                 "no more room at ({:.2}, {:.2}): {} and {}, {:.3} mm missing",
@@ -239,6 +240,36 @@ pub fn follow_steps(
         offsets,
         stats: st,
     }
+}
+
+/// The problems of `after` that were not there `before` a move of `moved` mm, or got worse.
+/// Clearances by their spots (see [`is_new`]). A track too narrow (for its current, or below
+/// the minimum width) by its net and wherever it is: the check names the narrowest place of a
+/// way, and that place jumps along the way when the copper settles a little differently.
+pub(crate) fn new_problems(before: &[check::Violation], after: &[check::Violation], moved: f64) -> Vec<check::Spot> {
+    let clearances = |v: &[check::Violation]| -> Vec<check::Violation> {
+        v.iter().filter(|x| !x.is_width()).cloned().collect()
+    };
+    let base = check::spots(&clearances(before));
+    let mut out: Vec<check::Spot> = check::spots(&clearances(after))
+        .into_iter()
+        .filter(|s| is_new(s, &base, moved))
+        .collect();
+    let missing = |v: &check::Violation| v.required - v.actual;
+    for v in after.iter().filter(|v| v.is_width()) {
+        let known = before
+            .iter()
+            .any(|b| b.is_width() && b.is_current() == v.is_current() && b.nets.0 == v.nets.0 && missing(b) >= missing(v) - 0.001);
+        if !known && missing(v) >= 0.001 {
+            out.push(check::Spot {
+                at: v.at,
+                nets: v.nets,
+                missing: missing(v),
+                short: false,
+            });
+        }
+    }
+    out
 }
 
 /// A clearance spot that was not there before the move, or got worse: no spot of the same two
@@ -502,6 +533,23 @@ mod tests {
         let (_, _, reached, st) = move_with_copper(&mut board(), "Q", pt(-3.0, 1.2));
         assert!(st.stopped.as_deref().is_some_and(|s| s.contains("P0")), "{st:?}");
         assert!(reached.x > -3.0 && reached.x < -1.5, "{reached:?}");
+    }
+
+    /// The narrowest place of a current path is named somewhere along the path: the same
+    /// finding at another place is not a new problem, a narrower one is.
+    #[test]
+    fn a_narrow_way_that_is_named_elsewhere_is_not_new() {
+        let narrow = |x: f64, actual: f64| check::Violation {
+            what: "current A".into(),
+            nets: (0, None),
+            at: pt(x, 0.0),
+            actual,
+            required: 0.69,
+        };
+        let before = [narrow(0.0, 0.4)];
+        assert!(new_problems(&before, &[narrow(4.0, 0.4)], 0.1).is_empty());
+        assert_eq!(new_problems(&before, &[narrow(4.0, 0.3)], 0.1).len(), 1);
+        assert_eq!(new_problems(&[], &[narrow(4.0, 0.4)], 0.1).len(), 1);
     }
 
     #[test]

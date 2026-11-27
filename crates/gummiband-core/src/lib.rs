@@ -4,6 +4,7 @@ pub mod board;
 pub mod check;
 pub mod exit;
 pub mod fill;
+pub mod floes;
 pub mod follow;
 pub mod geom;
 pub mod ground;
@@ -967,115 +968,179 @@ pub fn route_board(
     (sub, res)
 }
 
+/// What a placement round is judged on: connections routed, the cost, the places of the
+/// clearance problems, the pins of the open connections, and the problems a new search would
+/// have to solve.
+struct PlaceScore {
+    routed: usize,
+    cost: f64,
+    spots: Vec<geom::Point>,
+    open: Vec<geom::Point>,
+    problems: usize,
+}
+
+impl PlaceScore {
+    fn of(b: &Board, r: &RouteResult) -> PlaceScore {
+        // on the pads as the last steps of the search saw them (`exit::release_unused`)
+        let free = exit::release_unused(b, &r.geometry);
+        let v = check::check(free.as_ref().unwrap_or(b), &r.geometry);
+        let shorts = v.iter().filter(|x| x.actual <= 0.0).count();
+        // the length of the copper as it lies: a round that keeps the topology changes nothing
+        // else, and the search and the round have to be measured alike
+        let length: f64 = r
+            .geometry
+            .tracks
+            .iter()
+            .map(|t| t.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
+            .sum();
+        let cost = r.stats.cost() + (length - r.stats.length) * LENGTH_WEIGHT + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0;
+        PlaceScore {
+            routed: r.stats.routed,
+            cost,
+            // one squeezed place is one problem, however many pieces of copper the check names
+            problems: check::spots(&v).len() + r.stats.unrouted.len(),
+            spots: v.iter().map(|x| x.at).collect(),
+            open: open_pins(b, &r.stats.unrouted),
+        }
+    }
+
+    /// The places that ask for room: clearance problems, and the pins of open connections,
+    /// where the parts around may step aside to let a track out.
+    fn hot(&self) -> Vec<geom::Point> {
+        self.spots.iter().chain(&self.open).copied().collect()
+    }
+
+    fn better_than(&self, o: &PlaceScore) -> bool {
+        self.routed > o.routed || (self.routed == o.routed && self.cost < o.cost - 1e-6)
+    }
+}
+
 /// [`route_board`] up to the vias of the current paths.
+///
+/// The placement rounds ([`floes`]): the copper of the best routing pushes the movable parts,
+/// away from the places that ask for room and, with `GB_FLOE_BAND`, out of the way of the tracks
+/// that bend around them and towards the tracks that pull at them. The parts drift there in
+/// small steps with the topology kept, shoving each other along. A round that makes the board
+/// better is kept and the next one starts from it. One that does not may route the board anew
+/// on the shifted parts (`GB_PLACE_SEARCHES` times, and only for a handful of problems on a
+/// board where a search is cheap); after that the parts are pushed twice as hard, once.
 fn place_and_route(
     board: &Board,
     sub_cfg: &SubstrateConfig,
     base: &RouterConfig,
     search: &SearchConfig,
 ) -> (Substrate, RouteResult) {
-    let score = |b: &Board, r: &RouteResult| -> (usize, f64, Vec<geom::Point>, usize) {
-        // on the pads as the last steps of the search saw them (`exit::release_unused`)
-        let free = exit::release_unused(b, &r.geometry);
-        let v = check::check(free.as_ref().unwrap_or(b), &r.geometry);
-        let shorts = v.iter().filter(|x| x.actual <= 0.0).count();
-        let cost = r.stats.cost() + v.len() as f64 * 1000.0 + shorts as f64 * 5000.0;
-        // places that ask for room: clearance problems, and the pins of open connections,
-        // where the parts around may step aside to let a track out
-        let mut hot: Vec<geom::Point> = v.iter().map(|x| x.at).collect();
-        hot.extend(open_pins(b, &r.stats.unrouted));
-        // the problems a new search would have to solve: one squeezed place is one problem,
-        // however many pieces of copper the check names there
-        let problems = check::spots(&v).len() + r.stats.unrouted.len();
-        (r.stats.routed, cost, hot, problems)
-    };
     let (sub, res) = route_search(board, sub_cfg, base, search);
     if board.movable.is_empty() || search.geometry_generations == 0 {
         return (sub, res);
     }
     let rounds: i32 = knobs::PLACE_ROUNDS.num();
-    let mut best_score = score(board, &res);
+    let mut searches: i32 = knobs::PLACE_SEARCHES.num();
+    let fl = floes::floes(board);
+    let push = floes::Push::default();
+    let mut best_score = PlaceScore::of(board, &res);
     let mut best = (sub, res);
     let mut offsets: HashMap<String, geom::Point> = HashMap::new();
-    let mut hot = best_score.2.clone();
-    let mut rng = Rng(0x91ace);
+    // how hard the spots push: doubled after a round that reached nothing
+    let mut gain = 1.0;
     for round in 1..=rounds {
         // GB_PLACE_AFTER_STOP: an open end that was stopped still gets the fast rounds below
         let after_stop = search.open_end.is_some() && knobs::PLACE_AFTER_STOP.on();
-        if (hot.is_empty() && best.1.stats.unrouted.is_empty()) || (search.stopped() && !after_stop) {
+        let hot = best_score.hot();
+        if (hot.is_empty() && push.band_step <= 0.0) || (search.stopped() && !after_stop) {
             break;
         }
         let cur = board.with_offsets(&offsets);
-        let Some(next) = shift_parts(board, &cur, &offsets, &hot, &mut rng) else {
+        let forces = floes::forces(&cur, &fl, &best.1.geometry, &best_score.spots, &best_score.open);
+        let harder = floes::Push {
+            press_step: push.press_step * gain,
+            ..push.clone()
+        };
+        let Some(next) = floes::targets(board, &cur, &fl, &offsets, &forces, &harder) else {
             break;
         };
-        // fast path, the rubber band way: keep the topology of the best routing and move the
-        // parts in small steps; after each the pads take their track ends along, and the tracks
-        // they press against give way within their clearances. The parts stop where the copper
-        // cannot give way any more, so the shift may end short of `next`.
-        let quick = {
-            // the routed copper stays awake: the relaxation of each step may also settle the
-            // spots the shift is meant to free
-            let f = follow::follow_steps(
-                board,
-                &offsets,
-                &next,
-                &best.1.geometry,
-                sub_cfg,
-                &relax::RelaxConfig::default(),
-            );
-            let geometry = f.geo;
-            eprintln!(
-                "placement round {round}: followed {} of {} steps{}",
-                f.stats.steps,
-                f.stats.steps_planned,
-                f.stats
-                    .stopped
-                    .as_ref()
-                    .map_or(String::new(), |w| format!(", stopped: {w}"))
-            );
-            let moved = board.with_offsets(&f.offsets);
-            let sub = Substrate::build(&moved, sub_cfg);
-            let res = RouteResult {
-                geometry,
-                stats: best.1.stats.clone(),
-                portfolio: Vec::new(),
-                frames: Vec::new(),
-                offsets: f.offsets.clone(),
-                alternatives: Vec::new(),
-            };
-            (sub, res, moved, f.offsets)
-        };
-        let (quick, moved_quick, reached) = ((quick.0, quick.1), quick.2, quick.3);
-        let qs = score(&moved_quick, &quick.1);
-        eprintln!(
-            "placement round {round}: {} parts shifted, kept topology: cost {:.0} (best {:.0})",
-            next.len(),
-            qs.1,
-            best_score.1
+        // the rubber band way: keep the topology of the best routing and let the parts drift in
+        // small steps; after each the pads take their track ends along, and the tracks they
+        // press against give way within their clearances. A part stops where the copper cannot
+        // give way any more, so the drift may end short of `next`.
+        let t0 = std::time::Instant::now();
+        let d = floes::drift(
+            board,
+            &fl,
+            &offsets,
+            &next,
+            &best.1.geometry,
+            &hot,
+            push.reach,
+            sub_cfg,
+            // as the search relaxed it: with `via_edge` the tracks would leave the pads another
+            // way than they do, and the first step would be judged on that
+            &relax::RelaxConfig {
+                iterations: knobs::FLOE_IT.num(),
+                ..Default::default()
+            },
         );
-        if qs.0 == best_score.0 && qs.1 < best_score.1 {
-            hot = qs.2.clone();
-            best_score = qs;
-            best = quick;
-            offsets = reached;
+        let moved = board.with_offsets(&d.offsets);
+        let quick = RouteResult {
+            geometry: d.geo,
+            stats: best.1.stats.clone(),
+            portfolio: Vec::new(),
+            frames: Vec::new(),
+            offsets: d.offsets.clone(),
+            alternatives: Vec::new(),
+        };
+        let qs = PlaceScore::of(&moved, &quick);
+        eprintln!(
+            "placement round {round}: {} parts drifted up to {:.2} mm in {} of {} steps ({} shoved through copper, {} stuck), kept topology: cost {:.2} (best {:.2}), {:.1} s",
+            d.moved,
+            d.longest,
+            d.steps,
+            d.planned,
+            d.shoved.len(),
+            d.stuck.len(),
+            qs.cost,
+            best_score.cost,
+            t0.elapsed().as_secs_f64()
+        );
+        for (part, why) in &d.stuck {
+            eprintln!("  {part} stopped: {why}");
+        }
+        let report = |best: &(Substrate, RouteResult), score: &PlaceScore| {
             let mut st = best.1.stats.clone();
-            st.violations = Some(best_score.2.len());
+            st.violations = Some(score.spots.len());
             search.report_stats(
                 &format!("placement round {round}"),
                 &st,
                 &best.1.geometry,
-                &hot,
+                &score.hot(),
                 Search::default(),
             );
-            continue;
+        };
+        if qs.better_than(&best_score) {
+            // a round that solved nothing only made the copper a little shorter: it is kept,
+            // and the spots that are left push harder next time
+            let solved = qs.problems < best_score.problems || (push.band_step > 0.0 && qs.cost < best_score.cost - 0.05);
+            best_score = qs;
+            best = (Substrate::build(&moved, sub_cfg), quick);
+            offsets = d.offsets;
+            report(&best, &best_score);
+            if solved {
+                gain = 1.0;
+                continue;
+            }
         }
         // a full new search pays off only for a handful of local problems, and only on boards
-        // where a search is not expensive; otherwise the fast path above is all there is.
+        // where a search is not expensive; otherwise the drift above is all there is.
         // By board size and not by the clock: the result must not depend on the machine.
-        if best_score.3 > 20 || best.1.stats.conns > 400 || search.stopped() {
+        if searches <= 0 || hot.is_empty() || best_score.problems > 20 || best.1.stats.conns > 400 || search.stopped()
+        {
+            if gain >= 2.0 {
+                break;
+            }
+            gain *= 2.0;
             continue;
         }
+        searches -= 1;
         let moved = board.with_offsets(&next);
         // where the search took up a negotiation on its own, the rounds negotiate right away
         let (sub, mut res) = if base.negotiate == 0 && best.1.stats.negotiate > 0 {
@@ -1088,32 +1153,22 @@ fn place_and_route(
             route_search(&moved, sub_cfg, base, search)
         };
         res.offsets = next.clone();
-        let sc = score(&moved, &res);
+        let sc = PlaceScore::of(&moved, &res);
         eprintln!(
-            "placement round {round}: {} parts shifted, {}/{} routed, cost {:.0} (best {:.0})",
-            next.len(),
-            res.stats.routed,
-            res.stats.conns,
-            sc.1,
-            best_score.1
+            "placement round {round}: routed anew on the shifted parts, {}/{} routed, cost {:.2} (best {:.2})",
+            res.stats.routed, res.stats.conns, sc.cost, best_score.cost
         );
-        // the next round starts from the best result, with its placement: the fast path moves
-        // the copper of that result and needs the offsets it was routed with
-        if sc.0 > best_score.0 || (sc.0 == best_score.0 && sc.1 < best_score.1) {
-            hot = sc.2.clone();
+        // the next round starts from the best result, with its placement: the drift moves the
+        // copper of that result and needs the offsets it was routed with
+        if sc.better_than(&best_score) {
             offsets = next;
             best_score = sc;
             best = (sub, res);
+            gain = 1.0;
+        } else {
+            gain *= 2.0;
         }
-        let mut st = best.1.stats.clone();
-        st.violations = Some(best_score.2.len());
-        search.report_stats(
-            &format!("placement round {round}"),
-            &st,
-            &best.1.geometry,
-            &hot,
-            Search::default(),
-        );
+        report(&best, &best_score);
     }
     best
 }
@@ -2036,147 +2091,6 @@ fn open_pins(b: &Board, unrouted: &[String]) -> Vec<geom::Point> {
         .collect()
 }
 
-/// New footprint offsets: movable parts with pads next to clearance problems step away from
-/// them (boldly, 0.15 to 0.5 mm per step), as long as the courtyards stay inside the board and
-/// apart from each other. `cur` is the board with the current `offsets` applied.
-fn shift_parts(
-    board: &Board,
-    cur: &Board,
-    offsets: &HashMap<String, geom::Point>,
-    hot: &[geom::Point],
-    rng: &mut Rng,
-) -> Option<HashMap<String, geom::Point>> {
-    let mut offsets = offsets.clone();
-    let mut courtyards = cur.courtyards.clone();
-    let mut changed = false;
-    let mut spots: Vec<geom::Point> = Vec::new();
-    for &h in hot {
-        if spots.iter().all(|s| s.dist(h) > 1.0) {
-            spots.push(h);
-        }
-    }
-    for h in spots {
-        // the part whose pin is the spot itself (an open connection) stays: its neighbours make
-        // the room
-        let near: Vec<&String> = board
-            .movable
-            .iter()
-            .filter(|f| cur.pins.iter().any(|p| &p.footprint == *f && p.pos.dist(h) < 1.5))
-            .filter(|f| !cur.pins.iter().any(|p| &p.footprint == *f && p.pos.dist(h) < 1e-6))
-            .collect();
-        if near.is_empty() {
-            continue;
-        }
-        let fp = near[(rng.next() % near.len() as u64) as usize];
-        let Some(r) = courtyards.get(fp).copied() else {
-            continue;
-        };
-        let centre = (r.min + r.max) * 0.5;
-        let away = centre - h;
-        if away.len() < 1e-6 {
-            continue;
-        }
-        let step = away.norm() * (0.15 + 0.35 * rng.unit());
-        for scale in [1.0, 0.5] {
-            // the part shoves the movable parts in its way along (a chain, as far as needed)
-            let mut trial_off = offsets.clone();
-            let mut trial_cy = courtyards.clone();
-            if shove(
-                board,
-                fp,
-                step * scale,
-                &mut trial_cy,
-                &mut trial_off,
-                &mut Vec::new(),
-                0,
-            ) {
-                offsets = trial_off;
-                courtyards = trial_cy;
-                changed = true;
-                break;
-            }
-        }
-    }
-    changed.then_some(offsets)
-}
-
-/// Shift footprint `fp` by `d`, and with it the rest of its block; movable parts whose
-/// courtyards it would run into are shifted by the same amount first (up to a chain of four).
-/// False if a fixed part or the board edge is in the way.
-fn shove(
-    board: &Board,
-    fp: &str,
-    d: geom::Point,
-    courtyards: &mut HashMap<String, geom::Rect>,
-    offsets: &mut HashMap<String, geom::Point>,
-    done: &mut Vec<String>,
-    depth: usize,
-) -> bool {
-    if done.iter().any(|x| x == fp) {
-        return true;
-    }
-    done.push(fp.to_string());
-    let Some(r) = courtyards.get(fp).copied() else {
-        return false;
-    };
-    let moved = geom::Rect {
-        min: r.min + d,
-        max: r.max + d,
-    };
-    let inside = [
-        moved.min,
-        moved.max,
-        geom::pt(moved.min.x, moved.max.y),
-        geom::pt(moved.max.x, moved.min.y),
-    ]
-    .iter()
-    .all(|&q| board.inside(q));
-    if !inside {
-        return false;
-    }
-    courtyards.insert(fp.to_string(), moved);
-    let e = offsets.entry(fp.to_string()).or_insert(geom::pt(0.0, 0.0));
-    *e = *e + d;
-    // the block moves as a whole (a member without courtyard only takes the offset)
-    for block in board.blocks.iter().filter(|b| b.refs.iter().any(|x| x == fp)) {
-        for other in &block.refs {
-            if !courtyards.contains_key(other) {
-                if !done.contains(other) {
-                    done.push(other.clone());
-                    let e = offsets.entry(other.clone()).or_insert(geom::pt(0.0, 0.0));
-                    *e = *e + d;
-                }
-            } else if !shove(board, other, d, courtyards, offsets, done, depth) {
-                return false;
-            }
-        }
-    }
-    // parts that already overlapped may keep overlapping as much as before
-    let hit: Vec<String> = courtyards
-        .iter()
-        .filter(|(other, o)| other.as_str() != fp && overlap(o, &moved) > overlap(o, &r) + 1e-9)
-        .map(|(other, _)| other.clone())
-        .collect();
-    for other in hit {
-        if done.contains(&other) {
-            continue;
-        }
-        if depth >= 4
-            || !board.movable.contains(&other)
-            || !shove(board, &other, d, courtyards, offsets, done, depth + 1)
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn overlap(a: &geom::Rect, b: &geom::Rect) -> f64 {
-    let w = a.max.x.min(b.max.x) - a.min.x.max(b.min.x);
-    let h = a.max.y.min(b.max.y) - a.min.y.max(b.min.y);
-    if w > 0.0 && h > 0.0 { w * h } else { 0.0 }
-}
-
 /// A mutant that moves the connections of nets with clearance violations (and failed ones)
 /// earlier, so that they get their room before their neighbours.
 fn mutate_geo(best: &Candidate, rng: &mut Rng) -> Genome {
@@ -2279,45 +2193,5 @@ mod tests {
             ..Default::default()
         };
         assert!(!auto_negotiate(&asked, &stats(90)), "asked for already");
-    }
-
-    fn board() -> Board {
-        let mut b = Board::default();
-        b.outline.push(Polygon::new(vec![
-            pt(0.0, 0.0),
-            pt(50.0, 0.0),
-            pt(50.0, 50.0),
-            pt(0.0, 50.0),
-        ]));
-        b.courtyards.insert("A".into(), rect(10.0, 10.0, 2.0, 2.0));
-        b.courtyards.insert("B".into(), rect(13.0, 10.0, 2.0, 2.0));
-        b.courtyards.insert("C".into(), rect(20.0, 20.0, 2.0, 2.0));
-        b.movable = vec!["A".into(), "B".into(), "C".into()];
-        b
-    }
-
-    #[test]
-    fn a_block_moves_as_a_whole() {
-        let mut b = board();
-        b.blocks.push(Block {
-            refs: vec!["A".into(), "C".into()],
-            ..Default::default()
-        });
-        let (mut cy, mut off) = (b.courtyards.clone(), HashMap::new());
-        assert!(shove(&b, "A", pt(0.5, 0.0), &mut cy, &mut off, &mut Vec::new(), 0));
-        assert_eq!(off.len(), 2);
-        assert_eq!(off["C"].x, 0.5);
-        assert_eq!(cy["C"].min.x, 20.5);
-    }
-
-    #[test]
-    fn shoving_pushes_movable_neighbours_and_stops_at_fixed_ones() {
-        let mut b = board();
-        let (mut cy, mut off) = (b.courtyards.clone(), HashMap::new());
-        assert!(shove(&b, "A", pt(1.5, 0.0), &mut cy, &mut off, &mut Vec::new(), 0));
-        assert_eq!(off["B"].x, 1.5);
-        b.movable.retain(|f| f != "B");
-        let (mut cy, mut off) = (b.courtyards.clone(), HashMap::new());
-        assert!(!shove(&b, "A", pt(1.5, 0.0), &mut cy, &mut off, &mut Vec::new(), 0));
     }
 }

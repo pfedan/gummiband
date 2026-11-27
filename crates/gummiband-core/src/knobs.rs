@@ -408,8 +408,16 @@ knobs! {
         "How many runners-up of the geometry stage are finished next to the winner; the best finished result is the route (0: the winner alone).";
     DIRS_ALL = "GB_DIRS_ALL", Experiment, Set, "off",
         "Every run of the portfolio uses the preferred layer directions, not every third.";
-    PLACE_ROUNDS = "GB_PLACE_ROUNDS", Experiment, Num, "2",
-        "Rounds in which parts give way at hot spots (`--move-parts`).";
+    PLACE_ROUNDS = "GB_PLACE_ROUNDS", Experiment, Num, "8",
+        "Rounds in which the copper pushes the movable parts (`--move-parts`).";
+    PLACE_SEARCHES = "GB_PLACE_SEARCHES", Experiment, Num, "2",
+        "How many of those rounds may route the board anew on the shifted parts.";
+    FLOE_REACH = "GB_FLOE_REACH", Experiment, Num, "2.0",
+        "How far a movable part may end up from its place in the file, in mm (`--move-parts`).";
+    FLOE_IT = "GB_FLOE_IT", Experiment, Num, "400",
+        "Relaxation rounds after each step of the parts (`--move-parts`).";
+    FLOE_BAND = "GB_FLOE_BAND", Experiment, Num, "0",
+        "mm a part moves per round for the force of one track wrapped around it or pulling at it (0: only spots that ask for room push parts).";
     PLACE_AFTER_STOP = "GB_PLACE_AFTER_STOP", Experiment, Set, "off",
         "An open end that was stopped still gets the placement rounds.";
     NEG_ONLY = "GB_NEG_ONLY", Experiment, Set, "off",
