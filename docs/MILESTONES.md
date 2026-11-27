@@ -1187,6 +1187,27 @@ So the layer rule is worth it where the field has room to choose (the synthetic 
 a little) and is no lever where the layers are full. Both stay off; a portfolio member with
 `GB_BGA_RIM` is the next measurement, together with the field rules of 1.
 
+### The neighbours give way, a first try (2026-11-27)
+
+`GB_GIVE` (experiment, off; `gummiband_core::give`): after the finishing steps every finding of
+the own check is taken as a distance that must grow. The via at the spot (or the track at its
+nearest point) tries a move in 16 directions by what is missing and twice that; a via takes its
+track ends along, a track bends at the spot and less and less up to 0.6 mm along it; then every
+movable track or via the moved copper is now too near to gives way in turn, up to 3 steps. A
+move is kept only if the findings of all it touched weigh less, measured by the check (per other
+net the worst finding, a short as 1 mm). `check::Copper` got a journal (`begin`, `rollback`,
+`commit`) so that a tried move costs only its own pieces, and `set_via`, `via_findings`,
+`track_findings`.
+
+Measured (draft, seed 1): Glasgow with `--field-rules auto` 84 to 83 own findings, 1 move, 13 s
+more; bga_dense 23 to 23; tigard 11 to 12 before the weight counted every finding; esp_prog
+clean either way. Almost every tried via move is refused: in a ball field the via moves into
+the next ball or its track, and the neighbours pushed after it into theirs; a same-net pair of
+vias 4 µm apart (hole_to_hole -0.196 mm on Glasgow) shows that the geometry can hold a via twice.
+Open: let the pushed neighbours choose their own direction (now away from the finding), weigh
+by the KiCad count, and a test case where a via has room (the cloud side counts 22 of 24 spots
+on Glasgow standard, seed 1).
+
 ## Parts as floes (2026-11-27)
 
 `--move-parts` used to move a part only where a clearance problem or an open pin sat next to it,

@@ -1376,6 +1376,14 @@ fn route_with(t0: Instant, board: &Board, opts: &RouteOptions, hooks: &Hooks, re
         });
         gummiband_core::spread::spread(b, &mut res.geometry)
     });
+    // and the neighbours give way at what the check still finds
+    if gummiband_core::knobs::GIVE.on() {
+        let r = gummiband_core::give::give_way(b, &mut res.geometry);
+        eprintln!(
+            "give way: {} findings to {}, {} moves of {} vias and {} tracks in {} rounds",
+            r.before, r.after, r.moves, r.vias, r.tracks, r.rounds
+        );
+    }
     let matching = gummiband_core::matching::check(b, &res.geometry);
     let violations = gummiband_core::check::check(b, &res.geometry);
     let soft = gummiband_core::import::soft_changes(b, &res.geometry);

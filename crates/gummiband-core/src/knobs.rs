@@ -330,6 +330,8 @@ knobs! {
         "Layer changes of current paths get the vias that carry their current (`relax::stitch_vias`).";
     PIVOT_ARCS = "GB_PIVOT_ARCS", Switch, NotZero, "on",
         "The finished copper gets its last form from its pivots (`relax::pivot_pass`): one arc around each pad corner, via or bundle a track bends around, with the radius of what lies between, and tangent lines. A track keeps the corners the shortcuts gave it where such an arc or line comes too close, and where the own check finds something new.";
+    GIVE = "GB_GIVE", Experiment, Set, "off",
+        "At the end of a route the neighbours give way: every finding of the own check is pushed off exactly (a via with the ends of its tracks, a track bent at the spot), and what that presses into gives way in turn; a move is taken only if the findings of all it touched get smaller (`give::give_way`).";
     SPREAD = "GB_SPREAD", Switch, NotZero, "on",
         "Where the own check finds tracks too near to something and the passage has room for them, the tracks through it are laid again as one group (`spread::spread`): from one side outwards with the clearance and 2 um, lines and arcs, taken only if the check then finds nothing new.";
     LOCAL_RULES = "GB_LOCAL_RULES", Switch, NotZero, "on",

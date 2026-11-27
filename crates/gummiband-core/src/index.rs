@@ -104,6 +104,19 @@ impl GridIndex {
         }
     }
 
+    /// Take id out again (inserted with the same box).
+    pub fn remove(&mut self, id: u32, r: &Rect) {
+        let (x0, x1, y0, y1) = self.range(r);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let c = &mut self.cells[y * self.nx + x];
+                if let Some(k) = c.iter().rposition(|&i| i == id) {
+                    c.swap_remove(k);
+                }
+            }
+        }
+    }
+
     /// Ids whose boxes may overlap `r` (deduplicated, sorted).
     pub fn query(&self, r: &Rect) -> Vec<u32> {
         let (x0, x1, y0, y1) = self.range(r);

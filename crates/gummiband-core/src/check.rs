@@ -242,11 +242,23 @@ pub struct Copper<'a> {
     owner: Vec<u32>,
     /// The pieces of every track.
     owned: Vec<Vec<u32>>,
+    /// The piece of every via of the geometry (`GONE` for a branch point without copper).
+    via_piece: Vec<u32>,
+    /// While a change is tried ([`Copper::begin`]): what it replaced, to take it back.
+    journal: Option<Journal>,
     idx: GridIndex,
     oidx: GridIndex,
     /// The edges of the board outline, and an index of them: a panel has hundreds.
     esegs: Vec<(Point, Point)>,
     eidx: GridIndex,
+}
+
+/// What a tried change replaced: the count of pieces before it, and in order the pieces of
+/// tracks and vias it took away.
+struct Journal {
+    pieces: usize,
+    owned: Vec<(usize, Vec<u32>)>,
+    vias: Vec<(usize, u32)>,
 }
 
 const NO_TRACK: u32 = u32::MAX;
@@ -299,6 +311,10 @@ impl<'a> Copper<'a> {
             }
         }
         // (a branch point of soft tracks has no copper of its own)
+        let mut via_piece = Vec::with_capacity(geo.vias.len());
+        for v in &geo.vias {
+            via_piece.push(if v.drill > 0.0 { pieces.len() as u32 } else { GONE });
+        }
         for v in geo.vias.iter().filter(|v| v.drill > 0.0) {
             let h = if v.is_pair() { v.half.len() } else { 0.0 };
             pieces.push(Piece::Via {
@@ -331,6 +347,8 @@ impl<'a> Copper<'a> {
             pieces,
             owner,
             owned,
+            via_piece,
+            journal: None,
             idx,
             oidx,
             esegs,
@@ -362,8 +380,12 @@ impl<'a> Copper<'a> {
 
     /// Track `ti` of the geometry has these points and elements from now on.
     pub(crate) fn set_track(&mut self, ti: usize, t: &Track, pts: &[Point], elems: &[Elem]) {
-        for id in std::mem::take(&mut self.owned[ti]) {
+        let old = std::mem::take(&mut self.owned[ti]);
+        for &id in &old {
             self.owner[id as usize] = GONE;
+        }
+        if let Some(j) = &mut self.journal {
+            j.owned.push((ti, old));
         }
         for (w, bow) in pts.windows(2).zip(bows(pts, elems)) {
             let id = self.pieces.len() as u32;
@@ -380,6 +402,97 @@ impl<'a> Copper<'a> {
             self.owner.push(ti as u32);
             self.owned[ti].push(id);
         }
+    }
+
+    /// Via `vi` of the geometry is this one from now on (a via with a drill).
+    pub(crate) fn set_via(&mut self, vi: usize, v: &crate::realize::Via) {
+        let old = self.via_piece[vi];
+        if old != GONE {
+            self.owner[old as usize] = GONE;
+        }
+        if let Some(j) = &mut self.journal {
+            j.vias.push((vi, old));
+        }
+        let h = if v.is_pair() { v.half.len() } else { 0.0 };
+        let p = Piece::Via {
+            c: v.at,
+            r: v.diameter / 2.0 - h,
+            drill: v.drill - 2.0 * h,
+            net: v.net,
+            half: v.half,
+        };
+        let id = self.pieces.len() as u32;
+        self.idx.insert(id, &p.bbox());
+        self.pieces.push(p);
+        self.owner.push(NO_TRACK);
+        self.via_piece[vi] = id;
+    }
+
+    /// Start a change that [`Copper::rollback`] takes back (or [`Copper::commit`] keeps).
+    pub(crate) fn begin(&mut self) {
+        self.journal = Some(Journal {
+            pieces: self.pieces.len(),
+            owned: Vec::new(),
+            vias: Vec::new(),
+        });
+    }
+
+    pub(crate) fn commit(&mut self) {
+        self.journal = None;
+    }
+
+    /// Take back everything since [`Copper::begin`]: the new pieces leave the index, the old
+    /// ones come back.
+    pub(crate) fn rollback(&mut self) {
+        let Some(j) = self.journal.take() else { return };
+        for id in j.pieces..self.pieces.len() {
+            let b = self.pieces[id].bbox();
+            self.idx.remove(id as u32, &b);
+        }
+        self.pieces.truncate(j.pieces);
+        self.owner.truncate(j.pieces);
+        for (vi, old) in j.vias.into_iter().rev() {
+            // (a piece of the change itself is gone with the truncation)
+            if old != GONE && (old as usize) < self.owner.len() {
+                self.owner[old as usize] = NO_TRACK;
+            }
+            self.via_piece[vi] = old;
+        }
+        for (ti, old) in j.owned.into_iter().rev() {
+            for &id in old.iter().filter(|&&id| (id as usize) < self.pieces.len()) {
+                self.owner[id as usize] = ti as u32;
+            }
+            self.owned[ti] = old;
+        }
+    }
+
+    /// The findings of [`check`] of via `vi` against the board and all other copper, local
+    /// rules applied ([`localize`]).
+    pub(crate) fn via_findings(&self, vi: usize) -> Vec<Violation> {
+        let id = self.via_piece[vi];
+        if id == GONE {
+            return Vec::new();
+        }
+        let mut out = self.violations(&self.pieces[id as usize], None, PLAIN);
+        localize(self.board, &mut out);
+        out
+    }
+
+    /// The findings of [`check`] of the pieces of track `ti` that reach into `within`, against
+    /// the board and all copper but the track's own, local rules applied.
+    pub(crate) fn track_findings(&self, ti: usize, within: &Rect) -> Vec<Violation> {
+        let ask = Ask {
+            skip: ti as u32,
+            ..PLAIN
+        };
+        let mut out: Vec<Violation> = self.owned[ti]
+            .iter()
+            .map(|&id| &self.pieces[id as usize])
+            .filter(|p| p.bbox().overlaps(within))
+            .flat_map(|p| self.violations(p, None, ask))
+            .collect();
+        localize(self.board, &mut out);
+        out
     }
 
     /// Would the piece from a to b of track `ti` (net, layer, half width `r`; with `arc` the
@@ -765,23 +878,29 @@ pub fn check(board: &Board, geo: &Geometry) -> Vec<Violation> {
         .filter(|(i, _)| copper.owner[*i] != GONE)
         .flat_map_iter(|(i, p)| copper.violations(p, Some(i), PLAIN))
         .collect();
-    // a custom rule may lower the clearance in a courtyard (fine pitch power ICs)
-    if !board.courtyard_clearance.is_empty() || !board.rule_areas.is_empty() {
-        // (a copper clearance: what a drill, a keep-out or a mask opening asks stays as it is)
-        let other = |v: &Violation| ["hole", "keepout ", "mask "].iter().any(|k| v.what.starts_with(k));
-        out.retain_mut(|v| match board.courtyard_clearance_at(v.at, v.required) {
-            _ if other(v) => true,
-            Some(min) if v.actual >= min - TOL => false,
-            Some(min) => {
-                v.required = v.required.min(min);
-                true
-            }
-            None => true,
-        });
-    }
+    localize(board, &mut out);
     out.extend(min_widths(board, geo));
     out.extend(current_ways(board, geo));
     out
+}
+
+/// A custom rule may lower the clearance in a courtyard (fine pitch power ICs) or a rule area:
+/// the findings of the copper clearance that such a rule allows go, the others ask its value.
+/// (What a drill, a keep-out or a mask opening asks stays as it is.)
+fn localize(board: &Board, out: &mut Vec<Violation>) {
+    if board.courtyard_clearance.is_empty() && board.rule_areas.is_empty() {
+        return;
+    }
+    let other = |v: &Violation| ["hole", "keepout ", "mask "].iter().any(|k| v.what.starts_with(k));
+    out.retain_mut(|v| match board.courtyard_clearance_at(v.at, v.required) {
+        _ if other(v) => true,
+        Some(min) if v.actual >= min - TOL => false,
+        Some(min) => {
+            v.required = v.required.min(min);
+            true
+        }
+        None => true,
+    });
 }
 
 /// A piece of track narrower than the minimum width of its class that does not touch the
