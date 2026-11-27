@@ -390,6 +390,8 @@ pub struct Router<'a> {
     /// Per pin the distance to the nearest pin of its part on another net, see
     /// [`Board::pin_room`]: every search asks for it at its pins.
     pin_pitch: std::sync::Arc<Vec<f64>>,
+    /// The ball fields of the board for GB_BGA_RIM and GB_BGA_DEEP (empty when both are off).
+    balls: std::sync::Arc<BallFields>,
     /// With `areas fill`: per area net what its connections aim at, from the last run of the
     /// fill model ([`Router::area_pass`]).
     area_goals: std::sync::Arc<Vec<crate::fill::AreaGoal>>,
@@ -755,6 +757,7 @@ impl<'a> Router<'a> {
             trace: Default::default(),
             shown: None,
             pin_pitch: std::sync::Arc::new(Self::pin_pitches(board)),
+            balls: std::sync::Arc::new(BallFields::new(board, sub)),
             area_goals: Default::default(),
             area_wait: Vec::new(),
             area_base: 0,
@@ -2001,6 +2004,29 @@ impl<'a> Router<'a> {
         }
     }
 
+    /// The extra price of a new via of connection `conn` on `site` (GB_BGA_RIM).
+    fn rim(&self, conn: &Conn, site: u32) -> f64 {
+        if self.balls.rim.is_empty() || conn.goal == Goal::Plane {
+            return 0.0;
+        }
+        self.balls.rim.get(site as usize).copied().unwrap_or(0.0)
+    }
+
+    /// GB_BGA_DEEP: the field whose deep ball (a ring at or past GB_BGA_RIM_RINGS) connection
+    /// `conn` ends at, if any.
+    fn deep_field(&self, conn: &Conn) -> Option<usize> {
+        if self.balls.deep <= 0.0 || self.board.planes.iter().any(|p| p.net == conn.net) {
+            return None;
+        }
+        let Goal::Pins(tree) = &conn.goal else { return None };
+        std::iter::once(&conn.from)
+            .chain(tree.iter())
+            .filter_map(|p| self.balls.ring.get(p))
+            .filter(|x| x.1 as f64 >= self.balls.rings)
+            .max_by_key(|x| x.1)
+            .map(|x| x.0)
+    }
+
     /// The pitch of every pin as [`Board::pin_room`] folds it: the nearest pin of the same part
     /// on another net, `INFINITY` without one.
     fn pin_pitches(board: &Board) -> Vec<f64> {
@@ -2599,6 +2625,15 @@ impl<'a> Router<'a> {
             Some(m) if m.applies(li, net) => self.cfg.ref_cost * m.penalty(li, a, b),
             _ => 0.0,
         };
+        // the connection of a deep ball pays for track in the outer rings of its field on the
+        // ball layer (GB_BGA_DEEP): it leaves through a via, the outer balls keep the channels
+        let deep = self.deep_field(conn).map(|f| &self.balls.fields[f]);
+        let deep_price = |li: usize, a: Point, b: Point| match deep {
+            Some(f) if f.layers.has(self.sub.layers[li]) && f.in_rim((a + b) * 0.5, self.balls.rings) => {
+                self.balls.deep * a.dist(b)
+            }
+            _ => 0.0,
+        };
         // a via in a pad is a last resort
         let via_in_pad = self.cfg.via_in_pad;
         let cls = self.board.class_of(net);
@@ -2998,6 +3033,7 @@ impl<'a> Router<'a> {
                         + step
                         + self.across(lu, node.pos, q)
                         + ref_price(lu, node.pos, q)
+                        + deep_price(lu, node.pos, q)
                         + escape
                         + self.pull(guide, lu, q, step)
                         + price
@@ -3299,7 +3335,7 @@ impl<'a> Router<'a> {
                         let mut vc = if existing {
                             0.1
                         } else {
-                            via_cost + pair_via_at(self.site_point(site))
+                            via_cost + pair_via_at(self.site_point(site)) + self.rim(conn, site)
                         };
                         if let Some(s) = soft {
                             if let Some((ep, es)) = entry_pos {
@@ -3401,7 +3437,7 @@ impl<'a> Router<'a> {
                         if own_vias.iter().any(|v| v.dist(q) < hole_gap) {
                             continue;
                         }
-                        let mut vc = via_cost + pair_via_at(q);
+                        let mut vc = via_cost + pair_via_at(q) + self.rim(conn, site);
                         if let Some(s) = soft {
                             if let Some((ep, es)) = entry_pos {
                                 vc += s.crossing * self.half_chords_crossed(t, lu, net, q, ep, es) as f64;
@@ -5514,6 +5550,101 @@ pub(crate) fn seg_param_intersection(a: Point, b: Point, c: Point, d: Point) -> 
         Some((t, u))
     } else {
         None
+    }
+}
+
+/// A ball field in the frame of its lattice: axes, pitch, the span of the balls along both axes
+/// and the layers of the balls.
+struct BallField {
+    u: Point,
+    v: Point,
+    pitch: f64,
+    su: (f64, f64),
+    sv: (f64, f64),
+    layers: crate::board::LayerSet,
+}
+
+impl BallField {
+    /// How deep q lies in the field, in pitches from its outer ring (negative outside).
+    fn depth(&self, q: Point) -> f64 {
+        let (x, y) = (q.dot(self.u), q.dot(self.v));
+        (x - self.su.0).min(self.su.1 - x).min(y - self.sv.0).min(self.sv.1 - y) / self.pitch
+    }
+
+    /// Whether q lies in the outer `rings` rings of the field, or in the half pitch around it.
+    fn in_rim(&self, q: Point, rings: f64) -> bool {
+        let d = self.depth(q);
+        d > -0.5 && d < rings - 0.5
+    }
+}
+
+/// The ball fields of a board for the experiments GB_BGA_RIM (a price for signal vias in the
+/// outer rings) and GB_BGA_DEEP (a price for track of the deep balls in the outer rings on the
+/// ball layer): the layer rule of a field that is left ring by ring, as a person does it.
+#[derive(Default)]
+struct BallFields {
+    fields: Vec<BallField>,
+    /// Per ball pin: its field and ring (0 the outer ring).
+    ring: HashMap<usize, (usize, u32)>,
+    /// Per via site the extra price of a new signal via there (empty without GB_BGA_RIM).
+    rim: Vec<f64>,
+    /// GB_BGA_DEEP, per mm.
+    deep: f64,
+    /// GB_BGA_RIM_RINGS.
+    rings: f64,
+}
+
+impl BallFields {
+    fn new(board: &Board, sub: &Substrate) -> BallFields {
+        let rim: f64 = knobs::BGA_RIM.num();
+        let deep: f64 = knobs::BGA_DEEP.num();
+        if rim <= 0.0 && deep <= 0.0 {
+            return BallFields::default();
+        }
+        let rings: f64 = knobs::BGA_RIM_RINGS.num();
+        let mut out = BallFields {
+            deep: deep.max(0.0),
+            rings,
+            ..Default::default()
+        };
+        for g in crate::patterns::grids(board) {
+            let (u, v) = (g.dir, g.dir.perp());
+            let span = |n: Point| {
+                let at = g.pins.iter().map(|&p| board.pins[p].pos.dot(n));
+                at.fold((f64::MAX, f64::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)))
+            };
+            let f = BallField {
+                u,
+                v,
+                pitch: g.pitch,
+                su: span(u),
+                sv: span(v),
+                layers: board.pins[g.pins[0]].layers,
+            };
+            let i = out.fields.len();
+            for &p in &g.pins {
+                out.ring
+                    .insert(p, (i, f.depth(board.pins[p].pos).round().max(0.0) as u32));
+            }
+            out.fields.push(f);
+        }
+        if rim > 0.0 && !out.fields.is_empty() {
+            // the dog-bone places between the outer rings and the raster sites there; not the
+            // places half a pitch outside the field
+            out.rim = sub
+                .shared
+                .sites
+                .iter()
+                .map(|s| {
+                    let hit = out.fields.iter().any(|f| {
+                        let d = f.depth(s.p);
+                        d > -0.25 && d < rings - 1.0 + 0.25
+                    });
+                    if hit { rim } else { 0.0 }
+                })
+                .collect();
+        }
+        out
     }
 }
 

@@ -1142,6 +1142,51 @@ any board, ball fields and the steps before the search come first.
    via price that grows with the vias a connection already has; hand KiCad's unconnected items
    back to the router.
 
+### The layer rule of the rings, as prices (2026-11-27)
+
+Point 2 of the ranking above, as two experiments of the search (off by default, hashes
+unchanged without them):
+
+- `GB_BGA_RIM` (mm): a new signal via in the outer `GB_BGA_RIM_RINGS` (2) rings of a ball field
+  costs this much more: the dog-bone places between the outer rings and the raster sites there,
+  not the places half a pitch outside the field. Fan-outs to a plane pay nothing extra. The
+  outer balls keep their channels on the ball layer.
+- `GB_BGA_DEEP` (per mm): the connection of a deeper ball (ring 2 and in) pays this much per mm
+  of track on the ball layer in the outer rings and the half pitch around them, so that it
+  leaves through a via and not through the channels of the outer balls.
+
+Both read the fields of `patterns::grids` once per router (`BallFields` in `route.rs`).
+
+Measured on the M4 Pro (14 cores), one run at a time, KiCad 10.0.7:
+
+- `bga_dense` (`quick`, seeds 1 to 3): own findings 23 in every seed without, 0 in every seed
+  with `GB_BGA_RIM=10`, with `GB_BGA_DEEP=2` and with both; 100 of 100 and 60 to 64 vias
+  either way. `bga_escape` unchanged.
+- All boards (`draft --no-move-parts`, the synthetic suite, arty, corne, ulx3s and the krt set;
+  rows that differ, unconnected / KiCad findings / own findings, off - RIM 10 - DEEP 2):
+  bga_dense 0/12/23 - 0/0/0 - 0/0/0; glasgow_revC 68/6/3 - 68/6/3 - 68/2/2; krt-ulx3s
+  169/39/0 - 168/37/0 - 168/43/0; ulx3s own 56 - 54 - 56. Totals 414/660/150 -
+  413/646/125 - 413/648/126, time 284 - 293 - 275 s. Every other board identical.
+- ulx3s with finer rules (track 0.15, clearance 0.1, vias 0.35/0.2 mm in the project, GND on
+  In1 and +3V3 on In2 as planes, so two signal layers; `draft`, seeds 1 to 3):
+
+| | routed of 799 | vias | own findings | KiCad findings | time |
+| --- | --- | --- | --- | --- | --- |
+| off | 786, 785, 786 | 939 to 1008 | 180, 302, 72 | 376, 456, 288 | 318 to 356 s |
+| `GB_BGA_RIM=10` | 784 in all three | 929 | 95 | 297 | 382 to 392 s |
+| `GB_BGA_DEEP=2` | 786 in all three | 938 to 1054 | 155, 201, 275 | 356, 382, 426 | 337 to 354 s |
+| both | 784, 783, 782 | 910 to 967 | 175, 574, 99 | 363, 555, 292 | 338 to 365 s |
+
+  The 13 open balls of that board lie in rings 1 to 4 of U1, and the field is full: one track
+  between two balls on F.Cu and one between two vias on B.Cu gives about four rings, and ring 4
+  alone holds 36 signal balls. Neither price moves that limit; RIM gives the cleaner copper and
+  two balls fewer. (The seed only steers the generations of mutants, the portfolio is the same
+  for every seed: where the mutants find nothing better, all seeds give the same board.)
+
+So the layer rule is worth it where the field has room to choose (the synthetic field, Glasgow
+a little) and is no lever where the layers are full. Both stay off; a portfolio member with
+`GB_BGA_RIM` is the next measurement, together with the field rules of 1.
+
 ## Parts as floes (2026-11-27)
 
 `--move-parts` used to move a part only where a clearance problem or an open pin sat next to it,

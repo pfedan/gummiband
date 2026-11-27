@@ -114,6 +114,9 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_RIVALS` | number | 2 | How many runners-up of the geometry stage are finished next to the winner; the best finished result is the route (0: the winner alone). |
 | `GB_DIRS_ALL` | set to anything | off | Every run of the portfolio uses the preferred layer directions, not every third. |
 | `GB_BALLS` | number | 0 | The connections of the balls of a ball field go before the other signal connections, ring by ring: 1 the innermost ring first, 2 the outermost first (0: off). |
+| `GB_BGA_RIM` | number | 0 | Extra price in mm of a new signal via in the outer rings of a ball field (GB_BGA_RIM_RINGS), so that the outer balls keep their channels on the ball layer (0: off). |
+| `GB_BGA_RIM_RINGS` | number | 2 | With GB_BGA_RIM and GB_BGA_DEEP: how many outer rings of a ball field leave on the ball layer, free of signal vias. |
+| `GB_BGA_DEEP` | number | 0 | Extra price per mm of track on the ball layer in the outer rings of a ball field (GB_BGA_RIM_RINGS) for the connection of a deeper ball, so that it leaves through a via (0: off). |
 | `GB_PAIR_VIA` | number | 0 | With `--pairs pull`: a via of a pair net costs this many vias more, and as much again 2 mm or more from where its partner changes layers (0: off). |
 | `GB_PLACE_ROUNDS` | number | 6 | Rounds in which the spots that ask for room push the movable parts (`--move-parts`). |
 | `GB_PLACE_SEARCHES` | number | 2 | How many of those rounds may route the board anew on the shifted parts. |

@@ -412,6 +412,12 @@ knobs! {
         "Every run of the portfolio uses the preferred layer directions, not every third.";
     BALLS = "GB_BALLS", Experiment, Num, "0",
         "The connections of the balls of a ball field go before the other signal connections, ring by ring: 1 the innermost ring first, 2 the outermost first (0: off).";
+    BGA_RIM = "GB_BGA_RIM", Experiment, Num, "0",
+        "Extra price in mm of a new signal via in the outer rings of a ball field (GB_BGA_RIM_RINGS), so that the outer balls keep their channels on the ball layer (0: off).";
+    BGA_RIM_RINGS = "GB_BGA_RIM_RINGS", Experiment, Num, "2",
+        "With GB_BGA_RIM and GB_BGA_DEEP: how many outer rings of a ball field leave on the ball layer, free of signal vias.";
+    BGA_DEEP = "GB_BGA_DEEP", Experiment, Num, "0",
+        "Extra price per mm of track on the ball layer in the outer rings of a ball field (GB_BGA_RIM_RINGS) for the connection of a deeper ball, so that it leaves through a via (0: off).";
     PAIR_VIA = "GB_PAIR_VIA", Experiment, Num, "0",
         "With `--pairs pull`: a via of a pair net costs this many vias more, and as much again 2 mm or more from where its partner changes layers (0: off).";
     PLACE_ROUNDS = "GB_PLACE_ROUNDS", Experiment, Num, "6",
