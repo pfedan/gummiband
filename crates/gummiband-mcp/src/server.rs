@@ -1927,7 +1927,11 @@ impl Gummiband {
                 .iter()
                 .map(|&n| b.nets[n as usize].name.clone())
                 .collect(),
-            warnings: b.ground_warning().into_iter().collect(),
+            warnings: b
+                .ground_warning()
+                .into_iter()
+                .chain(gummiband_core::patterns::escape_warnings(b))
+                .collect(),
         };
         let summary = format!(
             "Loaded {} as board {id}: {:.1} x {:.1} mm, {} copper layers ({}), {} pins, {} nets ({} to route, {} connections), {} net classes, {} custom rules.",

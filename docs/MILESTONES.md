@@ -1036,6 +1036,53 @@ What it does and we do not, noted for later:
   off by default. Pairs with their vias side by side are what `--pairs band` with
   `--via-pairs` is for.
 
+### KiCadRoutingTools, the close look at ball fields and pairs (2026-11-27)
+
+Read in the source: `py_router/bga_fanout` (channel, under-pad and dog-bone engines, plane
+drops, the planned moves), `qfn_fanout`, `docs/differential-pairs.md`, `awx/joint_escape.py` and
+the recorded command chains of its corpus (`tests/stress/corpus_chains`).
+
+**How it gets a dense field out.** Not by a better search, by an order of steps a person would
+take, each fixed before the next: (1) the outer rings leave on the top layer from the outside
+in, so a deep ball never strands a shallow one; (2) every via site of the inner balls is
+reserved before any inner track is laid, deepest ball first, each in the gap towards its exit;
+(3) pairs leave coupled, deepest first; (4) the rest runs under the pads on the inner layers,
+deepest first; (5) every ball of a plane net gets its via right after, while the field is
+still open; (6) the planes, then the pairs, then the signals. And before all of that the chain
+of ulx3s lowers the rules until the field can be left at all: clearance 0.2 to 0.1 mm, via 0.6
+to 0.35 mm.
+
+**What that is worth with our router, measured on ulx3s** (20 x 20 balls at 0.8 mm, `draft`,
+seed 1, own check):
+
+| board and rules | routed | vias | findings | time |
+|---|---|---|---|---|
+| as in the file: 0.2 / 0.2 / 0.6 mm, no planes | 656 of 827 | 223 | 0 | 42 s |
+| 0.15 / 0.1 / 0.35 mm, GND and +3V3 as planes, two signal layers | 786 of 799 | 996 | 260 | 1053 s |
+| the same rules, the two zones as areas on four routed layers (`--areas fill`) | 827 of 827 | 569 | 28 | 269 s |
+
+So the search gets the field out once the rules allow it; what we lacked was saying so. Taken up:
+
+- `patterns::escape_warnings`: a line per ball field whose rules leave no track between two
+  balls or no via between four, with the clearance, track or via that would fit (its "escape
+  budget"). ulx3s and Glasgow get it, the synthetic BGA boards do not.
+
+Noted, not built:
+
+- The order of the field as fixed steps (rings outside in, sites reserved deepest first). Our
+  dog-bone sites exist, the order is left to the portfolio. Worth a pattern hint (`balls`) and a
+  measurement on ulx3s with two signal layers, where 13 stay open and the negotiation takes 17
+  minutes.
+- A via for every plane ball before the signals (`fanout_first` does this in every second run;
+  the joint plan of `awx` prices a drop in the lanes the bus leaves by).
+- Pairs: short pairs uncoupled, the pad swap, narrower with the gap that holds the impedance
+  (as noted above); for the two nets of `pull`, the vias side by side (see the findings from
+  watching a route).
+- One plan for all balls of a field at once (`awx/joint_escape.py`: a menu of moves per ball,
+  conflicts between moves, one CP-SAT solve, bus balls first). It answers the case its notes
+  name: a bus escape across three rows fences in twenty other balls. Our negotiation meets the
+  same case with prices; no board of ours shows it yet.
+
 ## Parts as floes (2026-11-27)
 
 `--move-parts` used to move a part only where a clearance problem or an open pin sat next to it,

@@ -981,6 +981,13 @@ part with a neighbour one pitch away along both axes of a square lattice, at lea
 way. Unlike the pad grids above this takes fields of short rows (a DDR package: two blocks of 3
 columns) and leaves out the pads off the lattice (support balls, a thermal pad).
 
+Whether a ball field can be left at all is arithmetic before any search
+(`patterns::escape_warnings`, a warning line in `info`, `route` and `load_board`): an inner ball
+leaves between two balls on its own layer (the gap must hold a track and two clearances), through
+a via between four balls (the diagonal room must hold a via and two clearances) or through a via
+in its pad. Where the rules of the narrowest class on the field allow neither of the first two,
+the line says so and names the clearance, track or via that would fit.
+
 A pattern is only a hint to the search, never fixed copper: what does not fit a board costs at
 most the run that tried it, and nothing is ever given up for it. `route --patterns` switches the
 hints on, all off by default (and then byte for byte the same as without them):
