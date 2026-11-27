@@ -305,6 +305,11 @@ each layer stays planar by construction.
   controller short on three of four seeds: the USB pair lay around the via by then.
   `GB_NO_VIA_ROOM` switches the kept room off, `GB_LOG=current` tells what became of each such
   via.
+- Fine vias: a class whose via ring is narrower than the hole clearance minus its copper
+  clearance is routed with a wider via, its drill and that room (`wide_rings` in
+  `gummiband-app/src/route.rs`), because search and relaxation know one size of a via and KiCad
+  keeps foreign copper `hole_clearance` away from the drill. The finished vias have the diameter
+  of their class again (`narrow_rings`), and the findings are those of the check on that copper.
 - A chain whose new vias split triangles is checked before it is committed: consecutive
   triangles must still be neighbours, and a via must still be a corner of the triangles the
   chain arrives from and leaves through, since another via of the same chain may have split one
@@ -986,7 +991,26 @@ Whether a ball field can be left at all is arithmetic before any search
 leaves between two balls on its own layer (the gap must hold a track and two clearances), through
 a via between four balls (the diagonal room must hold a via and two clearances) or through a via
 in its pad. Where the rules of the narrowest class on the field allow neither of the first two,
-the line says so and names the clearance, track or via that would fit.
+the line says so and names the clearance, track or via that would fit, and the mildest fab step
+of `patterns::FAB_STEPS` at which the field can be left.
+
+`route --field-rules` routes such a field at that step, and only the field
+(`patterns::field_rules`): a `RuleArea` of the board, a rectangle one pitch around the balls with
+a clearance and a via of its own. Rules that hold in a place are the same thing wherever they
+come from: the areas of the option, a named rule area of the file with a rule
+`A.intersectsArea('name')`, and the courtyard rules (`A.intersectsCourtyard('U4')` with a
+clearance, a via diameter and a hole size). The board answers for a place
+(`Board::clearance_at`, `Board::via_at`), and between two pieces of copper the larger clearance
+holds, so a rule counts where both lie in its place: KiCad lets it count where one of them does,
+which is never stricter. The pads in such a place ask only its clearance
+(`Board::settle_courtyard_rules`), the search takes the clearance of a track per mesh edge
+(`Router::c_on`) and the size and clearance of a via from its site (`Router::via_size_at`), and
+the via sites of a place are kept by the room of its via. The passages, the spreading and the
+check knew the courtyard clearance before and take the areas the same way. The writer puts the
+areas of the option into the board as rule areas that forbid nothing and their rules into the
+`.kicad_dru` next to it (`dru::with_area_rules`), so that KiCad's DRC counts as the router does.
+The track width stays that of the class. `GB_LOCAL_RULES=0` leaves the rules of places to the
+check alone, as before.
 
 A pattern is only a hint to the search, never fixed copper: what does not fit a board costs at
 most the run that tried it, and nothing is ever given up for it. `route --patterns` switches the

@@ -911,6 +911,10 @@ fn build_sites(board: &Board, shared: &Shared, pitch: f64) -> Vec<Site> {
     candidates
         .par_iter()
         .filter_map(|&p| {
+            // (a courtyard rule may allow a smaller via than the board does elsewhere)
+            let min_via_r = board
+                .courtyard_via_at(p)
+                .map_or(min_via_r, |(d, _)| min_via_r.min(d / 2.0));
             let edge = board.edge_dist(p);
             if edge < min_via_r + board.rules.edge_clearance {
                 return None;

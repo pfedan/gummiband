@@ -1090,6 +1090,14 @@ pub struct RouteIn {
     /// area, set on the finished copper where the fill model finds the spot (default true with
     /// areas "fill"). false: such a pad gets a track to the area instead.
     pub area_stitch: Option<bool>,
+    /// Finer rules inside a ball field (BGA) that cannot be left at the rules of the board:
+    /// "auto" (per field the mildest fab step at which a track passes between two balls and a
+    /// via fits between four) or a step, "5mil", "4mil", "3.5mil" or "3mil". The clearance and
+    /// the via of the step hold only in a rule area around the field, which is written with its
+    /// custom rule and named in the result. Default "off": the board info warns about such a
+    /// field and names the step that fits. Ask the user before lowering rules: their fab has
+    /// to make the step.
+    pub field_rules: Option<String>,
     /// Output .kicad_pcb (default: `<input>.routed.kicad_pcb` next to the input). The
     /// .kicad_pro and .kicad_dru are copied next to it if missing.
     pub output: Option<String>,
@@ -1514,6 +1522,10 @@ pub struct RouteOut {
     /// copper, judged by the router's fill model (area_report on the written file has the
     /// details).
     pub areas: Vec<RouteAreaOut>,
+    /// With field_rules: per ball field that was routed at a finer fab step, what holds in its
+    /// rule area and what the board asks elsewhere. Tell the user: their fab has to make it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub field_rules: Vec<String>,
     /// Of `vias`, those set for islands of fill (area_stitch).
     pub area_vias: usize,
     /// With areas "fill": one sentence on what was laid again at the end, because the last
@@ -3433,6 +3445,14 @@ fn route_options(p: &RouteIn, loaded_keep: bool) -> Result<(RouteOptions, Vec<Re
         },
         pour: p.pour.clone().unwrap_or_default(),
         area_stitch: p.area_stitch,
+        field_rules: match p.field_rules.as_deref() {
+            None => d.field_rules.clone(),
+            Some(word) => gummiband_app::option_doc("field_rules")
+                .expect("field_rules")
+                .choice(word)
+                .map_err(anyhow::Error::msg)?
+                .to_string(),
+        },
         preset: match &p.preset {
             Some(word) => Preset::parse(word).map_err(anyhow::Error::msg)?,
             None => d.preset,
@@ -3723,6 +3743,14 @@ fn route_blocking(
         length_mm: st.length,
         items_written: items,
         skipped_nets: outcome.skipped_nets.clone(),
+        field_rules: outcome
+            .kb
+            .board
+            .rule_areas
+            .iter()
+            .filter(|a| !a.why.is_empty())
+            .map(|a| a.why.clone())
+            .collect(),
         area_vias: routed.area_vias,
         area_repair: routed.area_repair.as_ref().map(|a| a.line()),
         area_fallback: routed.area_fallback.as_ref().map(|a| a.line()),

@@ -1083,6 +1083,65 @@ Noted, not built:
   name: a bus escape across three rows fences in twenty other balls. Our negotiation meets the
   same case with prices; no board of ours shows it yet.
 
+### The same look again, for a general tool (2026-11-27)
+
+The first ranking weighed the ideas by the boards at hand. Weighed for a router that is to take
+any board, ball fields and the steps before the search come first.
+
+**Measured since.**
+
+- The order of the balls by ring, as an order alone (`GB_BALLS`: 1 the innermost ring first, 2
+  the outermost first; an experiment, off): on the synthetic fields the outermost first saves
+  vias (bga_escape 18 to 16, bga_dense 64 to 62 or 64), the innermost first costs vias (86, 26)
+  and clears bga_dense (23 findings to 0 or 10). On ulx3s (feasible rules, four layers) and on
+  Glasgow nothing moves: 827 of 827 and 743 or 741 of 811 in all three. The order is not what
+  holds a real field back: the negotiation rearranges it anyway. What KiCadRoutingTools gains
+  from its rings is the layer rule that goes with them (the outer rings on the surface without a
+  via, the via sites of the inner balls reserved before any inner track), and that is a
+  constraint, not an order.
+- Glasgow with the rules its warning names (0.1 mm clearance, vias of 0.35 mm): 811 of 811
+  with 2 findings in 59 s, where the rules of the file give 743 of 811 in 400 s. With ulx3s
+  that is the second real field the search gets out once the rules allow it.
+- Found on the way and mended: with a via ring narrower than the hole clearance minus the copper
+  clearance (0.075 mm ring, 0.25 mm hole clearance, 0.1 mm clearance) the search and the
+  relaxation kept tracks at the copper clearance from the via and the check then counted the
+  drill: 2544 hole findings on that Glasgow variant. Boards with the usual rings never show it.
+  Now such a class is routed with a via as wide as its drill and the room of the hole clearance,
+  and the vias get their size back at the end (`wide_rings`, `narrow_rings` in
+  `gummiband-app/src/route.rs`): 33 findings (22 of them holes short by 4 to 7 µm), 810 of
+  811, the vias written at 0.35 mm.
+- `GB_RIPUP_CUT` over five seeds with KiCad's DRC (`quick`): esp_prog clean in all five
+  without it and 30 findings in all five with it; corne worse (a median of 29 for 20);
+  kit-dev twice as fast but with exactly 385 vias on every seed against 151 to 207. A result
+  that does not depend on the seed says the cut falls back to one solution. It stays off; the
+  cause on esp_prog and kit-dev comes before any new measurement.
+
+**The ranking now.**
+
+1. Fab steps instead of a warning alone: where a ball field or a fine pitch row cannot be left
+   at the rules of the board, offer the next step of a ladder (clearance, track, via) that a
+   named fab makes, route with it only in the field (a rule area), and say what was narrowed.
+   Both real BGA boards of the corpus need exactly this before anything else.
+2. The layer rule of the rings as a constraint of the search (a pattern hint `balls`): no via
+   in the two outer rings, their balls out on the surface; the via site of every inner ball
+   kept from the start. To be measured on ulx3s with two signal layers (13 open, 17 minutes of
+   negotiation) and on the DDR boards.
+3. A price for the track that cuts a plane, so that a plane layer takes signals only where
+   that saves a via: the board of ulx3s itself routes signals on In2. `--areas fill` already
+   routes the layers of zones (the ulx3s run above), and the fill model says what a track cut
+   off; a plane layer is still either routed like any other or not at all.
+4. Matching by delay: ps per mm per layer from the stackup and the delay of a via barrel, and
+   KiCad 10's tuning profiles. We drop rules given in ps today.
+5. Pairs: vias as a pair for `pull` too, short pairs uncoupled, the pad swap and swap groups a
+   user declares (the bits of a byte lane, FPGA pins), narrower at held impedance, return vias
+   where ground has copper on both reference layers.
+6. One plan for all balls of a field (ends chosen together so that the fewest orders are
+   reversed): the largest step and the one nearest to a topological router, after 1 to 3 show
+   what is left.
+7. Small ones: say of an open connection whether fixed copper shuts it in or which nets do; a
+   via price that grows with the vias a connection already has; hand KiCad's unconnected items
+   back to the router.
+
 ## Parts as floes (2026-11-27)
 
 `--move-parts` used to move a part only where a clearance problem or an open pin sat next to it,

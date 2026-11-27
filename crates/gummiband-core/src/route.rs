@@ -917,6 +917,25 @@ impl<'a> Router<'a> {
         }
     }
 
+    /// The clearance of a track on edge e that asks `c`: what a courtyard rule allows where the
+    /// whole edge lies in the courtyard ([`Board::clearance_on`]).
+    pub(crate) fn c_on(&self, li: usize, e: u32, c: f64) -> f64 {
+        if !self.board.local_clearances() {
+            return c;
+        }
+        let m = self.m(li);
+        let [u, v] = m.edges[e as usize];
+        self.board.clearance_on(m.verts[u as usize], m.verts[v as usize], c)
+    }
+
+    /// The clearance of a track around vertex v that asks `c`, see [`Router::c_on`].
+    fn c_at(&self, li: usize, v: u32, c: f64) -> f64 {
+        if !self.board.local_clearances() {
+            return c;
+        }
+        self.board.clearance_at(self.m(li).verts[v as usize], c)
+    }
+
     fn obs_net(&self, obs: u32) -> Option<NetId> {
         if obs == OUTSIDE {
             None
@@ -964,6 +983,10 @@ impl<'a> Router<'a> {
     /// Distance from the edge end vertex to the centre line of a track of `it`.
     pub(crate) fn end_need(&self, li: usize, e: u32, end: usize, it: &Item) -> f64 {
         let m = self.m(li);
+        let it = &Item {
+            c: self.c_on(li, e, it.c),
+            ..*it
+        };
         let mut need: f64 = 0.0;
         for d in m.demands(e, end) {
             if self.obs_net(d.obs) == Some(it.net) {
@@ -1009,6 +1032,10 @@ impl<'a> Router<'a> {
     /// factor is the price of crossing the edge at a slant, and an arc does not cross at one.
     pub(crate) fn end_need_square(&self, li: usize, e: u32, end: usize, it: &Item) -> f64 {
         let m = self.m(li);
+        let it = &Item {
+            c: self.c_on(li, e, it.c),
+            ..*it
+        };
         let mut need: f64 = 0.0;
         for d in m.demands(e, end) {
             if self.obs_net(d.obs) == Some(it.net) {
@@ -1025,6 +1052,10 @@ impl<'a> Router<'a> {
     /// Need of a track at vertex v (vertex demands only), for a new edge.
     pub(crate) fn vertex_need(&self, li: usize, v: u32, it: &Item) -> f64 {
         let m = self.m(li);
+        let it = &Item {
+            c: self.c_at(li, v, it.c),
+            ..*it
+        };
         let mut need: f64 = 0.0;
         for &t in &m.vert_tris[v as usize] {
             let o = m.status[t as usize];
@@ -1290,6 +1321,7 @@ impl<'a> Router<'a> {
     /// Item of segment `seg` crossing edge e, with its sides relative to the two apexes.
     pub(crate) fn item_on(&self, li: usize, e: u32, seg: u32) -> Item {
         let mut it = self.item_of(seg);
+        it.c = self.c_on(li, e, it.c);
         {
             let s = self.segs[seg as usize].as_ref().unwrap();
             if let Some(k) = s.crossings.iter().position(|c| c.e == e) {
@@ -1550,6 +1582,10 @@ impl<'a> Router<'a> {
     }
 
     fn edge_view(&self, li: usize, e: u32, new: &Item) -> EdgeView {
+        let new = &Item {
+            c: self.c_on(li, e, new.c),
+            ..*new
+        };
         let m = self.m(li);
         let [u, v] = m.edges[e as usize];
         let (pu, pv) = (m.verts[u as usize], m.verts[v as usize]);
@@ -1938,6 +1974,20 @@ impl<'a> Router<'a> {
         )
     }
 
+    /// [`Router::via_size`] of a via at p: a single via in a courtyard with a rule of its own
+    /// has the size and the clearance of that rule ([`Board::via_at`], [`Board::clearance_at`]).
+    fn via_size_at(&self, net: NetId, n: usize, p: Point) -> (f64, f64, f64) {
+        let (r, drill, c) = self.via_size(net, n);
+        let c = self.board.clearance_at(p, c);
+        if n > 1 {
+            return (r, drill, c);
+        }
+        let (d, drill) = self.board.via_at(net, p);
+        // (other copper keeps the hole clearance from the drill, whatever the ring is)
+        let c = c.max(self.board.hole_gap_at(net, p) - (d - drill) / 2.0);
+        (r.min(d / 2.0), drill, c)
+    }
+
     /// How many vias a via of connection ci stands for: [`Router::via_factor`], 1 with
     /// `GB_NO_VIA_ROOM`.
     fn via_cluster(&self, ci: usize) -> usize {
@@ -2007,8 +2057,8 @@ impl<'a> Router<'a> {
         }
     }
 
-    fn via_info(&self, net: NetId, n: usize) -> ViaInfo {
-        let (r, drill, clearance) = self.via_size(net, n);
+    fn via_info(&self, site: u32, net: NetId, n: usize) -> ViaInfo {
+        let (r, drill, clearance) = self.via_size_at(net, n, self.site_point(site));
         ViaInfo {
             net,
             r,
@@ -2021,9 +2071,9 @@ impl<'a> Router<'a> {
 
     /// Static and via spacing checks of a via of `net` at site `site`.
     fn site_clear(&self, site: u32, net: NetId, cluster: usize) -> bool {
-        let (r, drill, clr) = self.via_size(net, cluster);
         let s = &self.sub.shared.sites[site as usize];
         let p = s.p;
+        let (r, drill, clr) = self.via_size_at(net, cluster, p);
         if cluster > 1 && s.pad.is_some() {
             // a site in a pad does not see that pad among its neighbours: the vias of a layer
             // change of several stay out of the pads of their net there as everywhere (below)
@@ -2112,7 +2162,7 @@ impl<'a> Router<'a> {
 
     /// Do the tracks around an unused via vertex keep their room with a via of `net`?
     fn vertex_fits(&self, site: u32, net: NetId, n: usize) -> bool {
-        let info = self.via_info(net, n);
+        let info = self.via_info(site, net, n);
         for li in 0..self.nl() {
             let m = self.m(li);
             // a via in a pad has no vertex on the pad's layer
@@ -2143,7 +2193,7 @@ impl<'a> Router<'a> {
     /// Do the tracks around the unused `site` keep their room with a via of `net`?
     fn site_fits(&self, site: u32, net: NetId, n: usize) -> bool {
         let p = self.site_point(site);
-        let via = self.via_info(net, n);
+        let via = self.via_info(site, net, n);
         for li in 0..self.nl() {
             let m = self.m(li);
             let t = m.site_tri[site as usize];
@@ -2441,7 +2491,7 @@ impl<'a> Router<'a> {
     }
 
     fn in_plane(&self, p: Point, net: NetId) -> bool {
-        let (r, _, _) = self.via_size(net, 1);
+        let (r, _, _) = self.via_size_at(net, 1, p);
         self.board.planes.iter().any(|pl| pl.net == net && pl.takes_via(p, r))
     }
 
@@ -2466,7 +2516,7 @@ impl<'a> Router<'a> {
             via.users += 1;
             return;
         }
-        let mut info = self.via_info(net, n);
+        let mut info = self.via_info(site, net, n);
         info.users = 1;
         self.vias.insert(site, info);
         self.via_cells
@@ -4060,6 +4110,42 @@ impl<'a> Router<'a> {
                     // the longest first
                     keys[i].tier = 0;
                     keys[i].block = -jitter(seed, c.from as u64) * d;
+                }
+            }
+        }
+        // ball fields (GB_BALLS): the connections of the balls go before the rest, by the ring
+        // of the ball, the innermost first (1) or the outermost first (2)
+        let balls: f64 = knobs::BALLS.num();
+        if balls > 0.0 {
+            let mut ring: HashMap<usize, f64> = HashMap::new();
+            for g in crate::patterns::grids(b) {
+                let (u, v) = (g.dir, g.dir.perp());
+                let span = |n: Point| {
+                    let at = g.pins.iter().map(|&p| b.pins[p].pos.dot(n));
+                    at.fold((f64::MAX, f64::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)))
+                };
+                let (su, sv) = (span(u), span(v));
+                for &p in &g.pins {
+                    let (x, y) = (b.pins[p].pos.dot(u), b.pins[p].pos.dot(v));
+                    let d = (x - su.0).min(su.1 - x).min(y - sv.0).min(sv.1 - y);
+                    ring.insert(p, (d / g.pitch).round());
+                }
+            }
+            for (i, (_, d, c)) in conns.iter().enumerate() {
+                if !signal(c) || keys[i].tier == 0 {
+                    continue;
+                }
+                let Goal::Pins(tree) = &c.goal else { continue };
+                let deep = std::iter::once(&c.from)
+                    .chain(tree.iter())
+                    .filter_map(|p| ring.get(p))
+                    .copied()
+                    .max_by(f64::total_cmp);
+                if let Some(r) = deep {
+                    keys[i].tier = 1;
+                    let r = if balls < 1.5 { -r } else { r };
+                    // within a ring the plain order
+                    keys[i].block = r * 1e6 + jitter(seed, c.from as u64) * d;
                 }
             }
         }

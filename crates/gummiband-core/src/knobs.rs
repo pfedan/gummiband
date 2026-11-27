@@ -332,6 +332,10 @@ knobs! {
         "The finished copper gets its last form from its pivots (`relax::pivot_pass`): one arc around each pad corner, via or bundle a track bends around, with the radius of what lies between, and tangent lines. A track keeps the corners the shortcuts gave it where such an arc or line comes too close, and where the own check finds something new.";
     SPREAD = "GB_SPREAD", Switch, NotZero, "on",
         "Where the own check finds tracks too near to something and the passage has room for them, the tracks through it are laid again as one group (`spread::spread`): from one side outwards with the clearance and 2 um, lines and arcs, taken only if the check then finds nothing new.";
+    LOCAL_RULES = "GB_LOCAL_RULES", Switch, NotZero, "on",
+        "Clearance and via rules of a courtyard hold for the search and the geometry steps, not only for the check.";
+    VIA_WALLS = "GB_VIA_WALLS", Switch, Set, "off",
+        "Experiment. In the relaxation a via never comes to rest inside the clearance of a fixed thing (a pad, a hole, kept copper, a keepout): the pushes of the tracks on its other side add up over their pieces and would hold it a few micrometres inside. Where two fixed things leave it no room, it rests between them as before.";
     ZIP = "GB_ZIP", Switch, NotZero, "on",
         "Pairs the search pulled together close up to their gap at the end (`pairs::zip`).";
     GOAL_CHECK = "GB_GOAL_CHECK", Switch, NotZero, "on",
@@ -408,6 +412,8 @@ knobs! {
         "How many runners-up of the geometry stage are finished next to the winner; the best finished result is the route (0: the winner alone).";
     DIRS_ALL = "GB_DIRS_ALL", Experiment, Set, "off",
         "Every run of the portfolio uses the preferred layer directions, not every third.";
+    BALLS = "GB_BALLS", Experiment, Num, "0",
+        "The connections of the balls of a ball field go before the other signal connections, ring by ring: 1 the innermost ring first, 2 the outermost first (0: off).";
     PAIR_VIA = "GB_PAIR_VIA", Experiment, Num, "0",
         "With `--pairs pull`: a via of a pair net costs this many vias more, and as much again 2 mm or more from where its partner changes layers (0: off).";
     PLACE_ROUNDS = "GB_PLACE_ROUNDS", Experiment, Num, "6",

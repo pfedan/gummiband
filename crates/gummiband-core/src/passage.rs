@@ -783,7 +783,9 @@ impl Local<'_> {
                 }
                 ObstacleKind::Hole => (board.hole_gap(net), Kind::Hole),
                 _ => (
-                    o.clearance.max(clr(net)).max(board.item_gap(net, o.net)),
+                    o.clearance
+                        .max(board.clearance_at(p, clr(net)))
+                        .max(board.item_gap(net, o.net)),
                     cut_kind(&o.kind).unwrap_or(Kind::Kept),
                 ),
             };
@@ -812,7 +814,11 @@ impl Local<'_> {
             let holes = v.drill / 2.0 + x.drill / 2.0 + board.rules.hole_to_hole - r - x.diameter / 2.0;
             worst.take(d - holes, holes, any, Kind::Via, Some(x.net), 0, towards(x.at));
             if x.net != net {
-                let need = clr(net).max(clr(x.net)).max(board.item_gap(net, Some(x.net))) + margin;
+                let need = board
+                    .clearance_at(p, clr(net))
+                    .max(board.clearance_at(x.at, clr(x.net)))
+                    .max(board.item_gap(net, Some(x.net)))
+                    + margin;
                 worst.take(d - need, need, any, Kind::Via, Some(x.net), 0, towards(x.at));
             }
         }

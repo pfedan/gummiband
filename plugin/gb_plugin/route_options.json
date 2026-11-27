@@ -114,6 +114,38 @@
     {
       "choices": [
         {
+          "help": "The rules of the board hold everywhere; a field that cannot be left gets a warning.",
+          "value": "off"
+        },
+        {
+          "help": "Per field the mildest step at which a track passes between two balls and a via fits between four.",
+          "value": "auto"
+        },
+        {
+          "help": "0.127 mm clearance, vias of 0.5/0.25 mm.",
+          "value": "5mil"
+        },
+        {
+          "help": "0.1 mm clearance, vias of 0.45/0.2 mm.",
+          "value": "4mil"
+        },
+        {
+          "help": "0.09 mm clearance, vias of 0.35/0.2 mm.",
+          "value": "3.5mil"
+        },
+        {
+          "help": "0.075 mm clearance, vias of 0.3/0.15 mm.",
+          "value": "3mil"
+        }
+      ],
+      "default": "off",
+      "help": "Finer rules inside a ball field that cannot be left at the rules of the board: the clearance and the via of a fab step, only in a rule area around the field, written with its custom rule and named in the report.",
+      "kind": "choice",
+      "name": "field_rules"
+    },
+    {
+      "choices": [
+        {
           "help": "runs 4, generations 1, geometry_generations 0, open_end_seconds 0: the quickest look at whether the board routes and where it is tight, as the benchmark suite routes; leaves many clearance violations.",
           "value": "draft"
         },

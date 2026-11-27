@@ -224,6 +224,25 @@ pub const OPTIONS: &[OptionDoc] = &[
         "With areas fill: an island of fill that holds pads gets one via where it joins the area, set on the finished copper where the fill model finds the spot.",
     ),
     choice(
+        "field_rules",
+        "off",
+        "Finer rules inside a ball field that cannot be left at the rules of the board: the clearance and the via of a fab step, only in a rule area around the field, written with its custom rule and named in the report.",
+        &[
+            word(
+                "off",
+                "The rules of the board hold everywhere; a field that cannot be left gets a warning.",
+            ),
+            word(
+                "auto",
+                "Per field the mildest step at which a track passes between two balls and a via fits between four.",
+            ),
+            word("5mil", "0.127 mm clearance, vias of 0.5/0.25 mm."),
+            word("4mil", "0.1 mm clearance, vias of 0.45/0.2 mm."),
+            word("3.5mil", "0.09 mm clearance, vias of 0.35/0.2 mm."),
+            word("3mil", "0.075 mm clearance, vias of 0.3/0.15 mm."),
+        ],
+    ),
+    choice(
         "preset",
         "standard",
         "How much search the route gets: a preset sets runs, generations, geometry_generations and open_end_seconds, and each of the four wins over it when given.",
@@ -474,6 +493,7 @@ mod tests {
             areas,
             pour,
             area_stitch,
+            field_rules,
             preset,
             runs,
             via_pitch,
@@ -588,6 +608,7 @@ mod tests {
             ("patterns", d.patterns.clone()),
             ("via_pass", d.via_pass.to_string()),
             ("pairs", d.pairs.word().to_string()),
+            ("field_rules", d.field_rules.clone()),
             ("pair_skew", d.pair_skew.to_string()),
             ("pair_all", on_off(d.pair_all)),
             ("breakouts", on_off(d.breakouts)),

@@ -292,40 +292,17 @@ pub fn grids(board: &Board) -> Vec<PadGrid> {
 /// with the neck a track may take at a pin.
 pub fn escape_warnings(board: &Board) -> Vec<String> {
     let mut out = Vec::new();
-    for g in grids(board) {
-        let Some(ball) = g
-            .pins
+    for f in tight_fields(board) {
+        // (a field with rules of its own is told by its area)
+        if board
+            .rule_areas
             .iter()
-            .map(|&p| board.pins[p].size.0.max(board.pins[p].size.1))
-            .max_by(f64::total_cmp)
-        else {
-            continue;
-        };
-        // per class of the routed nets on the field: (track, clearance, via)
-        let mut needs: Vec<(f64, f64, f64)> = g
-            .pins
-            .iter()
-            .map(|&p| board.pins[p].net)
-            .filter(|&n| board.nets[n as usize].pins.len() >= 2 && !has_plane(board, n))
-            .map(|n| {
-                let c = board.class_of(n);
-                let neck = c.min_width.unwrap_or(board.rules.min_track_width.max(0.0));
-                // near a pin a track may neck down to 0.25 mm
-                let w = c.track_width.min(0.25).max(neck).min(c.track_width);
-                (w, c.clearance.max(board.rules.min_clearance), c.via_diameter)
-            })
-            .collect();
-        needs.sort_by(|a, b| (a.0 + 2.0 * a.1).total_cmp(&(b.0 + 2.0 * b.1)));
-        let Some(&(w, c, via)) = needs.first() else {
-            continue;
-        };
-        let gap = g.pitch - ball;
-        let room = g.pitch * std::f64::consts::SQRT_2 - ball;
-        let track = gap + 1e-6 >= w + 2.0 * c;
-        let dog = room + 1e-6 >= via + 2.0 * c;
-        if track && dog {
+            .any(|a| a.part.as_deref() == Some(f.grid.footprint.as_str()) && (a.clearance.is_some() || a.via.is_some()))
+        {
             continue;
         }
+        let (g, ball, w, c, via, gap, room, track, dog) =
+            (&f.grid, f.ball, f.w, f.c, f.via, f.gap, f.room, f.track, f.dog);
         let head = format!(
             "{}: ball field {} x {} at {:.2} mm pitch, balls of {:.2} mm",
             g.footprint, g.rows, g.cols, g.pitch, ball
@@ -372,9 +349,208 @@ pub fn escape_warnings(board: &Board) -> Vec<String> {
             _ => format!(
                 "{head}: {no_via}, so the inner balls leave on their own layer or through a via in their pad; {fit_via}"
             ),
+        } + &match f.step(board) {
+            Some(s) => format!(
+                "; the fab step {} fits ({}), and `--field-rules auto` routes the field alone at it",
+                s.name,
+                s.words()
+            ),
+            None => "; no fab step of `--field-rules` fits".to_string(),
         });
     }
     out
+}
+
+/// A step of what board fabs make: the clearance and the via they take a surcharge for, or
+/// none. The numbers are the usual steps of pooled production (5, 4, 3.5 and 3 mil); the fab
+/// of a board decides which of them it makes.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct FabStep {
+    pub name: &'static str,
+    pub clearance: f64,
+    pub via: f64,
+    pub drill: f64,
+}
+
+/// What copper keeps from a drill at any fab step, in mm, where the board asks more.
+pub const STEP_HOLE: f64 = 0.2;
+
+impl FabStep {
+    pub fn words(&self) -> String {
+        format!(
+            "{} mm clearance, vias of {}/{} mm",
+            self.clearance, self.via, self.drill
+        )
+    }
+}
+
+pub const FAB_STEPS: [FabStep; 4] = [
+    FabStep {
+        name: "5mil",
+        clearance: 0.127,
+        via: 0.5,
+        drill: 0.25,
+    },
+    FabStep {
+        name: "4mil",
+        clearance: 0.1,
+        via: 0.45,
+        drill: 0.2,
+    },
+    FabStep {
+        name: "3.5mil",
+        clearance: 0.09,
+        via: 0.35,
+        drill: 0.2,
+    },
+    FabStep {
+        name: "3mil",
+        clearance: 0.075,
+        via: 0.3,
+        drill: 0.15,
+    },
+];
+
+/// The name of the rule area of a field starts so, the reference of its part follows.
+pub const FIELD_AREA: &str = "gummiband field ";
+
+/// A ball field that the rules of the board leave no way out of ([`escape_warnings`]).
+pub struct TightField {
+    pub grid: PadGrid,
+    /// The largest ball.
+    pub ball: f64,
+    /// Track, clearance and via of the narrowest class among the routed nets of the field.
+    pub w: f64,
+    pub c: f64,
+    pub via: f64,
+    /// Between two balls, and between four.
+    pub gap: f64,
+    pub room: f64,
+    /// Whether a track passes between two balls and a via fits between four.
+    pub track: bool,
+    pub dog: bool,
+}
+
+impl TightField {
+    /// Whether the field can be left at step s: the track of the class between two balls and
+    /// the via of the step between four, both at the clearance of the step; the drill keeps
+    /// the hole clearance of the board from the balls.
+    pub fn fits(&self, board: &Board, s: &FabStep) -> bool {
+        let c = s.clearance.min(self.c);
+        let via = s.via.min(self.via);
+        self.gap + 1e-6 >= self.w + 2.0 * c
+            && self.room + 1e-6 >= via + 2.0 * c
+            && self.room + 1e-6 >= s.drill + 2.0 * board.rules.hole_clearance.min(STEP_HOLE)
+    }
+
+    /// The mildest step the field can be left at.
+    pub fn step(&self, board: &Board) -> Option<FabStep> {
+        FAB_STEPS.iter().copied().find(|s| self.fits(board, s))
+    }
+}
+
+/// The ball fields whose balls cannot all leave at the rules of the board.
+pub fn tight_fields(board: &Board) -> Vec<TightField> {
+    let mut out = Vec::new();
+    for g in grids(board) {
+        let Some(ball) = g
+            .pins
+            .iter()
+            .map(|&p| board.pins[p].size.0.max(board.pins[p].size.1))
+            .max_by(f64::total_cmp)
+        else {
+            continue;
+        };
+        // per class of the routed nets on the field: (track, clearance, via)
+        let mut needs: Vec<(f64, f64, f64)> = g
+            .pins
+            .iter()
+            .map(|&p| board.pins[p].net)
+            .filter(|&n| board.nets[n as usize].pins.len() >= 2 && !has_plane(board, n))
+            .map(|n| {
+                let c = board.class_of(n);
+                let neck = c.min_width.unwrap_or(board.rules.min_track_width.max(0.0));
+                // near a pin a track may neck down to 0.25 mm
+                let w = c.track_width.min(0.25).max(neck).min(c.track_width);
+                (w, c.clearance.max(board.rules.min_clearance), c.via_diameter)
+            })
+            .collect();
+        needs.sort_by(|a, b| (a.0 + 2.0 * a.1).total_cmp(&(b.0 + 2.0 * b.1)));
+        let Some(&(w, c, via)) = needs.first() else {
+            continue;
+        };
+        let gap = g.pitch - ball;
+        let room = g.pitch * std::f64::consts::SQRT_2 - ball;
+        let track = gap + 1e-6 >= w + 2.0 * c;
+        let dog = room + 1e-6 >= via + 2.0 * c;
+        if track && dog {
+            continue;
+        }
+        out.push(TightField {
+            grid: g,
+            ball,
+            w,
+            c,
+            via,
+            gap,
+            room,
+            track,
+            dog,
+        });
+    }
+    out
+}
+
+/// The rule areas of `--field-rules`: for every ball field that cannot be left at the rules of
+/// the board, the field with the clearance and the via of a fab step. `choice` is `auto` (the
+/// mildest step that fits, per field) or the name of a step for all such fields. A field that
+/// already has an area keeps it. Err: an unknown step.
+pub fn field_rules(board: &Board, choice: &str) -> Result<Vec<crate::board::RuleArea>, String> {
+    let fixed = match choice {
+        "auto" => None,
+        name => Some(FAB_STEPS.iter().copied().find(|s| s.name == name).ok_or_else(|| {
+            format!(
+                "field rules: no step {name}; the steps are auto, {}",
+                FAB_STEPS.map(|s| s.name).join(", ")
+            )
+        })?),
+    };
+    let mut out = Vec::new();
+    for f in tight_fields(board) {
+        let Some(s) = fixed.or_else(|| f.step(board)) else {
+            continue;
+        };
+        let has = |a: &crate::board::RuleArea| {
+            a.part.as_deref() == Some(f.grid.footprint.as_str()) && (a.clearance.is_some() || a.via.is_some())
+        };
+        if board.rule_areas.iter().any(has) {
+            continue;
+        }
+        let mut rect = crate::geom::Rect::empty();
+        for &p in &f.grid.pins {
+            rect.add(board.pins[p].pos);
+        }
+        out.push(crate::board::RuleArea {
+            name: format!("{FIELD_AREA}{}", f.grid.footprint),
+            part: Some(f.grid.footprint.clone()),
+            rect: rect.grow(f.grid.pitch),
+            clearance: (s.clearance < f.c).then_some(s.clearance),
+            via: (s.via < f.via).then_some((s.via, s.drill)),
+            hole: (s.via < f.via && STEP_HOLE < board.rules.hole_clearance).then_some(STEP_HOLE),
+            why: format!(
+                "ball field {} ({} x {} at {:.2} mm pitch) is routed at the fab step {}: {} inside the area, where the board asks {} mm clearance and vias of {} mm",
+                f.grid.footprint,
+                f.grid.rows,
+                f.grid.cols,
+                f.grid.pitch,
+                s.name,
+                s.words(),
+                f.c,
+                f.via
+            ),
+        });
+    }
+    Ok(out)
 }
 
 fn has_plane(board: &Board, net: NetId) -> bool {
@@ -828,6 +1004,7 @@ mod tests {
                 track_width: track,
                 clearance,
                 via_diameter: via,
+                via_drill: 0.3,
                 ..NetClass::default()
             };
             for i in 0..25 {
@@ -835,8 +1012,44 @@ mod tests {
                 b.pins[2 * i].size = (0.4, 0.4);
                 pin(&mut b, &format!("R{i}"), 1, i as NetId, 20.0 + i as f64, 20.0);
             }
-            escape_warnings(&b)
+            b
         };
+        // a field that cannot be left gets the mildest step that fits, as an area around it
+        let mut b = field(0.2, 0.2, 0.6);
+        let areas = field_rules(&b, "auto").unwrap();
+        assert_eq!(areas.len(), 1);
+        let a = &areas[0];
+        assert_eq!((a.name.as_str(), a.part.as_deref()), ("gummiband field U1", Some("U1")));
+        assert_eq!((a.clearance, a.via), (Some(0.1), Some((0.45, 0.2))));
+        assert!(
+            a.why.contains("fab step 4mil") && a.why.contains("0.2 mm clearance"),
+            "{}",
+            a.why
+        );
+        // one pitch around the balls
+        assert!(
+            (a.rect.min.x + 0.8).abs() < 1e-9 && (a.rect.max.y - 4.0).abs() < 1e-9,
+            "{:?}",
+            a.rect
+        );
+        assert_eq!(field_rules(&b, "3mil").unwrap()[0].clearance, Some(0.075));
+        assert!(
+            field_rules(&b, "2mil")
+                .unwrap_err()
+                .contains("5mil, 4mil, 3.5mil, 3mil")
+        );
+        assert!(field_rules(&field(0.15, 0.1, 0.35), "auto").unwrap().is_empty());
+        // in the area copper asks the clearance of the step and a via has its size
+        let (inside, outside) = (pt(1.2, 1.2), pt(10.0, 10.0));
+        assert_eq!(b.clearance_at(inside, 0.2), 0.2);
+        b.rule_areas = areas;
+        b.settle_courtyard_rules();
+        assert_eq!((b.clearance_at(inside, 0.2), b.clearance_at(outside, 0.2)), (0.1, 0.2));
+        assert_eq!((b.via_at(0, inside), b.via_at(0, outside)), ((0.45, 0.2), (0.6, 0.3)));
+        assert_eq!(b.clearance_on(inside, outside, 0.2), 0.2);
+        // the field with its area is told by the area, not by a warning
+        assert!(escape_warnings(&b).is_empty() && field_rules(&b, "auto").unwrap().is_empty());
+        let field = |track: f64, clearance: f64, via: f64| escape_warnings(&field(track, clearance, via));
         // 0.4 mm between the balls, 0.73 mm between four
         assert!(field(0.15, 0.1, 0.35).is_empty());
         let w = field(0.2, 0.2, 0.6);
@@ -857,6 +1070,11 @@ mod tests {
             w[0]
         );
         assert!(w[0].contains("or as a via of 0.331 mm"), "{}", w[0]);
+        assert!(
+            w[0].ends_with("the fab step 4mil fits (0.1 mm clearance, vias of 0.45/0.2 mm), and `--field-rules auto` routes the field alone at it"),
+            "{}",
+            w[0]
+        );
         let w = field(0.15, 0.1, 0.6);
         assert!(
             w.len() == 1 && w[0].contains("no via fits") && !w[0].contains("no track"),

@@ -66,6 +66,8 @@ Each turns off a behaviour that is on by default (or, for the `GB_NO_*` names, a
 | `GB_STITCH` | `0` turns it off | on | Layer changes of current paths get the vias that carry their current (`relax::stitch_vias`). |
 | `GB_PIVOT_ARCS` | `0` turns it off | on | The finished copper gets its last form from its pivots (`relax::pivot_pass`): one arc around each pad corner, via or bundle a track bends around, with the radius of what lies between, and tangent lines. A track keeps the corners the shortcuts gave it where such an arc or line comes too close, and where the own check finds something new. |
 | `GB_SPREAD` | `0` turns it off | on | Where the own check finds tracks too near to something and the passage has room for them, the tracks through it are laid again as one group (`spread::spread`): from one side outwards with the clearance and 2 um, lines and arcs, taken only if the check then finds nothing new. |
+| `GB_LOCAL_RULES` | `0` turns it off | on | Clearance and via rules of a courtyard hold for the search and the geometry steps, not only for the check. |
+| `GB_VIA_WALLS` | set to anything | off | Experiment. In the relaxation a via never comes to rest inside the clearance of a fixed thing (a pad, a hole, kept copper, a keepout): the pushes of the tracks on its other side add up over their pieces and would hold it a few micrometres inside. Where two fixed things leave it no room, it rests between them as before. |
 | `GB_ZIP` | `0` turns it off | on | Pairs the search pulled together close up to their gap at the end (`pairs::zip`). |
 | `GB_GOAL_CHECK` | `0` turns it off | on | A search asks early whether its goal is shut in. The results are the same without, only slower. |
 | `GB_BANDIT` | `0` turns it off | on | Open end, combination A: the via price of a move is drawn by what has won on this board (Thompson sampling). |
@@ -112,6 +114,7 @@ Seeds and limits for benchmarks, constants under test, and ideas that are off by
 | `GB_FULL` | number | 6 | How many finalists get the full relaxation after the short one. |
 | `GB_RIVALS` | number | 2 | How many runners-up of the geometry stage are finished next to the winner; the best finished result is the route (0: the winner alone). |
 | `GB_DIRS_ALL` | set to anything | off | Every run of the portfolio uses the preferred layer directions, not every third. |
+| `GB_BALLS` | number | 0 | The connections of the balls of a ball field go before the other signal connections, ring by ring: 1 the innermost ring first, 2 the outermost first (0: off). |
 | `GB_PAIR_VIA` | number | 0 | With `--pairs pull`: a via of a pair net costs this many vias more, and as much again 2 mm or more from where its partner changes layers (0: off). |
 | `GB_PLACE_ROUNDS` | number | 6 | Rounds in which the spots that ask for room push the movable parts (`--move-parts`). |
 | `GB_PLACE_SEARCHES` | number | 2 | How many of those rounds may route the board anew on the shifted parts. |
